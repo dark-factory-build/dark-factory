@@ -416,6 +416,26 @@ func (daemon *Daemon) runNext(ctx context.Context, spec SupervisorSpec) (resultR
 			return daemon.failRunBeforeRuntime(daemon.cleanupCtx, run, keys.resources.RuntimeRoot, kernel.FailureInternal, kernel.ErrCorruptState)
 		}
 	}
+	// A fresh Change for a task published on an open pull request (a repair,
+	// or work whose Change was reclaimed) starts at that pull request's exact
+	// observed head, never at the base it would otherwise revert to. An empty
+	// retained Change elsewhere is refused: its task's end lets reclaim free
+	// it, so the next run starts fresh at the head.
+	revision, pull := repository.BaseRef, kernel.ProductionPullRequest{}
+	if worker {
+		var found bool
+		if pull, found, err = daemon.store.TaskOpenPullRequest(ctx, run.TaskID); err != nil {
+			return daemon.failRunBeforeRuntime(daemon.cleanupCtx, run, keys.resources.RuntimeRoot, kernel.FailureInternal, err)
+		}
+		switch base := changeState.Selection; {
+		case found && retained == nil:
+			revision = fmt.Sprintf("refs/pull/%d/head", pull.Number)
+		case found && base != nil && changeState.HeadCommit != nil && kernelCommitEqual(*changeState.HeadCommit, base.Commit()) && !strings.EqualFold(fmt.Sprintf("%x", base.Commit().Bytes()), pull.Head):
+			return daemon.failRunBeforeRuntime(daemon.cleanupCtx, run, keys.resources.RuntimeRoot, kernel.FailureSource, fmt.Errorf("Change is empty at %x, not pull request #%d head %s", base.Commit().Bytes(), pull.Number, pull.Head))
+		default:
+			pull = kernel.ProductionPullRequest{}
+		}
+	}
 	var repositoryGitIdentity change.RepositoryIdentity
 	var repositoryOriginDigest [32]byte
 	source, sourceErr := inspectRegisteredRepository(ctx, repository.Root, "")
@@ -458,7 +478,19 @@ func (daemon *Daemon) runNext(ctx context.Context, spec SupervisorSpec) (resultR
 	// not block otherwise valid supervision, so any failure here just means
 	// no hint, the same as a first-ever run.
 	var previousWorkingDirectory string
+	var projectGitDirs []string
 	if !worker {
+		// An overseer publishes Changes of every enabled repository of its
+		// project, so it reads each one's Git directory; one that cannot be
+		// resolved only loses that grant.
+		repositories, _ := daemon.store.ProjectRepositories(ctx, repository.ProjectID)
+		for _, other := range repositories {
+			if other.Enabled && other.ID != repository.ID {
+				if dir, err := resolveGitCommonDir(ctx, spec.GitExecutable, other.Root); err == nil {
+					projectGitDirs = append(projectGitDirs, dir)
+				}
+			}
+		}
 		if previousRuntimeRoot, found, err := daemon.store.LatestTerminalRuntimeRoot(ctx, run.AgentID); err == nil && found {
 			previousWorkingDirectory = filepath.Join(previousRuntimeRoot, changeworker.HomeName)
 		}
@@ -499,8 +531,8 @@ func (daemon *Daemon) runNext(ctx context.Context, spec SupervisorSpec) (resultR
 		GitAuthor: daemon.gitAuthor(ctx), CustomerMaintainer: customerMaintainer, Provider: run.Provider, Role: run.Role, Model: run.Model, ReasoningEffort: run.ReasoningEffort,
 		AgentID: run.AgentID.String(), TaskIncarnationID: run.TaskIncarnationID.String(), PreviousWorkingDirectory: previousWorkingDirectory,
 		RuntimePath: gotRuntimePath, RuntimeIdentity: runtimeFileIdentity,
-		GitExecutable: spec.GitExecutable, FactoryctlExecutable: factoryctl.Path(), ToolPath: spec.ToolPath, ToolchainReadRoots: spec.ToolchainReadRoots, LocalCILeaseDir: localCILeaseDir, TraceReceiverPort: traceReceiverPort, RunID: telemetryRunID, AccountHome: spec.AccountHome, AccountConfigDir: accountConfigDir, RepositoryRoot: repository.Root, RepositoryIdentity: repositoryIdentity, RepositoryGitIdentity: repositoryGitIdentity, RepositoryOriginDigest: repositoryOriginDigest, GitCommonDir: gitCommonDir,
-		Revision: repository.BaseRef, ChangeParent: spec.ChangeParent, FinalName: finalName,
+		GitExecutable: spec.GitExecutable, FactoryctlExecutable: factoryctl.Path(), ToolPath: spec.ToolPath, ToolchainReadRoots: spec.ToolchainReadRoots, LocalCILeaseDir: localCILeaseDir, TraceReceiverPort: traceReceiverPort, RunID: telemetryRunID, AccountHome: spec.AccountHome, AccountConfigDir: accountConfigDir, RepositoryRoot: repository.Root, RepositoryIdentity: repositoryIdentity, RepositoryGitIdentity: repositoryGitIdentity, RepositoryOriginDigest: repositoryOriginDigest, GitCommonDir: gitCommonDir, ProjectGitDirs: projectGitDirs,
+		Revision: revision, ChangeParent: spec.ChangeParent, FinalName: finalName,
 		AttemptSocket: spec.AttemptSocket, Retained: retained, ProviderTask: providerTask,
 	}
 	workerConfig, err := changeworker.EncodeConfig(config)
@@ -554,13 +586,6 @@ func (daemon *Daemon) runNext(ctx context.Context, spec SupervisorSpec) (resultR
 	if err != nil {
 		_ = childControl.Close()
 		return daemon.failRun(run, kernel.FailureSpawn, err)
-	}
-	if err := controller.Configure(runner.AttemptSpec{
-		AttemptID: run.ID.String(), Wrapper: wrapper,
-		MarkerName: runner.InnerActivationMarkerName, ResultName: runner.AttemptResultSpoolName, ResultProof: resultProof,
-	}); err != nil {
-		_ = childControl.Close()
-		return daemon.failRun(run, kernel.FailureProtocol, err)
 	}
 	outerStderr, err := newBoundedOutput()
 	if err != nil {
@@ -652,6 +677,17 @@ func (daemon *Daemon) runNext(ctx context.Context, spec SupervisorSpec) (resultR
 	if !owner.activated {
 		return daemon.convergeActivatedRunner(run, owner, runtimeDirectory, keys.resources.RunnerProcess, runtimeIdentity, runnerResourceIdentity, errInvalidContract)
 	}
+	if err := controller.Configure(runner.AttemptSpec{
+		AttemptID: run.ID.String(), Wrapper: wrapper,
+		MarkerName: runner.InnerActivationMarkerName, ResultName: runner.AttemptResultSpoolName, ResultProof: resultProof,
+	}); err != nil {
+		return daemon.convergeActivatedRunner(run, owner, runtimeDirectory, keys.resources.RunnerProcess, runtimeIdentity, runnerResourceIdentity, err)
+	}
+	if spec.afterOuterConfiguration != nil {
+		if err := spec.afterOuterConfiguration(child); err != nil {
+			return daemon.convergeActivatedRunner(run, owner, runtimeDirectory, keys.resources.RunnerProcess, runtimeIdentity, runnerResourceIdentity, err)
+		}
+	}
 	ready, err := controller.Next(8 * time.Second)
 	if err != nil || ready.Kind != runner.AttemptInnerReady {
 		return daemon.convergeActivatedRunner(run, owner, runtimeDirectory, keys.resources.RunnerProcess, runtimeIdentity, runnerResourceIdentity, errors.Join(err, runner.ErrState))
@@ -694,6 +730,9 @@ func (daemon *Daemon) runNext(ctx context.Context, spec SupervisorSpec) (resultR
 		if selection, err = kernelSelectionCheckpoint(workerResult, repositoryIdentity); err != nil {
 			return daemon.failRun(run, kernel.FailureSource, err)
 		}
+		if pull.Number != 0 && !strings.EqualFold(workerResult.Base.Hex(), pull.Head) {
+			return daemon.failRun(run, kernel.FailureSource, fmt.Errorf("pull request #%d head is %s, not the observed %s", pull.Number, workerResult.Base.Hex(), pull.Head))
+		}
 		at, err = daemon.timestamp()
 		if err != nil {
 			return daemon.failRun(run, kernel.FailureInternal, err)
@@ -717,10 +756,11 @@ func (daemon *Daemon) runNext(ctx context.Context, spec SupervisorSpec) (resultR
 		return daemon.failRun(run, kernel.FailureSource, errInvalidContract)
 	}
 	if worker {
-		if retained != nil {
+		if retained != nil || pull.Number != 0 {
 			// The registered checkout is factoryd's fetch boundary. Refresh the
-			// current base there, then copy that exact commit into the retained
-			// Change before the worker can run a correction offline.
+			// current base there, then copy that exact commit into a retained
+			// or pull request Change before the worker can run a correction
+			// offline.
 			current, selectErr := change.SelectRegisteredGit(ctx, spec.GitExecutable, repository.Root, repository.BaseRef, change.RepositorySourceIdentity{Root: repositoryIdentity, Git: repositoryGitIdentity, OriginDigest: repositoryOriginDigest})
 			if selectErr != nil {
 				return daemon.failRun(run, kernel.FailureSource, selectErr)

@@ -168,11 +168,12 @@ const keyboard = grid(`
   olslsllo
   .oooooo.
 `);
+// Mostly paper, so it reads as a board held against any clothes.
 const clipboard = grid(`
   .ss.
   oppo
-  osso
-  opmo
+  olpo
+  oppo
   oooo
 `);
 const hat = grid(`
@@ -267,7 +268,7 @@ const providers = { claude_code: 'c', codex: 't', shell: 's' };
 // A pose is the body's shape, independent of who wears it or why. Only the
 // layers that bend (skin, sleeves, legs, shoes) are baked per pose; hair, face,
 // headwear, tools and badges are drawn once and ride on every pose.
-const poses = ['idle', 'waiting', 'wave.0', 'wave.1', 'type.0', 'type.1', 'walk.0', 'walk.1', 'hold', 'sip', 'pet.0', 'pet.1'];
+const poses = ['idle', 'waiting', 'wave.0', 'wave.1', 'type.0', 'type.1', 'walk.0', 'walk.1', 'hold', 'sip', 'pet.0', 'pet.1', 'inspect.0', 'inspect.1'];
 const add = (name, build) => { const pixels = blank(); build(pixels); sprites.set(name, pixels); };
 const shortArm = grid(`
   ou
@@ -305,6 +306,13 @@ const strokingArm = grid(`
   uuao
   ooo.
 `);
+// A specialist inspecting reads the board held up in both hands, then lowers it
+// to look past it at the thing itself.
+const loweringArm = grid(`
+  ou.
+  ou.
+  oua
+`);
 const arms = pose => ({
   waiting: [foldedArms],
   'type.0': [typingArms],
@@ -318,9 +326,11 @@ const arms = pose => ({
   sip: [relaxedArm, sippingArm],
   'pet.0': [relaxedArm, reachingArm],
   'pet.1': [relaxedArm, strokingArm],
+  'inspect.0': [mirror(holdingArm), holdingArm],
+  'inspect.1': [loweringArm, mirror(loweringArm)],
 })[pose] ?? [relaxedArm, mirror(relaxedArm)];
 const armPosition = (pose, index) => index === 0 ? [pose === 'waiting' || pose.startsWith('type') ? 4 : 3, pose === 'waiting' ? 11 : 9]
-  : index === 1 ? pose === 'sip' ? [10, 7] : pose === 'hold' ? [10, 9] : [11, 9] : [2, 4];
+  : index === 1 ? pose === 'sip' ? [10, 7] : pose === 'hold' || pose.startsWith('inspect') ? [10, 9] : [11, 9] : [2, 4];
 for (const [skinIndex, tone] of skinTones.entries()) {
   const colour = rows => rows.map(row => row.replace(/[ab]/g, key => key === 'a' ? tone.skin : tone.shadow));
   for (const pose of poses) add(`person.skin.${skinIndex}.${pose}`, pixels => {
@@ -397,6 +407,8 @@ for (const [name, { art, mouth }] of Object.entries(items)) {
   add(`person.held.${name}.chest`, pixels => draw(pixels, art, 10 - wide, 12 - tall));
   if (mouth) add(`person.held.${name}.mouth`, pixels => draw(pixels, art, 11 - wide, 6));
 }
+// What an inspector reads drops below the chest while it looks past it.
+for (const name of ['clipboard', 'tablet']) add(`person.held.${name}.low`, pixels => draw(pixels, items[name].art, 6, 10));
 add('person.held.pencil.0', pixels => draw(pixels, grid(`..y\n.y.\no..`), 10, 9));
 // The pencil tips upright between strokes, beside the hand rather than over it.
 add('person.held.pencil.1', pixels => draw(pixels, grid(`y\ny\no`), 11, 8));
@@ -694,18 +706,33 @@ const swingingArm = grid(`
   ..ao
   ..oo
 `);
+// Working a machine is done facing it: from behind, one hand reaches up to its
+// controls, then works lower down, while the other hangs at the side.
+const reachUp = grid(`
+  .a.
+  ou.
+  ou.
+  oou
+`);
+const reachMid = grid(`
+  ao
+  uo
+  uo
+`);
+const operating = frame => [[relaxedArm, 3, 9], frame === 0 ? [mirror(reachUp), 11, 5] : [reachMid, 12, 7]];
 const views = {
-  back: { head: headBack, hair: hairBack, outfits: outfitsBack, arms: pose => arms(pose).map((part, index) => [part, ...armPosition(pose, index)]) },
+  back: { head: headBack, hair: hairBack, outfits: outfitsBack, arms: pose => pose.startsWith('operate') ? operating(Number(pose.slice(-1))) : arms(pose).map((part, index) => [part, ...armPosition(pose, index)]) },
   side: { head: headSide, hair: hairSide, outfits: outfitsSide, arms: pose => [pose === 'walk.0' ? [swingingArm, 7, 9] : [mirror(swingingArm), 4, 9]] },
 };
 const strides = ['walk.0', 'walk.1'];
+const viewPoses = { back: [...strides, 'operate.0', 'operate.1'], side: strides };
 for (const [view, art] of Object.entries(views)) {
-  for (const [skinIndex, tone] of skinTones.entries()) for (const pose of strides) add(`person.skin.${skinIndex}.${view}.${pose}`, pixels => {
+  for (const [skinIndex, tone] of skinTones.entries()) for (const pose of viewPoses[view]) add(`person.skin.${skinIndex}.${view}.${pose}`, pixels => {
     const colour = rows => rows.map(row => row.replace(/[ab]/g, key => key === 'a' ? tone.skin : tone.shadow));
     draw(pixels, colour(art.head), 5, 2);
     for (const [part, x, y] of art.arms(pose)) draw(pixels, keep(colour(part).map(row => row.replaceAll('u', tone.skin)), [tone.skin, tone.shadow]), x, y);
   });
-  for (const [outfitIndex, outfit] of art.outfits.entries()) for (const [colourIndex, colour] of clothesColours.entries()) for (const pose of strides) add(`person.outfit.${outfitIndex}.${colourIndex}.${view}.${pose}`, pixels => {
+  for (const [outfitIndex, outfit] of art.outfits.entries()) for (const [colourIndex, colour] of clothesColours.entries()) for (const pose of viewPoses[view]) add(`person.outfit.${outfitIndex}.${colourIndex}.${view}.${pose}`, pixels => {
     draw(pixels, tint(outfit, colour.colour), 4, 6);
     // As from the front, the back of a pair of overalls keeps the split between its legs.
     if (outfitIndex === 1 && view === 'back') draw(pixels, [legs[0].replaceAll('m', colour.colour)], 4, 12);
@@ -743,7 +770,7 @@ for (const [toolIndex, tool] of tools.entries()) {
 // Compare finished portraits: transparent layer differences can disappear in composition.
 const legPose = pose => pose.startsWith('walk') ? pose : 'stand';
 // Busy hands put the tool down: a cup, a keyboard or a pencil takes its place.
-const carries = pose => pose !== 'sip' && pose !== 'hold' && !pose.startsWith('type') && !pose.startsWith('pet');
+const carries = pose => pose !== 'sip' && pose !== 'hold' && !['type', 'pet', 'inspect', 'operate'].some(busy => pose.startsWith(busy));
 const portrait = (pose, appearance = {}) => {
   const v = { skin: 1, hair: 0, hair_colour: 1, face: 0, outfit: 0, clothes_colour: 0, shoes: 0, tool: 0, headwear: 0, ...appearance };
   const pixels = blank();
@@ -781,7 +808,7 @@ for (const pose of poses) {
 // What a person wears must never swallow what their body is doing: in every
 // pose, under every hat, face and hairstyle, and with whatever the pose holds,
 // both hands and the held thing itself stay on show.
-const heldBy = { hold: Object.keys(items).map(name => `${name}.chest`), sip: Object.entries(items).filter(([, { mouth }]) => mouth).map(([name]) => `${name}.mouth`), 'type.0': ['keyboard', 'pencil.0'], 'type.1': ['keyboard', 'pencil.1'] };
+const heldBy = { hold: Object.keys(items).map(name => `${name}.chest`), sip: Object.entries(items).filter(([, { mouth }]) => mouth).map(([name]) => `${name}.mouth`), 'type.0': ['keyboard', 'pencil.0'], 'type.1': ['keyboard', 'pencil.1'], 'inspect.0': ['clipboard.chest', 'tablet.chest'], 'inspect.1': ['clipboard.low', 'tablet.low'] };
 const report = [];
 for (const pose of poses) for (const [group, options] of Object.entries(optionGroups)) for (const [option] of options.entries()) for (const held of [undefined, ...(heldBy[pose] ?? [])]) {
   if (group === 'tool' && (held !== undefined || !carries(pose))) continue;
@@ -802,9 +829,12 @@ for (const pose of poses) for (const [group, options] of Object.entries(optionGr
     }));
   });
   if (heldPixels) heldPixels.forEach((row, y) => row.forEach((key, x) => { if (key !== '.' && pixels[y][x] !== key) report.push(`held hidden: ${pose} ${group}=${option} held=${held} at ${x},${y}`); }));
+  // Whatever is held is in a hand, never floating beside one.
+  const hands = arms(pose).flatMap((part, index) => { const [x, y] = armPosition(pose, index); return part.flatMap((row, dy) => [...row].flatMap((key, dx) => key === 'a' ? [[x + dx, y + dy]] : [])); });
+  if (heldPixels && !hands.some(([x, y]) => [-1, 0, 1].some(ny => [-1, 0, 1].some(nx => (heldPixels[y + ny]?.[x + nx] ?? '.') !== '.')))) report.push(`held floats free of the hands: ${pose} held=${held}`);
 }
 assert.deepEqual([...new Set(report)], [], 'A feature hides a pose');
-for (const pose of ['idle', 'wave.0', 'walk.0', 'hold', 'sip']) assert.equal(portrait(pose, { outfit: 1 })[12].slice(7, 9).join(''), 'oo', `Overalls lost the split between their legs: ${pose}`);
+for (const pose of ['idle', 'wave.0', 'walk.0', 'hold', 'sip', 'inspect.0', 'inspect.1']) assert.equal(portrait(pose, { outfit: 1 })[12].slice(7, 9).join(''), 'oo', `Overalls lost the split between their legs: ${pose}`);
 // The same promises hold walking away and walking across: every choice a person
 // can make still tells them apart where it can be seen, both steps differ, and
 // nothing worn hides the swinging hand.
@@ -812,7 +842,7 @@ const turned = (view, pose, appearance = {}) => {
   const v = { skin: 1, hair: 0, hair_colour: 1, face: 0, outfit: 0, clothes_colour: 0, shoes: 0, tool: 0, headwear: 0, ...appearance };
   const cloth = v.outfit === 1 ? v.clothes_colour : 'plain';
   const names = view === 'back'
-    ? [`skin.${v.skin}.back.${pose}`, `legs.${cloth}.${pose}`, `outfit.${v.outfit}.${v.clothes_colour}.back.${pose}`, `hair.${v.hair}.${v.hair_colour}.back`, `shoes.${v.shoes}.${pose}`, `headwear.${v.headwear}.back`, `tool.${v.tool}.back.${pose === 'walk.0' ? 'high' : 'low'}`]
+    ? [`skin.${v.skin}.back.${pose}`, `legs.${cloth}.${legPose(pose)}`, `outfit.${v.outfit}.${v.clothes_colour}.back.${pose}`, `hair.${v.hair}.${v.hair_colour}.back`, `shoes.${v.shoes}.${legPose(pose)}`, `headwear.${v.headwear}.back`, ...(carries(pose) ? [`tool.${v.tool}.back.${pose === 'walk.0' ? 'high' : 'low'}`] : [])]
     : [`skin.${v.skin}.side.${pose}`, `legs.${cloth}.side.${pose}`, `outfit.${v.outfit}.${v.clothes_colour}.side.${pose}`, `hair.${v.hair}.${v.hair_colour}.side`, `face.${v.face}.side`, `shoes.${v.shoes}.side.${pose}`, `headwear.${v.headwear}.side`, `tool.${v.tool}.side.${pose}`, 'system.worker.codex'];
   const pixels = blank();
   for (const name of names) draw(pixels, sprites.get(`person.${name}`).map(row => row.join('')));
@@ -821,8 +851,9 @@ const turned = (view, pose, appearance = {}) => {
 for (const [view, art] of Object.entries(views)) {
   assert.notDeepEqual(turned(view, 'walk.0'), turned(view, 'walk.1'), `Indistinguishable steps: ${view}`);
   assert.notDeepEqual(turned(view, 'walk.0'), portrait('walk.0'), `${view} reads as the front`);
-  for (const pose of strides) for (const [group, options] of Object.entries(optionGroups)) {
+  for (const pose of viewPoses[view]) for (const [group, options] of Object.entries(optionGroups)) {
     if (view === 'back' && group === 'face') continue; // A face cannot be seen from behind.
+    if (group === 'tool' && !carries(pose)) continue; // Working hands have put the tool down.
     assert.equal(new Set(options.map((_, index) => JSON.stringify(turned(view, pose, { [group]: index })))).size, options.length, `Indistinguishable ${group}: ${view}/${pose}`);
     if (group === 'tool') {
       // The tool stays in the hand that carries it: the first arm drawn in both views.
@@ -842,7 +873,11 @@ for (const [view, art] of Object.entries(views)) {
     }
   }
 }
-for (const pose of strides) assert.equal(turned('back', pose, { outfit: 1 })[12].slice(7, 9).join(''), 'oo', `Overalls lost the split between their legs from behind: ${pose}`);
+for (const pose of viewPoses.back) assert.equal(turned('back', pose, { outfit: 1 })[12].slice(7, 9).join(''), 'oo', `Overalls lost the split between their legs from behind: ${pose}`);
+// Working a machine is a body in motion, unlike walking away or anything seen from the front.
+const backs = viewPoses.back.map(pose => JSON.stringify(turned('back', pose)));
+assert.equal(new Set(backs).size, backs.length, 'Indistinguishable poses from behind');
+assert.notDeepEqual(turned('back', 'operate.0'), portrait('type.0'), 'Operating reads as typing');
 // Every pose must read as a different body, or the animation is invisible.
 assert.equal(new Set(poses.map(pose => JSON.stringify(portrait(pose)))).size, poses.length, 'Indistinguishable poses');
 function tile(name, rows) {
@@ -1356,7 +1391,7 @@ function paint() {
       'person.hair.' + identity + '.' + identity,
       'person.face.0',
       'person.shoes.' + identity + '.' + (activity.startsWith('walk') ? activity : 'stand'),
-      ...(activity === 'sip' ? ['person.held.cup.mouth'] : activity === 'hold' ? ['person.held.book.chest'] : activity.startsWith('type') ? ['person.held.keyboard'] : ['person.tool.' + (role.value === 'overseer' ? 1 : 0) + (activity === 'walk.1' ? '.high' : '.low')]),
+      ...(activity === 'sip' ? ['person.held.cup.mouth'] : activity === 'hold' ? ['person.held.book.chest'] : activity.startsWith('inspect') ? ['person.held.clipboard.' + (activity === 'inspect.0' ? 'chest' : 'low')] : activity.startsWith('type') ? ['person.held.keyboard'] : ['person.tool.' + (role.value === 'overseer' ? 1 : 0) + (activity === 'walk.1' ? '.high' : '.low')]),
       'person.headwear.' + (role.value === 'overseer' ? 1 : 0),
       'person.system.' + role.value + '.' + provider.value,
       ...(activity.startsWith('wave') ? ['person.alert'] : []),
