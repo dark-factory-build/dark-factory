@@ -124,12 +124,14 @@ pub(crate) enum OperationError {
 /// Why GitHub refused, said with typed classifications only. GitHub's
 /// error text can quote caller input, so the text never rides along -- the
 /// same discipline `github_graphql` applies to its logging.
-#[derive(Clone, Copy, Debug, Eq, PartialEq, thiserror::Error)]
+#[derive(Clone, Debug, Eq, PartialEq, thiserror::Error)]
 pub(crate) enum RefusalReason {
     /// The mutation was rejected before execution, and these are the typed
     /// error classes GitHub returned at the mutation root.
     #[error("rejected before execution as {0}")]
     Rejected(RejectionKinds),
+    #[error("required CODEOWNERS approval is missing")]
+    CodeownersApproval,
     /// The mutation answered with neither an effect nor an error.
     #[error("answered with neither an effect nor an error")]
     NoEffect,
@@ -168,6 +170,7 @@ pub(crate) struct RejectionKinds {
     forbidden: bool,
     unprocessable: bool,
     rate_limited: bool,
+    codeowners_approval: bool,
 }
 
 impl std::fmt::Display for RejectionKinds {
@@ -178,6 +181,7 @@ impl std::fmt::Display for RejectionKinds {
             (self.forbidden, "FORBIDDEN"),
             (self.unprocessable, "UNPROCESSABLE"),
             (self.rate_limited, "RATE_LIMITED"),
+            (self.codeowners_approval, "CODEOWNERS_APPROVAL"),
         ] {
             if present {
                 if separate {
@@ -3279,11 +3283,17 @@ impl Authority {
             },
         )
         .await?;
-        let entry = enqueue_outcome(
-            data.and_then(|data| data.enqueue)
-                .and_then(|payload| payload.entry),
-            failure,
-        )?;
+        let entry = data
+            .and_then(|data| data.enqueue)
+            .and_then(|payload| payload.entry);
+        if entry.is_none() {
+            if let Some(GraphQlFailure::Rejected(kinds)) = failure {
+                if kinds.codeowners_approval {
+                    return Err(OperationError::Refused(RefusalReason::CodeownersApproval));
+                }
+            }
+        }
+        let entry = enqueue_outcome(entry, failure)?;
         entry.into_result(request)
     }
 
@@ -4876,6 +4886,8 @@ struct GraphQlError {
     /// select into, so the effect may already exist -- whatever the type says.
     #[serde(default)]
     path: Vec<serde_json::Value>,
+    #[serde(default)]
+    message: String,
 }
 
 /// Classify a GraphQL `errors` array into what it establishes about the
@@ -4917,7 +4929,13 @@ fn classify_graphql_errors(errors: &[GraphQlError]) -> Option<GraphQlFailure> {
         match error.kind.as_deref() {
             Some("NOT_FOUND") => kinds.not_found = true,
             Some("FORBIDDEN") => kinds.forbidden = true,
-            Some("UNPROCESSABLE") => kinds.unprocessable = true,
+            Some("UNPROCESSABLE") => {
+                kinds.unprocessable = true;
+                kinds.codeowners_approval |= error
+                    .message
+                    .to_ascii_lowercase()
+                    .contains("required approval");
+            }
             Some("RATE_LIMITED") => kinds.rate_limited = true,
             _ => return Some(GraphQlFailure::Unknown),
         }
@@ -5247,7 +5265,13 @@ mod tests {
                 serde_json::from_value(response["errors"].clone()).unwrap();
             assert!(matches!(
                 classify_graphql_errors(&errors),
-                Some(GraphQlFailure::Rejected(kinds)) if kinds.to_string() == "UNPROCESSABLE"
+                Some(GraphQlFailure::Rejected(kinds))
+                    if kinds.to_string()
+                        == if name == "enqueue-refused-before-codeowners-approval" {
+                            "UNPROCESSABLE+CODEOWNERS_APPROVAL"
+                        } else {
+                            "UNPROCESSABLE"
+                        }
             ));
             assert!(response["data"]["enqueuePullRequest"].is_null());
         }
@@ -6019,6 +6043,7 @@ mod tests {
                 .map(|kind| GraphQlError {
                     kind: kind.map(Into::into),
                     path: vec!["enqueuePullRequest".into()],
+                    message: String::new(),
                 })
                 .collect::<Vec<_>>()
         };
@@ -6026,6 +6051,7 @@ mod tests {
             vec![GraphQlError {
                 kind: Some(kind.into()),
                 path: path.iter().map(|part| (*part).into()).collect(),
+                message: String::new(),
             }]
         };
 
@@ -6215,10 +6241,12 @@ mod tests {
             GraphQlError {
                 kind: Some("NOT_FOUND".into()),
                 path: vec!["enqueuePullRequest".into()],
+                message: String::new(),
             },
             GraphQlError {
                 kind: Some("RATE_LIMITED".into()),
                 path: vec![],
+                message: String::new(),
             },
         ];
         match classify_graphql_errors(&mixed) {

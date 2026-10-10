@@ -43,6 +43,7 @@ type Operation struct {
 	Failures           int       `json:"failures,omitempty"`   // consecutive merge-stage passes that failed
 	Refused            bool      `json:"refused,omitempty"`    // the last enqueue was refused; wait for its observation to change
 	RefusedObservation string    `json:"refused_observation,omitempty"`
+	OwnerApproval      bool      `json:"owner_approval,omitempty"`
 	CreatedAt          time.Time `json:"created_at"`
 	UpdatedAt          time.Time `json:"updated_at"`
 }
@@ -135,9 +136,10 @@ func (g *GroupRun) note(head string) string {
 }
 
 // ErrRefused marks an enqueue GitHub refused as UNPROCESSABLE. The operation
-// stays attached to the exact head and waits for the pull observation to
-// change before trying the existing enqueue operation again.
+// stays attached to the exact head and retries the existing enqueue operation.
 var ErrRefused = errors.New("the merge queue refuses this exact head; factoryd will wait for its checks or review state to change")
+
+var ErrOwnerApproval = errors.New("the merge queue requires CODEOWNERS owner approval")
 
 // FailuresBeforeEscalation is how many consecutive merge-stage passes may
 // fail before the overseer is told: 30 minutes at the 5-minute merge tick.
@@ -261,10 +263,7 @@ func (c Coordinator) Advance(ctx context.Context, op Operation) (Operation, erro
 	}
 	observation := pullObservation(pull)
 	if op.Refused {
-		if observation == op.RefusedObservation {
-			return op, nil
-		}
-		op.Refused, op.RefusedObservation = false, ""
+		op.Refused, op.RefusedObservation, op.OwnerApproval = false, "", false
 	}
 	// A pass that observes a changed pull resets the failure count and any escalation.
 	failures, escalation, enqueues := op.Failures, op.Escalation, op.Enqueues
@@ -287,9 +286,15 @@ func (c Coordinator) Advance(ctx context.Context, op Operation) (Operation, erro
 		// Queued, removed, re-queued once and removed again.
 		op.State, op.RoutePending, op.Detail = "ejected", true, pull.Group.note(head)
 	default:
-		if err := c.Backend.Enqueue(ctx, op); errors.Is(err, ErrRefused) {
+		if err := c.Backend.Enqueue(ctx, op); errors.Is(err, ErrOwnerApproval) {
+			op.Refused, op.OwnerApproval, op.RefusedObservation = true, true, observation
+			op.Escalate(fmt.Sprintf("pull request #%d requires owner approval for a CODEOWNERS-protected path: %v", op.Request.PullNumber, err))
+			op.UpdatedAt = c.Now()
+			return op, errors.Join(err, c.Store.Update(ctx, op))
+		} else if errors.Is(err, ErrRefused) {
 			// Keep the operation live. A changed check or review observation is
-			// the existing refresh trigger that permits the same enqueue again.
+			// normal refresh trigger, but retry on every pass: mergeability can
+			// become queueable without changing checks or review state.
 			op.Refused, op.RefusedObservation = true, observation
 			op.Escalate(fmt.Sprintf("the merge queue refused this exact head: %v", err))
 			op.UpdatedAt = c.Now()
