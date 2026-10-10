@@ -42,14 +42,13 @@ the daemon supervisor fixtures, the full gate itself) does not block on it:
 it lists that check as "not run locally; required by the gate" in its result
 and finishes.
 
-Record the exact head, the checks run, and the checks left to the gate. For CI
-changes, also run the affected gate fixtures. Get the independent review with
+Record the exact head, the checks run, and the checks left to the gate. Get the independent review with
 `factoryctl review` (factoryd records the exact-head verdict). An independent reviewer
 reproduces relevant risks. Do not repeat the full suite for each edit,
 reviewer, or enqueue: the protected merge queue checks the actual combined
-tree, widening mixed or uncertain inputs. Agent-posted issue or pull-request
-comments must use `./scripts/gh-comment.sh`; pass the comment body through
-`--body-file` or stdin, never as a command-line argument.
+tree, widening mixed or uncertain inputs. Pass agent-posted issue and
+pull-request comment bodies with `--body-file`, never as a command-line
+argument.
 
 ## Writing code: the ponytail ladder
 

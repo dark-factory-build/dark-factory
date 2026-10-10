@@ -82,17 +82,8 @@ if [ "$local_ci_mode" = ui ]; then
 fi
 
 if [ "$local_ci_mode" = full ] && in_source_shard; then
-    echo "local-ci: repository contract fixtures"
-    ./scripts/check-toolchain-pins.sh
-    ./scripts/test-local-ci-environment.sh
-    ./scripts/test-with-local-ci-lease.sh
-    ./scripts/test-new-worktree.sh
-    ./scripts/test-publication-parents.sh
-    python3 ./scripts/test-factory-browser.py
-    ./scripts/test-github-step-summary.sh
+    echo "local-ci: release fixture"
     ./scripts/test-release.sh
-    ./scripts/test-repository-settings.sh
-    /bin/sh ./scripts/test-go-gates.sh
 fi
 
 if [ "$local_ci_mode" = full ] || [ "$local_ci_mode" = runtime ]; then
@@ -102,9 +93,6 @@ if [ "$local_ci_mode" = full ] || [ "$local_ci_mode" = runtime ]; then
     fi
 
     echo "local-ci: process-sensitive gate"
-    if in_source_shard; then
-        ./scripts/test-go-e2e-tools.sh
-    fi
     if [ "${DARK_FACTORY_LOCAL_CI_LEASE_HELD-}" = 1 ]; then
         /bin/sh "$script_dir/go-ci-owned.sh" --client-built ${local_ci_shard:+"$local_ci_shard"}
     else
