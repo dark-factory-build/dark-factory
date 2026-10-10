@@ -45,10 +45,20 @@ const (
 	AND json_extract(` + metaC + `, '$.record_type') = 'proposal'`
 	proposalResolutionSQL = `d.project_id = c.project_id AND d.kind = 'decision' AND d.deprecated = 0 AND d.revision = (SELECT MAX(revision) FROM project_content_revisions WHERE id = d.id)
 	AND json_extract(` + metaD + `, '$.record_type') = 'proposal' AND lower(json_extract(` + metaD + `, '$.record_id')) = lower(hex(c.id))`
+	proposalRevisionSQL = `p.kind = 'observation' AND json_extract(` + metaP + `, '$.record_type') = 'proposal'`
 	attachedProposalSQL = `task_content_references AS r JOIN project_content_revisions AS p ON p.id = r.content_id AND p.revision = r.content_revision
-	WHERE r.project_id = c.project_id AND r.content_id = c.id AND p.kind = 'observation' AND json_extract(` + metaP + `, '$.record_type') = 'proposal'`
+	WHERE r.project_id = c.project_id AND r.content_id = c.id AND ` + proposalRevisionSQL
 	openProposalSQL = latestProposalSQL + ` AND NOT EXISTS (SELECT 1 FROM project_content_revisions AS d WHERE ` + proposalResolutionSQL + `)
 	AND NOT EXISTS (SELECT 1 FROM ` + attachedProposalSQL + `)`
+	// activeImplementationSQL is task t of project ?1, other than task ?4
+	// (hex), implementing an accepted proposal while active: it pins a
+	// proposal revision, or a live decision other than ?3 names it. One
+	// self-generated implementation is active at a time.
+	activeImplementationSQL = `t.project_id = ?1 AND lower(hex(t.id)) <> lower(?4) AND t.status IN ('queued', 'running', 'blocked') AND (
+	EXISTS (SELECT 1 FROM task_content_references AS r JOIN project_content_revisions AS p ON p.id = r.content_id AND p.revision = r.content_revision WHERE r.task_id = t.id AND ` + proposalRevisionSQL + `)
+	OR EXISTS (SELECT 1 FROM project_content_revisions AS d WHERE d.project_id = ?1 AND d.id IS NOT ?3 AND d.kind = 'decision' AND d.deprecated = 0
+		AND d.revision = (SELECT MAX(revision) FROM project_content_revisions WHERE id = d.id)
+		AND json_extract(` + metaD + `, '$.record_type') = 'proposal' AND unhex(json_extract(` + metaD + `, '$.task_id')) = t.id))`
 	// authorAgentSQL is the agent that authored content c through an attempt.
 	authorAgentSQL = `unhex(substr(c.author, instr(c.author, ' agent:') + 7, 32))`
 )
@@ -389,16 +399,13 @@ func validateSpecialistRecord(ctx context.Context, c *sql.Conn, spec NewContent,
 		}
 		var proposals, active int
 		if err := c.QueryRowContext(ctx, `SELECT (SELECT count(*) FROM project_content_revisions AS c WHERE c.id = ?2 AND c.project_id = ?1 AND `+latestProposalSQL+`),
-			(SELECT count(*) FROM project_content_revisions AS d JOIN tasks AS t ON t.id = unhex(json_extract(`+metaD+`, '$.task_id'))
-				WHERE d.project_id = ?1 AND d.id <> ?3 AND d.kind = 'decision' AND d.deprecated = 0 AND d.revision = (SELECT MAX(revision) FROM project_content_revisions WHERE id = d.id)
-				AND json_extract(`+metaD+`, '$.record_type') = 'proposal' AND t.status IN ('queued', 'running', 'blocked'))`,
-			spec.ProjectID.Bytes(), id, spec.ID.Bytes()).Scan(&proposals, &active); err != nil {
+			(SELECT count(*) FROM tasks AS t WHERE `+activeImplementationSQL+`)`,
+			spec.ProjectID.Bytes(), id, spec.ID.Bytes(), m.TaskID).Scan(&proposals, &active); err != nil {
 			return err
 		}
 		if proposals == 0 {
 			return fmt.Errorf("%w: unknown proposal", ErrInvalidValue)
 		}
-		// One self-generated implementation is active at a time.
 		if a != nil && m.TaskID != "" && active != 0 {
 			return fmt.Errorf("%w: an accepted proposal's task is still active", ErrConflict)
 		}

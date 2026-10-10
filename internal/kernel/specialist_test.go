@@ -433,6 +433,58 @@ func TestSpecialistAttachedObservationRevisedIntoProposalStaysOpen(t *testing.T)
 	}
 }
 
+// Attaching a proposal accepts it, so both attachment and decision keep one
+// accepted implementation active at a time, even after the pinned proposal
+// is revised.
+func TestSpecialistProposalAttachmentKeepsOneActiveImplementation(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	store, run, _ := runningWorkerRun(t)
+	defer store.Close()
+	var tasks []Task
+	for _, seed := range []byte{100, 102} {
+		task, err := store.EnqueueTask(ctx, NewTask{ID: taskID(t, seed), ProjectID: run.ProjectID, IncarnationID: incarnationID(t, seed+1), Title: "implement"}, mustTime(t, 40))
+		if err != nil {
+			t.Fatal(err)
+		}
+		tasks = append(tasks, task)
+	}
+	var proposals []ContentRevision
+	for _, seed := range []byte{90, 91} {
+		proposal, err := store.CreateContent(ctx, knowledgeSpec(t, run.ProjectID, seed, ContentObservation, KnowledgeMetadata{Status: "tentative", RecordType: "proposal"}), mustTime(t, 41))
+		if err != nil {
+			t.Fatal(err)
+		}
+		proposals = append(proposals, proposal)
+	}
+	if err := store.AttachContentToTask(ctx, tasks[0].ID, run.ProjectID, proposals[0].ID, proposals[0].Revision, mustTime(t, 42)); err != nil {
+		t.Fatal(err)
+	}
+	revised := knowledgeSpec(t, run.ProjectID, 90, ContentObservation, KnowledgeMetadata{Status: "tentative", RecordType: "proposal"})
+	revised.Title = "revised"
+	if _, err := store.ReviseContent(ctx, proposals[0].Revision, revised, mustTime(t, 43)); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.AttachContentToTask(ctx, tasks[1].ID, run.ProjectID, proposals[1].ID, proposals[1].Revision, mustTime(t, 44)); !errors.Is(err, ErrConflict) {
+		t.Fatalf("second attached implementation: %v", err)
+	}
+	if err := store.AttachContentToTask(ctx, tasks[0].ID, run.ProjectID, proposals[1].ID, proposals[1].Revision, mustTime(t, 45)); err != nil {
+		t.Fatalf("second proposal on the active implementation: %v", err)
+	}
+	overseer := runningOverseerDigest(t, store, run.ProjectID, 50)
+	accept := func(seed byte, task TaskID) error {
+		decision := knowledgeSpec(t, run.ProjectID, seed, ContentDecision, KnowledgeMetadata{Status: "tentative", Evidence: []string{"proposal:" + proposals[1].ID.String()}, RecordType: "proposal", RecordID: proposals[1].ID.String(), TaskID: task.String()})
+		_, err := store.CreateContentForAttempt(ctx, overseer, decision, mustTime(t, 60))
+		return err
+	}
+	if err := accept(96, tasks[1].ID); !errors.Is(err, ErrConflict) {
+		t.Fatalf("decision beside an attached implementation: %v", err)
+	}
+	if err := accept(97, tasks[0].ID); err != nil {
+		t.Fatalf("decision naming the attached implementation: %v", err)
+	}
+}
+
 // Every record shape the specialist runbook uses is creatable by an attempt,
 // and each names what it is about.
 func TestSpecialistRunbookRecords(t *testing.T) {

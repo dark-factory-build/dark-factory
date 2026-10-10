@@ -450,6 +450,14 @@ func attachContentTx(ctx context.Context, tx *writeTx, task TaskID, project Proj
 	if status != TaskQueued.String() {
 		return ErrConflict
 	}
+	var busy bool
+	if err := tx.connection.QueryRowContext(ctx, `SELECT EXISTS (SELECT 1 FROM project_content_revisions AS p WHERE p.id = ?2 AND p.revision = ?5 AND `+proposalRevisionSQL+`)
+		AND EXISTS (SELECT 1 FROM tasks AS t WHERE `+activeImplementationSQL+`)`, project.Bytes(), content.Bytes(), nil, task.String(), revision.Int64()).Scan(&busy); err != nil {
+		return err
+	}
+	if busy {
+		return fmt.Errorf("%w: an accepted proposal's task is still active", ErrConflict)
+	}
 	var references int
 	if err := tx.connection.QueryRowContext(ctx, `SELECT COUNT(*) FROM task_content_references WHERE task_id = ? AND task_work_revision = ?`, task.Bytes(), taskWorkRevision).Scan(&references); err != nil {
 		return err
