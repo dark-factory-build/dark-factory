@@ -2,6 +2,7 @@ package daemon
 
 import (
 	"bytes"
+	"cmp"
 	"context"
 	"errors"
 	"fmt"
@@ -127,11 +128,13 @@ func TestProjectGraphReadsOneSourcePerRepositoryAndInvalidatesConfiguration(t *t
 }
 
 // A node's paths are repository-prefixed only when more than one repository
-// feeds the project, matching run and change paths.
+// feeds the project, matching run and change paths. Every inferred runtime,
+// the CI unit's included, encodes on the wire.
 func TestGraphFramePrefixesPathsOnlyForMultipleRepositories(t *testing.T) {
 	project, first, second := strings.Repeat("a1", 16), strings.Repeat("b2", 16), strings.Repeat("c3", 16)
-	files := map[string][]byte{"go.mod": []byte("module example.com/x\n"), "cmd/x/main.go": []byte(mainSource)}
-	graph, err := opgraph.Infer(project, []opgraph.Repository{{ID: first, Name: "one", Files: files}})
+	files := map[string][]byte{"go.mod": []byte("module example.com/x\n"), "cmd/x/main.go": []byte(mainSource),
+		".github/workflows/ci.yml": []byte("on: pull_request\njobs:\n  test:\n    runs-on: macos-15\n")}
+	graph, err := opgraph.Infer(project, []opgraph.Repository{{ID: first, Name: "one", Files: files}}, nil)
 	if err != nil || len(graph.Nodes) == 0 {
 		t.Fatalf("graph = %+v, %v", graph, err)
 	}
@@ -254,7 +257,7 @@ func TestOutboundRequestsLightTheirExternalGate(t *testing.T) {
 	}
 
 	source := "package main\nimport \"net/http\"\nfunc main() { http.Get(\"https://api.github.com/repos\") }\n"
-	graph, err := opgraph.Infer("s", []opgraph.Repository{{ID: "r", Name: "r", Files: map[string][]byte{"go.mod": []byte("module example.com/x\n"), "cmd/factoryd/main.go": []byte(source)}}})
+	graph, err := opgraph.Infer("s", []opgraph.Repository{{ID: "r", Name: "r", Files: map[string][]byte{"go.mod": []byte("module example.com/x\n"), "cmd/factoryd/main.go": []byte(source)}}}, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -268,4 +271,51 @@ func TestOutboundRequestsLightTheirExternalGate(t *testing.T) {
 		}
 	}
 	t.Fatalf("no inferred gate for api.github.com in %+v", live.Graph.Nodes)
+}
+
+// This repository's own tree, served as two repositories with live runtime
+// evidence a sender controls, always encodes: the daemon never builds a frame
+// its own encoder refuses.
+func TestOwnRepositoryGraphEncodesWithLiveEvidence(t *testing.T) {
+	project, first, second := strings.Repeat("a1", 16), strings.Repeat("b2", 16), strings.Repeat("c3", 16)
+	root, repositories := filepath.Join("..", ".."), []opgraph.Repository{{ID: first, Name: "core", Files: map[string][]byte{}}, {ID: second, Name: "site", Files: map[string][]byte{}}}
+	for index, tops := range [][]string{{"go.mod", "cmd", ".github/workflows"}, {"web", ".github/workflows"}} {
+		for _, top := range tops {
+			if err := filepath.WalkDir(filepath.Join(root, top), func(name string, entry os.DirEntry, err error) error {
+				if err != nil || entry.IsDir() && (entry.Name() == "node_modules" || entry.Name() == "dist") {
+					return cmp.Or(err, filepath.SkipDir)
+				}
+				if !entry.IsDir() {
+					relative, _ := filepath.Rel(root, name)
+					repositories[index].Files[filepath.ToSlash(relative)], err = os.ReadFile(name)
+				}
+				return err
+			}); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+	graph, err := opgraph.Infer(project, repositories, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	service := ""
+	for index, node := range graph.Nodes {
+		if name := node.Selectors["service.name"]; node.Kind == opgraph.Processor && name != "" {
+			// A repository path the wire cannot carry once repository-prefixed.
+			service, graph.Nodes[index].Sources = name, append(node.Sources, opgraph.Location{Repository: first, Path: strings.Repeat("deep/", 204)})
+		}
+	}
+	if service == "" {
+		t.Fatal("no unit names a service")
+	}
+	now := time.Now().UnixMilli()
+	observations := []opgraph.Observation{{Source: "otlp", Environment: "local", Kind: "internal", Start: now - 1000, End: now, Count: 1, Errors: 3, LatencyP95: 1e12,
+		Attributes: map[string]string{"service.name": service, "code.function.name": strings.Repeat("é", 300)}}}
+	live := opgraph.Overlay(project, graph, observations, nil, nil, now, runtimeWindow.Milliseconds())
+	sources := []graphSource{{RepositoryID: first, Name: "core", Kind: "integrated", Revision: strings.Repeat("d4", 20)}, {RepositoryID: second, Name: "site", Kind: "unavailable"}}
+	frame := graphFrame(project, projectGraph{graph: graph, sources: sources, digest: strings.Repeat("ab", 32)}, live, now)
+	if _, err := browserprotocol.EncodeOperationalGraph("graph", frame); err != nil || len(frame.Nodes) <= len(graph.Nodes) {
+		t.Fatalf("%d of %d nodes: %v", len(frame.Nodes), len(graph.Nodes), err)
+	}
 }

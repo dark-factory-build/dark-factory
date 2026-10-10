@@ -59,7 +59,7 @@ func TestBrowserProductionIsPrivateAndProjectScoped(t *testing.T) {
 	}
 	noPrivate := newAdapterFixture(t, kernel.BrowserCapabilityObserve)
 	input, _ := json.Marshal(map[string]any{"project_id": project.String(), "limit": 8})
-	if _, err := noPrivate.backend.ProjectContent(ctx, rawBrowserClient(noPrivate.client.ID), browserprotocol.ProjectContent{Operation: "production", Input: input}); !errors.Is(err, browser.ErrUnauthorized) {
+	if _, err := noPrivate.backend.ProjectContent(ctx, rawBrowserClient(noPrivate.client.ID), browserprotocol.ProjectContent{Operation: "production", Input: input}); !errors.Is(mapBrowserError(err), browser.ErrUnauthorized) {
 		t.Fatalf("public read=%v", err)
 	}
 }
@@ -94,7 +94,7 @@ func TestBrowserProductionWithoutProjectReportsOnlyTheFactoryBuild(t *testing.T)
 	noPrivate := newAdapterFixture(t, kernel.BrowserCapabilityObserve)
 	public := noPrivate.pair(t)
 	defer public.Close(websocket.StatusNormalClosure, "")
-	if _, err := noPrivate.backend.ProjectContent(ctx, rawBrowserClient(noPrivate.client.ID), browserprotocol.ProjectContent{Operation: "production", Input: input}); !errors.Is(err, browser.ErrUnauthorized) {
+	if _, err := noPrivate.backend.ProjectContent(ctx, rawBrowserClient(noPrivate.client.ID), browserprotocol.ProjectContent{Operation: "production", Input: input}); !errors.Is(mapBrowserError(err), browser.ErrUnauthorized) {
 		t.Fatalf("public projectless read=%v", err)
 	}
 }

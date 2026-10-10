@@ -185,7 +185,7 @@ func runProvider(ctx context.Context) (resultErr error) {
 			_ = cwd.Close()
 			return err
 		}
-	} else if delivery != provider.TaskDeliveryStartupTerminal && delivery != provider.TaskDeliveryAttemptAPI {
+	} else if delivery != provider.TaskDeliveryAttemptAPI {
 		_ = cwd.Close()
 		return provider.ErrInvalid
 	}
@@ -467,12 +467,6 @@ func openRetainedChange(ctx context.Context, control *runner.WorkerControl, conf
 	}
 	if err != nil {
 		return change.WorktreeFacts{}, errors.Join(err, ErrWorker)
-	}
-	// A correction may be sent back against a newer main than the Change
-	// started from; its private Git needs that tip to rebase onto. Best
-	// effort: an unreachable origin must not strand a run that needs no rebase.
-	if selection, err := change.SelectRegisteredGit(ctx, config.GitExecutable, config.RepositoryRoot, config.Revision, change.RepositorySourceIdentity{Root: config.RepositoryIdentity, Git: config.RepositoryGitIdentity, OriginDigest: config.RepositoryOriginDigest}); err == nil {
-		_ = change.FetchBase(ctx, selection, path)
 	}
 	if err := os.Chmod(path, 0o700); err != nil {
 		return change.WorktreeFacts{}, ErrWorker

@@ -79,9 +79,9 @@ Access policy, or App configuration is live.
   upstream refusal is unavailable, never an empty backlog. These reads do not
   create local work or grant publication permission.
 - `list_deployments` (1–30 per call) reads a repository's newest GitHub
-  Deployments with their newest status's state and time. It requires only
-  Deployments read and Metadata read, and returns no URLs, payloads or
-  creators.
+  Deployments with their newest status's state, time and environment URL
+  host. It requires only Deployments read and Metadata read, and returns no
+  URLs, payloads or creators.
 - The product webhook and operator/PWA namespaces have no routes.
 
 Missing, empty, partial, or syntactically invalid authority produces the fixed

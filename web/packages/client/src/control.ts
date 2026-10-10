@@ -44,7 +44,7 @@ export type AuthResultBody = { client_id: string; capabilities: CapabilityMask }
 export type ErrorBody = { code: ErrorCode; retryable: boolean };
 
 export type FactoryItem = { dispatch_enabled: boolean; capacity: number; active_runs: number; revision: bigint };
-export type ProjectItem = { id: string; name: string; run_budget_limit: bigint; runs_used: bigint; max_run_seconds: number; revision: bigint };
+export type ProjectItem = { id: string; name: string; run_budget_limit: bigint; runs_used: bigint; max_run_seconds: number; specialist_runs: number; specialist_open_proposals: number; revision: bigint };
 /**
  * `model` and `reasoning_effort` are the agent's own overrides; empty means it
  * inherits. `effective_*` is what the run will actually use, and `model_source`
@@ -55,7 +55,10 @@ export type ProjectItem = { id: string; name: string; run_budget_limit: bigint; 
  */
 export type IdlePolicy = "wait" | "standing_instruction";
 export type SpriteAppearance = { automatic: boolean; skin: number; hair: number; hair_colour: number; face: number; outfit: number; clothes_colour: number; shoes: number; tool: number; headwear: number };
-export type AgentItem = { id: string; project_id: string; name: string; role: "orchestrator" | "worker"; provider: "claude_code" | "codex" | "shell"; appearance: SpriteAppearance; paused: boolean; archived?: boolean; model: string; reasoning_effort: string; effective_model: string; effective_reasoning_effort: string; model_source: string; revision: bigint; account_id: string; idle_policy: IdlePolicy; idle_after_seconds: number; idle_instruction: string; idle_run_budget: number; idle_runs_used: number };
+export type AgentItem = { id: string; project_id: string; name: string; role: "orchestrator" | "worker"; provider: "claude_code" | "codex" | "shell"; appearance: SpriteAppearance; paused: boolean; archived?: boolean; model: string; reasoning_effort: string; effective_model: string; effective_reasoning_effort: string; model_source: string; revision: bigint; account_id: string; idle_policy: IdlePolicy; idle_after_seconds: number; idle_instruction: string; idle_run_budget: number; idle_runs_used: number; idle_wake_on?: IdleWakeOn; specialist?: Specialist };
+export type IdleWakeOn = "" | "failures" | "merges" | "failures,merges";
+/** Served only for a specialist (a worker with a standing instruction); absent from an older daemon. */
+export type Specialist = { next_review_at_ms: number; next_reason: "" | "initial" | "scheduled" | "events"; waiting: "" | "budget" | "paused" | "stopped" | "queued" | "capacity"; quiet_reviews: number; open_proposals: number; open_proposal_limit: number; last_review_task_id: string };
 export type AccountItem = { id: string; provider: "claude_code" | "codex"; home: string; label: string; revision: bigint };
 /** An empty `assigned_agent_id` is queued shared work no worker has claimed yet; it is served only in `shared_tasks`. */
 export type TaskItem = { id: string; project_id: string; assigned_agent_id: string; title: string; status: "queued" | "running" | "blocked" | "succeeded" | "failed" | "cancelled"; blocked_reason?: string; priority: number; revision: bigint; updated_at_ms?: bigint; issue_number?: bigint; mission_id?: string };
@@ -110,7 +113,7 @@ export type TaskPeerQuestion = { id: string; source_task_id: string; target_task
 export type TaskDetailBody = { task_id: string; revision: bigint; head: bigint; instruction: string; feedback: string; outcome?: string; next_text_offset?: bigint; peer_questions: TaskPeerQuestion[]; next_peer_offset?: bigint };
 export type TaskListGetBody = { agent_id?: string; project_id?: string; before_updated_at_ms?: bigint; before_task_id?: string };
 export type TaskListBody = { agent_id?: string; project_id?: string; head: bigint; total: bigint; tasks: TaskItem[]; has_more: boolean };
-export type AgentUpdateBody = { agent_id: string; expected_revision: bigint; appearance?: SpriteAppearance; model?: string; reasoning_effort?: string; account_id?: string; paused?: boolean; archived?: boolean; idle_policy?: IdlePolicy; idle_after_seconds?: number; idle_instruction?: string; idle_run_budget?: number };
+export type AgentUpdateBody = { agent_id: string; expected_revision: bigint; appearance?: SpriteAppearance; model?: string; reasoning_effort?: string; account_id?: string; paused?: boolean; archived?: boolean; idle_policy?: IdlePolicy; idle_after_seconds?: number; idle_instruction?: string; idle_run_budget?: number; idle_wake_on?: IdleWakeOn };
 export type AgentUpdateResultBody = { agent_id: string; revision: bigint };
 export type ProjectLimitsBody = { project_id: string; expected_revision: bigint; run_budget: bigint; max_run_seconds: number };
 export type ProjectLimitsResultBody = { project_id: string; revision: bigint };
@@ -139,9 +142,10 @@ export const GRAPH_NODE_KINDS = ["processor", "ingress", "job", "queue", "store"
 export const GRAPH_EDGE_KINDS = ["handles", "calls", "uses", "publishes", "consumes", "runs"] as const;
 export const GRAPH_EVIDENCE = ["static", "runtime", "both", "uncertain", "contradicted"] as const;
 export const GRAPH_OBSERVATIONS = ["observed", "quiet", "partial", "stale", "unobserved", "opaque"] as const;
-export const GRAPH_STATES = ["active", "degraded", "failing", "idle", "unknown"] as const;
-const GRAPH_RUNTIMES = ["process", "cli", "worker", "server", "browser", "ci"] as const;
+export const GRAPH_STATES = ["failing", "degraded", "active", "idle", "unknown"] as const; // worst first
+export const GRAPH_RUNTIMES = ["process", "server", "worker", "browser", "cli", "ci"] as const; // the unit a path prefers first, as opgraph.Locate
 const GRAPH_TRIGGERS = ["request", "timer", "message"] as const;
+const GRAPH_ORIGINS = ["static", "runtime"] as const;
 export type GraphReading = Readonly<{ evidence: typeof GRAPH_EVIDENCE[number]; observation: typeof GRAPH_OBSERVATIONS[number]; state: typeof GRAPH_STATES[number]; rate_per_hour?: number }>;
 export type GraphNode = GraphReading & Readonly<{ id: string; kind: typeof GRAPH_NODE_KINDS[number]; label: string; unit?: string; runtime?: typeof GRAPH_RUNTIMES[number]; trigger?: typeof GRAPH_TRIGGERS[number]; paths: readonly string[]; error_permille?: number; latency_p95_ms?: number; last_seen?: number; deployed_at?: number }>;
 export type GraphEdge = GraphReading & Readonly<{ from: string; to: string; kind: typeof GRAPH_EDGE_KINDS[number] }>;
@@ -149,7 +153,7 @@ export type GraphSummary = Readonly<{ components: number; inferred: number; obse
 export type GraphSource = Readonly<{ repository_id: string; name: string; kind: "integrated" | "unavailable"; target_ref: string; revision: string; observed_at: number; reason?: string }>;
 export type OperationalGraphBody = Readonly<{ project_id: string; digest: string; observed_at: number; sources: readonly GraphSource[]; nodes: readonly GraphNode[]; edges: readonly GraphEdge[]; summary: GraphSummary; omitted: number }>;
 export type GraphLocation = Readonly<{ repository_id: string; path: string; line?: number }>;
-export type OperationalNodeBody = Readonly<{ project_id: string; node_id: string; selectors: Readonly<Record<string, string>>; evidence: readonly Readonly<{ origin: "static" | "runtime"; source: string; detail?: string; confidence: string }>[]; sources: readonly GraphLocation[]; modules: readonly GraphLocation[]; observers: readonly string[] }>;
+export type OperationalNodeBody = Readonly<{ project_id: string; node_id: string; selectors: Readonly<Record<string, string>>; evidence: readonly Readonly<{ origin: typeof GRAPH_ORIGINS[number]; source: string; detail?: string; confidence: string }>[]; sources: readonly GraphLocation[]; modules: readonly GraphLocation[]; observers: readonly string[] }>;
 export type RunPathsGetBody = { agent_id: string };
 /** One run's recorded agent effort and spend: counts and cost, never content. */
 export type RunTelemetry = { tokens_in: number; tokens_out: number; cost_micro_usd: number; tool_calls: number; api_requests: number; quiet_seconds?: number };
@@ -489,7 +493,7 @@ function validateBody(type: ControlType, body: unknown, wire: boolean): ControlB
       if (total < BigInt(tasks.length) || (body.has_more && tasks.length !== 10)) malformed();
       return { ...scope, head: decimal(body.head, wire, true), total, tasks, has_more: body.has_more };
     }
-    case "AGENT_UPDATE": requireKeys(body, ["agent_id", "expected_revision"], wire, ["appearance", "model", "reasoning_effort", "account_id", "paused", "archived", "idle_policy", "idle_after_seconds", "idle_instruction", "idle_run_budget"]); { const result: AgentUpdateBody = { agent_id: dynamicID(body.agent_id), expected_revision: decimal(body.expected_revision, wire, true) }; if (present(body, "appearance")) result.appearance = spriteAppearance(body.appearance, wire); if (present(body, "model")) result.model = boundedText(body.model, 0, MAX_AGENT_MODEL_BYTES); if (present(body, "reasoning_effort")) result.reasoning_effort = boundedText(body.reasoning_effort, 0, MAX_AGENT_MODEL_BYTES); if (present(body, "account_id")) result.account_id = body.account_id === "" ? "" : dynamicID(body.account_id); if (present(body, "paused")) { if (typeof body.paused !== "boolean") malformed(); result.paused = body.paused; } if (present(body, "archived")) { if (typeof body.archived !== "boolean") malformed(); result.archived = body.archived; } if (present(body, "idle_policy")) result.idle_policy = idlePolicy(body.idle_policy); if (present(body, "idle_after_seconds")) result.idle_after_seconds = integer(body.idle_after_seconds, 0, MAX_IDLE_AFTER_SECONDS); if (present(body, "idle_instruction")) result.idle_instruction = boundedText(body.idle_instruction, 0, MAX_TASK_INSTRUCTION_BYTES); if (present(body, "idle_run_budget")) result.idle_run_budget = integer(body.idle_run_budget, 0, MAX_IDLE_RUN_BUDGET); return result; }
+    case "AGENT_UPDATE": requireKeys(body, ["agent_id", "expected_revision"], wire, ["appearance", "model", "reasoning_effort", "account_id", "paused", "archived", "idle_policy", "idle_after_seconds", "idle_instruction", "idle_run_budget", "idle_wake_on"]); { const result: AgentUpdateBody = { agent_id: dynamicID(body.agent_id), expected_revision: decimal(body.expected_revision, wire, true) }; if (present(body, "appearance")) result.appearance = spriteAppearance(body.appearance, wire); if (present(body, "model")) result.model = boundedText(body.model, 0, MAX_AGENT_MODEL_BYTES); if (present(body, "reasoning_effort")) result.reasoning_effort = boundedText(body.reasoning_effort, 0, MAX_AGENT_MODEL_BYTES); if (present(body, "account_id")) result.account_id = body.account_id === "" ? "" : dynamicID(body.account_id); if (present(body, "paused")) { if (typeof body.paused !== "boolean") malformed(); result.paused = body.paused; } if (present(body, "archived")) { if (typeof body.archived !== "boolean") malformed(); result.archived = body.archived; } if (present(body, "idle_policy")) result.idle_policy = idlePolicy(body.idle_policy); if (present(body, "idle_after_seconds")) result.idle_after_seconds = integer(body.idle_after_seconds, 0, MAX_IDLE_AFTER_SECONDS); if (present(body, "idle_instruction")) result.idle_instruction = boundedText(body.idle_instruction, 0, MAX_TASK_INSTRUCTION_BYTES); if (present(body, "idle_run_budget")) result.idle_run_budget = integer(body.idle_run_budget, 0, MAX_IDLE_RUN_BUDGET); if (present(body, "idle_wake_on")) result.idle_wake_on = wakeOn(body.idle_wake_on); return result; }
     case "AGENT_UPDATE_RESULT": requireKeys(body, ["agent_id", "revision"], wire); return { agent_id: dynamicID(body.agent_id), revision: decimal(body.revision, wire, true) };
     case "PROJECT_LIMITS": requireKeys(body, ["project_id", "expected_revision", "run_budget", "max_run_seconds"], wire); return { project_id: dynamicID(body.project_id), expected_revision: decimal(body.expected_revision, wire, true), run_budget: decimal(body.run_budget, wire), max_run_seconds: integer(body.max_run_seconds, 0, 86400) };
     case "PROJECT_LIMITS_RESULT": requireKeys(body, ["project_id", "revision"], wire); return { project_id: dynamicID(body.project_id), revision: decimal(body.revision, wire, true) };
@@ -687,12 +691,14 @@ function factoryItem(value: unknown, wire: boolean): FactoryItem {
   if (active_runs > capacity + 1) malformed(); return { dispatch_enabled: value.dispatch_enabled, capacity, active_runs, revision: decimal(value.revision, wire, true) };
 }
 function projectItem(value: unknown, wire: boolean): ProjectItem {
-  if (!isObject(value)) malformed(); requireKeys(value, ["id", "name", "revision"], wire, ["run_budget_limit", "runs_used", "max_run_seconds"]);
+  if (!isObject(value)) malformed(); requireKeys(value, ["id", "name", "specialist_runs", "specialist_open_proposals", "revision"], wire, ["run_budget_limit", "runs_used", "max_run_seconds"]);
   const run_budget_limit = present(value, "run_budget_limit") ? decimal(value.run_budget_limit, wire) : 0n;
   const runs_used = present(value, "runs_used") ? decimal(value.runs_used, wire) : 0n;
   const max_run_seconds = present(value, "max_run_seconds") ? integer(value.max_run_seconds, 0, 86400) : 0;
+  const specialist_runs = integer(value.specialist_runs, 0, 16);
+  const specialist_open_proposals = integer(value.specialist_open_proposals, 0, 32);
   if (run_budget_limit !== 0n && runs_used > run_budget_limit) malformed();
-  return { id: dynamicID(value.id), name: boundedText(value.name, 1, MAX_PROJECT_NAME_BYTES), run_budget_limit, runs_used, max_run_seconds, revision: decimal(value.revision, wire, true) };
+  return { id: dynamicID(value.id), name: boundedText(value.name, 1, MAX_PROJECT_NAME_BYTES), run_budget_limit, runs_used, max_run_seconds, specialist_runs, specialist_open_proposals, revision: decimal(value.revision, wire, true) };
 }
 function spriteAppearance(value: unknown, wire: boolean): SpriteAppearance {
   if (!isObject(value)) malformed();
@@ -706,13 +712,15 @@ function agentItem(value: unknown, wire: boolean): AgentItem {
   // An older daemon does not send the launch controls, the resolved model or
   // the account; they read as unset, which the console shows as an unknowable
   // CLI default under that provider's own directory.
-  if (!isObject(value)) malformed(); requireKeys(value, ["id", "project_id", "name", "role", "provider", "paused", "revision"], wire, ["archived", "appearance", "model", "reasoning_effort", "effective_model", "effective_reasoning_effort", "model_source", "account_id", "idle_policy", "idle_after_seconds", "idle_instruction", "idle_run_budget", "idle_runs_used"]);
+  if (!isObject(value)) malformed(); requireKeys(value, ["id", "project_id", "name", "role", "provider", "paused", "revision"], wire, ["archived", "appearance", "model", "reasoning_effort", "effective_model", "effective_reasoning_effort", "model_source", "account_id", "idle_policy", "idle_after_seconds", "idle_instruction", "idle_run_budget", "idle_runs_used", "idle_wake_on", "specialist"]);
   // An older daemon serves no idle rule; every agent then waits.
   const idle_policy = present(value, "idle_policy") ? idlePolicy(value.idle_policy) : "wait";
   const idle_after_seconds = present(value, "idle_after_seconds") ? integer(value.idle_after_seconds, 0, MAX_IDLE_AFTER_SECONDS) : 0;
   const idle_instruction = present(value, "idle_instruction") ? boundedText(value.idle_instruction, 0, MAX_TASK_INSTRUCTION_BYTES) : "";
   const idle_run_budget = present(value, "idle_run_budget") ? integer(value.idle_run_budget, 0, MAX_IDLE_RUN_BUDGET) : 0;
   const idle_runs_used = present(value, "idle_runs_used") ? integer(value.idle_runs_used, 0, 0xffff_ffff) : 0;
+  const idle_wake_on = present(value, "idle_wake_on") ? wakeOn(value.idle_wake_on) : undefined;
+  const specialist = present(value, "specialist") ? specialistItem(value.specialist, wire) : undefined;
   const archived = present(value, "archived") ? value.archived : undefined;
   if (value.role !== "orchestrator" && value.role !== "worker" || typeof value.paused !== "boolean" || archived !== undefined && typeof archived !== "boolean") malformed();
   if (value.provider !== "claude_code" && value.provider !== "codex" && value.provider !== "shell") malformed();
@@ -724,7 +732,15 @@ function agentItem(value: unknown, wire: boolean): AgentItem {
   const account_id = present(value, "account_id") && value.account_id !== "" ? dynamicID(value.account_id) : "";
   if (account_id !== "" && value.provider === "shell") malformed();
   const appearance = present(value, "appearance") ? spriteAppearance(value.appearance, wire) : { automatic: true, skin: 0, hair: 0, hair_colour: 0, face: 0, outfit: 0, clothes_colour: 0, shoes: 0, tool: 0, headwear: 0 };
-  return { id: dynamicID(value.id), project_id: dynamicID(value.project_id), name: boundedText(value.name, 1, MAX_AGENT_NAME_BYTES), role: value.role, provider: value.provider, appearance, paused: value.paused, ...(archived === undefined ? {} : { archived }), model, reasoning_effort, effective_model, effective_reasoning_effort, model_source, revision: decimal(value.revision, wire, true), account_id, idle_policy, idle_after_seconds, idle_instruction, idle_run_budget, idle_runs_used };
+  return { id: dynamicID(value.id), project_id: dynamicID(value.project_id), name: boundedText(value.name, 1, MAX_AGENT_NAME_BYTES), role: value.role, provider: value.provider, appearance, paused: value.paused, ...(archived === undefined ? {} : { archived }), model, reasoning_effort, effective_model, effective_reasoning_effort, model_source, revision: decimal(value.revision, wire, true), account_id, idle_policy, idle_after_seconds, idle_instruction, idle_run_budget, idle_runs_used, ...(idle_wake_on === undefined ? {} : { idle_wake_on }), ...(specialist === undefined ? {} : { specialist }) };
+}
+function wakeOn(value: unknown): IdleWakeOn { if (value !== "" && value !== "failures" && value !== "merges" && value !== "failures,merges") malformed(); return value; }
+function specialistItem(value: unknown, wire: boolean): Specialist {
+  if (!isObject(value)) malformed(); requireKeys(value, [], wire, ["next_review_at_ms", "next_reason", "waiting", "quiet_reviews", "open_proposals", "open_proposal_limit", "last_review_task_id"]);
+  const next_reason = present(value, "next_reason") ? value.next_reason : ""; const waiting = present(value, "waiting") ? value.waiting : "";
+  if (next_reason !== "" && next_reason !== "initial" && next_reason !== "scheduled" && next_reason !== "events") malformed();
+  if (waiting !== "" && waiting !== "budget" && waiting !== "paused" && waiting !== "stopped" && waiting !== "queued" && waiting !== "capacity") malformed();
+  return { next_review_at_ms: present(value, "next_review_at_ms") ? integer(value.next_review_at_ms, 0, Number.MAX_SAFE_INTEGER) : 0, next_reason, waiting, quiet_reviews: present(value, "quiet_reviews") ? integer(value.quiet_reviews, 0, 0xffff_ffff) : 0, open_proposals: present(value, "open_proposals") ? integer(value.open_proposals, 0, 0xffff_ffff) : 0, open_proposal_limit: present(value, "open_proposal_limit") ? integer(value.open_proposal_limit, 0, 0xffff_ffff) : 0, last_review_task_id: present(value, "last_review_task_id") && value.last_review_task_id !== "" ? dynamicID(value.last_review_task_id) : "" };
 }
 function accountProvider(value: unknown): "claude_code" | "codex" { if (value !== "claude_code" && value !== "codex") malformed(); return value; }
 /** One absolute configuration directory, bounded exactly as the daemon does. */
@@ -848,9 +864,9 @@ function intakeCandidate(item: unknown, wire: boolean): IntakeCandidate {
 function oneOf<T extends string>(value: unknown, allowed: readonly T[]): T { if (typeof value !== "string" || !(allowed as readonly string[]).includes(value)) malformed(); return value as T; }
 function graphReading(value: Record<string, unknown>): GraphReading {
   const evidence = oneOf(value.evidence, GRAPH_EVIDENCE), observation = oneOf(value.observation, GRAPH_OBSERVATIONS), state = oneOf(value.state, GRAPH_STATES);
+  // How readings combine (idle only when quiet, a rate only when observed) is
+  // the producer's rule, proven in opgraph's overlay tests; this checks shape and bounds.
   const rate = present(value, "rate_per_hour") ? integer(value.rate_per_hour, 0, Number.MAX_SAFE_INTEGER) : undefined;
-  // Idle is a claim only a covering source makes; a rate only an observation makes.
-  if (state === "idle" && observation !== "quiet" || (rate ?? 0) > 0 && (observation === "unobserved" || observation === "stale")) malformed();
   return { evidence, observation, state, ...(rate === undefined ? {} : { rate_per_hour: rate }) };
 }
 function operationalGraphBody(body: Record<string, unknown>, wire: boolean): OperationalGraphBody {
@@ -898,7 +914,7 @@ function operationalNodeBody(body: Record<string, unknown>, wire: boolean): Oper
   if (!Array.isArray(body.evidence) || body.evidence.length > 32 || !Array.isArray(body.sources) || body.sources.length > 16 || !Array.isArray(body.modules) || body.modules.length > 256 || !Array.isArray(body.observers) || body.observers.length > 16) malformed();
   const location = (item: unknown): GraphLocation => { if (!isObject(item)) malformed(); requireKeys(item, ["repository_id", "path"], wire, ["line"]); return { repository_id: dynamicID(item.repository_id), path: boundedText(item.path, 1, MAX_TASK_TITLE_BYTES), ...(present(item, "line") ? { line: integer(item.line, 0, 0xffffffff) } : {}) }; };
   return { project_id: dynamicID(body.project_id), node_id: dynamicID(body.node_id), selectors,
-    evidence: body.evidence.map((item) => { if (!isObject(item)) malformed(); requireKeys(item, ["origin", "source", "confidence"], wire, ["detail"]); return { origin: oneOf(item.origin, ["static", "runtime"] as const), source: boundedText(item.source, 1, 64), ...(present(item, "detail") ? { detail: boundedText(item.detail, 0, 256) } : {}), confidence: boundedText(item.confidence, 1, 32) }; }),
+    evidence: body.evidence.map((item) => { if (!isObject(item)) malformed(); requireKeys(item, ["origin", "source", "confidence"], wire, ["detail"]); return { origin: oneOf(item.origin, GRAPH_ORIGINS), source: boundedText(item.source, 1, 64), ...(present(item, "detail") ? { detail: boundedText(item.detail, 0, 256) } : {}), confidence: boundedText(item.confidence, 1, 32) }; }),
     sources: body.sources.map(location), modules: body.modules.map(location), observers: body.observers.map((item) => boundedText(item, 1, 64)) };
 }
 function taskItem(value: unknown, wire: boolean): TaskItem {

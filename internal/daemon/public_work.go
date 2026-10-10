@@ -110,7 +110,7 @@ func publicCrates(records []kernel.ProductionRecord, now int64) []opgraph.Crate 
 				if deployedAt, ok := deployed[record.Repository]; ok && deployedAt < at && at-deployedAt <= deployingFor.Milliseconds() {
 					station = 2
 				}
-				crates = append(crates, opgraph.Crate{Key: key, Station: station, Fault: blocked[key]})
+				crates = append(crates, opgraph.Crate{Key: key, Station: station, Fault: blocked[key], Repository: strings.ToLower(record.Repository), Number: pr.Number, Title: pr.Title})
 			}
 		case "open":
 			current := pr.Review.Head != "" && pr.Review.Head == pr.Head
@@ -122,7 +122,7 @@ func publicCrates(records []kernel.ProductionRecord, now int64) []opgraph.Crate 
 			} else if allowed {
 				station = 1
 			}
-			crates = append(crates, opgraph.Crate{Key: key, Station: station, Fault: correction})
+			crates = append(crates, opgraph.Crate{Key: key, Station: station, Fault: correction, Repository: strings.ToLower(record.Repository), Number: pr.Number, Title: pr.Title})
 		}
 	}
 	return crates

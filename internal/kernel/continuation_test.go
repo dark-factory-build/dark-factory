@@ -10,6 +10,7 @@ import (
 )
 
 func TestContinuationTaskFitsCodexProviderLimit(t *testing.T) {
+	t.Parallel()
 	context := ContinuationContext{ConditionKind: ConditionHumanRequest, ConditionRevision: mustRevision(t, 1), ResolutionDetail: strings.Repeat("答", 4096)}
 	if ContinuationTaskFits(ProviderCodex, strings.Repeat("x", 8192), []ContinuationContext{context}) {
 		t.Fatal("exact-limit Codex task was admitted without room for causal context")
@@ -20,6 +21,7 @@ func TestContinuationTaskFitsCodexProviderLimit(t *testing.T) {
 }
 
 func TestQuestionYieldCannotBeStrandedByImmediateResolution(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	store, run, keys := runningWorkerRun(t)
 	defer store.Close()
@@ -46,6 +48,7 @@ func TestQuestionYieldCannotBeStrandedByImmediateResolution(t *testing.T) {
 }
 
 func TestOrchestratorHumanQuestionYieldsAndRevokesBearer(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	store, run, keys := runningOrchestratorRun(t)
 	defer store.Close()
@@ -69,6 +72,7 @@ func TestOrchestratorHumanQuestionYieldsAndRevokesBearer(t *testing.T) {
 }
 
 func TestYieldedHumanReplyPersistsFullSchemaBound(t *testing.T) {
+	t.Parallel()
 	for _, size := range []int{4097, MaxHumanRequestReplyBytes} {
 		t.Run(fmt.Sprint(size), func(t *testing.T) {
 			ctx := context.Background()
@@ -132,6 +136,7 @@ func continuationForRequest(t *testing.T, store *Store, run Run, condition Conti
 }
 
 func TestContinuationSpecRejectsUnknownConditionAndZeroTarget(t *testing.T) {
+	t.Parallel()
 	spec := NewContinuation{ConditionKind: ConditionHumanRequest}
 	if err := validateContinuationSpec(spec); err == nil {
 		t.Fatal("zero continuation spec was accepted")
@@ -143,6 +148,7 @@ func TestContinuationSpecRejectsUnknownConditionAndZeroTarget(t *testing.T) {
 }
 
 func TestContinuationConditionIDRoundTripsBytes(t *testing.T) {
+	t.Parallel()
 	var want ContinuationConditionID
 	want[0], want[15] = 1, 255
 	got := ContinuationConditionID{}
@@ -153,6 +159,7 @@ func TestContinuationConditionIDRoundTripsBytes(t *testing.T) {
 }
 
 func TestCreateHumanQuestionAndYieldIsAtomic(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	store, run, keys := runningWorkerRun(t)
 	defer store.Close()
@@ -183,6 +190,7 @@ func TestCreateHumanQuestionAndYieldIsAtomic(t *testing.T) {
 }
 
 func TestResolvedContinuationPromotesThenReentersProviderAdmission(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	proposal, _ := NewBlockedProposal("waiting for continuation")
 	store, run := finalizingReleasedRun(t, RoleOrchestrator, proposal)
@@ -255,6 +263,7 @@ func continuationIDForTest(t *testing.T, seed byte) ContinuationID {
 }
 
 func TestReusedHumanQuestionYieldsAtomically(t *testing.T) {
+	t.Parallel()
 	for _, reuse := range []bool{false, true} {
 		t.Run(fmt.Sprint(reuse), func(t *testing.T) {
 			ctx := context.Background()

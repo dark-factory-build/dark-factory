@@ -8,6 +8,7 @@ import (
 )
 
 func TestHumanRequestDetailProjectsExactTargetAndCapabilityBoundAuthority(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	store, run, _ := runningOrchestratorRun(t)
 	defer store.Close()
@@ -28,6 +29,7 @@ func TestHumanRequestDetailProjectsExactTargetAndCapabilityBoundAuthority(t *tes
 }
 
 func TestHumanRequestDetailUnavailableStatesCarryNoTargetOrAuthority(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	store, run, _ := runningOrchestratorRun(t)
 	defer store.Close()
@@ -58,6 +60,7 @@ func TestHumanRequestDetailUnavailableStatesCarryNoTargetOrAuthority(t *testing.
 }
 
 func TestHumanRequestDetailMissingSessionIsUnavailableAndCorruptFailsClosed(t *testing.T) {
+	t.Parallel()
 	for _, test := range []struct {
 		name, mutate string
 		corrupt      bool
@@ -88,6 +91,7 @@ func TestHumanRequestDetailMissingSessionIsUnavailableAndCorruptFailsClosed(t *t
 }
 
 func TestHumanRequestDetailRejectsCorruptActiveRunRelationships(t *testing.T) {
+	t.Parallel()
 	for _, test := range []struct {
 		name    string
 		prepare func(*testing.T, *Store, Run)
@@ -141,6 +145,7 @@ func TestHumanRequestDetailRejectsCorruptActiveRunRelationships(t *testing.T) {
 }
 
 func TestHumanRequestDetailRejectsCanonicalSessionMismatchBeforeProjection(t *testing.T) {
+	t.Parallel()
 	store, run, _ := runningOrchestratorRun(t)
 	defer store.Close()
 	selected := terminalSessionForRunTest(t, store, run.ID)
@@ -152,6 +157,7 @@ func TestHumanRequestDetailRejectsCanonicalSessionMismatchBeforeProjection(t *te
 }
 
 func TestHumanRequestDetailFinalizingAndTerminalOriginsAreUnavailable(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	store, run, _ := runningOrchestratorRun(t)
 	defer store.Close()
@@ -182,6 +188,7 @@ func TestHumanRequestDetailFinalizingAndTerminalOriginsAreUnavailable(t *testing
 }
 
 func TestHumanRequestDetailUsesOnePinnedClientAndStateSnapshot(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	store, run, _ := runningOrchestratorRun(t)
 	defer store.Close()

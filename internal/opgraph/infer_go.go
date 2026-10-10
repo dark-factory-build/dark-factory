@@ -418,7 +418,7 @@ func (walk *goWalk) pathRoute(expr ast.Expr) {
 func (walk *goWalk) route(method, route string, pos token.Pos, confidence, detail string) {
 	key := "http:" + strings.TrimSpace(method+" "+route)
 	label := strings.TrimSpace(method + " " + route)
-	walk.run.find(finding{owner: walk.owner(), kind: Ingress, key: key, label: label, trigger: "request", edge: Handles,
+	walk.run.find(finding{owner: walk.owner(), kind: Ingress, key: key, label: label, trigger: TriggerRequest, edge: Handles,
 		selectors: map[string]string{"http.request.method": method, "http.route": route},
 		evidence:  static("go-ast", detail, confidence), at: walk.at(pos)})
 }
@@ -546,7 +546,7 @@ func (walk *goWalk) listener(expr *ast.CallExpr, imported, name string) {
 		selectors["server.address"], selectors["server.port"] = host, port
 		key, label = "listen:"+transport+":"+address, transport+" listener "+address
 	}
-	walk.run.find(finding{owner: walk.owner(), kind: Ingress, key: key, label: label, trigger: "request", edge: Handles,
+	walk.run.find(finding{owner: walk.owner(), kind: Ingress, key: key, label: label, trigger: TriggerRequest, edge: Handles,
 		selectors: selectors, evidence: static("go-ast", imported+"."+name, Declared), at: walk.at(expr.Pos())})
 }
 

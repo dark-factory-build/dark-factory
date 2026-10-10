@@ -23,11 +23,13 @@ var releaseAssetNames = []string{
 }
 
 func TestPackageReleaseIsDeterministicAndConsistent(t *testing.T) {
+	t.Parallel()
 	root := t.TempDir()
 	arm, intel := filepath.Join(root, "arm"), filepath.Join(root, "intel")
 	for _, component := range []string{"factoryd", "factory-runner", "factoryctl"} {
-		buildFixture(t, arm, component, component, "1.2.3", fixtureSource, "darwin/arm64", "")
-		buildFixture(t, intel, component, component, "1.2.3", fixtureSource, "darwin/amd64", "")
+		// Intel first: the other parallel tests build arm meanwhile.
+		buildFixture(t, intel, component, "darwin/amd64")
+		buildFixture(t, arm, component, "darwin/arm64")
 	}
 	// Unrelated residue in an input directory is never an archive member.
 	if err := os.WriteFile(filepath.Join(arm, "factory-tui"), []byte("obsolete\n"), 0o644); err != nil {
@@ -82,19 +84,22 @@ func TestPackageReleaseIsDeterministicAndConsistent(t *testing.T) {
 }
 
 func TestPackageReleaseRefusesBadInputWithoutPartialOutput(t *testing.T) {
+	t.Parallel()
 	root := t.TempDir()
 	arm, intel := filepath.Join(root, "arm"), filepath.Join(root, "intel")
 	for _, component := range []string{"factoryd", "factory-runner", "factoryctl"} {
-		buildFixture(t, arm, component, component, "1.2.3", fixtureSource, "darwin/arm64", "")
+		buildFixture(t, arm, component, "darwin/arm64")
 	}
 	// A wrong embedded release identity is rejected.
-	buildFixture(t, intel, "factoryd", "factoryd", "1.2.4", fixtureSource, "darwin/amd64", "")
+	intelFactoryd, intelIdentity := buildFixture(t, intel, "factoryd", "darwin/amd64")
+	wrongVersion, _ := Expected("1.2.4", fixtureSource, "darwin/amd64")
+	relinkFixture(t, intelFactoryd, intelIdentity.Receipt(), wrongVersion.Receipt())
 	output := filepath.Join(root, "out")
 	if err := PackageRelease(packageArguments(output, "aarch64-apple-darwin", arm, "x86_64-apple-darwin", intel)); err == nil || !strings.Contains(err.Error(), "linked receipt") {
 		t.Fatalf("identity mismatch = %v", err)
 	}
 	// A missing binary in the second target also leaves nothing behind.
-	buildFixture(t, intel, "factoryd", "factoryd", "1.2.3", fixtureSource, "darwin/amd64", "")
+	buildFixture(t, intel, "factoryd", "darwin/amd64")
 	if err := PackageRelease(packageArguments(output, "aarch64-apple-darwin", arm, "x86_64-apple-darwin", intel)); err == nil {
 		t.Fatal("incomplete target was packaged")
 	}

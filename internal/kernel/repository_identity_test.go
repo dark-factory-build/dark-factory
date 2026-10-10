@@ -7,6 +7,7 @@ import (
 )
 
 func TestRepositoryBindingsRefuseCorruptionBeforeMutation(t *testing.T) {
+	t.Parallel()
 	for name, statement := range map[string]string{
 		"missing identity":        `DELETE FROM repository_source_identities`,
 		"missing default":         `UPDATE project_repositories SET is_default = 0`,
@@ -38,6 +39,7 @@ func TestRepositoryBindingsRefuseCorruptionBeforeMutation(t *testing.T) {
 }
 
 func TestRepositorySourceIdentityPinsOnceAcrossRestart(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	store, path := newTestStore(t)
 	project, err := store.CreateProject(ctx, NewProject{ID: projectID(t, 202), Name: "source", Root: "/source"}, mustTime(t, 2))
@@ -66,6 +68,7 @@ func TestRepositorySourceIdentityPinsOnceAcrossRestart(t *testing.T) {
 }
 
 func TestNewProjectSourceStaysUnverifiedUntilHostProof(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	store, path := newTestStore(t)
 	project, err := store.CreateProject(ctx, NewProject{ID: projectID(t, 204), Name: "legacy", Root: "/legacy"}, mustTime(t, 2))
@@ -92,6 +95,7 @@ func TestNewProjectSourceStaysUnverifiedUntilHostProof(t *testing.T) {
 }
 
 func TestRegisteredContentSourceMismatchRollsBack(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	store, _ := newTestStore(t)
 	defer store.Close()

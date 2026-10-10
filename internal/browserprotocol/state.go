@@ -114,7 +114,11 @@ type ProjectItem struct {
 	RunBudgetLimit Decimal `json:"run_budget_limit"`
 	RunsUsed       Decimal `json:"runs_used"`
 	MaxRunSeconds  uint32  `json:"max_run_seconds"`
-	Revision       Decimal `json:"revision"`
+	// The project's specialist limits: reviews running at once, and open
+	// proposals per specialist.
+	SpecialistRuns          uint32  `json:"specialist_runs"`
+	SpecialistOpenProposals uint32  `json:"specialist_open_proposals"`
+	Revision                Decimal `json:"revision"`
 }
 
 type SpriteAppearance struct {
@@ -197,6 +201,22 @@ type AgentItem struct {
 	IdleInstruction  string `json:"idle_instruction"`
 	IdleRunBudget    uint32 `json:"idle_run_budget"`
 	IdleRunsUsed     uint32 `json:"idle_runs_used"`
+	// IdleWakeOn is a specialist's event classes: "", "failures", "merges"
+	// or "failures,merges".
+	IdleWakeOn string `json:"idle_wake_on,omitempty"`
+	// Specialist is a specialist's review schedule; absent for other agents.
+	Specialist *SpecialistItem `json:"specialist,omitempty"`
+}
+
+// SpecialistItem is when a specialist reviews next and why it waits.
+type SpecialistItem struct {
+	NextReviewAtMillis Decimal `json:"next_review_at_ms"` // 0: none scheduled
+	NextReason         string  `json:"next_reason"`       // initial, scheduled, events or ""
+	Waiting            string  `json:"waiting"`           // "", budget, paused, stopped, queued or capacity
+	QuietReviews       uint8   `json:"quiet_reviews"`
+	OpenProposals      uint16  `json:"open_proposals"`
+	OpenProposalLimit  uint16  `json:"open_proposal_limit"`
+	LastReviewTaskID   string  `json:"last_review_task_id"`
 }
 
 // AccountItem is one linked provider login. Only which login it is and where
@@ -327,7 +347,7 @@ func validateFactoryItem(value FactoryItem) error {
 }
 
 func validateProjectItem(value ProjectItem) error {
-	if validateDynamicID(value.ID) != nil || validateBoundedText(value.Name, 1, MaxProjectNameBytes) != nil || value.RunBudgetLimit != 0 && value.RunsUsed > value.RunBudgetLimit || value.MaxRunSeconds > 86400 || value.Revision == 0 {
+	if validateDynamicID(value.ID) != nil || validateBoundedText(value.Name, 1, MaxProjectNameBytes) != nil || value.RunBudgetLimit != 0 && value.RunsUsed > value.RunBudgetLimit || value.MaxRunSeconds > 86400 || value.Revision == 0 || value.SpecialistRuns > 16 || value.SpecialistOpenProposals > 32 {
 		return fmt.Errorf("%w: project item", ErrMalformed)
 	}
 	return nil

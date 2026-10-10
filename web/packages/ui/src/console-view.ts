@@ -1,10 +1,14 @@
 import { productionKey, proposedProduction, type ProductionContraption } from "./production-view.js";
-import type { AgentItem, GraphNode, GraphReading, HumanRequestItem, IntakeCandidate, IntakeSource, OperationalGraphView, RunTelemetry, StateView, TaskItem } from "@dark-factory/client";
-import { compareText, QUIET_SECONDS, type SceneFlow, type SceneGraph, type SceneHall, type SceneMachine, type SceneProposal, type SceneReading, type SceneWorker } from "./factory-scene/scene.js";
+import { GRAPH_RUNTIMES, GRAPH_STATES, type AgentItem, type GraphNode, type GraphReading, type HumanRequestItem, type IntakeCandidate, type IntakeSource, type OperationalGraphView, type RunTelemetry, type StateView, type TaskItem } from "@dark-factory/client";
+import { compareText, QUIET_SECONDS, type SceneFlow, type SceneGraph, type SceneUnit, type SceneMachine, type SceneProposal, type SceneReading, type SceneWorker } from "./factory-scene/scene.js";
 
 export type AgentActivity = "busy" | "waiting" | "needs-you" | "idle";
 /** The operator-facing state has one name for each actionable condition. */
 export type AgentStatus = "working" | "ready" | "needs-you" | "paused";
+
+/** A specialist is an ordinary worker whose idle rule is a standing instruction; its reviews carry this title. */
+export const isSpecialist = (agent: AgentItem | undefined) => agent?.role === "worker" && agent.idle_policy === "standing_instruction";
+export const STANDING_TITLE = "Standing instruction";
 
 /** Tasks an agent is on right now (durable assignment, live statuses). */
 export function agentCurrentTask(agent: AgentItem, state: StateView): TaskItem | undefined {
@@ -73,7 +77,7 @@ export function workRows(state: StateView | undefined, inProgress: readonly Prod
   const inbox = sources.flatMap((source) => (source.sync?.waiting ?? []).map((candidate): WorkRow => ({ key: `${source.id}:${candidate.number}`, state: "inbox", title: candidate.title, origin: `#${candidate.number}`, intake: { source, candidate } })));
   return [...inbox, ...[...rows.values()].map(({ task, request, pr, key }): WorkRow => {
     const terminal = task === undefined || task.status === "succeeded" || task.status === "failed" || task.status === "cancelled";
-    const origin = task === undefined ? undefined : task.issue_number !== undefined ? `#${task.issue_number}` : task.mission_id !== undefined ? "mission" : state.agents.get(task.assigned_agent_id)?.role === "orchestrator" ? "overseer" : undefined;
+    const origin = task === undefined ? undefined : task.issue_number !== undefined ? `#${task.issue_number}` : task.mission_id !== undefined ? "mission" : state.agents.get(task.assigned_agent_id)?.role === "orchestrator" ? "overseer" : task.title === STANDING_TITLE && isSpecialist(state.agents.get(task.assigned_agent_id)) ? "specialist" : undefined;
     return { key, task, request, pr, origin, title: task?.title ?? pr?.pullRequest?.title ?? `Question from ${state.agents.get(request?.agent_id ?? "")?.name ?? "Agent"}`,
       state: request !== undefined || task?.status === "blocked" ? "needs-you" : terminal ? "in-review" : task.status === "running" ? "running" : "queued" };
   })].sort((a, b) => rank[a.state] - rank[b.state]);
@@ -95,7 +99,7 @@ export function orderTasksForHome(state: StateView): readonly TaskItem[] {
   });
 }
 
-/** Routes fold into a manifold past six per hall; zooming in lists them inside it. */
+/** Routes fold into a manifold past six per unit; zooming in lists them inside it. */
 const MAX_DOCKS = 6;
 const MAX_UNFLOWS = 100;
 
@@ -132,33 +136,28 @@ const reading = (value: GraphReading & { error_permille?: number; latency_p95_ms
   ...(value.deployed_at === undefined ? {} : { deployedAt: value.deployed_at }),
 });
 
-const STATE_ORDER = ["failing", "degraded", "active", "idle", "unknown"] as const;
-
 /** A fold of several machines claims only what all of them support. */
 function combine(readings: readonly SceneReading[]): SceneReading {
   const observations = new Set(readings.map((item) => item.observation));
   const observation = observations.size === 1 ? readings[0]!.observation : "partial";
   const measured = readings.filter((item) => item.state !== "unknown");
   const state = observation === "quiet" ? "idle" : measured.length === 0 ? "unknown"
-    : STATE_ORDER.find((candidate) => candidate !== "idle" && measured.some((item) => item.state === candidate)) ?? "unknown";
+    : GRAPH_STATES.find((candidate) => candidate !== "idle" && measured.some((item) => item.state === candidate)) ?? "unknown";
   const evidence = new Set(readings.map((item) => item.evidence));
   return { evidence: evidence.size === 1 ? readings[0]!.evidence : "both", observation, state,
     ratePerHour: readings.reduce((sum, item) => sum + item.ratePerHour, 0), errorPermille: Math.max(0, ...readings.map((item) => item.errorPermille)),
     latencyMs: Math.max(0, ...readings.map((item) => item.latencyMs)) };
 }
 
-const band = (node: GraphNode): SceneHall["band"] => node.runtime === "browser" ? 0 : node.runtime === "worker" || node.runtime === "server" ? 1 : node.runtime === "process" ? 2 : 3;
-const RUNTIME_ORDER = ["process", "server", "worker", "browser", "cli"];
-
 /**
- * The world projection: operational nodes become halls, machines, yard stock,
- * fence gates and quarantined activity. Only static evidence decides where a
- * machine stands; runtime-only nodes wait in quarantine.
+ * The world projection: operational nodes become units and their machines,
+ * shared stock, external parties and quarantined activity. Only static
+ * evidence gives a machine its owner; runtime-only nodes stay unexplained.
  */
 export function projectGraph(graphs: ReadonlyMap<string, OperationalGraphView> | undefined, projects: readonly string[]) {
-  const halls: SceneHall[] = [], shared: SceneMachine[] = [], parties: SceneMachine[] = [], quarantine: SceneMachine[] = [], flows = new Map<string, SceneFlow>();
-  /** Node id to the hall and machine that pictures it. */
-  const where = new Map<string, { hall?: string; machine: string }>();
+  const units: SceneUnit[] = [], shared: SceneMachine[] = [], parties: SceneMachine[] = [], quarantine: SceneMachine[] = [], flows = new Map<string, SceneFlow>();
+  /** Node id to the machine that pictures it, and the unit that owns it. */
+  const where = new Map<string, { unit?: string; machine: string }>();
   const nodes: (GraphNode & { projectId: string })[] = [];
   const digests: string[] = [];
   for (const projectId of projects) {
@@ -168,7 +167,7 @@ export function projectGraph(graphs: ReadonlyMap<string, OperationalGraphView> |
     const byId = new Map(graph.nodes.map((node) => [node.id, node]));
     for (const node of graph.nodes) nodes.push({ ...node, projectId });
     // Only runtime-only nodes are quarantined: a static "no recognised entry
-    // points" marker is part of its hall.
+    // points" marker belongs to its unit.
     const staticNode = (node: GraphNode) => node.evidence !== "runtime";
     for (const unit of graph.nodes.filter((node) => node.kind === "processor" && staticNode(node))) {
       const own = graph.nodes.filter((node) => node.unit === unit.id && staticNode(node)).sort((left, right) => compareText(left.label, right.label) || compareText(left.id, right.id));
@@ -180,28 +179,30 @@ export function projectGraph(graphs: ReadonlyMap<string, OperationalGraphView> |
       if (foldOwned) {
         const id = `${unit.id}:owned`;
         machines.push({ id, kind: "job", label: `${own.length} owned nodes`, represented: own.map((node) => node.id), reading: combine(own.map(reading)) });
-        for (const node of own) where.set(node.id, { hall: unit.id, machine: id });
+        for (const node of own) where.set(node.id, { unit: unit.id, machine: id });
       }
       if (foldDocks) {
         const id = `${unit.id}:docks`;
         machines.push({ id, kind: "ingress", label: `${docks.length} routes`, represented: docks.map((node) => node.id), routes: docks.map((node) => node.label), reading: combine(docks.map(reading)) });
-        for (const node of docks) where.set(node.id, { hall: unit.id, machine: id });
+        for (const node of docks) where.set(node.id, { unit: unit.id, machine: id });
       }
       for (const node of own) {
         if (foldOwned) continue;
         if (foldDocks && docks.includes(node)) continue;
         machines.push({ id: node.id, kind: node.kind, label: node.label, ...(node.trigger === undefined ? {} : { trigger: node.trigger }), reading: reading(node) });
-        where.set(node.id, { hall: unit.id, machine: node.id });
+        where.set(node.id, { unit: unit.id, machine: node.id });
       }
-      halls.push({ id: unit.id, label: unit.label, ...(unit.runtime === undefined ? {} : { runtime: unit.runtime }), reading: reading(unit), band: band(unit), machines });
-      where.set(unit.id, { hall: unit.id, machine: unit.id });
+      units.push({ id: unit.id, label: unit.label, ...(unit.runtime === undefined ? {} : { runtime: unit.runtime }), reading: reading(unit), machines });
+      where.set(unit.id, { unit: unit.id, machine: unit.id });
     }
     for (const node of graph.nodes) {
       if (where.has(node.id)) continue;
-      const machine: SceneMachine = { id: node.id, kind: node.kind, label: node.label, reading: reading(node), ...(node.unit === undefined ? {} : { owner: byId.get(node.unit)?.label ?? "" }) };
-      if (node.kind === "external") { parties.push(machine); where.set(node.id, { machine: node.id }); }
-      else if (staticNode(node) && node.unit === undefined) { shared.push(machine); where.set(node.id, { hall: "yard", machine: node.id }); }
-      else { quarantine.push(machine); where.set(node.id, { hall: "quarantine", machine: node.id }); }
+      const machine: SceneMachine = { id: node.id, kind: node.kind, label: node.label, reading: reading(node),
+        ...(node.unit === undefined ? {} : { owner: byId.get(node.unit)?.label ?? "", ...(where.get(node.unit)?.unit === node.unit ? { claims: node.unit } : {}) }) };
+      where.set(node.id, { machine: node.id });
+      if (node.kind === "external") parties.push(machine);
+      else if (staticNode(node) && node.unit === undefined) shared.push(machine);
+      else quarantine.push(machine);
     }
     for (const edge of graph.edges) {
       const from = where.get(edge.from)?.machine, to = where.get(edge.to)?.machine;
@@ -214,7 +215,7 @@ export function projectGraph(graphs: ReadonlyMap<string, OperationalGraphView> |
   quarantine.sort((left, right) => compareText(left.owner ?? "", right.owner ?? "") || compareText(left.label, right.label) || compareText(left.id, right.id));
   const graph: SceneGraph = {
     digest: `${digests.join(" ")}:${quarantine.map((machine) => machine.id).join(",")}`,
-    halls, shared, parties, quarantine, flows: [...flows.values()],
+    units, shared, parties, quarantine, flows: [...flows.values()],
     observedAt: Math.max(0, ...projects.map((id) => graphs?.get(id)?.observed_at ?? 0)),
     ...(projects.length === 1 && graphs?.get(projects[0]!) !== undefined ? { summary: graphs.get(projects[0]!)!.summary, sources: graphs.get(projects[0]!)!.sources } : {}),
   };
@@ -223,16 +224,15 @@ export function projectGraph(graphs: ReadonlyMap<string, OperationalGraphView> |
    * file or directory, else the unit whose code area holds it (the most
    * specific area wins; a running unit is preferred to a command-line tool).
    */
-  const locate = (projectId: string, path: string): { hall: string; machine: string } | undefined => {
+  const locate = (projectId: string, path: string): { unit?: string; machine: string } | undefined => {
     const within = (area: string) => area === "." || path === area || path.startsWith(`${area}/`);
-    const candidates = nodes.filter((node) => node.projectId === projectId && node.paths.some(within) && where.get(node.id)?.hall !== undefined);
+    const candidates = nodes.filter((node) => node.projectId === projectId && node.paths.some(within) && node.kind !== "external" && where.has(node.id));
     const score = (node: GraphNode) => Math.max(...node.paths.filter(within).map((area) => area === "." ? 0 : area.length));
     const leaf = candidates.filter((node) => node.kind !== "processor").sort((left, right) => score(right) - score(left) || compareText(left.id, right.id))[0];
     const unit = candidates.filter((node) => node.kind === "processor").sort((left, right) => score(right) - score(left)
-      || RUNTIME_ORDER.indexOf(left.runtime ?? "cli") - RUNTIME_ORDER.indexOf(right.runtime ?? "cli") || compareText(left.id, right.id))[0];
+      || GRAPH_RUNTIMES.indexOf(left.runtime ?? "cli") - GRAPH_RUNTIMES.indexOf(right.runtime ?? "cli") || compareText(left.id, right.id))[0];
     const best = leaf !== undefined && (unit === undefined || score(leaf) >= score(unit)) ? leaf : unit;
-    const found = best === undefined ? undefined : where.get(best.id);
-    return found?.hall === undefined ? undefined : { hall: found.hall, machine: found.machine };
+    return best === undefined ? undefined : where.get(best.id);
   };
   return { graph, locate, where };
 }
@@ -240,7 +240,7 @@ export function projectGraph(graphs: ReadonlyMap<string, OperationalGraphView> |
 /** Live task and observed-path projection onto the world. */
 export function projectFloor(state: StateView | undefined, prepared: ReturnType<typeof projectGraph>, runPaths?: ReadonlyMap<string, RunPathSample>, lastRunPaths?: ReadonlyMap<string, RunPathSample>): FloorScene {
   const footprint = (sample: RunPathSample | undefined) => {
-    const counts = new Map<string, { hall: string; machine: string; count: number }>();
+    const counts = new Map<string, { unit?: string; machine: string; count: number }>();
     for (const path of sample?.paths ?? []) {
       const found = prepared.locate(sample!.projectId, path);
       if (found === undefined) continue;
@@ -262,7 +262,7 @@ export function projectFloor(state: StateView | undefined, prepared: ReturnType<
           .map((request) => request.id),
       };
     });
-  const labels = new Map([...prepared.graph.halls.map((hall) => [hall.id, hall.label] as const), ["yard", "Shared yard"], ["quarantine", "Quarantine"]]);
+  const labels = new Map([...prepared.graph.units.map((unit) => [unit.id, unit.label] as const), ...[...prepared.graph.shared, ...prepared.graph.quarantine].map((machine) => [machine.id, machine.label] as const)]);
   const workers = state === undefined ? [] : [...state.agents.values()].filter((agent) => !agent.archived).map((agent): SceneWorker => {
     const task = agentCurrentTask(agent, state);
     const sample = task === undefined ? undefined : matchingRunSample(state, task, runPaths);
@@ -276,11 +276,11 @@ export function projectFloor(state: StateView | undefined, prepared: ReturnType<
     const location: SceneWorker["location"] = task === undefined ? last === undefined ? "resting" : "last-observed" : live !== undefined ? "working" : "unobserved";
     const at = location === "working" ? live : location === "last-observed" ? last : undefined;
     return {
-      id: agent.id, name: agent.name, role: agent.role, provider: agent.provider,
+      id: agent.id, name: agent.name, role: agent.role, provider: agent.provider, ...(isSpecialist(agent) ? { specialist: true } : {}),
       ...(agent.appearance === undefined ? {} : { appearance: agent.appearance }),
       activity: activity === "busy" && (telemetry?.quiet_seconds ?? 0) >= QUIET_SECONDS ? "waiting" : activity, paused: agent.paused, location,
       ...(telemetry === undefined ? {} : { telemetry }),
-      ...(at === undefined ? {} : { locationLabel: labels.get(at.hall) ?? "", nodeId: at.hall }),
+      ...(at === undefined ? {} : { locationLabel: labels.get(at.unit ?? at.machine) ?? "", nodeId: at.unit ?? at.machine }),
       ...(location === "working" && live !== undefined ? { observedBayId: live.machine } : {}),
     };
   });
@@ -317,20 +317,20 @@ export function projectProposals(prepared: ReturnType<typeof projectGraph>, item
     state: item.source.kind === "unavailable" ? "unavailable" : item.source.stale ? "stale" : "active", base: item.source.base, head: item.source.head,
     operations: item.source.paths.map((path) => {
       const found = prepared.locate(item.projectId, path.path) ?? (path.old_path === undefined ? undefined : prepared.locate(item.projectId, path.old_path));
-      return { ...(found === undefined ? {} : { entityId: found.machine, roomId: found.hall }), path: path.path, ...(path.old_path === undefined ? {} : { previousPath: path.old_path }),
+      return { ...(found === undefined ? {} : { entityId: found.machine, ...(found.unit === undefined ? {} : { unitId: found.unit }) }), path: path.path, ...(path.old_path === undefined ? {} : { previousPath: path.old_path }),
         kind: ({ added: "addition", modified: "modification", deleted: "removal", renamed: "move" } as const)[path.status] };
     }),
   }));
   const reviewers = new Map<string, SceneWorker>();
   for (const item of items.filter(proposedProduction)) {
     const proposal = proposals.find((candidate) => candidate.id === productionKey(item))!;
-    const operation = proposal.operations.find((candidate) => candidate.roomId !== undefined);
+    const operation = proposal.operations.find((candidate) => candidate.entityId !== undefined);
     for (const actor of item.reviewers) {
       const id = `review:${item.projectId}:${item.repository}:${actor.id}`;
       if (reviewers.has(id)) continue;
       const working = actor.state === "running" && proposal.state === "active" && actor.head === proposal.head && operation !== undefined;
       reviewers.set(id, { id, name: actor.name || actor.id, role: "worker", activity: working ? "busy" : actor.state === "waiting" ? "waiting" : "idle",
-        location: working ? "working" : "resting", ...(working ? { nodeId: operation.roomId, observedBayId: operation.entityId } : {}),
+        location: working ? "working" : "resting", ...(working ? { nodeId: operation.unitId ?? operation.entityId, observedBayId: operation.entityId } : {}),
         review: { proposalId: proposal.id, scope: `Review assignment at ${actor.head || "unknown head"}; ${proposal.operations.length} observed paths. Individual file inspection is not observed.` } });
     }
   }

@@ -8,43 +8,44 @@ Keep parallel work in one place instead of juggling separate agent sessions.
 
 <picture>
   <source media="(max-width: 600px)" srcset="docs/assets/factory-floor-demo-mobile.png">
-  <img src="docs/assets/factory-floor-demo.png" alt="Dark Factory demo showing kernel and store rooms, sample workers, queued work, and an open Needs You decision">
+  <img src="docs/assets/factory-floor-demo.png" alt="Dark Factory floor: machines from three repositories on one shared floor, joined by square belts, over faint unit areas, with an outside gate, the development block and sample workers">
 </picture>
 
-*Actual console with labelled demo data: sample workers, codebase rooms, and a
-synthetic Needs You decision. No daemon is connected.*
+*The factory floor drawn from a demo graph: three repositories' units on one
+shared floor, belts between them and sample workers. No daemon is connected; see [the operational
+factory](docs/development/OPERATIONAL_FACTORY.md).*
 
-[Get started](#quick-start) · [Website](https://www.darkfactory.build) ·
+[Get started](#install) · [Website](https://www.darkfactory.build) ·
 [Console (requires pairing)](https://app.darkfactory.build) ·
 [Documentation](docs/install.md) · [Community backlog](https://www.darkfactory.build/backlog)
 
 ## What you can do
 
-- **See the work.** Explore your codebase on the factory floor and select a worker to see its activity.
+- **See the work.** The floor pictures your software as one connected plant: its machines are routes, jobs and stores, grouped into faint areas by deployment unit and joined by belts, and a worker walks to the part its change touches. Select a worker to see its activity.
 - **Coordinate a team.** Let an overseer break down goals, assign workers, and follow up on their results.
 - **Keep work moving.** Queue and prioritize work across projects and repositories. Assign a named agent or the next available worker.
 - **Stay in control.** Open agent terminals, send instructions, and answer Needs You decisions from the same console.
 - **Review and improve.** Inspect completed work and review findings, request corrections, and publish reviewed pull requests when GitHub is configured.
-- **Contain the work.** Every worker attempt gets its own Git worktree, and every attempt gets a private runtime home and temp directory. Codex and Claude Code commands run in an OS sandbox whose only writable places are those, the repository's Git directory, and the shared local CI lease when one exists. Inside your home directory it can read only what the factory granted it, such as those places and the configured toolchain.
+- **Contain the work.** Every worker attempt gets its own Git worktree, and every attempt gets a private runtime home and temp directory. Codex and Claude Code commands run in an OS sandbox whose only writable places are those, the repository's Git directory (read-only for an overseer), and the shared local CI lease when one exists. Inside your home directory it can read only what the factory granted it, such as those places and the configured toolchain.
 - **Set the budget.** Cap a project by runs and by recorded provider tokens: at either ceiling it admits nothing new and running work finishes. Cap each run's wall-clock time: a run that passes it is cancelled.
 - **Choose the model per worker.** Codex and Claude Code workers share one floor, each with its own provider, model and effort.
 - **Step away from the browser.** Work continues while your Mac stays awake. With remote access configured, a paired phone can steer the same factory.
 
-## A working day
+## Requirements
 
-Give the overseer a bounded goal, such as improving a confusing setup flow.
-It coordinates workers while you follow their progress on the floor. Open a
-worker to inspect its terminal or answer a question. Read the completed result,
-request a correction if needed, and take the reviewed change forward.
+- macOS on Apple silicon or Intel. The runtime is macOS-only.
+- Git, and an existing committed Git checkout to work on.
+- For model-backed workers, the `codex` or `claude` CLI installed and already
+  signed in. The `shell` provider needs neither and runs its task as a script.
+- A browser for the console.
+- Building from source needs Go (the version in [go.mod](go.mod)). Console
+  development needs only Node 22 or later with Corepack; see
+  [Contributing](CONTRIBUTING.md).
 
-You can also start small with one worker and one task. Adding teammates does
-not mean managing another set of disconnected sessions.
+## Install
 
-## Quick start
-
-Start with macOS, Git, an existing committed checkout, and
-a signed-in Codex CLI. [Install the latest release](docs/install.md#install-a-release),
-putting its commands on `PATH`. Then run:
+[Install the latest release](docs/install.md#install-a-release) with its three
+commands on `PATH`, then create and start one managed home:
 
 ```sh
 factoryctl init --home "$HOME/.dark-factory"
@@ -52,70 +53,60 @@ factoryctl service install --home "$HOME/.dark-factory"
 ```
 
 A fresh installation opens the console in your default browser, already
-paired; later, `factoryctl web pair` opens your default browser already paired. Then
-follow [Start your first worker](docs/install.md#start-your-first-worker) to
-register your checkout, enable work, and give a worker its first task. That
-short CLI setup is still required; once the worker appears, use its console
-panel to inspect results and queue more work. Try one small documentation
-correction before handing over a larger goal.
+paired. If you lose every paired browser, `factoryctl web pair` opens your
+default browser already paired; see [installation](docs/install.md).
 
-In the floor's break room, select the task tray for **Tasks**, the planning table for **Missions**, the board or the bookshelf.
-A mission records an objective and acceptance criteria for an overseer; its related
-work remains inspectable after workers finish. **Pause new work** stops new
-admission while active processes continue.
+## Your first task
 
-The Tasks panel's **New task** form accepts pasted images, dropped files, or
-files selected with **Attach files** (up to 8 files and 8 MiB total). Add an
-instruction, review or remove the previews, then submit. Attachments commit
-with the task in the local daemon database and remain there with its history.
-Each attempt gets a fresh copy in its private runtime home, available through
-`$DARK_FACTORY_TASK_ATTACHMENTS`; uploads do not enter your Git checkout.
-Unsubmitted uploads are temporary and discarded when the connection closes.
-File contents remain unchanged; interpretation depends on the provider's tools.
+Every command below talks to the daemon over its local socket, authenticated
+by the operator token file in the home. For the default home `~/.dark-factory`
+they find both without configuration; for another home, export
+`DARK_FACTORY_SOCKET` and `DARK_FACTORY_OPERATOR_TOKEN_FILE` first.
 
-In **Settings → Attachment storage**, enable **Automatically remove attachments
-after 30 days** to clean up succeeded and cancelled tasks hourly while the daemon
-is running. This saved factory-wide setting is off by default and also applies
-to existing tasks. Turning it off stops future cleanup. To remove files sooner, run
-`factoryctl task update --task ID --revision REVISION --remove-attachments`.
-Queued, running, failed, and blocked tasks are protected. `factoryctl task read`
-keeps the original filenames with `removed: true`; sending cleaned tasks back
-is refused, so create a new task and attach any required files instead. Normal
-runtime cleanup already removes worker copies.
+```sh
+factoryctl dispatch on
+factoryctl project create --name "My project" --root "$PWD"
+factoryctl agent create --project PROJECT_ID --name builder --provider codex --tool-budget 100
+factoryctl task add --project PROJECT_ID --agent AGENT_ID \
+  --title "Fix one setup instruction" \
+  --body "Correct one setup instruction in README.md that the code contradicts, commit it, and report the file changed."
+```
 
-Deletion frees database space for reuse. To return unused space to disk, turn
-`factoryctl dispatch off`, let all runs settle, then run
-`factoryctl storage compact`. It uses SQLite VACUUM and a WAL checkpoint while
-holding the daemon's writer gate. Compaction is optional, may need temporary
-free disk space up to twice the database size, and leaves dispatch off.
-Compaction remains explicit; automatic attachment cleanup frees database space
-for reuse without running VACUUM.
+Each command prints JSON; copy its `id` into the next. Work is asynchronous:
+`task add` only queues it. Poll `factoryctl status` until the task's `status`
+is `succeeded`, `failed` or `blocked`, then read its result with the task's
+current `revision` from that status:
 
-## Status and further reading
+```sh
+factoryctl status
+factoryctl task read --task TASK_ID --revision REVISION
+```
 
-Repository management and issue intake ship in v0.4.0. **Hosted GitHub
-connection for new customers still awaits service activation**; installing
-v0.4.0 alone does not enable it. Manual local work and the public
-[reporting page](https://www.darkfactory.build/feedback) remain available.
+The `outcome` is the worker's report. Its commits are on a `factory/…` branch
+in a private Git directory inside your checkout's `.git`, never on your own
+branches; [inspecting a result](docs/install.md#inspect-a-result) shows how to
+fetch it. Everything here is also in the console: select **builder** on the
+floor to watch its terminal, read the result, and send it back with feedback.
+To try the same path without a model or an installed service, see [a task
+without a model](docs/install.md#try-a-task-without-a-model).
 
-v0.5.1 lets factoryd run accepted issues end to end itself: it hands each one
-straight to a worker, publishes and corrects the pull request, reviews it and
-enqueues it; the overseer handles only exceptions. Releases are built in Go.
+## Status
 
-Sandboxed Claude Code workers and provider token budgets ship in v0.5.0. Codex
-workers and overseers are proven with real work. Claude Code workers are proven
-by a live run; a Claude Code overseer has fixture proof only, so use a Codex
-overseer for now. Agents run on your Mac as your user. The sandbox confines the
-commands and file tools an agent uses; the provider process and its MCP servers
-sit outside it, and configured providers receive task and repository material.
-Token budgets count billable tokens recorded from each provider's session log:
-uncached input plus output (and Claude cache creation), excluding cached input
-reads; they measure tokens, not money. A run the daemon recovers after a restart,
-or one whose provider log is missing, records none, so real usage can exceed
-the ceiling. Remote access and GitHub publication need additional setup. See
-[installation and recovery](docs/install.md) and [provider
-support](docs/providers.md).
+With a GitHub connection, factoryd runs accepted issues end to end itself: it
+hands each one to a worker, publishes and corrects the pull request, reviews it
+and enqueues it; the overseer handles only exceptions. The hosted GitHub
+connection for new customers still awaits service activation; manual local
+work and the public [reporting page](https://www.darkfactory.build/feedback)
+remain available.
 
-For deeper detail: [Architecture](ARCHITECTURE.md) · [Security](SECURITY.md) ·
+Shell and Codex workers and Codex overseers are proven with real work. A Claude
+Code worker is proven by one live run; a Claude Code overseer has fixture proof
+only, so use a Codex overseer for now. Agents run on your Mac as your user; see
+[provider support](docs/providers.md) for the sandbox boundary and token
+budgets, and [Security](SECURITY.md) for what it does and does not contain.
+
+## Further reading
+
+[Installation and operation](docs/install.md) · [Architecture](ARCHITECTURE.md) · [Security](SECURITY.md) ·
 [Contributing](CONTRIBUTING.md) · [Development](docs/development/WORKFLOW.md) ·
 [Deployment](docs/development/DEPLOY.md). Dark Factory is MIT licensed.

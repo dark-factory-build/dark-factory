@@ -24,31 +24,31 @@ export type SceneMachine = Readonly<{
   represented?: readonly string[];
   /** The folded routes' labels, listed inside the manifold when zoomed in. */
   routes?: readonly string[];
-  /** The unit a quarantined or shared machine belongs to, for its label. */
+  /** The name of the unit a runtime-only machine claims, for its label. */
   owner?: string;
+  /** That unit's id: the machine stands near it, never inside it. */
+  claims?: string;
 }>;
 
-/** A deployment unit: one hall. Repository never decides its walls. */
-export type SceneHall = Readonly<{
+/** A deployment unit: its main machine and the machines it owns. Logical only; it has no walls or plot. */
+export type SceneUnit = Readonly<{
   id: string;
   label: string;
   runtime?: GraphNode["runtime"];
   reading: SceneReading;
-  /** Placement band: clients, public, internal, tools. Static evidence alone decides it. */
-  band: 0 | 1 | 2 | 3;
   machines: readonly SceneMachine[];
 }>;
 
 export type SceneFlow = Readonly<{ from: string; to: string; kind: string; reading: SceneReading }>;
 
-/** The world model: operational graph and runtime reading, grouped for one floor. */
+/** The world model: operational graph and runtime reading, for one floor. */
 export type SceneGraph = Readonly<{
   /** Changes only when static structure or the detail level changes. */
   digest: string;
-  halls: readonly SceneHall[];
+  units: readonly SceneUnit[];
   /** Stores and queues no single unit owns. */
   shared: readonly SceneMachine[];
-  /** External parties at the fence. */
+  /** External parties. */
   parties: readonly SceneMachine[];
   /** Runtime activity no static node explains. */
   quarantine: readonly SceneMachine[];
@@ -61,13 +61,13 @@ export type SceneGraph = Readonly<{
 
 export type SceneProposal = Readonly<{
   id: string; title: string; state: "active" | "stale" | "unavailable"; base?: string; head?: string;
-  operations: readonly Readonly<{ entityId?: string; roomId?: string; path: string; previousPath?: string; kind: "addition" | "modification" | "removal" | "move" }>[];
+  operations: readonly Readonly<{ entityId?: string; unitId?: string; path: string; previousPath?: string; kind: "addition" | "modification" | "removal" | "move" }>[];
 }>;
 
-/** The changes touching one machine or hall. */
+/** The changes touching one machine or unit. */
 export function proposalsForEntity(proposals: readonly SceneProposal[], id?: string): readonly SceneProposal[] {
   if (id === undefined) return [];
-  return proposals.filter((proposal) => proposal.operations.some((operation) => operation.entityId === id || operation.roomId === id));
+  return proposals.filter((proposal) => proposal.operations.some((operation) => operation.entityId === id || operation.unitId === id));
 }
 
 export type SceneWorker = Readonly<{
@@ -75,15 +75,17 @@ export type SceneWorker = Readonly<{
   name: string;
   role: "orchestrator" | "worker";
   provider?: "claude_code" | "codex" | "shell";
+  /** A worker with a standing instruction. */
+  specialist?: boolean;
   activity: "busy" | "waiting" | "needs-you" | "idle";
   paused?: boolean;
   appearance?: SpriteAppearance;
-  /** Live work is placed in a hall; retained samples annotate the resting area. */
+  /** Live work is placed at a machine; retained samples annotate the resting area. */
   location?: "working" | "last-observed" | "unobserved" | "resting";
   locationLabel?: string;
-  /** The hall the worker is in. */
+  /** The unit the worker is at, or the unowned machine. */
   nodeId?: string;
-  /** The machine within that hall. */
+  /** The machine it works at. */
   observedBayId?: string;
   review?: Readonly<{ proposalId: string; scope: string }>;
   /** What the live run's agent CLI recorded; absent when it recorded nothing. */
@@ -127,39 +129,54 @@ export type SceneCrate = Readonly<{
 }>;
 
 export const LINE_STATIONS = ["Review", "Checks", "Merge queue", "Shipped"] as const;
-export const LINE_SLOTS = 8;
 
-type SceneRect = Readonly<{ x: number; y: number; width: number; height: number }>;
-export type SceneRoomLayout = SceneRect & Readonly<{
-  id: string;
-  kind: "hall" | "yard" | "quarantine";
-  door: ScenePoint;
-  contents: readonly RoomContent[];
+export type SceneRect = Readonly<{ x: number; y: number; width: number; height: number }>;
+
+/** How a machine is pictured. A shape is chosen from the node kind, never its name. */
+export type StationShape = "line" | "dock" | "manifold" | "clock" | "cell" | "silo" | "conveyor" | "crate" | "gate";
+
+/** One machine where it stands: its body is solid, its label and the spot in front of it are floor. */
+export type SceneStation = SceneRect & Readonly<{
+  entityId: string;
+  representedIds?: readonly string[];
+  shape: StationShape;
+  machine: SceneMachine;
+  /** The unit it belongs to: its own id for a unit's main machine. */
+  unit?: string;
+  /** Where a worker stands to use it. */
+  anchor: ScenePoint;
+  /** Where its label is drawn: floor nobody builds on and no belt crosses. */
+  label: SceneRect;
+  /** Body, label and standing spot with an aisle's half-width around them. Footprints never overlap. */
+  footprint: SceneRect;
 }>;
-
-type SceneHeading = Readonly<{ label: string; x: number; y: number }>;
-
-/** A gate in the perimeter fence for one external party. */
-export type SceneGate = SceneRect & Readonly<{ machine: SceneMachine }>;
 
 export type SceneLayout = Readonly<{
   width: number;
   height: number;
-  rooms: readonly SceneRoomLayout[];
-  headings: readonly SceneHeading[];
-  corridors: readonly SceneRect[];
-  gates: readonly SceneGate[];
-  /** The fence line's x; gates hang on it. */
-  fence: number;
-  restingTop: number;
-  /** The outbound line along the top, from beside the desks to the fence. Fixed: it is there, empty, with no work. */
-  line: readonly (SceneRect & Readonly<{ label: string }>)[];
+  stations: readonly SceneStation[];
+  /** Each unit's area: the footprints of its stations, in lobes where they are apart. Painted only; layout never reads it. */
+  regions: readonly SceneRegion[];
+  /** The five fixtures, each in free floor between machines. They depend on the machines alone, never on who is offered or who is here. */
+  fixtures: readonly SceneFixture[];
+  /** The fixtures this floor shows. */
+  implements: readonly BreakRoomErrand[];
+  /** What nobody walks through: machine bodies and fixtures. */
+  solids: readonly SceneRect[];
 }>;
+
+/**
+ * One neighbourhood of a unit: members standing next to each other, merged
+ * into one irregular patch of floor. `rects` tile it without overlapping;
+ * `outline` traces its edge; `label` is where its one name goes.
+ */
+export type SceneRegion = Readonly<{ unit: string; lobe: number; hue: number; rects: readonly SceneRect[]; outline: string; label: ScenePoint & Readonly<{ width: number }> }>;
 
 export type SceneWorkerPlacement = Readonly<{
   id: string;
-  area: "room" | "resting" | "staging" | "outside" | "overflow";
-  roomId?: string;
+  area: "work" | "resting" | "staging" | "outside" | "overflow";
+  /** The machine worked at, or the unit's main machine a worker rests beside. */
+  stationId?: string;
   /** A resting worker who has got up for a while stands here instead of sitting. */
   errand?: BreakRoomErrand;
   errandKey?: string;
@@ -170,32 +187,16 @@ export type SceneWorkerPlacement = Readonly<{
 /** Coffee is ambient; the rest are implements, used when a recorded event says so (shelf also ambiently). */
 export type BreakRoomErrand = "shelf" | "coffee" | "board" | "missions" | "tasks";
 
-/** How a machine is pictured. A shape is chosen from the node kind, never its name. */
-export type StationShape = "line" | "dock" | "manifold" | "clock" | "cell" | "silo" | "conveyor" | "crate";
+/** A piece of furniture and the spot a worker stands to use it. */
+export type SceneFixture = Readonly<{ errand: BreakRoomErrand; x: number; y: number; stand: ScenePoint }>;
 
-export type RoomContent = SceneRect & Readonly<{
-  key: string;
-  entityId: string;
-  representedIds?: readonly string[];
-  shape: StationShape;
-  machine: SceneMachine;
-  workSurface: true;
-}>;
-
-// Halls share walls; dimensions never depend on live work.
-const CORRIDOR = 32;
-export const COMMON_WIDTH = 192;
 export const PADDING = 16;
-export const ROOM_LEFT = PADDING + COMMON_WIDTH + 16 + CORRIDOR;
-// The outbound line runs along the top beside the desks; halls start below it, a constant away.
-const LINE_TOP = 32;
-const FLOOR_TOP = LINE_TOP + 40 + 16;
-export const WORKER_GAP = 40;
 export const WORKER_SIZE = 20;
-const BAY = 176;
-const COLUMNS = 4;
-const YARD = 120;
-const BAND_LABELS = ["Clients", "Public", "Internal", "Tools"] as const;
+/** Half an aisle around every footprint: two neighbours leave a worker room to pass with the walking grid's slack. */
+export const MARGIN = 18;
+// Unrelated groups stand this much further apart than neighbours, so a disconnected group reads as one.
+const GROUP_GAP = 24;
+const ASPECT = 1.6;
 
 /** Ordering for the floor: byte order over served fields, never a locale. */
 export function compareText(left: string, right: string) {
@@ -205,199 +206,459 @@ export function compareText(left: string, right: string) {
 const shapeOf = (machine: SceneMachine): StationShape => machine.represented !== undefined ? "manifold"
   : machine.kind === "ingress" ? machine.trigger === "timer" ? "clock" : "dock"
   : machine.kind === "job" ? "cell" : machine.kind === "store" ? "silo" : machine.kind === "queue" ? "conveyor"
-  : machine.kind === "processor" ? "line" : "crate";
+  : machine.kind === "processor" ? "line" : machine.kind === "external" ? "gate" : "crate";
 
 const size: Record<StationShape, { width: number; height: number }> = {
   line: { width: 96, height: 44 }, dock: { width: 40, height: 18 }, manifold: { width: 44, height: 40 }, clock: { width: 22, height: 22 },
-  cell: { width: 34, height: 30 }, silo: { width: 28, height: 40 }, conveyor: { width: 64, height: 16 }, crate: { width: 22, height: 22 },
+  cell: { width: 34, height: 30 }, silo: { width: 28, height: 40 }, conveyor: { width: 64, height: 16 }, crate: { width: 22, height: 22 }, gate: { width: 12, height: 28 },
 };
 
-/**
- * Lay out a hall's stations in fixed zones by kind: intake docks along the
- * left wall, timers by the door, the main line in the middle, cells across
- * the top and silos to the right. Static machines only, so live data never
- * moves a machine.
- */
-function composeHall(hall: SceneHall, room: SceneRect): readonly RoomContent[] {
-  const place = (machine: SceneMachine, x: number, y: number): RoomContent => {
-    const shape = shapeOf(machine);
-    return { key: machine.id, entityId: machine.id, ...(machine.represented === undefined ? {} : { representedIds: machine.represented }), shape, machine, workSurface: true, x, y, ...size[shape] };
-  };
-  const docks = hall.machines.filter((machine) => machine.kind === "ingress" && machine.trigger !== "timer");
-  const clocks = hall.machines.filter((machine) => machine.kind === "ingress" && machine.trigger === "timer");
-  const cells = hall.machines.filter((machine) => machine.kind === "job");
-  const silos = hall.machines.filter((machine) => machine.kind === "store" || machine.kind === "queue");
-  const top = room.y + 44, contents: RoomContent[] = [];
-  docks.forEach((machine, index) => contents.push(place(machine, room.x + 22, top + 8 + index * 40)));
-  clocks.forEach((machine, index) => contents.push(place(machine, room.x + room.width - 30 - index * 26, room.y + 14)));
-  const { lineOffset, perRow, below } = cellGrid(cells.length, room.width);
-  const lineX = room.x + lineOffset;
-  contents.push(place({ id: hall.id, kind: "processor", label: hall.label, reading: hall.reading }, lineX, top + 34 + below));
-  const right = room.x + room.width - 50;
-  cells.forEach((machine, index) => contents.push(place(machine, lineX + (index % perRow) * 42, top + 6 + Math.floor(index / perRow) * CELL_ROW)));
-  silos.forEach((machine, index) => contents.push(place(machine, right - Math.floor(index / 3) * 36, top + 8 + (index % 3) * 62)));
-  // What the code shows but nothing recognised waits by the door as a crate.
-  hall.machines.filter((machine) => machine.kind === "unknown").forEach((machine, index) => contents.push(place(machine, room.x + 14 + index * 28, room.y + room.height - 40)));
-  return contents;
+// A label is set in an 8px monospace face, about this wide a character.
+const CHAR = 5;
+/** How many characters of a label a station shows: the renderer truncates to exactly this. */
+export function labelChars(shape: StationShape, width: number) {
+  return shape === "dock" || shape === "manifold" || shape === "line" ? 22 : shape === "gate" ? 20 : Math.max(6, Math.floor((width + 10) / 5));
 }
 
-// A cell row is the label and the cell under it, so rows never overlap.
-const CELL_ROW = 44;
-
-/** Where the main line stands and how the job cells wrap above it, from the hall's width alone. */
-function cellGrid(cells: number, width: number) {
-  const lineOffset = Math.max(72, Math.floor((width - size.line.width) / 2));
-  const perRow = Math.max(1, Math.floor((width - 50 - lineOffset) / 42));
-  const rows = Math.ceil(cells / perRow);
-  return { lineOffset, perRow, below: rows === 0 ? 0 : 30 + (rows - 1) * CELL_ROW };
+/** Where a station's label, and the worker using it, go, relative to its body's corner. */
+function sides(machine: SceneMachine) {
+  const shape = shapeOf(machine), { width, height } = size[shape], chars = Math.min(Array.from(machine.label).length, labelChars(shape, width)) * CHAR;
+  // Docks and manifolds are labelled above from their left edge; a gate to its right over two lines; the rest centred below.
+  const label = shape === "dock" || shape === "manifold" ? { x: 0, y: -11, width: chars, height: 10 }
+    : shape === "gate" ? { x: width + 6, y: 2, width: 124, height: 23 }
+    : { x: (width - chars) / 2, y: height + 1, width: chars, height: 10 };
+  const anchor = { x: width / 2, y: Math.max(height + 16, label.y + label.height + 13) };
+  const left = Math.min(0, label.x, anchor.x - WORKER_SIZE / 2) - MARGIN, top = Math.min(0, label.y) - MARGIN;
+  const right = Math.max(width, label.x + label.width, anchor.x + WORKER_SIZE / 2) + MARGIN, bottom = anchor.y + WORKER_SIZE / 2 + MARGIN;
+  return { shape, width, height, anchor, label, footprint: { x: Math.floor(left), y: Math.floor(top), width: Math.ceil(right - Math.floor(left)), height: Math.ceil(bottom - Math.floor(top)) } };
 }
 
-function hallUnits(hall: SceneHall) {
-  const count = hall.machines.length;
-  // Silos stand right of the main line, so a hall holding any is never a single bay.
-  return Math.max(count <= 4 ? 1 : count <= 10 ? 2 : COLUMNS, hall.machines.some((machine) => machine.kind === "store" || machine.kind === "queue") ? 2 : 1);
-}
+type Rect = { x: number; y: number; width: number; height: number };
+const overlaps = (a: SceneRect, b: SceneRect) => a.x < b.x + b.width && b.x < a.x + a.width && a.y < b.y + b.height && b.y < a.y + a.height;
+const centre = (rect: SceneRect) => ({ x: rect.x + rect.width / 2, y: rect.y + rect.height / 2 });
+const union = (rects: readonly SceneRect[]) => {
+  const x = Math.min(...rects.map((rect) => rect.x)), y = Math.min(...rects.map((rect) => rect.y));
+  return { x, y, width: Math.max(...rects.map((rect) => rect.x + rect.width)) - x, height: Math.max(...rects.map((rect) => rect.y + rect.height)) - y };
+};
+type Links = ReadonlyMap<string, ReadonlyMap<string, number>>;
 
-function hallHeight(hall: SceneHall) {
-  const docks = hall.machines.filter((machine) => machine.kind === "ingress" && machine.trigger !== "timer").length;
-  const silos = hall.machines.filter((machine) => machine.kind === "store" || machine.kind === "queue").length;
-  const cells = cellGrid(hall.machines.filter((machine) => machine.kind === "job").length, hallUnits(hall) * BAY).below;
-  return Math.max(hall.machines.length === 0 ? 132 : 176, 44 + 16 + docks * 40, 44 + 16 + Math.min(3, silos) * 62, 44 + 34 + cells + size.line.height + 56);
-}
-
-/**
- * Halls sit in fixed bands (clients, public, internal, tools) and in ID order
- * within a band, so a new edge or a busy hour never moves a hall. Shared
- * stores stand in the yard after the halls; runtime-only activity waits in a
- * quarantine bay last of all, so it can grow without shifting anything.
- * External parties are gates in the fence along the right edge.
- */
-export function layoutScene(graph: SceneGraph): SceneLayout {
-  const halls = [...graph.halls].sort((left, right) => left.band - right.band || compareText(left.id, right.id));
-  const width = ROOM_LEFT + COLUMNS * BAY + PADDING;
-  const fence = width + 8;
-  const rooms: SceneRoomLayout[] = [], headings: SceneHeading[] = [], corridors: SceneRect[] = [];
-  let top = FLOOR_TOP;
-  type Member = { id: string; kind: SceneRoomLayout["kind"]; span: number; height: number; compose: (room: SceneRect) => readonly RoomContent[] };
-  const placeRow = (members: readonly Member[]) => {
-    for (let start = 0; start < members.length;) {
-      const row: Member[] = [];
-      let used = 0;
-      while (start < members.length) {
-        const member = members[start]!, span = Math.min(COLUMNS, member.span);
-        if (used + span > COLUMNS) break;
-        row.push({ ...member, span }); used += span; start++;
-      }
-      const height = Math.max(...row.map((member) => member.height));
-      let x = ROOM_LEFT;
-      for (const member of row) {
-        const rectangle = { x, y: top, width: member.span * BAY, height };
-        rooms.push({ id: member.id, kind: member.kind, ...rectangle, contents: member.compose(rectangle), door: { x: x + rectangle.width / 2, y: top + height } });
-        x += rectangle.width;
-      }
-      corridors.push({ x: ROOM_LEFT - CORRIDOR, y: top + height, width: x - ROOM_LEFT + CORRIDOR, height: CORRIDOR });
-      top += height + CORRIDOR;
+/** Rectangles in buckets, so finding an overlap costs the same however large the floor. */
+function bucketed(pad = 0) {
+  const SIZE = 160, buckets = new Map<number, SceneRect[]>();
+  const grow = (rect: SceneRect) => pad === 0 ? rect : { x: rect.x - pad, y: rect.y - pad, width: rect.width + 2 * pad, height: rect.height + 2 * pad };
+  const each = (rect: SceneRect, visit: (bucket: SceneRect[]) => void, make = false) => {
+    for (let x = Math.floor(rect.x / SIZE); x <= Math.floor((rect.x + rect.width) / SIZE); x++) for (let y = Math.floor(rect.y / SIZE); y <= Math.floor((rect.y + rect.height) / SIZE); y++) {
+      const key = x * 65536 + y, bucket = buckets.get(key) ?? (make ? [] : undefined);
+      if (bucket === undefined) continue;
+      if (make) buckets.set(key, bucket);
+      visit(bucket);
     }
   };
-  for (const band of [0, 1, 2, 3] as const) {
-    const members = halls.filter((hall) => hall.band === band);
-    if (members.length === 0) continue;
-    headings.push({ label: BAND_LABELS[band], x: ROOM_LEFT, y: top });
-    top += 16;
-    placeRow(members.map((hall) => ({ id: hall.id, kind: "hall" as const, span: hallUnits(hall), height: hallHeight(hall), compose: (room: SceneRect) => composeHall(hall, room) })));
-  }
-  const yardRoom = (id: string, kind: SceneRoomLayout["kind"], label: string, machines: readonly SceneMachine[]) => {
-    if (machines.length === 0) return;
-    headings.push({ label, x: ROOM_LEFT, y: top });
-    top += 16;
-    const perRow = COLUMNS * 4, rowsNeeded = Math.ceil(machines.length / perRow);
-    placeRow([{ id, kind, span: COLUMNS, height: Math.max(YARD, 56 + rowsNeeded * 66), compose: (room) => machines.map((machine, index): RoomContent => {
-      const shape = shapeOf(machine);
-      return { key: machine.id, entityId: machine.id, shape, machine, workSurface: true, x: room.x + 24 + (index % perRow) * (BAY / 4), y: room.y + 40 + Math.floor(index / perRow) * 66, ...size[shape] };
-    }) }]);
+  return {
+    add: (rect: SceneRect) => each(grow(rect), (bucket) => bucket.push(rect), true),
+    remove: (rect: SceneRect) => each(grow(rect), (bucket) => { const index = bucket.indexOf(rect); if (index >= 0) bucket.splice(index, 1); }),
+    hits: (rect: SceneRect, counts: (other: SceneRect) => boolean = () => true) => { let hit = false; each(grow(rect), (bucket) => { hit ||= bucket.some((other) => overlaps(rect, grow(other)) && counts(other)); }); return hit; },
   };
-  yardRoom("yard", "yard", "Shared yard", [...graph.shared].sort((left, right) => compareText(left.id, right.id)));
-  yardRoom("quarantine", "quarantine", "Quarantine · runtime activity the code does not explain", graph.quarantine);
-  // The entrance stays beside the halls, including on large plants.
-  corridors.push({ x: ROOM_LEFT - CORRIDOR, y: FLOOR_TOP, width: CORRIDOR, height: Math.max(160, top - FLOOR_TOP) });
-  const parties = [...graph.parties].sort((left, right) => compareText(left.id, right.id));
-  const gates = parties.map((machine, index): SceneGate => ({ machine, x: fence - 6, y: FLOOR_TOP + 16 + index * 44, width: 12, height: 28 }));
-  const height = Math.max(224, top, ...gates.map((gate) => gate.y + gate.height + 24));
-  const line = LINE_STATIONS.map((label, index) => ({ label, x: ROOM_LEFT + index * BAY, y: LINE_TOP, width: BAY, height: 40 }));
-  return { width: fence + 140, height, rooms, headings, corridors, gates, fence, restingTop: 168, line };
 }
 
-/** Newest first within a station; past the eighth, crates wait unseen behind the "+N". */
-export function placeCrates(layout: SceneLayout, crates: readonly SceneCrate[]) {
-  const counts = [0, 0, 0, 0] as [number, number, number, number];
-  return [...crates].sort((left, right) => right.number - left.number || compareText(left.id, right.id)).map((crate) => {
-    const station = layout.line[crate.station]!, slot = counts[crate.station]++;
-    return { crate, shown: slot < LINE_SLOTS, x: station.x + 16 + Math.min(slot, LINE_SLOTS) * 18, y: station.y + 28 };
+function occupied(rects: readonly SceneRect[], pad = 0) {
+  const index = bucketed(pad);
+  for (const rect of rects) index.add(rect);
+  return index.hits;
+}
+
+/** Every free spot touching a placed rectangle: each side at three alignments, and each corner. */
+function around(rect: SceneRect, width: number, height: number, gap = 0) {
+  const { x, y } = rect, r = x + rect.width + gap, b = y + rect.height + gap, l = x - width - gap, t = y - height - gap;
+  const across = [x, x + (rect.width - width) / 2, x + rect.width - width], down = [y, y + (rect.height - height) / 2, y + rect.height - height];
+  return [...down.flatMap((at) => [{ x: r, y: at }, { x: l, y: at }]), ...across.flatMap((at) => [{ x: at, y: b }, { x: at, y: t }]),
+    { x: r, y: b }, { x: l, y: b }, { x: r, y: t }, { x: l, y: t }].map((point) => ({ x: Math.round(point.x), y: Math.round(point.y) }));
+}
+
+/** Footprints placed so far, with an overlap index and their bounds kept as they grow. */
+function floorOf() {
+  const placed = new Map<string, Rect>(), index = bucketed();
+  let bounds: Rect | undefined;
+  return {
+    placed, index, bounds: () => bounds, work: 0,
+    put(key: string, rect: Rect) { placed.set(key, rect); index.add(rect); bounds = bounds === undefined ? rect : union([bounds, rect]); },
+    take(key: string) { const rect = placed.get(key)!; placed.delete(key); index.remove(rect); return rect; },
+  };
+}
+
+/**
+ * The free spot for one footprint: beside a placed neighbour, where the
+ * weighted distance to its placed neighbours plus the growth of the bounds is
+ * least. A spiral around them is the fallback, so placement always ends. A
+ * current spot, when given, is kept unless another is clearly better.
+ */
+function placeOne(key: string, width: number, height: number, floor: ReturnType<typeof floorOf>, links: Links, current?: Rect): Rect {
+  const bounds = floor.bounds();
+  if (bounds === undefined) return current ?? { x: 0, y: 0, width, height };
+  const near = [...(links.get(key) ?? [])].filter(([other]) => floor.placed.has(other)).map(([other, weight]) => ({ rect: floor.placed.get(other)!, weight }));
+  const score = (spot: Rect) => {
+    const at = centre(spot), grown = union([bounds, spot]);
+    return near.reduce((sum, { rect, weight }) => { const other = centre(rect); return sum + weight * Math.hypot(at.x - other.x, at.y - other.y); }, 0)
+      + 0.5 * (grown.width + grown.height - bounds.width - bounds.height);
+  };
+  let best = current === undefined ? undefined : { spot: current, score: score(current) - 1 };
+  const consider = (spot: Rect) => {
+    floor.work++;
+    if (floor.index.hits(spot)) return;
+    const value = score(spot);
+    if (best === undefined || value < best.score - 1e-9 || Math.abs(value - best.score) <= 1e-9 && (spot.y < best.spot.y || spot.y === best.spot.y && spot.x < best.spot.x)) best = { spot, score: value };
+  };
+  for (const { rect } of near) for (const point of around(rect, width, height)) consider({ ...point, width, height });
+  const from = near.length === 0 ? centre(bounds) : centre(union(near.map(({ rect }) => rect)));
+  // Rings as coarse as the footprint is small: a crowded neighbourhood is searched in a few dozen rings, not hundreds.
+  const pitch = Math.max(16, Math.round(Math.min(width, height) / 2));
+  for (let ring = 1; best === undefined; ring++) {
+    const reach = ring * pitch;
+    for (let step = -reach; step <= reach; step += pitch) for (const [dx, dy] of [[step, -reach], [step, reach], [-reach, step], [reach, step]]) {
+      consider({ x: Math.round(from.x - width / 2 + dx!), y: Math.round(from.y - height / 2 + dy!), width, height });
+    }
+  }
+  return best.spot;
+}
+
+/** The order footprints are placed in: the most linked first, then whichever is most linked to those placed (ties by total links, then id). */
+function placementOrder(keys: readonly string[], links: Links, placed: ReadonlySet<string> = new Set()) {
+  const total = (key: string) => [...(links.get(key) ?? [])].reduce((sum, [, value]) => sum + value, 0);
+  const left = [...keys].sort(compareText), toPlaced = new Map(left.map((key) => [key, [...(links.get(key) ?? [])].reduce((sum, [other, value]) => placed.has(other) ? sum + value : sum, 0)]));
+  const totals = new Map(left.map((key) => [key, total(key)])), order: string[] = [];
+  while (left.length > 0) {
+    let pick = 0;
+    for (let index = 1; index < left.length; index++) {
+      const a = left[index]!, b = left[pick]!, byPlaced = toPlaced.get(a)! - toPlaced.get(b)!;
+      if (byPlaced > 0 || byPlaced === 0 && totals.get(a)! > totals.get(b)!) pick = index;
+    }
+    const [key] = left.splice(pick, 1);
+    order.push(key!);
+    for (const [other, value] of links.get(key!) ?? []) if (toPlaced.has(other)) toPlaced.set(other, toPlaced.get(other)! + value);
+  }
+  return order;
+}
+
+/** A connected group laid out from nothing: placed in order, then two bounded passes that move a footprint only to a better free spot. */
+function layoutGroup(keys: readonly string[], sizes: ReadonlyMap<string, { width: number; height: number }>, links: Links) {
+  // Placement has a work cap in proportion to the links it has to honour (ordinary groups use a fifth of it); only a
+  // runaway group, such as thousands of machines all linked to one hub, passes it. That group, or one that comes out a
+  // strip (a chain), is laid in rows in placement order instead, so neighbours stay side by side and the shape stays
+  // bounded. Refinement has its own cap of the same size and simply stops there.
+  const floor = floorOf(), order = placementOrder(keys, links), cap = 4_000 + 200 * keys.reduce((sum, key) => sum + (links.get(key)?.size ?? 0), 0);
+  for (const key of order) { const { width, height } = sizes.get(key)!; floor.put(key, placeOne(key, width, height, floor, links)); if (floor.work > cap) return rows(order, sizes); }
+  floor.work = 0;
+  for (let pass = 0; pass < 2 && order.length > 1 && floor.work <= cap; pass++) for (const key of order) {
+    if (floor.work > cap) break;
+    const current = floor.take(key);
+    floor.put(key, placeOne(key, current.width, current.height, floor, links, current));
+  }
+  const bounds = floor.bounds()!;
+  return bounds.width > 2.2 * bounds.height || bounds.height > 2.2 * bounds.width ? rows(order, sizes) : floor.placed;
+}
+
+/** Footprints in rows near 16:10, in order, each row running back the way the last came, so consecutive ones stay neighbours. */
+function rows(order: readonly string[], sizes: ReadonlyMap<string, { width: number; height: number }>) {
+  const area = order.reduce((sum, key) => sum + sizes.get(key)!.width * sizes.get(key)!.height, 0), shelf = Math.ceil(Math.max(...order.map((key) => sizes.get(key)!.width), Math.sqrt(area * ASPECT)));
+  const placed = new Map<string, Rect>();
+  let row: string[] = [], y = 0, forward = true;
+  const flush = () => {
+    let x = forward ? 0 : shelf;
+    for (const key of row) { const { width, height } = sizes.get(key)!; if (!forward) x -= width; placed.set(key, { x, y, width, height }); if (forward) x += width; }
+    y += Math.max(...row.map((key) => sizes.get(key)!.height)); row = []; forward = !forward;
+  };
+  for (const key of order) { if (row.length > 0 && row.reduce((sum, item) => sum + sizes.get(item)!.width, 0) + sizes.get(key)!.width > shelf) flush(); row.push(key); }
+  if (row.length > 0) flush();
+  return placed;
+}
+
+/**
+ * Groups on shelves, tallest first. The shelf width is the
+ * one, among the widths the groups' running sums offer, that keeps the floor
+ * smallest and nearest 16:10, whatever the pane.
+ */
+function packGroups(groups: readonly ReadonlyMap<string, Rect>[]) {
+  if (groups.length === 0) return new Map<string, Rect>();
+  const boxes = groups.map((group) => ({ group, bounds: union([...group.values()]) })).sort((a, b) => b.bounds.height - a.bounds.height || compareText([...a.group.keys()][0]!, [...b.group.keys()][0]!));
+  const shelve = (shelf: number) => {
+    const out = new Map<string, Rect>();
+    let x = 0, y = 0, tallest = 0, wide = 0;
+    for (const { group, bounds } of boxes) {
+      if (x > 0 && x + bounds.width > shelf) { y += tallest + GROUP_GAP; x = 0; tallest = 0; }
+      for (const [key, rect] of group) out.set(key, { ...rect, x: rect.x - bounds.x + x, y: rect.y - bounds.y + y });
+      x += bounds.width + GROUP_GAP; tallest = Math.max(tallest, bounds.height); wide = Math.max(wide, x - GROUP_GAP);
+    }
+    const high = y + tallest;
+    return { out, cost: wide * high * (1 + 4 * Math.abs(Math.log(wide / high / ASPECT))) };
+  };
+  let sum = 0;
+  const widths = [...new Set([Math.max(...boxes.map(({ bounds }) => bounds.width)), ...boxes.map(({ bounds }) => sum += bounds.width + GROUP_GAP)])];
+  // ponytail: one packing per candidate width, O(groups²); a binary search on width if floors reach thousands of groups.
+  return widths.map(shelve).reduce((best, next) => next.cost < best.cost ? next : best).out;
+}
+
+type Piece = { key: string; machine: SceneMachine; unit?: string };
+
+/** Ownership weighs most, then flows; a runtime-only machine leans only on the unit it claims. Traffic never enters. */
+function linksOf(graph: SceneGraph, keys: ReadonlySet<string>) {
+  const links = new Map<string, Map<string, number>>();
+  const link = (a: string, b: string, weight: number) => {
+    if (a === b || !keys.has(a) || !keys.has(b)) return;
+    for (const [from, to] of [[a, b], [b, a]] as const) { const row = links.get(from) ?? new Map<string, number>(); row.set(to, (row.get(to) ?? 0) + weight); links.set(from, row); }
+  };
+  for (const unit of graph.units) for (const machine of unit.machines) link(machine.id, unit.id, 3);
+  for (const machine of graph.quarantine) if (machine.claims !== undefined) link(machine.id, machine.claims, 1);
+  for (const flow of graph.flows) link(flow.from, flow.to, 1);
+  // Neighbours in id order, so sums and ties never depend on the order the graph arrived in.
+  return new Map([...links].sort(([left], [right]) => compareText(left, right)).map(([key, row]) => [key, new Map([...row].sort(([left], [right]) => compareText(left, right)))]));
+}
+
+/** Connected groups by link, each named by its least key, largest first. */
+function groupsOf(keys: readonly string[], links: Links) {
+  const seen = new Set<string>(), groups: string[][] = [];
+  for (const key of [...keys].sort(compareText)) {
+    if (seen.has(key)) continue;
+    const group: string[] = [], queue = [key];
+    seen.add(key);
+    while (queue.length > 0) { const next = queue.pop()!; group.push(next); for (const other of (links.get(next) ?? new Map()).keys()) if (!seen.has(other)) { seen.add(other); queue.push(other); } }
+    groups.push(group.sort(compareText));
+  }
+  return groups.sort((left, right) => right.length - left.length || compareText(left[0]!, right[0]!));
+}
+
+/** The machinery's floor: the machines and the fixtures, which depend on the machines alone. */
+export type SceneMachinery = Pick<SceneLayout, "width" | "height" | "stations" | "regions" | "fixtures">;
+
+// A fixture is 20 by 30; its zone adds room to stand in front of it and a walkway round it.
+const ZONE_W = 36, ZONE_H = 88;
+
+/**
+ * The floor, from structure alone: every machine at its drawn size, related
+ * machines beside each other, unrelated groups apart on a floor near 16:10,
+ * shared stores beside their users. Ids, kinds, labels, ownership and flows
+ * decide it; traffic, state, workers, the agent count and the pane never do.
+ * Given the previous floor, a small structural change keeps every machine
+ * that still exists where it stood.
+ */
+export function placeMachinery(graph: SceneGraph, previous?: SceneMachinery): SceneMachinery {
+  const pieces: Piece[] = [];
+  for (const unit of graph.units) {
+    pieces.push({ key: unit.id, machine: { id: unit.id, kind: "processor", label: unit.label, reading: unit.reading }, unit: unit.id });
+    for (const machine of unit.machines) pieces.push({ key: machine.id, machine, unit: unit.id });
+  }
+  for (const machine of [...graph.shared, ...graph.parties, ...graph.quarantine]) pieces.push({ key: machine.id, machine });
+  // Input order never matters: everything below works in id order.
+  pieces.sort((left, right) => compareText(left.key, right.key));
+  const geometry = new Map(pieces.map((piece) => [piece.key, sides(piece.machine)]));
+  const sizes = new Map(pieces.map((piece) => [piece.key, geometry.get(piece.key)!.footprint] as const));
+  const keys = [...sizes.keys()], links = linksOf(graph, new Set(keys));
+  const placed = (previous === undefined ? undefined : keep(previous, keys, sizes, links)) ?? cold(keys, sizes, links);
+  // Shift to the floor's corner; a shift moves everything together.
+  const all = [...placed.values()], left = (all.length === 0 ? 0 : Math.min(...all.map((rect) => rect.x))) - PADDING, top = (all.length === 0 ? 0 : Math.min(...all.map((rect) => rect.y))) - PADDING;
+  const at = (key: string) => { const rect = placed.get(key)!; return { ...rect, x: rect.x - left, y: rect.y - top }; };
+  const stations = pieces.map((piece): SceneStation => {
+    const { shape, width, height, anchor, label, footprint } = geometry.get(piece.key)!, spot = at(piece.key);
+    const x = spot.x - footprint.x, y = spot.y - footprint.y, machine = piece.machine;
+    return { entityId: piece.key, ...(machine.represented === undefined ? {} : { representedIds: machine.represented }), shape, machine,
+      ...(piece.unit === undefined ? {} : { unit: piece.unit }), x, y, width, height, anchor: { x: x + anchor.x, y: y + anchor.y }, label: { ...label, x: x + label.x, y: y + label.y }, footprint: spot };
+  });
+  const width = Math.max(240, ...all.map((rect) => rect.x + rect.width)) - left + PADDING, height = Math.max(160, ...all.map((rect) => rect.y + rect.height)) - top + PADDING;
+  const fixtures = placeFixtures(stations.map((station) => station.footprint), width, height);
+  return { width, height: Math.max(height, ...fixtures.map((piece) => piece.y + ZONE_H + PADDING)), stations, regions: regionsOf(stations), fixtures };
+}
+
+/**
+ * Each fixture in the free floor nearest the middle of the machinery, one after
+ * another in a fixed order: between machines when there is a gap, below them when
+ * there is none. Only the machines decide it, so nothing live ever moves one.
+ */
+function placeFixtures(blocks: readonly SceneRect[], width: number, height: number): readonly SceneFixture[] {
+  const hits = occupied(blocks), zones: SceneRect[] = [], spots: ScenePoint[] = [];
+  for (let y = PADDING; y <= height + NOOK_ORDER.length * ZONE_H; y += 12) for (let x = PADDING; x + ZONE_W <= width - PADDING; x += 12) spots.push({ x, y });
+  const far = (spot: ScenePoint) => Math.hypot(spot.x + ZONE_W / 2 - width / 2, spot.y + ZONE_H / 2 - height / 2);
+  spots.sort((a, b) => far(a) - far(b) || a.y - b.y || a.x - b.x);
+  return NOOK_ORDER.map((errand) => {
+    const spot = spots.find((at) => { const zone = { ...at, width: ZONE_W, height: ZONE_H }; return !hits(zone) && !zones.some((other) => overlaps(zone, other)); })!;
+    zones.push({ ...spot, width: ZONE_W, height: ZONE_H });
+    return { errand, x: spot.x + 8, y: spot.y + 8, stand: { x: spot.x + 18, y: spot.y + 74 } };
   });
 }
 
-export function placeWorkers(layout: SceneLayout, workers: readonly SceneWorker[], social: "nearby" | "commons" = "commons"): readonly SceneWorkerPlacement[] {
-  const rooms = new Map(layout.rooms.map((room) => [room.id, room]));
+/** The floor with the fixtures this floor shows; which they are never moves a machine or a fixture. */
+export function furnish(machinery: SceneMachinery, offered: readonly BreakRoomErrand[]): SceneLayout {
+  const present = NOOK_ORDER.filter((errand) => offered.includes(errand));
+  const furniture = machinery.fixtures.filter((piece) => present.includes(piece.errand)).map((piece) => ({ x: piece.x, y: piece.y, width: 20, height: 30 }));
+  return { ...machinery, implements: present, solids: [...machinery.stations, ...furniture].map(({ x, y, width, height }) => ({ x, y, width, height })) };
+}
+
+export function layoutScene(graph: SceneGraph, previous?: SceneMachinery, offered: readonly BreakRoomErrand[] = NOOK_ORDER): SceneLayout {
+  return furnish(placeMachinery(graph, previous), offered);
+}
+
+function cold(keys: readonly string[], sizes: ReadonlyMap<string, { width: number; height: number }>, links: Links) {
+  return packGroups(groupsOf(keys, links).map((group) => layoutGroup(group, sizes, links)));
+}
+
+/**
+ * Local stability: footprints that still exist stay where they were and new
+ * ones are placed beside their placed neighbours, or in the nearest free
+ * floor when they have none. Undefined when the change is too large for that to stay readable, so
+ * the floor is laid out cold.
+ */
+function keep(previous: SceneMachinery, keys: readonly string[], sizes: ReadonlyMap<string, { width: number; height: number }>, links: Links) {
+  const before = new Map(previous.stations.map((station) => [station.entityId, station.footprint] as const));
+  const floor = floorOf();
+  for (const key of [...keys].sort(compareText)) {
+    const was = before.get(key);
+    if (was === undefined) continue;
+    const { width, height } = sizes.get(key)!, spot = { x: was.x, y: was.y, width, height };
+    // One that has grown into a neighbour is placed afresh beside its neighbours, like a new one.
+    if (!floor.index.hits(spot)) floor.put(key, spot);
+  }
+  const fresh = keys.filter((key) => !floor.placed.has(key));
+  if (fresh.length > Math.max(4, keys.length / 4)) return undefined;
+  for (const key of placementOrder(fresh, links, new Set(floor.placed.keys()))) { const { width, height } = sizes.get(key)!; floor.put(key, placeOne(key, width, height, floor, links)); }
+  return floor.placed;
+}
+
+// Members of a unit closer than this (two aisles) share one region; farther apart they are separate lobes.
+const BRIDGE = 4 * MARGIN + 8, REGION_INSET = 0, REGION_CELL = 6;
+// Area hues, far apart on the wheel; neighbouring areas never share one when the palette allows.
+const HUES = [210, 35, 140, 290, 0, 180, 80, 330];
+
+/**
+ * Areas are painted after layout from where machines stand: a unit's members
+ * whose footprints are next to each other merge into one irregular region,
+ * the gaps between them bridged only where no other machine is in the way.
+ * Members apart make separate lobes. No region covers another machine's
+ * footprint or any floor that is not between its own members.
+ */
+function regionsOf(stations: readonly SceneStation[]): readonly SceneRegion[] {
+  const inset = (station: SceneStation) => ({ x: station.footprint.x + REGION_INSET, y: station.footprint.y + REGION_INSET, width: station.footprint.width - 2 * REGION_INSET, height: station.footprint.height - 2 * REGION_INSET, unit: station.unit });
+  const units = [...new Set(stations.flatMap((station) => station.unit ?? []))].sort(compareText), everyone = bucketed();
+  for (const station of stations) everyone.add(inset(station));
+  const byUnit = new Map(units.map((unit) => [unit, stations.filter((station) => station.unit === unit)]));
+  const regions = units.flatMap((unit) => {
+    const rects = byUnit.get(unit)!.map(inset), blocked = (rect: SceneRect) => everyone.hits(rect, (other) => (other as { unit?: string }).unit !== unit);
+    const parent = rects.map((_, index) => index), find = (index: number): number => parent[index] === index ? index : parent[index] = find(parent[index]!);
+    const bridges: { at: number; rect: SceneRect }[] = [];
+    // Only members within bridging reach of each other are paired, found through buckets.
+    const reach = bucketed(BRIDGE);
+    rects.forEach((rect, index) => reach.add({ ...rect, index } as SceneRect));
+    const neighbours = (i: number) => { const found: number[] = []; reach.hits(rects[i]!, (other) => { const j = (other as unknown as { index: number }).index; if (j > i) found.push(j); return false; }); return found; };
+    for (let i = 0; i < rects.length; i++) for (const j of neighbours(i)) {
+      const a = rects[i]!, b = rects[j]!;
+      const x0 = Math.max(a.x, b.x), x1 = Math.min(a.x + a.width, b.x + b.width), y0 = Math.max(a.y, b.y), y1 = Math.min(a.y + a.height, b.y + b.height);
+      // Face to face across a gap: the bridge is the span they share, as wide as the gap. Corner to corner: the band
+      // between them, as wide as both, which meets each along an edge.
+      // A bridge narrower than half an aisle would be a stray strip; corner bands only span a single aisle.
+      const bridge = x1 - x0 >= MARGIN && y1 <= y0 && y0 - y1 <= BRIDGE ? { x: x0, y: y1, width: x1 - x0, height: y0 - y1 }
+        : y1 - y0 >= MARGIN && x1 <= x0 && x0 - x1 <= BRIDGE ? { x: x1, y: y0, width: x0 - x1, height: y1 - y0 }
+        : x1 <= x0 && y1 <= y0 && x0 - x1 <= 2 * MARGIN && y0 - y1 <= 2 * MARGIN ? { x: Math.min(a.x, b.x), y: y1, width: Math.max(a.x + a.width, b.x + b.width) - Math.min(a.x, b.x), height: y0 - y1 } : undefined;
+      if (bridge === undefined || blocked(bridge)) continue;
+      parent[find(i)] = find(j);
+      bridges.push({ at: i, rect: bridge });
+    }
+    const lobes = new Map<number, SceneRect[]>();
+    rects.forEach((rect, index) => lobes.set(find(index), [...lobes.get(find(index)) ?? [], rect]));
+    for (const { at, rect } of bridges) lobes.get(find(at))!.push(rect);
+    return [...lobes.values()].map((parts, lobe) => ({ unit, lobe, hue: 0, bounds: union(parts), ...trace(parts) }));
+  });
+  // Greedy colouring in unit order: each unit takes the first hue no neighbouring area (within an aisle) has.
+  const hue = new Map<string, number>(), nearby = bucketed(24);
+  for (const region of regions) nearby.add({ ...region.bounds, unit: region.unit } as SceneRect);
+  for (const unit of units) {
+    const taken = new Set<number>();
+    for (const region of regions) if (region.unit === unit) nearby.hits(region.bounds, (other) => { const owner = (other as { unit?: string }).unit!; if (owner !== unit && hue.has(owner)) taken.add(hue.get(owner)!); return false; });
+    hue.set(unit, HUES.find((value) => !taken.has(value)) ?? HUES[hue.size % HUES.length]!);
+  }
+  return regions.map(({ bounds: _, ...region }) => ({ ...region, hue: hue.get(region.unit)! }));
+}
+
+/** A patch of floor made of rectangles, as non-overlapping row runs, its outline, and the top-left corner for its name. */
+function trace(parts: readonly SceneRect[]) {
+  const bounds = union(parts), columns = Math.ceil(bounds.width / REGION_CELL), rows = Math.ceil(bounds.height / REGION_CELL);
+  // A cell is in the patch when its centre is inside a part: each part marks its own cells.
+  const mask = Array.from({ length: rows }, () => new Array<boolean>(columns).fill(false));
+  for (const rect of parts) for (let row = Math.max(0, Math.floor((rect.y - bounds.y) / REGION_CELL - .5) + 1); row < rows && bounds.y + (row + .5) * REGION_CELL < rect.y + rect.height; row++)
+    for (let column = Math.max(0, Math.floor((rect.x - bounds.x) / REGION_CELL - .5) + 1); column < columns && bounds.x + (column + .5) * REGION_CELL < rect.x + rect.width; column++) mask[row]![column] = true;
+  const at = (column: number, row: number) => mask[row]?.[column] === true;
+  const rects: SceneRect[] = [], edges: string[] = [];
+  for (let row = 0; row < rows; row++) for (let column = 0; column < columns; column++) {
+    if (!at(column, row)) continue;
+    const x = bounds.x + column * REGION_CELL, y = bounds.y + row * REGION_CELL;
+    if (!at(column - 1, row)) { let end = column; while (at(end + 1, row)) end++; rects.push({ x, y, width: (end - column + 1) * REGION_CELL, height: REGION_CELL }); }
+    if (!at(column, row - 1)) edges.push(`M${x} ${y}h${REGION_CELL}`);
+    if (!at(column, row + 1)) edges.push(`M${x} ${y + REGION_CELL}h${REGION_CELL}`);
+    if (!at(column - 1, row)) edges.push(`M${x} ${y}v${REGION_CELL}`);
+    if (!at(column + 1, row)) edges.push(`M${x + REGION_CELL} ${y}v${REGION_CELL}`);
+  }
+  const top = rects[0]!;
+  return { rects, outline: edges.join(""), label: { x: top.x + 4, y: top.y + 10, width: top.width - 8 } };
+}
+
+/** Whether a worker standing here clears every solid. */
+export function standable(layout: SceneLayout, point: ScenePoint) {
+  const reach = WORKER_SIZE / 2;
+  return layout.solids.every((rect) => point.x <= rect.x - reach || point.x >= rect.x + rect.width + reach || point.y <= rect.y - reach || point.y >= rect.y + rect.height + reach);
+}
+
+/** The station picturing a node: its own, or the fold that holds it. */
+export function stationOf(layout: SceneLayout, id: string | undefined) {
+  return id === undefined ? undefined : layout.stations.find((station) => station.entityId === id) ?? layout.stations.find((station) => station.representedIds?.includes(id));
+}
+
+/** A worker stands in front of the machine it works on; more stand beside them where the floor is clear. */
+export function workPositions(layout: SceneLayout, station: SceneStation): readonly ScenePoint[] {
+  const { x, y } = station.anchor;
+  return [[0, 0], [-24, 0], [24, 0], [0, 24], [-24, 24], [24, 24]].map(([dx, dy]) => ({ x: x + dx!, y: y + dy! })).filter((point, index) => index === 0 || standable(layout, point));
+}
+
+export function placeWorkers(layout: SceneLayout, workers: readonly SceneWorker[]): readonly SceneWorkerPlacement[] {
   const sorted = [...workers].sort((left, right) => compareText(left.id, right.id));
   const placed: SceneWorkerPlacement[] = [];
   // ponytail: a bounded actor list uses linear collision checks; use spatial buckets if thousands are displayed.
-  const occupied = (point: ScenePoint) => placed.some((other) => Math.abs(point.x - other.x) < 24 && Math.abs(point.y - other.y) < 24);
-  const areas: Record<"resting" | "staging" | "outside" | "overflow", SceneWorker[]> = { resting: [], staging: [], outside: [], overflow: [] };
+  // Nobody stands where a visitor to a fixture would.
+  const occupied = (point: ScenePoint) => [...placed, ...layout.fixtures.map((piece) => piece.stand)].some((other) => Math.abs(point.x - other.x) < 24 && Math.abs(point.y - other.y) < 24);
+  const resting: { worker: SceneWorker; area: "resting" | "staging" | "outside" | "overflow" }[] = [];
+  const homeOf = (worker: SceneWorker) => stationOf(layout, worker.observedBayId) ?? stationOf(layout, worker.nodeId);
   for (const worker of sorted) {
-    if (worker.location !== "working") {
-      areas[worker.location === "unobserved" ? "staging" : "resting"].push(worker);
-      continue;
+    if (worker.location !== "working") { resting.push({ worker, area: worker.location === "unobserved" ? "staging" : "resting" }); continue; }
+    const station = homeOf(worker);
+    if (station === undefined) { resting.push({ worker, area: "outside" }); continue; }
+    const position = workPositions(layout, station).find((point) => !occupied(point));
+    if (position === undefined) { resting.push({ worker, area: "overflow" }); continue; }
+    placed.push({ id: worker.id, area: "work", stationId: station.entityId, ...position });
+  }
+  // Anyone not at work stands beside a machine: the one they last worked at, else beside someone who is alone, else
+  // the first free one. Rows fan out beside and then below it for as long as there are people; nobody is turned away.
+  const homes = layout.stations.length > 0 ? layout.stations.map((station) => ({ id: station.entityId as string | undefined, ...station.anchor })) : [{ id: undefined, x: 2 * PADDING + 8, y: PADDING }];
+  const crowd = new Map<string | undefined, number>();
+  const beside = (home: ScenePoint) => {
+    for (let row = 1; ; row++) for (let step = 0; step < 3; step++) for (const side of [-1, 1]) {
+      const point = { x: Math.min(layout.width - PADDING, Math.max(PADDING, home.x + side * (24 + 48 * step))), y: home.y + 24 * row };
+      if (!occupied(point) && standable(layout, point)) return point;
     }
-    const room = worker.nodeId === undefined ? undefined : rooms.get(worker.nodeId);
-    if (room === undefined) { areas.outside.push(worker); continue; }
-    const position = workPositions(room, worker.observedBayId).find((point) => !occupied(point));
-    if (position === undefined) { areas.overflow.push(worker); continue; }
-    placed.push({ id: worker.id, area: "room", roomId: room.id, ...position });
+  };
+  // Those with a machine take their places first.
+  resting.sort((left, right) => Number(homeOf(right.worker) !== undefined) - Number(homeOf(left.worker) !== undefined) || compareText(left.worker.id, right.worker.id));
+  for (const { worker, area } of resting) {
+    const station = homeOf(worker), home = station === undefined ? (homes.find((next) => crowd.get(next.id) === 1) ?? homes.find((next) => !crowd.has(next.id)) ?? homes[0]!) : { id: station.entityId as string | undefined, ...station.anchor };
+    crowd.set(home.id, (crowd.get(home.id) ?? 0) + 1);
+    placed.push({ id: worker.id, area, ...(home.id === undefined ? {} : { stationId: home.id }), ...beside(home)! });
   }
-  const nearby = social === "nearby" ? layout.rooms.filter((room) => room.kind === "hall") : [];
-  const localCounts = new Map<string, number>();
-  const commons: SceneWorker[] = [];
-  // Known locations keep their seats before unlocated idle workers join a nearby pair.
-  const resting = areas.resting.sort((left, right) => Number(nearby.some((room) => room.id === right.nodeId)) - Number(nearby.some((room) => room.id === left.nodeId)) || compareText(left.id, right.id));
-  for (const worker of resting) {
-    const known = nearby.find((room) => room.id === worker.nodeId);
-    const candidates = known ? [known] : [...nearby.filter((room) => localCounts.get(room.id) === 1), ...nearby.slice(0, 3)];
-    const seat = candidates.filter((room) => (localCounts.get(room.id) ?? 0) < 2).flatMap((room) => [-24, 24].map((offset) => ({ roomId: room.id, x: room.door.x + offset, y: room.door.y - 24 }))).find((point) => !occupied(point));
-    if (seat === undefined) { commons.push(worker); continue; }
-    placed.push({ id: worker.id, area: "resting", ...seat });
-    localCounts.set(seat.roomId, (localCounts.get(seat.roomId) ?? 0) + 1);
-  }
-  const planning = (["staging", "outside", "overflow"] as const).flatMap((area) => areas[area].map((worker) => ({ worker, area })));
-  const seats = commonSeating(layout, commons.length, planning.length);
-  commons.forEach((worker, slot) => placed.push({ id: worker.id, area: "resting", ...seats.resting[slot]! }));
-  planning.forEach(({ worker, area }, slot) => placed.push({ id: worker.id, area, ...seats.planning[slot]! }));
   return placed.sort((left, right) => compareText(left.id, right.id));
 }
 
-/** The side commons has four seats per row and no empty duplicate seats for local rest. */
-export function commonSeating(layout: SceneLayout, restingCount: number, planningCount: number) {
-  const seats = (count: number, top: number) => Array.from({ length: count }, (_, slot) => ({
-    x: PADDING + 24 + (slot % 4) * WORKER_GAP,
-    y: top + Math.floor(slot / 4) * WORKER_GAP,
-  }));
-  return { resting: seats(restingCount, layout.restingTop), planning: seats(planningCount,
-    layout.restingTop + (restingCount === 0 ? 0 : (Math.ceil(restingCount / 4) - 1) * WORKER_GAP + 64)) };
-}
-
-// Left to right along the break room's back wall.
+// Left to right along the board wall: the order the five are placed in.
 const NOOK_ORDER: readonly BreakRoomErrand[] = ["board", "missions", "tasks", "shelf", "coffee"];
 
 /**
- * Stable furniture in the side commons, never moved by data. Halls hold machinery, not break-room furniture.
+ * Stable furniture, never moved by data.
  * Ambient turns come first in the list, so their timing never depends on the implements beside them.
  */
-export function breakRoomNook(_layout: SceneLayout, _restingCount: number, _planningCount: number, _nearby = false) {
-  return { width: COMMON_WIDTH, furniture: (["shelf", "coffee", "board", "missions", "tasks"] as const).map((errand) => ({
-    errand, key: String(errand), roomId: undefined as string | undefined,
-    // High enough that a cue over a visitor's head clears the implement's sign.
-    x: PADDING + 6 + NOOK_ORDER.indexOf(errand) * 38, y: 70,
-    stand: { x: PADDING + 12 + NOOK_ORDER.indexOf(errand) * 38, y: 136 },
-  })) };
+export function breakRoomNook(layout: SceneLayout) {
+  return { furniture: (["shelf", "coffee", "board", "missions", "tasks"] as const).flatMap((errand) => { const piece = layout.fixtures.find((item) => item.errand === errand); return piece === undefined || !layout.implements.includes(errand) ? [] : [{ ...piece, key: String(errand) }]; }) };
 }
 
 // Each piece of furniture is visited in turns: free for the first part of a turn, then one visitor.
@@ -417,7 +678,7 @@ export function placeErrands(placements: readonly SceneWorkerPlacement[], nook: 
   for (const [index, piece] of nook.furniture.entries()) {
     // Later pieces run behind the first, so every piece's first turn begins free.
     const clock = at - index * TURN / 2, turn = Math.floor(clock / TURN);
-    const suited = placements.filter((placement) => placement.area === "resting" && placement.roomId === piece.roomId && habitOf(placement.id) === piece.errand);
+    const suited = placements.filter((placement) => placement.area === "resting" && habitOf(placement.id) === piece.errand);
     // Whoever has the piece keeps it for as long as they rest and the turn runs, whoever else
     // sits down or leaves meanwhile. (Every turn starts free, so nobody is carried into the next.)
     const holder = before.find((placement) => placement.errandKey === piece.key || placement.errandKey === undefined && placement.errand === piece.errand)?.id;
@@ -425,13 +686,4 @@ export function placeErrands(placements: readonly SceneWorkerPlacement[], nook: 
     if (visitor !== undefined) visiting.set(visitor.id, piece);
   }
   return placements.map((placement) => { const piece = visiting.get(placement.id); return piece === undefined ? placement : { ...placement, errand: piece.errand, errandKey: piece.key, ...piece.stand }; });
-}
-
-/** A worker stands in front of the machine they are working on; no parallel workstation map. */
-export function workPositions(room: SceneRoomLayout, entityId?: string): readonly ScenePoint[] {
-  const surface = room.contents.find((item) => item.entityId === entityId || item.representedIds?.includes(entityId ?? ""))
-    ?? room.contents.find((item) => item.shape === "line") ?? room.contents[0];
-  if (surface === undefined) return [{ x: room.door.x, y: room.door.y - 32 }];
-  const offsets = surface.width >= 88 ? [0, -24, 24] : [0, -24];
-  return offsets.map((offset) => ({ x: surface.x + surface.width / 2 + offset, y: surface.y + surface.height + WORKER_SIZE / 2 + 2 }));
 }

@@ -22,6 +22,16 @@ Shell and Codex are proven end to end. A Claude Code worker is proven by one
 live run against its signed-in CLI; a Claude Code overseer is fixture-proven
 only.
 
+Agents run on your Mac as your user. The sandbox confines the commands and file
+tools an agent uses; the provider process and its MCP servers sit outside it,
+and configured providers receive task and repository material.
+
+Project token budgets count billable tokens recorded from each provider's
+session log: uncached input plus output (and Claude cache creation), excluding
+cached input reads; they measure tokens, not money. A run the daemon recovers
+after a restart, or one whose provider log is missing, records none, so real
+usage can exceed the ceiling.
+
 ## Select an existing provider account
 
 Use `factoryctl account discover` or `factoryctl account list` to inspect existing
@@ -237,8 +247,9 @@ Codex local commands use a launch-derived permission profile: the Change,
 private runtime home and temp directory are writable; current same-project
 retained Change trees selected at launch are individually readable; the exact provider
 executable, factoryctl, attempt token and socket are readable. Other file
-access is denied except Codex's minimal platform/runtime paths, including its
-temp exceptions. An optional startup `--toolchain-read-roots` path list adds
+access is denied except Codex's minimal platform/runtime paths; the shared
+`/private/tmp` and `/private/var/tmp`, which that profile otherwise opens for
+reading and writing, are denied, as for the reviewer. An optional startup `--toolchain-read-roots` path list adds
 read-only access to exact installed software directories (for example one
 Node installation including its Corepack libraries, or one Go `libexec`).
 This is not inferred from PATH and does not pin every child executable.
@@ -379,31 +390,24 @@ runs as the operator and may use its normal account or Keychain access. Before a
 worker records the working directory as trusted in that account's
 `.claude.json`, the record the CLI's own folder-trust dialog writes; every
 Change is a path the CLI has never seen, and without the record the session
-would stop at that dialog with the startup task typed into it.
+would stop at that dialog instead of reading its startup instruction.
 
-Native providers do not inherit the shell task descriptor. For Claude, the
-runner types one fixed instruction plus the terminal-safe JSON-quoted task
-into the PTY after provider exec, once the CLI has taken its terminal out of
-canonical mode or two seconds have passed, and before reporting the terminal
-ready; the carriage return that submits it is the one startup byte sent after
-ready, as a keystroke of its own once the CLI's output has been quiet for half
-a second (after a one-second floor, or at five seconds regardless), because a
-CLI reads text and newline arriving together as a paste, and a paste does not
-submit. The complete prepared input must fit 8 KiB; a partial or uncertain
-write of the text fails the attempt and is never replayed. A daemon-delivered
-human reply or overseer message reaches Claude and Codex the same way: the
-text as one write, then the runner's own Enter once the output is quiet, so
-the CLI submits it instead of holding it in its input box.
-
-Codex starts from a fixed, non-secret positional instruction to run
-`factoryctl attempt task` first. That command authenticates with the attempt's
-private credential and returns the exact effective task as terminal-safe JSON;
-body wins, with title
-used only when a native task has no body. Codex task text
-is absent from argv, environment, and Change-worker configuration, and is
-bounded to 8 KiB so the configured 32,768-token tool-result budget cannot
-truncate it even under worst-case control-character escaping. The attempt API
-serves it only while that exact run is `running`.
+Native providers do not inherit the shell task descriptor. Claude and Codex
+start from the same fixed, non-secret positional instruction to run
+`factoryctl attempt task` first through their factory tool; Claude's follows
+`--` because `--mcp-config` takes several values. That call authenticates with
+the attempt's private credential and returns the exact effective task as
+terminal-safe JSON; body wins, with title used only when a native task has no
+body. Task text is absent from argv, environment, PTY input, and Change-worker
+configuration, and is bounded to 8 KiB so a tool-result budget (Codex's is
+configured at 32,768 tokens) cannot truncate it even under worst-case
+control-character escaping. The attempt API serves it only while that exact
+run is `running`. That first call is also each run's startup proof: a native
+run with no attempt API call within three minutes is requeued as never
+started, whatever its TUI painted. A daemon-delivered human reply or overseer
+message reaches Claude and Codex the same way: the text as one write, then
+the runner's own Enter once the output is quiet, so the CLI submits it instead
+of holding it in its input box.
 
 Workers and overseers can exchange one durable, task-linked question and
 answer across providers using `factoryctl attempt peer status`, `peer ask`,

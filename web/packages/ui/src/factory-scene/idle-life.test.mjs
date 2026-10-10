@@ -6,12 +6,12 @@ import { act, create } from "react-test-renderer";
 import { FactoryScene } from "../../dist/src/factory-scene/factory-scene.js";
 import { catAt, catBed, chats, gossip } from "../../dist/src/factory-scene/idle-life.js";
 import { workerFrames } from "../../dist/src/factory-scene/appearance.js";
-import { hallsOf } from "../../../../fixtures/scene.mjs";
+import { unitsOf } from "../../../../fixtures/scene.mjs";
 import { spriteAtlas } from "../../dist/src/factory-scene/sprites/sprites.generated.js";
 
 const seats = (ids, free = () => true) => ids.map((id, slot) => ({ x: 72 + slot * 40, y: 400, id, free: id !== undefined && free(id) }));
 const HOUR = 3_600_000;
-const commons = { social: "commons", scenery: "subtle", animation: "follow-device" };
+const scenic = { scenery: "subtle", animation: "follow-device" };
 
 test("the cat keeps to its table, prowls only behind it, and is stroked only by someone free to", () => {
   const row = seats(["ada", undefined, "grace", "linus"], (id) => id !== "grace");
@@ -115,15 +115,15 @@ test("neighbours talk one conversation at a time, in turn, and never about thems
 });
 
 test("the floor shows the cat, what is said and the heart, and none of it without scenery or a clock", async () => {
-  const graph = hallsOf([..."abcdefghi"]);
+  const graph = unitsOf([..."abcdefghi"]);
   const workers = ["ada", "grace", "linus"].map((id) => ({ id, name: id[0].toUpperCase() + id.slice(1), role: "worker", provider: "codex", activity: "idle", location: "resting" }));
-  const still = renderToStaticMarkup(createElement(FactoryScene, { graph, appearance: commons, workers }));
+  const still = renderToStaticMarkup(createElement(FactoryScene, { graph, appearance: scenic, workers }));
   // The server's clock is 0: the cat is wherever this epoch's haunt is, settled.
   assert.match(still, /data-cat="(sit|sleep)\.0"/);
   assert.match(still, /The cat\n(Supervising|Asleep)/);
   assert.doesNotMatch(still, /data-bubble|data-heart/);
   assert.match(still, /data-cat-bed/);
-  assert.doesNotMatch(renderToStaticMarkup(createElement(FactoryScene, { graph, workers, appearance: { ...commons, scenery: "off" } })), /data-cat/, "no scenery: no cat, no bed");
+  assert.doesNotMatch(renderToStaticMarkup(createElement(FactoryScene, { graph, workers, appearance: { ...scenic, scenery: "off" } })), /data-cat/, "no scenery: no cat, no bed");
 
   const saved = { setTimeout: globalThis.setTimeout, clearTimeout: globalThis.clearTimeout, performance: globalThis.performance, requestAnimationFrame: globalThis.requestAnimationFrame, cancelAnimationFrame: globalThis.cancelAnimationFrame, window: globalThis.window, document: globalThis.document };
   let clock = 0, next = 0, renderer;
@@ -136,7 +136,7 @@ test("the floor shows the cat, what is said and the heart, and none of it withou
   globalThis.window = { matchMedia: () => ({ matches: false, addEventListener() {}, removeEventListener() {} }) };
   globalThis.document = { visibilityState: "visible", addEventListener() {}, removeEventListener() {} };
   try {
-    await act(async () => { renderer = create(createElement(FactoryScene, { graph, appearance: commons, workers, tasks: [{ id: "t", agentId: "nobody", projectId: "p", title: "t", status: "queued", humanRequestIds: [] }] })); });
+    await act(async () => { renderer = create(createElement(FactoryScene, { graph, appearance: scenic, workers, tasks: [{ id: "t", agentId: "nobody", projectId: "p", title: "t", status: "queued", humanRequestIds: [] }] })); });
     const seen = { bubbles: new Set(), said: new Set(), cat: new Set(), hearts: 0, smooth: 0 };
     let wasted = 0;
     for (let tick = 0; tick < 6000; tick += 1) {
@@ -146,7 +146,7 @@ test("the floor shows the cat, what is said and the heart, and none of it withou
       seen.cat.add(cat["data-cat"]);
       // Off the table it is behind the people at it; on the table, in front of them.
       const order = renderer.root.findAll((node) => node.props["data-cat"] !== undefined || node.props["data-worker-id"] !== undefined).map((node) => node.props["data-cat"] !== undefined);
-      const seatY = renderer.root.findAll((node) => node.props["data-common-seat"] === "resting")[0].props.transform.match(/ ([\d.]+)\)/)[1];
+      const seatY = renderer.root.findAll((node) => node.props["data-nearby-rest"] !== undefined)[0].findByType("rect").props.y - 5;
       assert.equal(order.indexOf(true), cat.transform.includes(` ${seatY})`) ? order.length - 1 : 0, `cat layered wrongly at ${clock}`);
       if (cat["data-cat"].startsWith("walk")) { seen.smooth += 1; assert.ok(frames.size > 0, "a prowling cat is drawn every frame"); }
       // Someone setting off for the bookshelf asks for frames a render before they are drawn walking.
@@ -171,10 +171,10 @@ test("the floor shows the cat, what is said and the heart, and none of it withou
     assert.ok([...seen.said].some((said) => /^\w+: [^\n]+$/.test(said)), "the opener is heard before the reply");
     // An empty floor's clock is stopped, whatever moment it is mounted at: even mid-prowl, nothing asks for frames.
     for (let at = 0; at < 180_000; at += 500) {
-      await act(async () => { clock = 10_000_000 + at; renderer.update(createElement(FactoryScene, { graph, appearance: commons, workers: [], tasks: [{ id: String(at), agentId: "nobody", projectId: "p", title: "t", status: "queued", humanRequestIds: [] }] })); });
+      await act(async () => { clock = 10_000_000 + at; renderer.update(createElement(FactoryScene, { graph, appearance: scenic, workers: [], tasks: [{ id: String(at), agentId: "nobody", projectId: "p", title: "t", status: "queued", humanRequestIds: [] }] })); });
       assert.equal(frames.size, 0, `an empty floor asked for frames at ${at}`);
     }
-    await act(async () => { renderer.update(createElement(FactoryScene, { graph, workers, appearance: { ...commons, scenery: "rich", animation: "off" } })); });
+    await act(async () => { renderer.update(createElement(FactoryScene, { graph, workers, appearance: { ...scenic, scenery: "rich", animation: "off" } })); });
     assert.equal(renderer.root.findAll((node) => node.props["data-cat"] !== undefined)[0].props["data-cat"], "sleep.0", "animation off: the cat sleeps");
     assert.equal(renderer.root.findAll((node) => node.props["data-bubble"] !== undefined || node.props["data-heart"] !== undefined).length, 0);
   } finally {
@@ -195,7 +195,7 @@ test("the cat shares its time evenly among a long table's gaps, and an empty flo
     for (let epoch = 0; epoch < 3000; epoch += 1) for (const t of [5_500, 7_000, 8_500, 10_000, 11_500, 13_000, 40_000]) { const cat = catAt(row, epoch * 45_000 + t); if (cat.y !== 400 || cat.moving) continue; if (cat.frame.startsWith("sleep")) naps.add(cat.x); if (cat.pettedBy !== undefined) strokes.add(cat.x); }
     assert.deepEqual([naps.size, strokes.size], [length - 1, length - 1], `a table of ${length}: naps at ${[...naps]}, strokes at ${[...strokes]}`);
   }
-  const graph = hallsOf(["repo"]);
-  const empty = renderToStaticMarkup(createElement(FactoryScene, { graph, appearance: commons, workers: [] }));
-  assert.match(empty, /data-cat="sleep.0"[^>]*aria-label="The cat, asleep"/);
+  const graph = unitsOf(["repo"]);
+  // The cat is where two sit side by side: with nobody on the floor, or one alone, there is no cat and no bed.
+  for (const alone of [[], [{ id: "ada", name: "Ada", role: "worker", activity: "idle", location: "resting" }]]) assert.doesNotMatch(renderToStaticMarkup(createElement(FactoryScene, { graph, appearance: scenic, workers: alone })), /data-cat/);
 });

@@ -19,6 +19,7 @@ import (
 // lock, because an already-cancelled context is refused earlier, at writer
 // admission. A second store holds that lock to make the window deterministic.
 func TestCallerCancellationDuringBeginKeepsTheRetainedWriterSet(t *testing.T) {
+	t.Parallel()
 	path, _ := walSnapshotFixture(t, "")
 	store, err := Open(context.Background(), path)
 	if err != nil {
@@ -79,8 +80,8 @@ func TestCallerCancellationDuringBeginKeepsTheRetainedWriterSet(t *testing.T) {
 			t.Fatalf("cancelled BEGIN error = %v, want context.Canceled", beginErr)
 		}
 		var unknown *OutcomeUnknownError
-		if !errors.As(beginErr, &unknown) {
-			t.Fatalf("cancelled BEGIN error = %v, want OutcomeUnknownError", beginErr)
+		if errors.As(beginErr, &unknown) {
+			t.Fatalf("cancelled BEGIN error = %v; BEGIN writes nothing, so its outcome is known", beginErr)
 		}
 	case <-time.After(time.Second):
 		t.Fatal("cancelled BEGIN did not return while the write lock was held")

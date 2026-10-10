@@ -512,7 +512,7 @@ func TestUsageFailureNamesTheSubcommandUsageLine(t *testing.T) {
 		{[]string{"task", "add", "--project", id, "--agent", "any", "--title", "t", "--priority", "99999999999999999999"}, "factoryctl task add: invalid arguments\nusage: factoryctl task add --project ID [--repository ID] --agent ID|any --title TEXT [--body TEXT] [--priority N] [--task-id ID --incarnation-id ID]\n"},
 		{[]string{"web", "revoke", "private", "--revision", "1"}, "factoryctl web revoke: invalid arguments\nusage: factoryctl web revoke CLIENT_ID --revision REVISION\n"},
 		{[]string{"attempt", "content", "read", "--id", id}, "factoryctl attempt content read: invalid arguments\nusage: factoryctl content read --id ID --revision REVISION\n"},
-		{[]string{"release", "a", "b"}, "factoryctl release: invalid arguments\nusage: factoryctl release SHA [--wait]\n"},
+		{[]string{"release", "a", "b"}, "factoryctl release: invalid arguments\nusage: factoryctl release SHA [--start] [--wait]\n"},
 		{[]string{"attempt", "unknown"}, usage},
 	} {
 		var stdout, stderr bytes.Buffer

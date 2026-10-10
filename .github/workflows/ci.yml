@@ -7,13 +7,18 @@ on:
   # combination is green. Without this trigger the queue would wait forever
   # for a `required` context that never reports.
   merge_group:
+  # A merge queue run can restore only caches saved on its own throwaway
+  # `gh-readonly-queue/**` ref or on `main`. `main` keeps a warm compiler and
+  # package cache so queue runs never start cold; no gate runs on push.
+  push:
+    branches: [main]
   # A manual run is the explicit path for platform investigation on the
   # persistent Mac. A conflict-free merge is not followed by a duplicate
   # full gate: the PR and merge-queue trees already supplied that evidence.
   workflow_dispatch:
     inputs:
       runner:
-        description: Mac runner (hosted can seed the main-branch cache)
+        description: Mac runner
         type: choice
         default: dark-factory-mac
         options: [dark-factory-mac, macos-latest]
@@ -28,9 +33,10 @@ concurrency:
   cancel-in-progress: ${{ github.event_name != 'merge_group' }}
 
 jobs:
-  # Pull requests need one cheap green context so GitHub will admit them to
-  # the queue. The queue then tests the exact combined tree once; running the
-  # full macOS and control-plane gates here as well would duplicate that work.
+  # Pull requests get a cheap patch check here plus, through scope, their own
+  # affected-package gate. A broken revision then fails on its own pull request
+  # instead of in the queue, where an ALLGREEN ejection rebuilds every entry
+  # behind it (most of the 5-9 Oct queue waste was exactly that).
   eligibility:
     if: github.event_name == 'pull_request'
     runs-on: ubuntu-24.04
@@ -45,6 +51,18 @@ jobs:
           git remote add origin "https://github.com/${GITHUB_REPOSITORY}.git"
           git fetch --no-tags --depth=1 origin "$BASE_SHA" "$GITHUB_SHA"
           git diff --check "$BASE_SHA" "$GITHUB_SHA"
+          # A formatting slip otherwise costs a whole queue run and the
+          # entries rebuilt behind it. Same pinned Go as the macOS gate.
+          go_archive=go1.27.2.linux-amd64.tar.gz
+          curl --fail --silent --show-error --location "https://dl.google.com/go/$go_archive" -o "$RUNNER_TEMP/$go_archive"
+          checksum=$(curl --fail --silent --show-error --location "https://dl.google.com/go/$go_archive.sha256")
+          printf '%s  %s\n' "$checksum" "$RUNNER_TEMP/$go_archive" | sha256sum -c -
+          tar -xzf "$RUNNER_TEMP/$go_archive" -C "$RUNNER_TEMP"
+          unformatted=
+          for file in $(git diff --name-only --diff-filter=AMR "$BASE_SHA" "$GITHUB_SHA" -- '*.go'); do
+            [ -z "$(git show "$GITHUB_SHA:$file" | "$RUNNER_TEMP/go/bin/gofmt" -l)" ] || unformatted="$unformatted $file"
+          done
+          [ -z "$unformatted" ] || { echo "::error::gofmt required:$unformatted"; exit 1; }
 
   # This classifier lives in the CODEOWNED workflow, not in a PR-publishable
   # script. The diff is the queue's whole combined tree, so entries ahead of
@@ -53,7 +71,6 @@ jobs:
   # the release gate, and protocol, dependency, CI, or unknown paths use the
   # full Darwin gate.
   scope:
-    if: github.event_name == 'merge_group' || github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     outputs:
@@ -61,6 +78,7 @@ jobs:
       macos_mode: ${{ steps.select.outputs.macos_mode }}
       control_plane: ${{ steps.select.outputs.control_plane }}
       relay: ${{ steps.select.outputs.relay }}
+      base: ${{ steps.select.outputs.base }}
     steps:
       - name: Select fixed gates from the combined tree
         id: select
@@ -74,6 +92,10 @@ jobs:
           }
           if [ "$GITHUB_EVENT_NAME" = workflow_dispatch ]; then
             emit_all
+            exit 0
+          fi
+          if [ "$GITHUB_EVENT_NAME" = push ]; then
+            printf '%s\n' macos=true macos_mode=warm control_plane=false relay=false >>"$GITHUB_OUTPUT"
             exit 0
           fi
           case "$GITHUB_SHA" in
@@ -143,6 +165,12 @@ jobs:
                 ;;
             esac
           done <"$RUNNER_TEMP/changed-paths"
+          # A pull request runs only the packages its change affects; the
+          # queue still runs the selected gate on the combined tree.
+          if [ "$GITHUB_EVENT_NAME" = pull_request ] && [ "$macos" = true ]; then
+            macos_mode=affected
+            printf 'base=%s\n' "$merge_base" >>"$GITHUB_OUTPUT"
+          fi
           {
             printf 'macos=%s\n' "$macos"
             printf 'macos_mode=%s\n' "$macos_mode"
@@ -156,8 +184,16 @@ jobs:
   checks:
     needs: scope
     if: needs.scope.result == 'success' && needs.scope.outputs.macos == 'true'
-    runs-on: ${{ github.event_name == 'merge_group' && 'macos-latest' || inputs.runner || 'dark-factory-mac' }}
+    runs-on: ${{ github.event_name != 'workflow_dispatch' && 'macos-latest' || inputs.runner || 'dark-factory-mac' }}
     timeout-minutes: 30
+    # The full and runtime gates split across parallel Macs; queued Mac jobs
+    # wait for a free runner rather than fail. Every shard must pass and runs
+    # to completion: a cancelled sibling would read to factoryd as an
+    # infrastructure failure and hide the failing tests (#1366).
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: ${{ fromJSON((needs.scope.outputs.macos_mode == 'full' || needs.scope.outputs.macos_mode == 'runtime') && '["daemon","packages","source"]' || '["source"]') }}
     steps:
       # No actions/checkout: codeload.github.com (which serves an action's
       # tarball) can 429 independently of git itself and has, for over an
@@ -183,25 +219,33 @@ jobs:
       # The repo is public, so the fetch is unauthenticated and nothing is
       # written to .git/config that could leak a credential.
       - name: Check out $GITHUB_SHA
+        env:
+          AFFECTED_BASE: ${{ needs.scope.outputs.base }}
         run: |
           set -euxo pipefail
           rm -rf .git
           git init
           git remote add origin "https://github.com/${GITHUB_REPOSITORY}.git"
-          git fetch --depth=1 origin "$GITHUB_SHA"
-          git checkout --force --detach FETCH_HEAD
+          git fetch --depth=1 origin "$GITHUB_SHA" ${AFFECTED_BASE:+"$AFFECTED_BASE"}
+          git checkout --force --detach "$GITHUB_SHA"
           git clean -ffdx
 
-      - name: Provide the Homebrew Go toolchain
+      - name: Provide the Go toolchain
         run: |
-          set -euxo pipefail
-          if [ ! -x /opt/homebrew/bin/go ]; then
-            # The hosted image's bundled formula can trail go.mod. Go's
-            # auto-download cannot satisfy clean helpers using GOTOOLCHAIN=local.
-            brew update
-            HOMEBREW_NO_AUTO_UPDATE=1 brew install go
-          fi
-          /opt/homebrew/bin/go version
+          set -euo pipefail
+          case $(uname -m) in
+            arm64) go_arch=arm64 ;;
+            x86_64) go_arch=amd64 ;;
+            *) echo "unsupported macOS architecture" >&2; exit 1 ;;
+          esac
+          go_archive=go1.27.2.darwin-$go_arch.tar.gz
+          curl --fail --silent --show-error --location "https://dl.google.com/go/$go_archive" -o "$RUNNER_TEMP/$go_archive"
+          checksum=$(curl --fail --silent --show-error --location "https://dl.google.com/go/$go_archive.sha256")
+          printf '%s  %s\n' "$checksum" "$RUNNER_TEMP/$go_archive" | shasum -a 256 -c -
+          rm -rf "$RUNNER_TEMP/go"
+          tar -xzf "$RUNNER_TEMP/$go_archive" -C "$RUNNER_TEMP"
+          "$RUNNER_TEMP/go/bin/go" version
+          printf '%s\n' "$RUNNER_TEMP/go/bin" >> "$GITHUB_PATH"
 
       - name: Provide an isolated Node and Corepack pair
         run: |
@@ -230,21 +274,27 @@ jobs:
         id: cache-toolchain
         run: |
           printf 'DF_CI_CACHE_ROOT=%s/dark-factory-ci-cache\n' "$RUNNER_TEMP" >> "$GITHUB_ENV"
-          printf 'go=%s\n' "$(/opt/homebrew/bin/go env GOVERSION)" >> "$GITHUB_OUTPUT"
+          printf 'go=%s\n' "$(go env GOVERSION)" >> "$GITHUB_OUTPUT"
 
+      # Restore only: queue refs are thrown away, so a save there is
+      # unreadable by later runs. The push-to-main run saves.
       - name: Restore reusable compiler and package caches
-        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
         with:
           path: |
             ${{ runner.temp }}/dark-factory-ci-cache/go-build
             ${{ runner.temp }}/dark-factory-ci-cache/go-mod
             ${{ runner.temp }}/dark-factory-ci-cache/corepack
             ${{ runner.temp }}/dark-factory-ci-cache/pnpm-store
-          key: ci-v1-${{ runner.os }}-${{ runner.arch }}-${{ steps.cache-toolchain.outputs.go }}-node22.20.0-${{ hashFiles('go.sum', 'web/pnpm-lock.yaml', 'web/package.json') }}
+          key: ci-v2-${{ runner.os }}-${{ runner.arch }}-${{ steps.cache-toolchain.outputs.go }}-node22.20.0-${{ hashFiles('go.sum', 'web/pnpm-lock.yaml', 'web/package.json') }}-${{ github.sha }}
+          restore-keys: |
+            ci-v2-${{ runner.os }}-${{ runner.arch }}-${{ steps.cache-toolchain.outputs.go }}-node22.20.0-${{ hashFiles('go.sum', 'web/pnpm-lock.yaml', 'web/package.json') }}-
 
       - name: Run the macOS source gate
         env:
           MACOS_MODE: ${{ needs.scope.outputs.macos_mode }}
+          AFFECTED_BASE: ${{ needs.scope.outputs.base }}
+          SHARD: ${{ matrix.shard }}
         run: |
           set -euo pipefail
           case "$MACOS_MODE" in
@@ -252,19 +302,36 @@ jobs:
               ./scripts/local-ci.sh --ui
               ;;
             runtime)
-              ./scripts/local-ci.sh --runtime
+              ./scripts/local-ci.sh --runtime "$SHARD"
               ;;
             release)
               ./scripts/local-ci.sh --release
               ;;
+            warm)
+              ./scripts/local-ci.sh --warm
+              ;;
+            affected)
+              ./scripts/local-ci.sh --affected "$AFFECTED_BASE"
+              ;;
             full)
-              ./scripts/local-ci.sh
+              ./scripts/local-ci.sh --full "$SHARD"
               ;;
             *)
               echo "unknown macOS gate mode: $MACOS_MODE" >&2
               exit 1
               ;;
           esac 2>&1 | tee "$RUNNER_TEMP/macos-gate.log"
+
+      - name: Save the warm main-branch cache
+        if: github.event_name == 'push'
+        uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          path: |
+            ${{ runner.temp }}/dark-factory-ci-cache/go-build
+            ${{ runner.temp }}/dark-factory-ci-cache/go-mod
+            ${{ runner.temp }}/dark-factory-ci-cache/corepack
+            ${{ runner.temp }}/dark-factory-ci-cache/pnpm-store
+          key: ci-v2-${{ runner.os }}-${{ runner.arch }}-${{ steps.cache-toolchain.outputs.go }}-node22.20.0-${{ hashFiles('go.sum', 'web/pnpm-lock.yaml', 'web/package.json') }}-${{ github.sha }}
 
       # factoryd reads these failure annotations when the merge queue ejects a
       # head, so the worker's correction names the failing tests (#1366).
@@ -311,7 +378,7 @@ jobs:
     timeout-minutes: 5
     steps:
       - name: Require every hosted source gate
-        if: (github.event_name == 'pull_request' && needs.eligibility.result != 'success') || ((github.event_name == 'merge_group' || github.event_name == 'workflow_dispatch') && (needs.scope.result != 'success' || (needs.scope.outputs.macos == 'true' && needs.checks.result != 'success') || (needs.scope.outputs.control_plane == 'true' && needs.control-plane.result != 'success') || (needs.scope.outputs.relay == 'true' && needs.relay.result != 'success')))
+        if: (github.event_name == 'pull_request' && needs.eligibility.result != 'success') || (github.event_name != 'push' && (needs.scope.result != 'success' || (needs.scope.outputs.macos == 'true' && needs.checks.result != 'success') || (needs.scope.outputs.control_plane == 'true' && needs.control-plane.result != 'success') || (needs.scope.outputs.relay == 'true' && needs.relay.result != 'success')))
         run: |
           echo "required source gates failed: eligibility=${{ needs.eligibility.result }}, scope=${{ needs.scope.result }}, macOS=${{ needs.checks.result }}, control-plane=${{ needs.control-plane.result }}, relay=${{ needs.relay.result }}" >&2
           exit 1
@@ -423,24 +490,21 @@ jobs:
       - name: Verify the adversarial review verdict
         env:
           GH_TOKEN: ${{ github.token }}
+          # Numeric publisher ids trusted beyond repository maintainers, set
+          # by administrators as a repository variable, never in this file.
+          DF_REVIEW_TRUSTED_PUBLISHERS: ${{ vars.DF_REVIEW_TRUSTED_PUBLISHERS }}
         run: |
           set -euo pipefail
           # Both gating events name the pull request in GITHUB_REF, so this
           # job does not branch on the event.
-          # ponytail: the default branch predates the Go gate only while the
-          # change that adds it merges; delete the shell fallback after that.
           gate="${RUNNER_TEMP}/gate"
-          if [ -d internal/review/gate ]; then
-            go build -o "${gate}" ./internal/review/gate
-          else
-            cp scripts/verify-adversarial-review.sh "${gate}"
-          fi
+          go build -o "${gate}" ./internal/review/gate
           number="$("${gate}" --pull-number)"
           head="$(gh api "repos/${GITHUB_REPOSITORY}/pulls/${number}" --jq '.head.sha')"
-          # Projection only: four fields per review and no decision, so the
+          # Projection only: five fields per review and no decision, so the
           # logic that gates every merge stays somewhere a test can drive it.
           gh api "repos/${GITHUB_REPOSITORY}/pulls/${number}/reviews" --paginate \
-            --jq '.[] | [.commit_id, .state, (.user.id | tostring), ((.body // "") | gsub("[\n\r\t]"; " "))] | @tsv' \
+            --jq '.[] | [.commit_id, .state, (.user.id | tostring), ((.body // "") | gsub("[\n\r\t]"; " ")), .author_association] | @tsv' \
             >"${RUNNER_TEMP}/reviews.tsv"
           DF_REVIEW_HEAD_SHA="${head}" DF_REVIEW_REVIEWS="${RUNNER_TEMP}/reviews.tsv" \
             "${gate}"

@@ -9,6 +9,7 @@ import (
 )
 
 func TestWorkerActivationRequiresExactChangeOwnershipRevision(t *testing.T) {
+	t.Parallel()
 	for _, test := range []struct {
 		name     string
 		revision func(Run) int64
@@ -68,6 +69,7 @@ func TestWorkerActivationRequiresExactChangeOwnershipRevision(t *testing.T) {
 }
 
 func TestRetainedRetryProvenanceRejectsSecondFreshJumpBeforeResourceMutation(t *testing.T) {
+	t.Parallel()
 	for _, test := range []struct {
 		name         string
 		extraRetries int
@@ -130,6 +132,7 @@ func TestRetainedRetryProvenanceRejectsSecondFreshJumpBeforeResourceMutation(t *
 }
 
 func TestEveryUnsettledChangeRequiresCurrentOwner(t *testing.T) {
+	t.Parallel()
 	for _, phase := range []ChangePhase{ChangeReserved, ChangePrepared, ChangeAvailable} {
 		for _, write := range []string{"SetDispatch", "CreateProject"} {
 			t.Run(phase.String()+"/"+write, func(t *testing.T) {
@@ -180,6 +183,7 @@ func TestEveryUnsettledChangeRequiresCurrentOwner(t *testing.T) {
 // that names another head, or forgets the head a worktree Change has, is
 // refused before it touches anything.
 func TestPreRunningWorkerSettlementCannotBlessChangedContent(t *testing.T) {
+	t.Parallel()
 	for _, retained := range []bool{false, true} {
 		name := "fresh A+2"
 		if retained {
@@ -250,6 +254,7 @@ func phaseRevision(phase ChangePhase) int64 {
 // A worker that ran may have committed: its settlement records the branch
 // head it left, and a later read of the Change sees exactly that head.
 func TestRunningWorkerSettlementMayUpdateContentOnStableTree(t *testing.T) {
+	t.Parallel()
 	blocked, _ := NewBlockedProposal("retain edits")
 	store, finalizing := finalizingReleasedRun(t, RoleWorker, blocked)
 	defer store.Close()
@@ -274,6 +279,7 @@ func TestRunningWorkerSettlementMayUpdateContentOnStableTree(t *testing.T) {
 }
 
 func TestPreProviderRetainedRetryKeepsPublishedHead(t *testing.T) {
+	t.Parallel()
 	for _, test := range []struct {
 		name string
 		head func(Change) *CommitID
@@ -360,6 +366,7 @@ func TestPreProviderRetainedRetryKeepsPublishedHead(t *testing.T) {
 }
 
 func TestRetainedRetryHistoryLoadsAndHistoricalFinalizationReplays(t *testing.T) {
+	t.Parallel()
 	store, first := terminalPreRunningAvailableWorker(t)
 	defer store.Close()
 	_, secondKeys := queueRetryForTerminal(t, store, first, 40)

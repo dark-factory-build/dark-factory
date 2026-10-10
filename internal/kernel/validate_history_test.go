@@ -183,6 +183,7 @@ func validationStatements(t *testing.T, store *Store) (int, time.Duration) {
 // adds a fixed number of statements, never one more walk of the task's
 // history per run already recorded.
 func TestDurableValidationCostIsLinearInRetainedHistory(t *testing.T) {
+	t.Parallel()
 	const tasks, maxRuns = 2, 4
 	var counts []int
 	var last *Store

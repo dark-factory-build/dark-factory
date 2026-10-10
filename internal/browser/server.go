@@ -10,9 +10,11 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"os"
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/coder/websocket"
@@ -56,6 +58,13 @@ type Config struct {
 // listener. Only fixed protocol names reach it, never request content.
 type Observer interface {
 	Observe(attributes map[string]string)
+}
+
+// ErrorClassifier is an optional Backend capability: name the backend's own
+// errors as this package's. The transport applies it once, to every error it
+// answers a request with, so no return path reaches the wire unnamed.
+type ErrorClassifier interface {
+	ClassifyError(err error) error
 }
 
 // TraceReceiver is an optional Backend capability: aggregate an OTLP trace
@@ -593,9 +602,23 @@ func errorFrame(err error) browserprotocol.Error {
 	case errors.Is(err, ErrRateLimited):
 		return browserprotocol.Error{Code: browserprotocol.ErrorRateLimited, Retryable: true}
 	default:
+		// Say why our own reply was refused, once per reason. ponytail: every 64th new reason forgets the rest.
+		if _, seen := refusals.LoadOrStore(err.Error(), true); !seen {
+			if refusalCount.Add(1)%64 == 0 {
+				refusals.Clear()
+			}
+			if errors.Is(err, browserprotocol.ErrMalformed) {
+				fmt.Fprintf(os.Stderr, "%s factoryd: reply refused: %v\n", time.Now().UTC().Format(time.RFC3339), err)
+			}
+		}
 		return browserprotocol.Error{Code: browserprotocol.ErrorInternal}
 	}
 }
+
+var (
+	refusals     sync.Map
+	refusalCount atomic.Int64
+)
 
 func zero16(value [16]byte) bool {
 	for _, item := range value {

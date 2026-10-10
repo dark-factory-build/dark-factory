@@ -60,7 +60,7 @@ const ids = {
   run: "05050505050505050505050505050505",
 };
 const factoryItem = (revision = 1n) => ({ dispatch_enabled: true, capacity: 8, active_runs: 2, revision });
-const projectItem = (revision = 1n) => ({ id: ids.project, name: "Factory", run_budget_limit: 12n, runs_used: 5n, max_run_seconds: 900, revision });
+const projectItem = (revision = 1n) => ({ id: ids.project, name: "Factory", run_budget_limit: 12n, runs_used: 5n, max_run_seconds: 900, specialist_runs: 1, specialist_open_proposals: 3, revision });
 const agentItem = (revision = 1n) => ({ id: ids.agent, project_id: ids.project, name: "Worker", role: "worker", provider: "claude_code", paused: false, model: "claude-opus-5", reasoning_effort: "high", effective_model: "claude-opus-5", effective_reasoning_effort: "high", model_source: "agent", revision });
 const taskItem = (revision = 1n, title = "Ship") => ({ id: ids.task, project_id: ids.project, assigned_agent_id: ids.agent, title, status: "queued", priority: 1, revision });
 const requestItem = (revision = 1n) => ({ id: ids.request, project_id: ids.project, agent_id: ids.agent, task_id: ids.task, created_at: 10n, updated_at: 11n, revision, kind: "question", status: "open", reply_max_bytes: 8192, can_reply: true });
@@ -126,7 +126,7 @@ test("the Go-produced snapshot fixture becomes one complete TypeScript state vie
 });
 
 test("project limits default to disabled for an older daemon and reject inconsistent ceilings", () => {
-  const legacy = decodeServerControl(encodeStateSnapshot("limits", snapshotBody({ projects: [{ id: ids.project, name: "Factory", revision: 1n }] }))).body.projects[0];
+  const legacy = decodeServerControl(encodeStateSnapshot("limits", snapshotBody({ projects: [{ id: ids.project, name: "Factory", specialist_runs: 1, specialist_open_proposals: 3, revision: 1n }] }))).body.projects[0];
   assert.deepEqual([legacy.run_budget_limit, legacy.runs_used, legacy.max_run_seconds], [0n, 0n, 0]);
   expectMalformed(() => encodeStateSnapshot("limits", snapshotBody({ projects: [{ ...projectItem(), run_budget_limit: 2n, runs_used: 3n }] })));
   expectMalformed(() => encodeStateSnapshot("limits", snapshotBody({ projects: [{ ...projectItem(), max_run_seconds: 86401 }] })));
@@ -522,9 +522,6 @@ test("operational graph decoding refuses unsupported readings and dangling refer
  const bad = {
   "unknown kind": (b) => { b.nodes[1].kind = "repository"; },
   "malformed id": (b) => { b.nodes[1].id = "nope"; },
-  "idle unless quiet": (b) => { b.nodes[1].state = "idle"; },
-  "rate on unobserved": (b) => { Object.assign(b.nodes[1], { observation: "unobserved", state: "unknown", rate_per_hour: 5 }); },
-  "rate on stale": (b) => { Object.assign(b.nodes[1], { observation: "stale", state: "unknown", rate_per_hour: 5 }); },
   "unit missing": (b) => { b.nodes[1].unit = "ff".repeat(16); },
   "edge to missing node": (b) => { b.edges[0].to = "ff".repeat(16); },
   "self edge": (b) => { b.edges[0].to = b.edges[0].from; },
@@ -532,6 +529,10 @@ test("operational graph decoding refuses unsupported readings and dangling refer
   "unknown evidence": (b) => { b.nodes[1].evidence = "guess"; },
  };
  for (const [name, change] of Object.entries(bad)) assert.throws(() => decode(change), ProtocolError, name);
+ // How readings combine is the producer's rule (the invariant in opgraph's overlay_test.go); the decoder does not second-guess it.
+ for (const reading of [{ state: "idle" }, { observation: "unobserved", state: "unknown", rate_per_hour: 5 }, { observation: "stale", state: "unknown", rate_per_hour: 5 }]) {
+  assert.deepEqual(Object.entries(reading).map(([key]) => decode((b) => { Object.assign(b.nodes[1], reading); return b; }).body.nodes[1][key]), Object.values(reading));
+ }
  assert.equal(decode((b) => { b.nodes[1].future = "additive"; return b; }).body.nodes[1].future, undefined);
 });
 

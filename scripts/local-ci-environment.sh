@@ -5,6 +5,7 @@
 # environment with the small, credential-free set the gate needs.
 ci_original_path=${PATH-}
 ci_original_home=${HOME-}
+ci_original_tmpdir=${TMPDIR-}
 ci_requested_cache_root=${DF_CI_CACHE_ROOT-}
 ci_requested_go_module_cache=${DF_CI_GO_MODULE_CACHE-}
 ci_node=${DF_CI_NODE-}
@@ -260,7 +261,8 @@ export DF_CI_CACHE_ROOT="$ci_cache_root"
 # Keep the daemon's exact, startup-owned tool path: replacing it here makes
 # Go invisible inside a worker attempt even though factoryd granted it.
 export PATH="$ci_original_path"
-export HOME=/var/empty TMPDIR=/tmp GOENV=off
+# Keep the caller's temporary directory: worker sandboxes deny the shared /tmp.
+export HOME=/var/empty TMPDIR="${ci_original_tmpdir:-/tmp}" GOENV=off
 export XDG_CONFIG_HOME=/var/empty XDG_CACHE_HOME="$ci_cache_root/cache"
 export XDG_DATA_HOME="$ci_private_root/data" XDG_STATE_HOME="$ci_private_root/state"
 export COREPACK_HOME="$ci_cache_root/corepack"

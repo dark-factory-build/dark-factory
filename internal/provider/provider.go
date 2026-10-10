@@ -28,13 +28,15 @@ const (
 	shellPath  = "/bin/sh"
 	claudeTool = "claude"
 	// GitIdentityName and GitIdentityEmail author a worker's local commits.
-	GitIdentityName      = gitauthor.AutomationName
-	GitIdentityEmail     = gitauthor.AutomationEmail
-	codexTool            = "codex"
-	maxPathBytes         = 4096
-	claudeConfigDir      = ".claude"
-	codexConfigDir       = ".codex"
-	codexBootstrapPrompt = `Use the factory_attempt.factory tool with argv ["attempt","task"] before doing anything else. The returned JSON task field is the exact task: complete only that task. Use this tool for every factoryctl attempt or overseer command, passing argv without the executable; shell commands cannot access the attempt API. Peer collaboration is asynchronous: use argv ["attempt","peer","status"] to read or answer task-linked questions, but it grants no task or terminal control. For a stale paged peer status, restart from the first page. Before exiting, report the durable outcome with attempt succeed, block, or fail through this tool.` + " " + runner.DiscoveryInstructions
+	GitIdentityName  = gitauthor.AutomationName
+	GitIdentityEmail = gitauthor.AutomationEmail
+	codexTool        = "codex"
+	maxPathBytes     = 4096
+	claudeConfigDir  = ".claude"
+	codexConfigDir   = ".codex"
+	// bootstrapPrompt is both native providers' fixed positional prompt: the
+	// exact task is read through the attempt API, never typed into the PTY.
+	bootstrapPrompt = `Use the factory_attempt.factory tool with argv ["attempt","task"] before doing anything else. The returned JSON task field is the exact task: complete only that task. Use this tool for every factoryctl attempt or overseer command, passing argv without the executable; shell commands cannot access the attempt API. Peer collaboration is asynchronous: use argv ["attempt","peer","status"] to read or answer task-linked questions, but it grants no task or terminal control. For a stale paged peer status, restart from the first page. Before exiting, report the durable outcome with attempt succeed, block, or fail through this tool. When assigned a writable task checkout, read and edit it directly, including corrections after send-back; never add Git remotes or fetch from the network inside it. Never substitute another task or private Change path. Scope file discovery to the task checkout and private runtime home. Locate tools with command -v and the checkout's documented setup. Never recursively search the user home, Library, Documents, Desktop, Music or Photos for tools or instructions. If a required path is not provided or present, report the missing prerequisite instead of widening the search. In UI review, screenshots are illustrative only and never blocking evidence; judge correctness from render tests and source behavior.`
 )
 
 var (
@@ -352,14 +354,13 @@ func (Launch) String() string   { return "provider launch (private)" }
 func (Launch) GoString() string { return "provider.Launch{private}" }
 
 // TaskDelivery is the one task-input channel selected with a provider launch.
-// Shell reads its program from the inherited sealed descriptor. Claude receives
-// its prompt once through the PTY. Codex starts from a fixed positional prompt
-// and reads the exact task through its attempt-scoped local API capability.
+// Shell reads its program from the inherited sealed descriptor. Claude and
+// Codex start from the fixed positional bootstrap prompt and read the exact
+// task through their attempt-scoped local API capability.
 type TaskDelivery uint8
 
 const (
 	TaskDeliveryFD11 TaskDelivery = iota + 1
-	TaskDeliveryStartupTerminal
 	TaskDeliveryAttemptAPI
 )
 
@@ -658,7 +659,6 @@ func Build(request Request) (Launch, error) {
 			},
 		}
 		environment := request.runtime.environmentForRole(request.provider, request.role)
-		environment = append(environment, "DISABLE_AUTOUPDATER=1")
 		if browser != "" {
 			servers["factory_browser"] = map[string]any{"command": browser, "args": browserArgs}
 		}
@@ -674,10 +674,11 @@ func Build(request Request) (Launch, error) {
 		if err != nil || len(config) > runner.MaxArgumentBytes {
 			return Launch{}, ErrInvalid
 		}
-		argv = append(argv, "--mcp-config", string(config))
+		// --mcp-config is variadic, so "--" ends options before the prompt.
+		argv = append(argv, "--mcp-config", string(config), "--", bootstrapPromptFor(request, "factory_attempt"))
 		return Launch{
 			executable: request.installation.executable, argv: argv,
-			environment: environment, taskDelivery: TaskDeliveryStartupTerminal,
+			environment: environment, taskDelivery: TaskDeliveryAttemptAPI,
 		}, nil
 	case kernel.ProviderCodex:
 		permissions, err := codexPermissions(request)
@@ -739,12 +740,7 @@ func Build(request Request) (Launch, error) {
 		if request.role == kernel.RoleOrchestrator && request.runtime.customerMaintainer {
 			argv = append(argv, "-c", "mcp_servers.dark_factory_maintainer={command="+tomlBasicString(request.runtime.factoryctl)+`,args=["attempt","maintainer-mcp"],env_vars=["DARK_FACTORY_SOCKET","DARK_FACTORY_ATTEMPT_TOKEN_FILE"],enabled=true,required=true,default_tools_approval_mode="approve"}`)
 		}
-		prompt := codexBootstrapPromptFor(request.runtime)
-		if request.role == kernel.RoleOrchestrator {
-			publication := "inspect the exact retained Change and publish it through your Maintainer App, except accepted GitHub intake whose issue is in the destination repository and that you delegated to exactly one worker task: factoryd publishes that itself, its pull request and every correction, and escalates once if it cannot. factoryd reviews and enqueues every published head, merges and releases it, and sends findings back to the worker; never submit a verdict or enqueue yourself, never create review tasks for workers; act on a published pull request only when an Escalated: wake names it."
-			prompt += " You are the project overseer. If no causal context is supplied, perform full reconciliation. On a causal wake, act on the summarized items; use overseer status --task only when a line is insufficient, then use the returned current head for subsequent pages; reconcile every fixed-head page only at startup, recovery, omissions, or an event that cannot be resolved narrowly. For a settled worker Change, request attempt source --task TASK_ID and verify its exact task/work/Change receipt; its branch and head_commit are the work, read from git_directory with git, and source_path is that branch's worktree; never reconstruct private paths. Follow next_offset with --offset and --head; use --task and next_text_offset for complete text. Delegate with overseer task add; supervise with task update, agent pause/resume, worker message, worker interrupt, worker stop, worker replace and human reply. Keep enduring acceptance criteria, prerequisites and owner authority in the complete base instruction using overseer task update --body while the task is queued; preserve the original acceptance criteria. Send-back replaces previous feedback, so use it only for current findings or pointers, not durable requirements. Use the factory tool description for exact flags. Routine supported task routing needs no checkout. Use the registered repository and its configured base for edits and checks; " + publication + " When you publish intake work, carry its source: for GitHub intake the fully qualified source repository and issue number, with close_on_merge true only on the pull request that completes the issue (Closes #N, otherwise Refs #N); for Linear intake its source_url as external_source_url with issue_number 0 and close_on_merge false. Never look up or create a GitHub issue for intake work, and never publish private source details into a public result. A successful Maintainer response's structuredContent is its result: do not repeat the identical read or write after its content acknowledgement; observe an ambiguous write instead. Respect direct operator interventions. A capability refusal is not actionable work: do not retry it until role, capability, or runtime state changes. If the only next event is external — including a pending check, merge queue or merge, configured deployment or release receipt, or human/external owner event — record the concrete pending gate and its exact identity in the durable result, call attempt succeed, and end this task immediately; do not wait or keep the overseer lane occupied, without idle polling; the factory cancels any overseer run " + fmt.Sprint(kernel.MaxOverseerRunSeconds/60) + " minutes after admission. Events remain pending for the next supervision task and existing wake tasks resume observation from that checkpoint. Continue actionable supervision and delivery in this session only while useful in-session work remains. Use attempt request-human only for operator decisions; non-shell overseers yield and release their lane, while shell overseers remain live for the answer."
-		}
-		argv = append(argv, prompt)
+		argv = append(argv, bootstrapPromptFor(request, codexAttemptServerName(request.runtime)))
 		return Launch{
 			executable: request.installation.executable, argv: argv,
 			environment: environment, taskDelivery: TaskDeliveryAttemptAPI,
@@ -754,9 +750,20 @@ func Build(request Request) (Launch, error) {
 	}
 }
 
+// bootstrapPromptFor names the attempt server as the provider registered it
+// and adds the overseer's standing instructions for an orchestrator.
+func bootstrapPromptFor(request Request, server string) string {
+	prompt := strings.Replace(bootstrapPrompt, "factory_attempt.factory", server+".factory", 1)
+	if request.role == kernel.RoleOrchestrator {
+		publication := "inspect the exact retained Change and publish it through your Maintainer App, except accepted GitHub intake whose issue is in the destination repository and that you delegated to exactly one worker task: factoryd publishes that itself, its pull request and every correction, and escalates once if it cannot. factoryd reviews and enqueues every published head, merges and releases it, and sends findings back to the worker; never submit a verdict or enqueue yourself, never create review tasks for workers; act on a published pull request only when an Escalated: wake names it."
+		prompt += " You are the project overseer. If no causal context is supplied, perform full reconciliation. On a causal wake, act on the summarized items; use overseer status --task only when a line is insufficient, then use the returned current head for subsequent pages; reconcile every fixed-head page only at startup, recovery, omissions, or an event that cannot be resolved narrowly. For a settled worker Change, request attempt source --task TASK_ID and verify its exact task/work/Change receipt; its branch and head_commit are the work, read from git_directory with git, and source_path is that branch's worktree; never reconstruct private paths. Follow next_offset with --offset and --head; use --task and next_text_offset for complete text. Delegate with overseer task add; supervise with task update, agent pause/resume, worker message, worker interrupt, worker stop, worker replace and human reply. Keep enduring acceptance criteria, prerequisites and owner authority in the complete base instruction using overseer task update --body while the task is queued; preserve the original acceptance criteria. Send-back replaces previous feedback, so use it only for current findings or pointers, not durable requirements. Use the factory tool description for exact flags. Routine supported task routing needs no checkout. Use the registered repository and its configured base for edits and checks; " + publication + " When you publish intake work, carry its source: for GitHub intake the fully qualified source repository and issue number, with close_on_merge true only on the pull request that completes the issue (Closes #N, otherwise Refs #N); for Linear intake its source_url as external_source_url with issue_number 0 and close_on_merge false. Never look up or create a GitHub issue for intake work, and never publish private source details into a public result. A successful Maintainer response's structuredContent is its result: do not repeat the identical read or write after its content acknowledgement; observe an ambiguous write instead. Respect direct operator interventions. A capability refusal is not actionable work: do not retry it until role, capability, or runtime state changes. If the only next event is external — including a pending check, merge queue or merge, configured deployment or release receipt, or human/external owner event — record the concrete pending gate and its exact identity in the durable result, call attempt succeed, and end this task immediately; do not wait or keep the overseer lane occupied, without idle polling; the factory cancels any overseer run " + fmt.Sprint(kernel.MaxOverseerRunSeconds/60) + " minutes after admission. Events remain pending for the next supervision task and existing wake tasks resume observation from that checkpoint. Continue actionable supervision and delivery in this session only while useful in-session work remains. Use attempt request-human only for operator decisions; non-shell overseers yield and release their lane, while shell overseers remain live for the answer."
+	}
+	return prompt
+}
+
 // The provider keeps its account/model configuration, but local commands get
 // only the Change, disposable runtime paths and the attempt API inputs. Codex's
-// minimal platform profile still includes its documented system/temp exceptions.
+// minimal platform profile still includes its documented system exceptions.
 // grant is one path a native provider's local commands may reach.
 type grant struct {
 	path  string
@@ -796,6 +803,12 @@ func sandboxGrants(request Request) []grant {
 	}
 	if request.runtime.gitCommonDir != "" {
 		grants = append(grants, grant{request.runtime.gitCommonDir, request.runtime.gitCommonDirWritable})
+		if request.runtime.gitCommonDirWritable {
+			// Codex 0.160 makes the Git directory a writable root's gitfile names
+			// read-only. Name the Change's own registration (Git names it after
+			// the worktree) so its index, HEAD and logs stay writable for commits.
+			grants = append(grants, grant{filepath.Join(request.runtime.gitCommonDir, "worktrees", filepath.Base(request.workingDirectory)), true})
+		}
 	}
 	return grants
 }
@@ -810,11 +823,11 @@ func codexPermissions(request Request) (string, error) {
 	return value, nil
 }
 
-func codexProfile(name string, grants []grant, network string, denied ...string) string {
-	entries := []string{`":root"="deny"`, `":minimal"="read"`}
-	for _, path := range denied {
-		entries = append(entries, tomlBasicString(path)+`="deny"`)
-	}
+// codexProfile renders grants over Codex's minimal system profile. That profile
+// lets commands read and write the shared temporary directories, so those are
+// denied; a more specific grant beneath them still applies.
+func codexProfile(name string, grants []grant, network string) string {
+	entries := []string{`":root"="deny"`, `":minimal"="read"`, `"/private/tmp"="deny"`, `"/private/var/tmp"="deny"`}
 	for _, grant := range grants {
 		access := "read"
 		if grant.write {
@@ -828,9 +841,7 @@ func codexProfile(name string, grants []grant, network string, denied ...string)
 // CodexReadOnly is the -c overrides that let a Codex exec's local commands
 // read only paths (and Codex's minimal system profile), with no network. It
 // replaces --sandbox read-only, which reads the whole disk. Each path is
-// granted under its resolved spelling as well. The minimal profile lets
-// commands read and write the shared temporary directories, so those are
-// denied; a more specific grant beneath them still applies.
+// granted under its resolved spelling as well.
 func CodexReadOnly(paths ...string) []string {
 	var grants []grant
 	for _, path := range paths {
@@ -839,7 +850,7 @@ func CodexReadOnly(paths ...string) []string {
 			grants = append(grants, grant{resolved, false})
 		}
 	}
-	return []string{"-c", `default_permissions="dark-factory-review"`, "-c", codexProfile("dark-factory-review", grants, "{enabled=false}", "/private/tmp", "/private/var/tmp")}
+	return []string{"-c", `default_permissions="dark-factory-review"`, "-c", codexProfile("dark-factory-review", grants, "{enabled=false}")}
 }
 
 // claudeSettings confines a Claude Code run to the same grants Codex gets.
@@ -909,10 +920,6 @@ func codexAttemptServerName(runtime RuntimePaths) string {
 	return fmt.Sprintf("factory_attempt_%x", digest[:8])
 }
 
-func codexBootstrapPromptFor(runtime RuntimePaths) string {
-	return strings.Replace(codexBootstrapPrompt, "factory_attempt.factory", codexAttemptServerName(runtime)+".factory", 1)
-}
-
 func codexUntrustedProjectConfig(path string) string {
 	return "projects={" + tomlBasicString(path) + "={trust_level=\"untrusted\"}}"
 }
@@ -934,7 +941,7 @@ func tomlBasicString(value string) string {
 }
 
 // PrepareTask is also available before executable selection so the daemon can
-// freeze descriptor or terminal input where required. Codex task bytes remain
+// freeze descriptor input where required. Claude and Codex task bytes remain
 // in the daemon and are retrieved through the attempt-scoped API. Build returns
 // the same closed delivery value, which the Change worker must compare before
 // exec.
@@ -945,17 +952,11 @@ func PrepareTask(kind kernel.Provider, task []byte) (TaskDelivery, []byte, error
 	switch kind {
 	case kernel.ProviderShell:
 		return TaskDeliveryFD11, bytes.Clone(task), nil
-	case kernel.ProviderClaudeCode:
-		encoded, err := runner.PrepareClaudeTask(task)
-		if err != nil {
-			return 0, nil, ErrInvalid
-		}
-		return TaskDeliveryStartupTerminal, encoded, nil
-	case kernel.ProviderCodex:
-		// Codex reads this value through a shell-tool result. Keep the exact task
-		// comfortably below the model-visible result bound even after JSON turns
-		// every DEL/C1 code point into a six-byte escape.
-		if len(task) > runner.MaxCodexTaskBytes {
+	case kernel.ProviderClaudeCode, kernel.ProviderCodex:
+		// The provider reads this value through a tool result. Keep the exact
+		// task comfortably below the model-visible result bound even after JSON
+		// turns every DEL/C1 code point into a six-byte escape.
+		if len(task) > runner.MaxNativeTaskBytes {
 			return 0, nil, ErrInvalid
 		}
 		return TaskDeliveryAttemptAPI, nil, nil
@@ -987,8 +988,8 @@ const maxClaudeConfigBytes = 16 << 20
 // TrustClaudeDirectory records cwd as trusted in the account's Claude Code
 // configuration, which is what answering the CLI's folder-trust dialog does.
 // Every Change is a path the CLI has never seen, so without this record the
-// interactive session stops at that dialog and the startup task is typed into
-// it. Only this one key is added; every other value in the file is kept, with
+// interactive session stops at that dialog instead of submitting its bootstrap
+// prompt. Only this one key is added; every other value in the file is kept, with
 // numbers as their own digits and strings unescaped, and a file whose shape
 // is not the CLI's is refused rather than rewritten.
 // ponytail: a read-modify-write like the CLI's own sessions do on the same
@@ -1104,18 +1105,17 @@ func (runtime RuntimePaths) valid() bool {
 }
 
 func (runtime RuntimePaths) environmentForRole(kind kernel.Provider, role kernel.AgentRole) []string {
-	home := runtime.home
-	if kind == kernel.ProviderClaudeCode {
-		home = runtime.accountHome
-	}
 	environment := []string{
 		"DARK_FACTORY_TASK_ATTACHMENTS=" + filepath.Join(runtime.home, "task-attachments"),
 		"DARK_FACTORY_SOCKET=" + runtime.socket,
 		"DARK_FACTORY_ATTEMPT_TOKEN_FILE=" + runtime.token,
 		"DARK_FACTORY_FACTORYCTL=" + runtime.factoryctl,
-		"HOME=" + home,
 		"TMPDIR=" + runtime.temp,
 		"PATH=" + runtime.toolPath,
+	}
+	// Claude Code's HOME is its account's, from AccountEnvironment below.
+	if kind != kernel.ProviderClaudeCode {
+		environment = append(environment, "HOME="+runtime.home)
 	}
 	if role == kernel.RoleWorker {
 		// A bare /usr/bin/git is Apple's xcrun shim. Pin its developer
@@ -1173,24 +1173,7 @@ func (runtime RuntimePaths) environmentForRole(kind kernel.Provider, role kernel
 			environment = append(environment, "DF_CI_CACHE_ROOT="+filepath.Join(runtime.home, ".cache", "dark-factory", "local-ci", "trusted"))
 		}
 	}
-	switch kind {
-	case kernel.ProviderCodex:
-		environment = append(environment, "CODEX_HOME="+codexConfigHome(runtime))
-	case kernel.ProviderClaudeCode:
-		// Only a directory beside the default one is named. The default is
-		// what the CLI already reaches through HOME, and its OAuth account
-		// lives in $HOME/.claude.json rather than inside it, so naming it
-		// would point the CLI at the flags-only file it does contain and
-		// launch the run with no login at all.
-		if configDir := claudeConfigHome(runtime); configDir != ConfigHome(kernel.ProviderClaudeCode, runtime.accountHome) {
-			environment = append(environment, "CLAUDE_CONFIG_DIR="+configDir)
-		}
-		// The CLI finds its keychain login under $USER; without it a
-		// logged-in account launches as "Not logged in" (#1107).
-		if account, err := user.Current(); err == nil {
-			environment = append(environment, "USER="+account.Username)
-		}
-	}
+	environment = append(environment, AccountEnvironment(kind, runtime.accountHome, runtime.accountConfig)...)
 	if runtime.localCILeaseDir != "" {
 		environment = append(environment, "DARK_FACTORY_LOCAL_CI_DIRECTORY="+runtime.localCILeaseDir)
 	}
@@ -1214,6 +1197,35 @@ func (runtime RuntimePaths) environmentForRole(kind kernel.Provider, role kernel
 		"GIT_SSH_COMMAND=/usr/bin/false",
 		"GH_CONFIG_DIR=/dev/null",
 	)
+}
+
+// AccountEnvironment selects one provider login, configuration directory
+// accountConfig ("" for the default) under accountHome, and sets the CLI's
+// fixed switches. Worker launches and factoryd's reviewer both take it, so
+// their provider environments cannot drift apart.
+func AccountEnvironment(kind kernel.Provider, accountHome, accountConfig string) []string {
+	runtime := RuntimePaths{accountHome: accountHome, accountConfig: accountConfig}
+	switch kind {
+	case kernel.ProviderCodex:
+		return []string{"CODEX_HOME=" + codexConfigHome(runtime)}
+	case kernel.ProviderClaudeCode:
+		environment := []string{"HOME=" + accountHome, "DISABLE_AUTOUPDATER=1"}
+		// Only a directory beside the default one is named. The default is
+		// what the CLI already reaches through HOME, and its OAuth account
+		// lives in $HOME/.claude.json rather than inside it, so naming it
+		// would point the CLI at the flags-only file it does contain and
+		// launch the run with no login at all.
+		if configDir := claudeConfigHome(runtime); configDir != ConfigHome(kernel.ProviderClaudeCode, accountHome) {
+			environment = append(environment, "CLAUDE_CONFIG_DIR="+configDir)
+		}
+		// The CLI finds its keychain login under $USER; without it a
+		// logged-in account launches as "Not logged in" (#1107).
+		if account, err := user.Current(); err == nil {
+			environment = append(environment, "USER="+account.Username)
+		}
+		return environment
+	}
+	return nil
 }
 
 // goModuleCachePath is the one shared-cache path native workers may see. It

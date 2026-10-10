@@ -112,6 +112,7 @@ func settleWorkerRunForTest(t *testing.T, store *Store, run Run, keys AdmissionK
 }
 
 func TestSharedTaskIsClaimedByExactlyOneWorkerAcrossStores(t *testing.T) {
+	t.Parallel()
 	store, path, project, first, second := newSharedQueueStore(t, 2)
 	task := sharedTask(t, store, project, 10, 0, 5)
 	other, err := Open(context.Background(), path)
@@ -161,6 +162,7 @@ func TestSharedTaskIsClaimedByExactlyOneWorkerAcrossStores(t *testing.T) {
 }
 
 func TestWorkerPrefersItsSpecificTaskBeforeSharedWork(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	store, _, project, first, second := newSharedQueueStore(t, 4)
 	defer store.Close()
@@ -196,6 +198,7 @@ func TestWorkerPrefersItsSpecificTaskBeforeSharedWork(t *testing.T) {
 }
 
 func TestSharedTaskOutranksSpecificWorkAcrossWorkers(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	store, _, project, first, second := newSharedQueueStore(t, 4)
 	defer store.Close()
@@ -248,6 +251,7 @@ func sentBackSharedTask(t *testing.T) (*Store, Task, Agent, Agent) {
 }
 
 func TestClaimedSharedTaskStaysWithItsWorkerThroughCorrections(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	store, task, first, second := sentBackSharedTask(t)
 	defer store.Close()
@@ -266,6 +270,7 @@ func TestClaimedSharedTaskStaysWithItsWorkerThroughCorrections(t *testing.T) {
 }
 
 func TestExplicitReassignmentMovesASentBackSharedTask(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	store, task, first, second := sentBackSharedTask(t)
 	defer store.Close()
@@ -281,6 +286,7 @@ func TestExplicitReassignmentMovesASentBackSharedTask(t *testing.T) {
 }
 
 func TestSharedTaskWaitsForAnEligibleWorker(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	store, _, project, first, second := newSharedQueueStore(t, 4)
 	defer store.Close()
@@ -337,6 +343,7 @@ func TestSharedTaskWaitsForAnEligibleWorker(t *testing.T) {
 }
 
 func TestSharedQueueSurvivesReopen(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	store, path, project, first, second := newSharedQueueStore(t, 4)
 	if _, err := store.EnqueueTask(ctx, NewTask{ID: taskID(t, 10), ProjectID: project.ID, AssignedAgentID: first.ID, IncarnationID: incarnationID(t, 11), Title: "specific", Priority: 9}, mustTime(t, 5)); err != nil {

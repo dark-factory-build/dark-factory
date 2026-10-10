@@ -571,7 +571,25 @@ func (store *Store) importIntakeAcceptance(ctx context.Context, id IntakeAccepta
 		return Task{}, tx.Rollback(err)
 	}
 	if accepted.WithdrawnAt != nil {
-		return Task{}, tx.Rollback(ErrConflict)
+		// Importing a withdrawn receipt again lifts its withdrawal (for the
+		// latest content only) and retries its failed or cancelled task in the
+		// same write, through the operator retry: a task that never ran stays
+		// at its work revision, and one a continuation waits on is refused.
+		task, found, err := taskByID(ctx, tx.connection, accepted.TaskID)
+		if err != nil {
+			return Task{}, tx.Rollback(err)
+		}
+		latest, latestFound, err := latestIntakeAcceptance(ctx, tx.connection, accepted.Snapshot, accepted.ProjectID, accepted.RepositoryID)
+		if err != nil {
+			return Task{}, tx.Rollback(err)
+		}
+		if !found || task.Status != TaskFailed && task.Status != TaskCancelled || !latestFound || latest.ID != accepted.ID {
+			return Task{}, tx.Rollback(ErrConflict)
+		}
+		if _, err := tx.connection.ExecContext(ctx, `UPDATE intake_acceptances SET withdrawn_at_ms = NULL WHERE id = ?`, id.Bytes()); err != nil {
+			return Task{}, tx.Rollback(err)
+		}
+		return store.retryTaskTx(ctx, tx, nil, task.ID, task.Revision, AgentID{}, at, 0)
 	}
 	if len(expectedSource) > 1 {
 		return Task{}, tx.Rollback(ErrInvalidValue)

@@ -8,6 +8,7 @@ import (
 )
 
 func TestProviderAndRunnerExitsRemainDistinctInEitherOrder(t *testing.T) {
+	t.Parallel()
 	t.Run("typed outcome then provider then runner", func(t *testing.T) {
 		store, run, keys := runningOrchestratorRun(t)
 		defer store.Close()
@@ -69,6 +70,7 @@ func TestProviderAndRunnerExitsRemainDistinctInEitherOrder(t *testing.T) {
 }
 
 func TestRecoveredProviderAbsenceRequiresExactRegisteredPair(t *testing.T) {
+	t.Parallel()
 	store, run, _ := admittedOrchestratorRun(t)
 	defer store.Close()
 	resources := resourcesForRunTest(t, store, run.ID)
@@ -89,6 +91,7 @@ func TestRecoveredProviderAbsenceRequiresExactRegisteredPair(t *testing.T) {
 }
 
 func TestReleaseOfNonemptyProcessResourceRequiresMatchingExit(t *testing.T) {
+	t.Parallel()
 	store, run, keys := runningOrchestratorRun(t)
 	defer store.Close()
 	success, _ := NewSuccessProposal("done")
@@ -129,6 +132,7 @@ func TestReleaseOfNonemptyProcessResourceRequiresMatchingExit(t *testing.T) {
 }
 
 func TestRelationshipValidationRejectsReleasedProcessWithoutExit(t *testing.T) {
+	t.Parallel()
 	store, run, keys := runningOrchestratorRun(t)
 	defer store.Close()
 	success, _ := NewSuccessProposal("done")
@@ -173,6 +177,7 @@ func prepareRunnerRelease(t *testing.T) (*Store, Run, Resource) {
 }
 
 func TestProcessExitTimeIsBoundedByRunLifetime(t *testing.T) {
+	t.Parallel()
 	t.Run("provider/input", func(t *testing.T) {
 		store, run, _ := runningOrchestratorRun(t)
 		defer store.Close()
