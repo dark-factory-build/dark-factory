@@ -979,7 +979,7 @@ func decodeCall(domain byte, bearer credential, encoded []byte) (Call, RemoteErr
 			return Call{}, RemoteInvalidRequest
 		}
 	case CallSendBack, CallSendBackTask:
-		if err := decodeExact(request.Params, &call.sendBack); err != nil || !validID(call.sendBack.TaskID) || !validText(call.sendBack.Note, 1, 8192) {
+		if err := decodeExact(request.Params, &call.sendBack); err != nil || !validID(call.sendBack.TaskID) || call.sendBack.Head != "" && !validCommitHex(call.sendBack.Head) || !validText(call.sendBack.Note, 1, 8192) {
 			return Call{}, RemoteInvalidRequest
 		}
 	case CallOverseerEnqueueTask:

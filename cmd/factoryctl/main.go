@@ -74,11 +74,11 @@ const (
   factoryctl attempt peer answer --question ID --revision REVISION --idempotency-key HEX32 --answer TEXT
   factoryctl attempt terminal observe --project ID --task ID --run ID [--cursor N] [--max-bytes N]
   factoryctl terminal observe --project ID --task ID --run ID [--cursor N] [--max-bytes N] [--text]
-  factoryctl attempt send-back --task ID --note TEXT
+  factoryctl attempt send-back --task ID [--head SHA] --note TEXT
   factoryctl overseer status [--task ID] [--offset N --head HEAD] [--text-offset RUNES --head HEAD]
 	factoryctl overseer task add --agent ID|any --title TEXT [--body TEXT] [--priority N] [--prerequisite TASK_ID:WORK_REVISION ...] [--conflict-path PATH ...] [--task-id ID --incarnation-id ID]
   factoryctl overseer task update --task ID --revision REVISION [--title TEXT] [--body TEXT] [--priority N] [--agent ID] [--cancel] [--retry]
-  factoryctl overseer task send-back --task ID --note TEXT
+  factoryctl overseer task send-back --task ID [--head SHA] --note TEXT
   factoryctl overseer agent pause|resume|archive|restore --agent ID --revision REVISION
   factoryctl overseer worker stop --operation-id ID --task ID --task-revision REVISION --run ID --run-revision REVISION
   factoryctl overseer worker replace --operation-id ID --task ID --task-revision REVISION --run ID --run-revision REVISION --successor-task ID --successor-incarnation ID --instruction TEXT
@@ -120,7 +120,7 @@ const (
     --project prints what factoryd waits on there instead: held health conditions,
     the overseers' due and stalled items, Changes reclaim keeps by reason, and
     each repository's readiness (running the project repository fetch check).
-  factoryctl task send-back --task ID --note TEXT
+  factoryctl task send-back --task ID [--head SHA] --note TEXT
   factoryctl task update --task ID --revision REVISION [--title TEXT] [--body TEXT] [--priority N] [--agent ID] [--cancel] [--retry]
   factoryctl task update --task ID --revision REVISION --remove-attachments
     Only succeeded/cancelled tasks; retained filenames are marked removed.
@@ -527,7 +527,7 @@ func runWithDependencies(ctx context.Context, args []string, getenv func(string)
 	case commandPeerAnswer:
 		result, err = client.PeerAnswer(callContext, api.PeerAnswerInput{QuestionID: command.id, ExpectedRevision: command.expectedRevision, IdempotencyKey: command.idempotencyKey, Answer: command.text})
 	case commandSendBack:
-		result, err = client.SendBack(callContext, api.SendBackInput{TaskID: command.id, Note: command.text})
+		result, err = client.SendBack(callContext, api.SendBackInput{TaskID: command.id, Head: command.sourceCommit, Note: command.text})
 	default:
 		err = api.ErrInvalidInput
 	}
@@ -884,8 +884,8 @@ func parse(args []string) (attemptCommand, bool, bool) {
 			}
 		}
 	case "send-back":
-		values, ok := pairedFlagValues(args[2:], true, "--task", "--note")
-		return attemptCommand{kind: commandSendBack, id: values["--task"], text: values["--note"]}, false, ok && validHumanRequestKey(values["--task"]) && validOperatorText(values["--note"], 1, 8192)
+		values, ok := pairedFlagValues(args[2:], true, "--task", "--head", "--note")
+		return attemptCommand{kind: commandSendBack, id: values["--task"], sourceCommit: values["--head"], text: values["--note"]}, false, ok && validHumanRequestKey(values["--task"]) && validOperatorText(values["--note"], 1, 8192)
 	}
 	return attemptCommand{}, false, false
 }
@@ -1617,7 +1617,7 @@ func parseOperator(args []string) (attemptCommand, bool, bool) {
 	case "task add":
 		command.kind, names = commandTaskAdd, []string{"--project", "--repository", "--agent", "--title", "--body", "--priority", "--content", "--task-id", "--incarnation-id"}
 	case "task send-back":
-		command.kind, names = commandTaskSendBack, []string{"--task", "--note"}
+		command.kind, names = commandTaskSendBack, []string{"--task", "--head", "--note"}
 	case "task read":
 		command.kind, names = commandTaskRead, []string{"--task", "--revision", "--offset"}
 	default:
@@ -1710,6 +1710,8 @@ func parseOperator(args []string) (attemptCommand, bool, bool) {
 			command.id = value
 		case name == "--offset" && command.kind == commandTaskRead && isCount:
 			command.offset = count
+		case name == "--head" && command.kind == commandTaskSendBack:
+			command.sourceCommit = value
 		case name == "--note" && command.kind == commandTaskSendBack && validOperatorText(value, 1, 8192):
 			command.text = value
 		case name == "--priority" && command.kind == commandTaskAdd:
@@ -1901,6 +1903,7 @@ func parseOverseer(args []string) (attemptCommand, bool, bool) {
 		return key(value) || command.kind == commandOverseerTaskAdd && value == "any"
 	})
 	validatedStringFlag("--task", &command.id, key)
+	validatedStringFlag("--head", &command.sourceCommit, func(string) bool { return command.kind == commandOverseerTaskSendBack })
 	validatedStringFlag("--request", &command.id, key)
 	validatedStringFlag("--run", &command.run, key)
 	validatedStringFlag("--successor-task", &command.project, key)
@@ -2461,7 +2464,7 @@ func runOperator(ctx context.Context, command attemptCommand, getenv func(string
 			Revision      uint64 `json:"revision"`
 		}{ID: id, IncarnationID: incarnation, Head: result.Head, Revision: result.Revision})
 	case commandTaskSendBack:
-		result, callErr := client.SendBackTask(callContext, api.SendBackInput{TaskID: command.id, Note: command.text})
+		result, callErr := client.SendBackTask(callContext, api.SendBackInput{TaskID: command.id, Head: command.sourceCommit, Note: command.text})
 		if callErr != nil {
 			return writeWebFailure(stderr, "task send-back", callErr)
 		}
@@ -2622,7 +2625,7 @@ func runOverseer(ctx context.Context, command attemptCommand, getenv func(string
 		}
 		result, err = client.OverseerUpdateTask(callContext, input)
 	case commandOverseerTaskSendBack:
-		result, err = client.SendBack(callContext, api.SendBackInput{TaskID: command.id, Note: command.text})
+		result, err = client.SendBack(callContext, api.SendBackInput{TaskID: command.id, Head: command.sourceCommit, Note: command.text})
 	case commandOverseerAgentUpdate:
 		input := api.OverseerAgentUpdateInput{AgentID: command.agent, ExpectedRevision: command.expectedRevision}
 		if command.archiveSet {
