@@ -51,6 +51,7 @@ type client struct {
 	tokenPath  string
 	token      tokenRecord
 	domain     byte
+	prefix     string
 }
 
 type OperatorClient struct{ client client }
@@ -82,6 +83,18 @@ func NewAttemptClientFromEnvironment(socketPath string) (*AttemptClient, error) 
 		return nil, err
 	}
 	return &AttemptClient{client: base}, nil
+}
+
+// NewAttemptReaderFromEnvironment sends the operator client's read views
+// (snapshot, human requests, task read, intake list) with the attempt
+// credential. factoryd answers them for a specialist's review run only.
+func NewAttemptReaderFromEnvironment(socketPath string) (*OperatorClient, error) {
+	attempt, err := NewAttemptClientFromEnvironment(socketPath)
+	if err != nil {
+		return nil, err
+	}
+	attempt.client.prefix = "attempt_"
+	return &OperatorClient{client: attempt.client}, nil
 }
 
 func newClient(socketPath, tokenPath string, domain byte) (client, error) {
@@ -705,6 +718,7 @@ func (client client) call(ctx context.Context, method string, params, output any
 	if err != nil || !current.same(client.token) {
 		return ErrInvalidClient
 	}
+	method = client.prefix + method
 	encoded, err := json.Marshal(requestEnvelope{Method: method, Params: params})
 	if err != nil || len(encoded)+requestPrelude > maxFrameBytes {
 		return ErrInvalidInput
@@ -877,7 +891,7 @@ func unavailable(err error) bool {
 
 func readMethod(method string) bool {
 	switch method {
-	case "task", "source", "peer_status", "overseer_snapshot", "terminal_observe", "attempt_content_list", "attempt_content_read", "attempt_content_body", "attempt_content_attachments", "attempt_outcome_read", "attempt_outcome_list":
+	case "task", "source", "peer_status", "overseer_snapshot", "terminal_observe", "attempt_snapshot", "attempt_human_requests", "attempt_task_read", "attempt_intake", "attempt_content_list", "attempt_content_read", "attempt_content_body", "attempt_content_attachments", "attempt_outcome_read", "attempt_outcome_list":
 		return true
 	}
 	return false

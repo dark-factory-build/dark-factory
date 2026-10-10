@@ -1989,3 +1989,69 @@ func TestRefusalRepliesCarryABoundedReason(t *testing.T) {
 		t.Fatalf("nil cause detail = %q", boundedDetail(nil))
 	}
 }
+
+// Only a specialist's review run (its carrier) reads the operator's views
+// with its attempt credential, and of intake only its list.
+func TestDaemonOperatorReadsAdmitOnlySpecialistCarrier(t *testing.T) {
+	fixture := newDispatchFixture(t)
+	ctx := context.Background()
+	project, seed := testID(211), byte(211)
+	enqueueCarrier := func() {
+		operator, err := api.NewOperatorClient(fixture.socket, fixture.operator)
+		if err != nil {
+			t.Fatal(err)
+		}
+		done := fixture.serve(t)
+		if _, err := operator.EnqueueTask(ctx, api.EnqueueTaskInput{ID: testID(seed + 2), ProjectID: project, AssignedAgentID: testID(seed + 1), IncarnationID: testID(seed + 3), Title: "Standing instruction", Body: "Review.", Priority: 1}); err != nil {
+			t.Fatal(err)
+		}
+		waitDispatch(t, done)
+	}
+	active := prepareActiveAttemptInProject(t, fixture, seed, project, "worker", enqueueCarrier)
+	reader, err := api.NewAttemptReaderFromEnvironment(fixture.socket)
+	if err != nil {
+		t.Fatal(err)
+	}
+	forbidden := func(name string, invoke func() error) {
+		t.Helper()
+		done := fixture.serve(t)
+		var remote *api.RemoteError
+		if err := invoke(); !errors.As(err, &remote) || remote.Code() != api.RemoteForbidden {
+			t.Fatalf("%s = %v, want forbidden", name, err)
+		}
+		waitDispatch(t, done)
+	}
+	humanRequests := func() error { _, err := reader.HumanRequests(ctx); return err }
+	forbidden("ordinary worker human list", humanRequests)
+
+	agent, _, err := fixture.store.Agent(ctx, active.run.AgentID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	policy, after, instruction := kernel.IdleStandingInstruction, uint32(3600), "Review the factory."
+	if _, err := fixture.store.UpdateAgent(ctx, agent.ID, agent.Revision, kernel.AgentPatch{IdlePolicy: &policy, IdleAfterSeconds: &after, IdleInstruction: &instruction}, mustKernelTime(t, 2000)); err != nil {
+		t.Fatal(err)
+	}
+	for name, invoke := range map[string]func() error{
+		"human list":  humanRequests,
+		"status":      func() error { _, err := reader.Snapshot(ctx); return err },
+		"intake list": func() error { _, err := reader.Intake(ctx, api.IntakeInput{Action: "list"}); return err },
+		"task read": func() error {
+			task, _, err := fixture.store.Task(ctx, active.run.TaskID)
+			if err == nil {
+				_, err = reader.ReadTask(ctx, api.TaskReadInput{TaskID: task.ID.String(), ExpectedRevision: uint64(task.Revision.Int64())})
+			}
+			return err
+		},
+	} {
+		done := fixture.serve(t)
+		if err := invoke(); err != nil {
+			t.Fatalf("specialist %s = %v", name, err)
+		}
+		waitDispatch(t, done)
+	}
+	forbidden("specialist intake write", func() error {
+		_, err := reader.Intake(ctx, api.IntakeInput{Action: "linear_disconnect"})
+		return err
+	})
+}

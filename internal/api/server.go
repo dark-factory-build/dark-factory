@@ -1248,6 +1248,16 @@ func methodKind(method string) (CallKind, byte) {
 		return CallOutcomeList, attemptDomain
 	case "human_requests":
 		return CallHumanRequests, operatorDomain
+	// A specialist's review run reads these operator views; factoryd refuses
+	// every other attempt.
+	case "attempt_snapshot":
+		return CallSnapshot, attemptDomain
+	case "attempt_human_requests":
+		return CallHumanRequests, attemptDomain
+	case "attempt_task_read":
+		return CallTaskRead, attemptDomain
+	case "attempt_intake":
+		return CallIntake, attemptDomain
 	case "human_reply":
 		return CallHumanReply, operatorDomain
 	case "human_cancel":
