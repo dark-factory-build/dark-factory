@@ -138,6 +138,17 @@ func reviewNow(ctx context.Context, daemon *Daemon, project kernel.ProjectID, re
 	return op.ID, err
 }
 
+func waitForMergePipeline(t *testing.T, daemon *Daemon) {
+	t.Helper()
+	deadline := time.Now().Add(2 * time.Second)
+	for daemon.pipelineBusy.Load() && time.Now().Before(deadline) {
+		time.Sleep(time.Millisecond)
+	}
+	if daemon.pipelineBusy.Load() {
+		t.Fatal("merge pipeline did not finish")
+	}
+}
+
 // #1300: a second review's ALLOW at a head factoryd already blocked was
 // enqueued, and the queue's review job failed on the standing block.
 func TestAllowAtABlockedHeadIsNotEnqueued(t *testing.T) {
@@ -502,8 +513,12 @@ func TestMergeQueueEjectionSendsBackOnceAndAMergeCloses(t *testing.T) {
 		ctx := context.Background()
 		backend := &publicReviewBackend{}
 		fixture.daemon.reviewBackend = func(string, uint64) review.Backend { return backend }
-		if _, err := reviewNow(ctx, fixture.daemon, project, publishedReviewRequest()); err != nil || backend.enqueues != 1 {
+		if _, err := reviewNow(ctx, fixture.daemon, project, publishedReviewRequest()); err != nil {
 			t.Fatalf("enqueue err=%v backend=%+v", err, backend)
+		}
+		waitForMergePipeline(t, fixture.daemon)
+		if backend.enqueues != 1 {
+			t.Fatalf("initial enqueue count=%d", backend.enqueues)
 		}
 		test.pull.Head = publishedReviewRequest().Head
 		backend.pull = &test.pull
@@ -555,8 +570,12 @@ func TestMergeQueueEjectionWithNoHeadFailureRequeuesOnceThenSendsBack(t *testing
 	ctx := context.Background()
 	backend := &publicReviewBackend{}
 	fixture.daemon.reviewBackend = func(string, uint64) review.Backend { return backend }
-	if _, err := reviewNow(ctx, fixture.daemon, project, publishedReviewRequest()); err != nil || backend.enqueues != 1 {
+	if _, err := reviewNow(ctx, fixture.daemon, project, publishedReviewRequest()); err != nil {
 		t.Fatalf("enqueue err=%v backend=%+v", err, backend)
+	}
+	waitForMergePipeline(t, fixture.daemon)
+	if backend.enqueues != 1 {
+		t.Fatalf("initial enqueue count=%d", backend.enqueues)
 	}
 	backend.pull = &review.Pull{Head: publishedReviewRequest().Head, State: "open", Group: &review.GroupRun{ID: 37516424704, Conclusion: "failure", Jobs: []review.GroupJob{{Name: "checks", Conclusion: "failure", Annotations: []string{"not ok 3 - board and shelves open peer views of one Library workspace"}}}}}
 	if _, err := fixture.daemon.advanceReviewOperations(ctx, false); err != nil {
