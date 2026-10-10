@@ -358,6 +358,9 @@ local_fixture="$temporary/local"
 printf 'module fixture\n' >"$local_fixture/go.mod"
 printf 'package buildinfo\n' >"$local_fixture/internal/buildinfo/buildinfo.go"
 /usr/bin/env -i PATH=/usr/bin:/bin HOME=/dev/null /usr/bin/git init -q "$local_fixture"
+/usr/bin/git -C "$local_fixture" -c user.name=fixture -c user.email=fixture@example.invalid add .
+/usr/bin/git -C "$local_fixture" -c user.name=fixture -c user.email=fixture@example.invalid commit -q -m base
+local_fixture_base=$(/usr/bin/git -C "$local_fixture" rev-parse HEAD)
 /bin/cp "$repository_root/scripts/local-ci.sh" "$local_fixture/scripts/local-ci.sh"
 /bin/cp "$repository_root/scripts/local-ci-environment.sh" "$local_fixture/scripts/local-ci-environment.sh"
 /bin/cat >"$local_fixture/scripts/with-local-ci-lease.sh" <<EOF
@@ -497,9 +500,10 @@ local_cache_root=$(sed -n '2p' "$local_fixture/cache-roots")
 
 run_local_mode() {
     selected_mode=$1
+    selected_base=${2-}
     local_output=$(CDPATH= cd -- "$local_fixture" && DARK_FACTORY_LOCAL_CI_LEASE_HELD=1 \
         PATH="$local_fixture/configured:/usr/bin:/bin" \
-        /bin/sh ./scripts/local-ci.sh "$selected_mode" 2>&1)
+        /bin/sh ./scripts/local-ci.sh "$selected_mode" ${selected_base:+"$selected_base"} 2>&1)
     printf '%s\n' "$local_output" | /usr/bin/grep -F "local-ci: PASS (${selected_mode#--})" >/dev/null \
         || fail "$selected_mode did not report its selected scope: $local_output"
     if printf '%s\n' "$local_output" | /usr/bin/grep -F 'repository contract fixtures' >/dev/null; then
@@ -507,8 +511,9 @@ run_local_mode() {
     fi
 }
 run_local_mode --warm
+run_local_mode --affected "$local_fixture_base"
 : >"$local_fixture/lease-calls"
-for selected_mode in --full --affected; do
+for selected_mode in --full; do
     : >"$local_fixture/lease-calls"
     local_output=$(CDPATH= cd -- "$local_fixture" && DARK_FACTORY_LOCAL_CI_LEASE_HELD=0 \
         PATH="$local_fixture/configured:/usr/bin:/bin" \
