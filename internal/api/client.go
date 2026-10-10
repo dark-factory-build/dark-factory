@@ -1164,6 +1164,16 @@ func validSnapshot(snapshot DashboardSnapshot) bool {
 			return false
 		}
 	}
+	for _, account := range snapshot.Accounts {
+		if !validID(account.ID) || !validProvider(account.Provider) || !validText(account.Home, 1, 4096) || !validText(account.Label, 1, 128) || account.Revision == 0 {
+			return false
+		}
+	}
+	for _, question := range snapshot.PeerQuestions {
+		if !validID(question.ID) || !validID(question.SourceTaskID) || !validID(question.TargetTaskID) || question.SourceTaskID == question.TargetTaskID || question.Revision == 0 {
+			return false
+		}
+	}
 	return true
 }
 

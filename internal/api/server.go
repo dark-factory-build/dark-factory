@@ -433,6 +433,12 @@ func NewSnapshotReply(snapshot DashboardSnapshot) (Reply, error) {
 	tasks := make([]TaskSummary, len(snapshot.Tasks))
 	copy(tasks, snapshot.Tasks)
 	snapshot.Tasks = tasks
+	accounts := make([]AccountSummary, len(snapshot.Accounts))
+	copy(accounts, snapshot.Accounts)
+	snapshot.Accounts = accounts
+	questions := make([]PeerQuestionSummary, len(snapshot.PeerQuestions))
+	copy(questions, snapshot.PeerQuestions)
+	snapshot.PeerQuestions = questions
 	return Reply{kind: replySnapshot, snapshot: snapshot}, nil
 }
 

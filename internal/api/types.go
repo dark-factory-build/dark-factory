@@ -107,11 +107,21 @@ type HealthStatus struct {
 // relative to the run's change directory; they are not the worker's current
 // working directory.
 type AgentPaths struct {
-	AgentID     string   `json:"agent_id"`
-	RunID       string   `json:"run_id,omitempty"`
-	SourcePath  string   `json:"source_path,omitempty"`
-	RuntimePath string   `json:"runtime_path,omitempty"`
-	Paths       []string `json:"paths"`
+	AgentID     string        `json:"agent_id"`
+	RunID       string        `json:"run_id,omitempty"`
+	SourcePath  string        `json:"source_path,omitempty"`
+	RuntimePath string        `json:"runtime_path,omitempty"`
+	Paths       []string      `json:"paths"`
+	Telemetry   *RunTelemetry `json:"telemetry,omitempty"`
+}
+
+type RunTelemetry struct {
+	TokensIn     uint64  `json:"tokens_in"`
+	TokensOut    uint64  `json:"tokens_out"`
+	CostMicroUSD uint64  `json:"cost_micro_usd"`
+	ToolCalls    uint64  `json:"tool_calls"`
+	APIRequests  uint64  `json:"api_requests"`
+	QuietSeconds *uint64 `json:"quiet_seconds,omitempty"`
 }
 
 type AgentPathsInput struct {
@@ -620,25 +630,53 @@ type ProjectSummary struct {
 }
 
 type AgentSummary struct {
-	ToolBudgetLimit  uint64 `json:"tool_budget_limit"`
-	ToolCallsUsed    uint64 `json:"tool_calls_used"`
-	ID               string `json:"id"`
-	ProjectID        string `json:"project_id"`
-	Name             string `json:"name"`
-	Role             string `json:"role"`
-	Provider         string `json:"provider"`
-	AccountID        string `json:"account_id"`
-	Paused           bool   `json:"paused"`
-	Archived         bool   `json:"archived"`
-	Model            string `json:"model"`
-	ReasoningEffort  string `json:"reasoning_effort"`
-	IdlePolicy       string `json:"idle_policy"`
-	IdleAfterSeconds uint32 `json:"idle_after_seconds"`
-	IdleInstruction  string `json:"idle_instruction"`
-	IdleRunBudget    uint32 `json:"idle_run_budget"`
-	IdleRunsUsed     uint32 `json:"idle_runs_used"`
-	IdleWakeOn       string `json:"idle_wake_on"`
-	Revision         uint64 `json:"revision"`
+	ToolBudgetLimit          uint64             `json:"tool_budget_limit"`
+	ToolCallsUsed            uint64             `json:"tool_calls_used"`
+	ID                       string             `json:"id"`
+	ProjectID                string             `json:"project_id"`
+	Name                     string             `json:"name"`
+	Role                     string             `json:"role"`
+	Provider                 string             `json:"provider"`
+	AccountID                string             `json:"account_id"`
+	Paused                   bool               `json:"paused"`
+	Archived                 bool               `json:"archived"`
+	Model                    string             `json:"model"`
+	ReasoningEffort          string             `json:"reasoning_effort"`
+	IdlePolicy               string             `json:"idle_policy"`
+	IdleAfterSeconds         uint32             `json:"idle_after_seconds"`
+	IdleInstruction          string             `json:"idle_instruction"`
+	IdleRunBudget            uint32             `json:"idle_run_budget"`
+	IdleRunsUsed             uint32             `json:"idle_runs_used"`
+	IdleWakeOn               string             `json:"idle_wake_on"`
+	Revision                 uint64             `json:"revision"`
+	Appearance               AgentAppearance    `json:"appearance"`
+	EffectiveModel           string             `json:"effective_model"`
+	EffectiveReasoningEffort string             `json:"effective_reasoning_effort"`
+	ModelSource              string             `json:"model_source"`
+	Specialist               *SpecialistSummary `json:"specialist,omitempty"`
+}
+
+type AgentAppearance struct {
+	Automatic     bool  `json:"automatic"`
+	Skin          uint8 `json:"skin"`
+	Hair          uint8 `json:"hair"`
+	HairColour    uint8 `json:"hair_colour"`
+	Face          uint8 `json:"face"`
+	Outfit        uint8 `json:"outfit"`
+	ClothesColour uint8 `json:"clothes_colour"`
+	Shoes         uint8 `json:"shoes"`
+	Tool          uint8 `json:"tool"`
+	Headwear      uint8 `json:"headwear"`
+}
+
+type SpecialistSummary struct {
+	NextReviewAtMillis uint64 `json:"next_review_at_ms"`
+	NextReason         string `json:"next_reason"`
+	Waiting            string `json:"waiting"`
+	QuietReviews       uint8  `json:"quiet_reviews"`
+	OpenProposals      uint16 `json:"open_proposals"`
+	OpenProposalLimit  uint16 `json:"open_proposal_limit"`
+	LastReviewTaskID   string `json:"last_review_task_id"`
 }
 
 type TaskSummary struct {
@@ -651,6 +689,26 @@ type TaskSummary struct {
 	Status          string `json:"status"`
 	Priority        int64  `json:"priority"`
 	Revision        uint64 `json:"revision"`
+	BlockedReason   string `json:"blocked_reason"`
+	UpdatedAt       uint64 `json:"updated_at_ms"`
+	IssueNumber     int64  `json:"issue_number"`
+	MissionID       string `json:"mission_id"`
+}
+
+type AccountSummary struct {
+	ID       string `json:"id"`
+	Provider string `json:"provider"`
+	Home     string `json:"home"`
+	Label    string `json:"label"`
+	Revision uint64 `json:"revision"`
+}
+
+type PeerQuestionSummary struct {
+	ID           string `json:"id"`
+	SourceTaskID string `json:"source_task_id"`
+	TargetTaskID string `json:"target_task_id"`
+	Answered     bool   `json:"answered"`
+	Revision     uint64 `json:"revision"`
 }
 
 type TaskReadInput struct {
@@ -673,11 +731,13 @@ type TaskText struct {
 // projection. Roots, task bodies/results, models, credentials and source data
 // have no representable field here.
 type DashboardSnapshot struct {
-	Head     uint64           `json:"head"`
-	Factory  FactorySummary   `json:"factory"`
-	Projects []ProjectSummary `json:"projects"`
-	Agents   []AgentSummary   `json:"agents"`
-	Tasks    []TaskSummary    `json:"tasks"`
+	Head          uint64                `json:"head"`
+	Factory       FactorySummary        `json:"factory"`
+	Projects      []ProjectSummary      `json:"projects"`
+	Agents        []AgentSummary        `json:"agents"`
+	Tasks         []TaskSummary         `json:"tasks"`
+	Accounts      []AccountSummary      `json:"accounts"`
+	PeerQuestions []PeerQuestionSummary `json:"peer_questions"`
 }
 
 // OverseerSnapshot is the private, project-scoped view granted to a running
