@@ -256,7 +256,9 @@ func (store *Store) RecordChangeWorktree(ctx context.Context, id ChangeID, expec
 
 // A retained Change's worktree may be reclaimed once nothing of value is left
 // in it: its task has ended (succeeded, failed or cancelled), and the work is
-// empty, or given up: merged at its exact head, failed or cancelled (with no
+// empty, or given up: its pull request merged after the Change last changed
+// (the App publishes its own commit, so the merged head never equals the
+// Change's head), failed or cancelled (with no
 // open pull request) for changeReclaimAfterEnd, or succeeded and never
 // published for changeReclaimAfterSuccess. The daemon adds the filesystem
 // half: the worktree is clean and verifies, and only given-up work leaves a
@@ -271,7 +273,8 @@ const (
 // changeReclaimAfterSuccess. A retained Change has no current run.
 const (
 	reclaimEnded   = `c.phase = 'retained' AND t.status IN ('succeeded', 'failed', 'cancelled')`
-	reclaimGivenUp = `(EXISTS (SELECT 1 FROM ` + changePullRequests + ` AND json_extract(r.document, '$.state') = 'merged' AND lower(json_extract(r.document, '$.head')) = lower(hex(c.head_commit)))
+	reclaimGivenUp = `(EXISTS (SELECT 1 FROM ` + changePullRequests + ` AND json_extract(r.document, '$.state') = 'merged'
+			AND COALESCE(unixepoch(json_extract(r.document, '$.merged_at')) * 1000, r.observed_at_ms) >= c.updated_at_ms)
 		OR t.status IN ('failed', 'cancelled') AND t.completed_at_ms <= ?1 AND NOT EXISTS (SELECT 1 FROM ` + changePullRequests + ` AND json_extract(r.document, '$.state') = 'open')
 		OR t.status = 'succeeded' AND t.completed_at_ms <= ?2 AND NOT EXISTS (SELECT 1 FROM publication_tasks p WHERE p.change_id = c.id OR p.task_id = c.task_id))`
 )

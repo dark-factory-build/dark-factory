@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"testing"
 )
 
@@ -384,9 +385,13 @@ func TestReclaimableChangesFollowTheRule(t *testing.T) {
 	day := int64(24 * 60 * 60 * 1000)
 	end, success := 33+14*day, 33+30*day
 	work := `UPDATE changes SET head_commit = randomblob(20)`
-	publish := func(state, head string) string {
+	publish := func(state, head string, observed ...int) string {
+		at := "34"
+		if len(observed) != 0 {
+			at = fmt.Sprint(observed[0])
+		}
 		return `INSERT INTO publication_tasks (project_id, repository, pull_number, task_id, change_id, created_at_ms) SELECT project_id, 'o/r', 7, task_id, id, 34 FROM changes;
-			INSERT INTO production_records (project_id, repository, kind, identity, visual_id, document, observed_at_ms) SELECT project_id, 'o/r', 'pull_request', '7', '', json_object('state', '` + state + `', 'head', ` + head + `), 34 FROM changes`
+			INSERT INTO production_records (project_id, repository, kind, identity, visual_id, document, observed_at_ms) SELECT project_id, 'o/r', 'pull_request', '7', '', json_object('state', '` + state + `', 'head', ` + head + `), ` + at + ` FROM changes`
 	}
 	for _, test := range []struct {
 		name  string
@@ -404,8 +409,8 @@ func TestReclaimableChangesFollowTheRule(t *testing.T) {
 		{name: "Git-free copy long", setup: []string{`UPDATE changes SET head_commit = NULL`}, at: end, want: true},
 		{name: "cancelled work long", setup: []string{work, `UPDATE tasks SET status = 'cancelled'`}, at: end, want: true},
 		{name: "failed work long with an open pull request", setup: []string{work, publish("open", `lower(hex(head_commit))`)}, at: end, want: false},
-		{name: "merged at head", setup: []string{work, publish("merged", `lower(hex(head_commit))`)}, at: 34, want: true},
-		{name: "merged elsewhere", setup: []string{work, publish("merged", `'00'`)}, at: 34, want: false},
+		{name: "merged after the Change last changed", setup: []string{work, publish("merged", `'00'`)}, at: 34, want: true},
+		{name: "merged before a later correction", setup: []string{work, publish("merged", `'00'`, 20)}, at: 34, want: false},
 		{name: "open", setup: []string{work, publish("open", `lower(hex(head_commit))`)}, at: 34, want: false},
 		{name: "succeeded unpublished recently", setup: []string{work, `UPDATE tasks SET status = 'succeeded', result = 'ok'`}, at: success - 1, want: false},
 		{name: "succeeded unpublished long", setup: []string{work, `UPDATE tasks SET status = 'succeeded', result = 'ok'`}, at: success, want: true},

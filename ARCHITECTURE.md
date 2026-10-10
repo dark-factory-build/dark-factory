@@ -406,7 +406,9 @@ filesystem byte ceiling.
 
 A retained Change is reclaimed once nothing of value can be lost: its task
 has ended (succeeded, failed or cancelled), and its head equals its base, or
-its work is given up: its pull request merged at that exact head, its task
+its work is given up: its pull request merged after the Change last changed
+(the App publishes its own commit, so a merged head never equals the
+Change's), its task
 failed or was cancelled at least 14 days ago with no open pull request, or
 succeeded unpublished at least 30 days ago. A worktree must verify on its own
 branch at the recorded head and have no uncommitted work. The scheduler
