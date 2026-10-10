@@ -32,7 +32,7 @@ import { IconButton } from "../icons.js";
 import { DEFAULT_FLOOR_APPEARANCE, type FloorAppearance } from "../floor-appearance.js";
 import { breakRoomHabit, restingItem, workerFrames, workerPhase } from "./appearance.js";
 import { catAt, catBed, chats, gossip, type Seat } from "./idle-life.js";
-import { endsAt, isPaper, messageAt, observe, send, type FloorMessage, type Seen } from "./messages.js";
+import { endsAt, fromTray, isPaper, messageAt, observe, send, type FloorMessage, type Seen } from "./messages.js";
 import { beltRoutes, type BeltStub, directionBetween, findRoute, pointOnRoute, samePoint, type WorkerMotion } from "./movement.js";
 import { spriteAtlas, spriteSheet, spriteSheetSize } from "./sprites/sprites.generated.js";
 
@@ -444,7 +444,7 @@ function SceneWorkers({ knowledgeCues, nook, onOpenBoard, errands, peerQuestions
               <g data-seated={sitting ? placement.area === "resting" ? "coffee" : "planning" : undefined} data-active-pose={position.motion.action === "interacting" ? position.motion.frame : undefined}><g transform={`scale(${WORKER_SIZE / FRAME})${bob === 0 ? "" : ` translate(0 ${bob})`}${facingWest ? " scale(-1 1)" : ""}`}>{frames.map((frame) => <Frame key={frame} name={frame} x={-8} y={-8} />)}</g>
               </g>
             </g>
-            <g role="img" className="dfFactoryScene__target" data-tooltip={`${worker.name}${worker.specialist ? " · Specialist" : ""} · ${worker.activity}${worker.review ? `\nReview assignment: ${worker.review.scope}; representative visit, not exact file inspection` : ""}\n${placement.area === "work" ? `Working at ${worker.locationLabel ?? at ?? "observed changes"}` : placement.errand !== undefined ? `${placement.errandKey?.startsWith("use ") ? "Recorded use" : "Taking a break"} · at the ${IMPLEMENT_NAMES[placement.errand]}` : placement.area === "resting" ? `${worker.paused ? "Paused · taking a break" : "Taking a break"}${stroking === undefined ? "" : " · fussing the cat"}${said}` : worker.location === "unobserved" ? "Planning · location not yet observed" : "Planning · work outside the machines shown"}${worker.telemetry === undefined ? "" : recordedEffort(worker.telemetry)}${[...new Set(asking)].join("")}`} aria-label={`${worker.name}, ${worker.review ? "reviewer" : worker.role}, ${worker.activity}, ${worker.review?.scope ?? location}`} {...sceneAction(worker.review && onSelectProposal ? () => onSelectProposal(worker.review!.proposalId) : onSelectWorker === undefined ? undefined : () => onSelectWorker(worker.id))}>
+            <g role="img" className="dfFactoryScene__target" data-tooltip={`${worker.name} · ${worker.specialist === undefined ? worker.activity : `${worker.specialist.title} · ${worker.specialist.text}${worker.specialist.next === "" ? "" : `\n${worker.specialist.next}`}`}${worker.review ? `\nReview assignment: ${worker.review.scope}; representative visit, not exact file inspection` : ""}\n${placement.area === "work" ? `Working at ${worker.locationLabel ?? at ?? "observed changes"}` : placement.errand !== undefined ? `${placement.errandKey?.startsWith("use ") ? "Recorded use" : "Taking a break"} · at the ${IMPLEMENT_NAMES[placement.errand]}` : placement.area === "resting" ? `${worker.paused ? "Paused · taking a break" : "Taking a break"}${stroking === undefined ? "" : " · fussing the cat"}${said}` : worker.location === "unobserved" ? "Planning · location not yet observed" : "Planning · work outside the machines shown"}${worker.telemetry === undefined ? "" : recordedEffort(worker.telemetry)}${[...new Set(asking)].join("")}`} aria-label={`${worker.name}, ${worker.review ? "reviewer" : worker.specialist?.title ?? worker.role}, ${worker.specialist?.text ?? worker.activity}, ${worker.review?.scope ?? location}`} {...sceneAction(worker.review && onSelectProposal ? () => onSelectProposal(worker.review!.proposalId) : onSelectWorker === undefined ? undefined : () => onSelectWorker(worker.id))}>
                 <rect className="dfFactoryScene__focus" x={-12} y={-12} width="24" height="24" rx="3" fill="transparent" />
             </g>
             {worker.review === undefined ? null : <g aria-hidden="true"><rect x="7" y="1" width="10" height="13" fill="#e1d1aa" stroke="#5c787b" /><text x="12" y="10" textAnchor="middle" fill="#203d46" fontSize="8">R</text></g>}
@@ -565,7 +565,7 @@ export function FactoryScene({ proposals, crates, tools, onLoadNode, onInvestiga
   // Selecting a unit's main machine lights every machine it owns and every belt touching them, wherever they stand.
   const litUnit = selectedId !== undefined && unitOf.get(selectedId)?.id === selectedId ? selectedId : undefined;
   const members = new Set(litUnit === undefined ? [] : layout.stations.filter((station) => station.unit === litUnit).map((station) => station.entityId));
-  const queued = tasks.filter((order) => order.status === "queued").length;
+  const queued = tasks.filter((order) => order.status === "queued" && fromTray(order)).length;
   // The implements are always there: each opens its panel and the tray shows the queue. Coffee is scenery only.
   const implementsShown = nook.furniture;
   const opens: Partial<Record<BreakRoomErrand, readonly [((projectId?: string) => void) | undefined, string, string, string]>> = {
