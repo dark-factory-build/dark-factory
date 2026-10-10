@@ -57,7 +57,7 @@ func (b *publicReviewBackend) Enqueue(_ context.Context, operation review.Operat
 	b.enqueues++
 	b.enqueuedBase, b.enqueuedSHA, b.enqueuedBody = operation.Request.BaseRef, operation.Request.Base, operation.Request.Body
 	if b.enqueueRefused {
-		return errors.New("review: Maintainer rejected operation: refused: rejected before execution as UNPROCESSABLE")
+		return enqueueRefused(errors.New("review: Maintainer rejected operation: refused: The request was refused: rejected before execution as UNPROCESSABLE."))
 	}
 	b.queued = true
 	return nil
@@ -551,25 +551,30 @@ func TestMergeQueueEjectionWithNoHeadFailureRequeuesOnceThenSendsBack(t *testing
 	}
 }
 
-// An enqueue the App refused is escalated: the reason is recorded on the
-// operation, which is then an item due to the project's overseer.
+// An enqueue the App refused as UNPROCESSABLE (#1510: no CI run, so the
+// required check can never exist) is terminal for the head: never enqueued
+// again, and escalated once as an item due to the project's overseer.
 func TestRefusedEnqueueBecomesAnOverseerItem(t *testing.T) {
 	fixture, project, _, settle := publishedTask(t)
 	settle()
 	customerMode(t, fixture)
 	ctx := context.Background()
-	fixture.daemon.reviewBackend = func(string, uint64) review.Backend { return &publicReviewBackend{enqueueRefused: true} }
-	if _, err := reviewNow(ctx, fixture.daemon, project, publishedReviewRequest()); err == nil {
-		t.Fatal("a refused enqueue reported success")
+	backend := &publicReviewBackend{enqueueRefused: true}
+	fixture.daemon.reviewBackend = func(string, uint64) review.Backend { return backend }
+	if _, err := reviewNow(ctx, fixture.daemon, project, publishedReviewRequest()); !errors.Is(err, review.ErrRefused) {
+		t.Fatalf("a refused enqueue reported %v", err)
 	}
-	for range review.FailuresBeforeEscalation - 1 {
+	now, offset := fixture.daemon.now, time.Duration(0)
+	fixture.daemon.now = func() time.Time { return now().Add(offset) }
+	for range 3 {
+		offset += 2 * reviewStuckAfter
 		if _, err := fixture.daemon.advanceReviewOperations(ctx, false); err != nil {
 			t.Fatal(err)
 		}
 	}
 	op := lastDurableReview(t, fixture.store, project)
-	if op.State != "enqueued" || op.RoutePending || !strings.Contains(op.Escalation, "failed 6 passes in a row") {
-		t.Fatalf("refused enqueue operation = %+v", op)
+	if op.State != "failed" || !op.Handled || op.Retryable || backend.enqueues != 1 || backend.reviews != 1 || !strings.Contains(op.Escalation, "refuses this exact head") || !strings.Contains(op.Escalation, "UNPROCESSABLE") {
+		t.Fatalf("refused enqueue operation = %+v enqueues=%d reviews=%d", op, backend.enqueues, backend.reviews)
 	}
 	overseer, err := fixture.store.CreateAgent(ctx, kernel.NewAgent{ID: mustAgentID(t, testID(234)), ProjectID: project, Name: "overseer", Role: kernel.RoleOrchestrator, Provider: kernel.ProviderCodex, ToolBudgetLimit: 2}, mustKernelTime(t, 1001))
 	if err != nil {
@@ -579,7 +584,7 @@ func TestRefusedEnqueueBecomesAnOverseerItem(t *testing.T) {
 	if _, err := fixture.store.UpdateAgent(ctx, overseer.ID, overseer.Revision, kernel.AgentPatch{IdlePolicy: &policy, IdleAfterSeconds: &after, IdleInstruction: &instruction}, mustKernelTime(t, 1002)); err != nil {
 		t.Fatal(err)
 	}
-	wakes, err := fixture.store.EnqueueOverseerWakeups(ctx, mustKernelTime(t, time.Now().Add(time.Minute).UnixMilli()))
+	wakes, err := fixture.store.EnqueueOverseerWakeups(ctx, mustKernelTime(t, fixture.daemon.now().Add(time.Minute).UnixMilli()))
 	if err != nil || len(wakes) != 1 || !strings.Contains(wakes[0].Body, "Escalated: factoryd cannot advance team/repo#12") {
 		t.Fatalf("escalation wake = %+v, %v", wakes, err)
 	}

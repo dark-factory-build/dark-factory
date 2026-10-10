@@ -3,6 +3,7 @@ package review
 import (
 	"context"
 	"errors"
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -302,11 +303,30 @@ func TestIndeterminateEnqueueIsSettledByTheNextObservation(t *testing.T) {
 	}
 }
 
-// A refusal is escalated only once it has persisted for
-// FailuresBeforeEscalation consecutive passes, and only once.
-func TestPersistingRefusalEscalatesOnceAfterTheGracePasses(t *testing.T) {
+// A refusal the same request cannot change (#1510: UNPROCESSABLE, a required
+// check that never ran) fails the head at once, not retryable, so it is
+// escalated once and never enqueued again.
+func TestRefusedEnqueueIsTerminalForTheHead(t *testing.T) {
 	store := &memoryStore{}
-	c := Coordinator{Store: store, Backend: &fakeBackend{enqueueErr: errors.New("rejected before execution as UNPROCESSABLE")}, Now: func() time.Time { return time.Unix(20, 0) }}
+	backend := &fakeBackend{enqueueErr: fmt.Errorf("%w (rejected before execution as UNPROCESSABLE)", ErrRefused)}
+	c := Coordinator{Store: store, Backend: backend, Now: func() time.Time { return time.Unix(20, 0) }}
+	op, err := c.Advance(context.Background(), Operation{ID: "op", Request: reviewRequest(), State: "enqueued", Verdict: "allow", Submitted: true})
+	if !errors.Is(err, ErrRefused) || op.State != "failed" || op.Retryable || !strings.Contains(op.Detail, "UNPROCESSABLE") || store.values[len(store.values)-1].State != "failed" {
+		t.Fatalf("operation=%+v err=%v", op, err)
+	}
+	if _, err := c.Advance(context.Background(), op); err == nil {
+		t.Fatal("a failed head was advanced again")
+	}
+	if _, err := c.ReserveRetry(context.Background(), op); err == nil {
+		t.Fatal("a refused head was retried")
+	}
+}
+
+// Any other enqueue failure is escalated only once it has persisted for
+// FailuresBeforeEscalation consecutive passes, and only once.
+func TestPersistingEnqueueFailureEscalatesOnceAfterTheGracePasses(t *testing.T) {
+	store := &memoryStore{}
+	c := Coordinator{Store: store, Backend: &fakeBackend{enqueueErr: errors.New("rejected before execution as RATE_LIMITED")}, Now: func() time.Time { return time.Unix(20, 0) }}
 	op := Operation{ID: "op", Request: reviewRequest(), State: "enqueued", Verdict: "allow", Submitted: true}
 	for pass := 1; pass <= FailuresBeforeEscalation+2; pass++ {
 		next, err := c.Advance(context.Background(), op)
@@ -318,7 +338,7 @@ func TestPersistingRefusalEscalatesOnceAfterTheGracePasses(t *testing.T) {
 		}
 		op = next
 	}
-	if !strings.Contains(op.Escalation, "UNPROCESSABLE") {
+	if !strings.Contains(op.Escalation, "RATE_LIMITED") {
 		t.Fatalf("escalation = %q", op.Escalation)
 	}
 }

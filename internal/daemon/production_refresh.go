@@ -140,7 +140,21 @@ func changedProductionHeads(known []kernel.ProductionPullRequest, observed []ker
 	return changed
 }
 
+// githubQuotaLow holds back non-urgent GitHub polling (pull request refresh,
+// merge-stage observation, issue intake) while the owner's quota, shared with
+// host sessions and agents, is under a tenth until it resets (#1510).
+func (daemon *Daemon) githubQuotaLow() bool {
+	if daemon.github == nil {
+		return false
+	}
+	quota, ok := daemon.github.Quota()
+	return ok && quota.Low(daemon.now())
+}
+
 func (daemon *Daemon) productionRefreshAllowed(project kernel.ProjectID, now time.Time) bool {
+	if daemon.githubQuotaLow() {
+		return false
+	}
 	daemon.productionRefreshMu.Lock()
 	defer daemon.productionRefreshMu.Unlock()
 	if daemon.productionRefreshAt == nil {

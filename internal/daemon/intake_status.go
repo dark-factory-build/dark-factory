@@ -57,7 +57,7 @@ func (daemon *Daemon) intakeReachable(source kernel.IntakeSource) bool {
 }
 
 func (daemon *Daemon) pollIntakeSource(ctx context.Context, source kernel.IntakeSource) {
-	if !daemon.intakeReachable(source) {
+	if !daemon.intakeReachable(source) || source.LinearTeamID == "" && daemon.githubQuotaLow() {
 		return
 	}
 	daemon.intakeMu.Lock()

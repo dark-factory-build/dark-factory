@@ -21,7 +21,7 @@ const GITHUB_API_VERSION: &str = "2026-03-10";
 // GitHub list endpoints below request at most 100 records. Issue comments and
 // review bodies can each be 65,536 characters, so a webhook-sized 64 KiB cap
 // rejected valid bounded pages before their typed count checks could run.
-const MAX_GITHUB_RESPONSE_BYTES: usize = 8 * 1024 * 1024;
+pub(crate) const MAX_GITHUB_RESPONSE_BYTES: usize = 8 * 1024 * 1024;
 /// Publication bounds. A commit is a bounded, reviewable unit of work, not a
 /// bulk upload channel, and the Worker must hold every blob in memory.
 const MAX_COMMIT_FILES: usize = 50;
@@ -5075,7 +5075,7 @@ async fn github_response(
 }
 
 #[cfg(target_arch = "wasm32")]
-async fn github_request(
+pub(crate) async fn github_request(
     method: worker::Method,
     url: &str,
     credential: &str,
