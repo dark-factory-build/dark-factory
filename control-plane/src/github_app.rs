@@ -124,12 +124,14 @@ pub(crate) enum OperationError {
 /// Why GitHub refused, said with typed classifications only. GitHub's
 /// error text can quote caller input, so the text never rides along -- the
 /// same discipline `github_graphql` applies to its logging.
-#[derive(Clone, Copy, Debug, Eq, PartialEq, thiserror::Error)]
+#[derive(Clone, Debug, Eq, PartialEq, thiserror::Error)]
 pub(crate) enum RefusalReason {
     /// The mutation was rejected before execution, and these are the typed
     /// error classes GitHub returned at the mutation root.
     #[error("rejected before execution as {0}")]
     Rejected(RejectionKinds),
+    #[error("required CODEOWNERS approval is missing for {0}")]
+    CodeownersApproval(String),
     /// The mutation answered with neither an effect nor an error.
     #[error("answered with neither an effect nor an error")]
     NoEffect,
@@ -3281,12 +3283,47 @@ impl Authority {
             },
         )
         .await?;
-        let entry = enqueue_outcome(
-            data.and_then(|data| data.enqueue)
-                .and_then(|payload| payload.entry),
-            failure,
-        )?;
+        let entry = data
+            .and_then(|data| data.enqueue)
+            .and_then(|payload| payload.entry);
+        if entry.is_none() {
+            if let Some(GraphQlFailure::Rejected(kinds)) = failure {
+                if kinds.codeowners_approval {
+                    return Err(OperationError::Refused(RefusalReason::CodeownersApproval(
+                        self.codeowners_path(token, request.pull_number).await,
+                    )));
+                }
+            }
+        }
+        let entry = enqueue_outcome(entry, failure)?;
         entry.into_result(request)
+    }
+
+    async fn codeowners_path(&self, token: &RepositoryToken, pull_number: i64) -> String {
+        #[derive(Deserialize)]
+        struct File {
+            filename: String,
+        }
+        let files: Vec<File> = match github_json(
+            &format!(
+                "https://api.github.com/repos/{}/{}/pulls/{pull_number}/files?per_page=100",
+                token.repository.owner, token.repository.name
+            ),
+            token.token.as_str(),
+        )
+        .await
+        {
+            Ok(files) => files,
+            Err(_) => return "a CODEOWNERS-protected path".into(),
+        };
+        files
+            .into_iter()
+            .find_map(|file| {
+                valid_repository_path(&file.filename)
+                    .ok()
+                    .map(|_| file.filename)
+            })
+            .unwrap_or_else(|| "a CODEOWNERS-protected path".into())
     }
 
     /// Answer "is this pull request queued at the head I stated?" by reading

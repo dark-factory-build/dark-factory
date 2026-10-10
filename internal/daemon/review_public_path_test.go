@@ -552,8 +552,8 @@ func TestMergeQueueEjectionWithNoHeadFailureRequeuesOnceThenSendsBack(t *testing
 	}
 }
 
-// An enqueue the App refused as UNPROCESSABLE waits on the exact head, never
-// retries without a changed observation, and escalates once to the overseer.
+// An enqueue the App refused as UNPROCESSABLE retries each merge pass and
+// remains one escalated overseer item.
 func TestRefusedEnqueueBecomesAnOverseerItem(t *testing.T) {
 	fixture, project, _, settle := publishedTask(t)
 	settle()
@@ -573,7 +573,7 @@ func TestRefusedEnqueueBecomesAnOverseerItem(t *testing.T) {
 		}
 	}
 	op := lastDurableReview(t, fixture.store, project)
-	if op.State != "enqueued" || op.Handled || op.Retryable || !op.Refused || backend.enqueues != 1 || backend.reviews != 1 || !strings.Contains(op.Escalation, "refuses this exact head") || !strings.Contains(op.Escalation, "UNPROCESSABLE") {
+	if op.State != "enqueued" || op.Handled || op.Retryable || !op.Refused || backend.enqueues != 4 || backend.reviews != 1 || !strings.Contains(op.Escalation, "refuses this exact head") || !strings.Contains(op.Escalation, "UNPROCESSABLE") {
 		t.Fatalf("refused enqueue operation = %+v enqueues=%d reviews=%d", op, backend.enqueues, backend.reviews)
 	}
 	overseer, err := fixture.store.CreateAgent(ctx, kernel.NewAgent{ID: mustAgentID(t, testID(234)), ProjectID: project, Name: "overseer", Role: kernel.RoleOrchestrator, Provider: kernel.ProviderCodex, ToolBudgetLimit: 2}, mustKernelTime(t, 1001))
@@ -587,6 +587,27 @@ func TestRefusedEnqueueBecomesAnOverseerItem(t *testing.T) {
 	wakes, err := fixture.store.EnqueueOverseerWakeups(ctx, mustKernelTime(t, fixture.daemon.now().Add(time.Minute).UnixMilli()))
 	if err != nil || len(wakes) != 1 || !strings.Contains(wakes[0].Body, "Escalated: factoryd cannot advance team/repo#12") {
 		t.Fatalf("escalation wake = %+v, %v", wakes, err)
+	}
+}
+
+func TestCodeownersRefusalNamesPullAndPath(t *testing.T) {
+	fixture, project, _, settle := publishedTask(t)
+	settle()
+	customerMode(t, fixture)
+	backend := &publicReviewBackend{enqueueRefusal: "UNPROCESSABLE+CODEOWNERS_APPROVAL for .github/workflows/ci.yml"}
+	fixture.daemon.reviewBackend = func(string, uint64) review.Backend { return backend }
+	if _, err := reviewNow(context.Background(), fixture.daemon, project, publishedReviewRequest()); !errors.Is(err, review.ErrOwnerApproval) {
+		t.Fatalf("owner approval refusal reported %v", err)
+	}
+	op := lastDurableReview(t, fixture.store, project)
+	if op.Refused == false || !op.OwnerApproval || backend.enqueues != 1 || !strings.Contains(op.Escalation, "#12") || !strings.Contains(op.Escalation, ".github/workflows/ci.yml") {
+		t.Fatalf("owner approval escalation = %+v enqueues=%d", op, backend.enqueues)
+	}
+	if _, err := fixture.daemon.advanceReviewOperations(context.Background(), false); err != nil {
+		t.Fatal(err)
+	}
+	if backend.enqueues != 1 {
+		t.Fatalf("owner approval was retried: %d", backend.enqueues)
 	}
 }
 
