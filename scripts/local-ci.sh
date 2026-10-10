@@ -44,13 +44,13 @@ if { [ "$local_ci_mode" = full ] || [ "$local_ci_mode" = release ]; } \
     exec "$script_dir/with-local-ci-lease.sh" "$script_dir/local-ci.sh" "--$local_ci_mode" ${local_ci_shard:+"$local_ci_shard"}
 fi
 
-# CI's push-to-main job fills the compiler and package caches that merge
-# queue runs restore: everything the source gate builds, plus test binaries.
+# CI's push-to-main job fills the compiler, package, and cacheable test-result
+# caches that merge-queue runs restore.
 if [ "$local_ci_mode" = warm ]; then
     ./scripts/go-check.sh
-    # The binaries land in the unsaved cache/ child; only their compiled
-    # packages in go-build matter.
-    GOTOOLCHAIN=local "$DF_CI_GO" test -c -o "$XDG_CACHE_HOME/warm-test-binaries/" ./...
+    # Queue runs cannot save cache entries for other runs, so execute the
+    # cacheable tests on main while the cache is saved.
+    /bin/sh "$script_dir/go-ci-owned.sh" --cacheable
     echo "local-ci: PASS (warm)"
     exit 0
 fi
