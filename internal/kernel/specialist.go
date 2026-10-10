@@ -38,8 +38,10 @@ const (
 // its resolution is a live latest decision naming it, or a task it is attached
 // to (the acceptance). An open proposal has neither. Both read content revision c, and the resolution is d.
 const (
-	latestProposalSQL = `c.kind = 'observation' AND c.deprecated = 0 AND c.revision = (SELECT MAX(revision) FROM project_content_revisions WHERE id = c.id)
-	AND json_extract(` + metaC + `, '$.record_type') = 'proposal'`
+	// proposalRevisionSQL is revision c recorded as a proposal, whichever
+	// revision is latest: an attachment pins the revision it was made at.
+	proposalRevisionSQL   = `c.kind = 'observation' AND json_extract(` + metaC + `, '$.record_type') = 'proposal'`
+	latestProposalSQL     = proposalRevisionSQL + ` AND c.deprecated = 0 AND c.revision = (SELECT MAX(revision) FROM project_content_revisions WHERE id = c.id)`
 	proposalResolutionSQL = `d.project_id = c.project_id AND d.kind = 'decision' AND d.deprecated = 0 AND d.revision = (SELECT MAX(revision) FROM project_content_revisions WHERE id = d.id)
 	AND json_extract(` + metaD + `, '$.record_type') = 'proposal' AND lower(json_extract(` + metaD + `, '$.record_id')) = lower(hex(c.id))`
 	openProposalSQL = latestProposalSQL + ` AND NOT EXISTS (SELECT 1 FROM project_content_revisions AS d WHERE ` + proposalResolutionSQL + `)

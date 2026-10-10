@@ -459,9 +459,9 @@ func attachContentTx(ctx context.Context, tx *writeTx, task TaskID, project Proj
 	}
 	// Attaching a proposal accepts it: one self-generated implementation is active at a time.
 	var busy bool
-	if err := tx.connection.QueryRowContext(ctx, `SELECT EXISTS (SELECT 1 FROM project_content_revisions AS c WHERE c.id = ?1 AND c.revision = ?2 AND `+latestProposalSQL+`)
+	if err := tx.connection.QueryRowContext(ctx, `SELECT EXISTS (SELECT 1 FROM project_content_revisions AS c WHERE c.id = ?1 AND c.revision = ?2 AND `+proposalRevisionSQL+`)
 		AND EXISTS (SELECT 1 FROM task_content_references AS r JOIN tasks AS t ON t.id = r.task_id JOIN project_content_revisions AS c ON c.id = r.content_id AND c.revision = r.content_revision
-			WHERE r.task_id <> ?3 AND t.project_id = ?4 AND t.status IN ('queued', 'running', 'blocked') AND `+latestProposalSQL+`)`, content.Bytes(), revision.Int64(), task.Bytes(), project.Bytes()).Scan(&busy); err != nil {
+			WHERE r.task_id <> ?3 AND t.project_id = ?4 AND t.status IN ('queued', 'running', 'blocked') AND `+proposalRevisionSQL+`)`, content.Bytes(), revision.Int64(), task.Bytes(), project.Bytes()).Scan(&busy); err != nil {
 		return err
 	}
 	if busy {

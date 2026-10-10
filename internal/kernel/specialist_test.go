@@ -591,6 +591,15 @@ func TestSpecialistAttachAcceptsProposal(t *testing.T) {
 	if open() != 2 {
 		t.Fatalf("open after attach = %d", open())
 	}
+	// Revising the attached proposal leaves its pinned revision a proposal.
+	revised := knowledgeSpec(t, run.ProjectID, 110, ContentObservation, KnowledgeMetadata{Status: "tentative", RecordType: "proposal"})
+	revised.ID = proposals[0].ID
+	if _, err := store.ReviseContent(ctx, proposals[0].Revision, revised, mustTime(t, 60)); err != nil {
+		t.Fatal(err)
+	}
+	if err := attach(1, 1); !errors.Is(err, ErrConflict) {
+		t.Fatalf("proposal on a second active task after a revision = %v", err)
+	}
 	if err := attach(2, 0); err != nil {
 		t.Fatalf("second proposal on the same task: %v", err)
 	}
