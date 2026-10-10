@@ -157,7 +157,7 @@ func (daemon *Daemon) advanceReviewOperations(ctx context.Context, startup bool)
 		case op.State == "running" && startup:
 			// A review takes minutes; startup does not wait for it.
 			daemon.launchReview(operation.Project, op)
-		case op.State == "enqueued" && daemon.customerMaintainer():
+		case op.State == "enqueued" && daemon.customerMaintainer() && !daemon.githubQuotaLow():
 			var coordinator review.Coordinator
 			if coordinator, err = daemon.reviewCoordinator(ctx, operation.Project, operation.Repository); err == nil {
 				if op, err = coordinator.Advance(ctx, op); err == nil && op.State == "enqueued" {
@@ -666,7 +666,16 @@ func (b *daemonReviewBackend) Observe(ctx context.Context, operationID string) (
 }
 
 func (b *daemonReviewBackend) Enqueue(ctx context.Context, operation review.Operation) error {
-	return b.call(ctx, "enqueue_pull_request", map[string]any{"repository": b.repository, "pull_number": operation.Request.PullNumber, "head_sha": operation.Request.Head, "base": operation.Request.BaseRef, "reviewed_body_digest": reviewedBodyDigest(operation)})
+	return enqueueRefused(b.call(ctx, "enqueue_pull_request", map[string]any{"repository": b.repository, "pull_number": operation.Request.PullNumber, "head_sha": operation.Request.Head, "base": operation.Request.BaseRef, "reviewed_body_digest": reviewedBodyDigest(operation)}))
+}
+
+// enqueueRefused reports the broker's typed refusal "refused: ...
+// UNPROCESSABLE" as review.ErrRefused. One also RATE_LIMITED may pass later.
+func enqueueRefused(err error) error {
+	if why := fmt.Sprint(err); strings.Contains(why, "rejected operation: refused:") && strings.Contains(why, "UNPROCESSABLE") && !strings.Contains(why, "RATE_LIMITED") {
+		return fmt.Errorf("%w (%v)", review.ErrRefused, err)
+	}
+	return err
 }
 
 func reviewedBodyDigest(operation review.Operation) string {

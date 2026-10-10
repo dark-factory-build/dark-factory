@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"net/http"
+	"regexp"
 	"strings"
 )
 
@@ -26,6 +27,15 @@ func (host *Host) MCP(ctx context.Context, request json.RawMessage, repositories
 	if err != nil {
 		return nil, err
 	}
+	var call struct {
+		Params struct {
+			Name string `json:"name"`
+		} `json:"params"`
+	}
+	if json.Unmarshal(request, &call) != nil || !toolName.MatchString(call.Params.Name) {
+		call.Params.Name = "other"
+	}
+	ctx = context.WithValue(ctx, operationKey{}, "mcp "+call.Params.Name)
 	var response json.RawMessage
 	if err := host.client.requestBounded(ctx, credential, http.MethodPost, prefix+"/"+credential.id+"/mcp", request, &response, 8<<20); err != nil {
 		host.delegations = nil // re-observe a revoked or changed connection
@@ -50,6 +60,9 @@ func (host *Host) authorizeRepositories(ctx context.Context, repositories map[st
 	}
 	return credential, nil
 }
+
+// toolName bounds what a caller's tool name can add to telemetry.
+var toolName = regexp.MustCompile(`^[a-z_]{1,64}$`)
 
 func delegated(delegations []Delegation, repositories map[string]uint64) bool {
 	for name, id := range repositories {

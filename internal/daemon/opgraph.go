@@ -11,6 +11,7 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"strconv"
 	"strings"
 	"time"
 
@@ -18,6 +19,7 @@ import (
 	"github.com/dark-factory-build/dark-factory/internal/browserprotocol"
 	"github.com/dark-factory-build/dark-factory/internal/change"
 	"github.com/dark-factory-build/dark-factory/internal/kernel"
+	"github.com/dark-factory-build/dark-factory/internal/maintainer"
 	"github.com/dark-factory-build/dark-factory/internal/opgraph"
 )
 
@@ -272,8 +274,22 @@ func (transport observedTransport) RoundTrip(request *http.Request) (*http.Respo
 	}
 	started := time.Now()
 	response, err := next.RoundTrip(request)
-	transport.daemon.observe("client", map[string]string{"http.request.method": request.Method},
+	attributes := map[string]string{"http.request.method": request.Method}
+	operation := maintainer.Operation(request.Context())
+	if operation != "" {
+		attributes["rpc.method"] = operation
+	}
+	transport.daemon.observe("client", attributes,
 		map[string]string{"server.address": strings.ToLower(request.URL.Hostname())}, err != nil || response.StatusCode >= 500, time.Since(started))
+	// The broker reports the owner-token GitHub calls a Maintainer request
+	// cost, so each operation's share of the owner's quota is known (#1510).
+	if err == nil && operation != "" {
+		if calls, _ := strconv.ParseUint(response.Header.Get("X-Github-Requests"), 10, 16); calls > 0 {
+			now := transport.daemon.now().UnixMilli()
+			transport.daemon.runtimeStore().Record(opgraph.Observation{Source: "factoryd", Environment: "local", Kind: "client", Start: now, End: now + 1, Count: calls,
+				Attributes: map[string]string{"service.name": "factoryd", "rpc.method": operation}, Peer: map[string]string{"server.address": "api.github.com"}})
+		}
+	}
 	return response, err
 }
 
