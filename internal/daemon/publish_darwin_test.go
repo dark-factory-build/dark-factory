@@ -303,6 +303,19 @@ func TestEmptyDiffFromIntegratedMainOpensNoPullRequestAtAStaleTip(t *testing.T) 
 	}
 }
 
+func TestEmptyDiffOnAnAlreadyPublishedPullRequestDoesNotPublish(t *testing.T) {
+	fixture, c, source, app, checkout := publishFixture(t, 1, false)
+	ctx := context.Background()
+	root, git := filepath.Dir(source), change.TrustedGitExecutable
+	registered := strings.TrimSpace(supervisorGitOutput(t, git, "-C", root, "remote", "get-url", "origin"))
+	supervisorGit(t, git, "-C", registered, "fetch", "-q", "--update-head-ok", root, "HEAD:main")
+	app.main, app.tip = c.Head, c.Base
+	c.Pull = 31
+	if err := fixture.daemon.publishPull(ctx, c, "team/repo", source, app.call, checkout); err == nil || !strings.Contains(err.Error(), "nothing to publish") || len(app.writes) != 0 {
+		t.Fatalf("err = %v, writes = %+v", err, app.writes)
+	}
+}
+
 // A correction after a send-back goes on the open pull request's branch head
 // as one commit carrying only what the worker changed since, with its first
 // commit's response lost: the retry publishes nothing twice, replaces the
