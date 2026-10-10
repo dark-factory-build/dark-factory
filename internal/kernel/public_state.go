@@ -205,7 +205,7 @@ func readPublicAccounts(ctx context.Context, connection *sql.Conn) ([]AccountSum
 // at all, so it cannot reach a projection by accident.
 
 func readPublicProjects(ctx context.Context, connection *sql.Conn) ([]ProjectSummary, error) {
-	rows, err := connection.QueryContext(ctx, `SELECT id, name, run_budget_limit, runs_used, max_run_seconds, revision, specialist_runs, specialist_open_proposals FROM projects ORDER BY id`)
+	rows, err := connection.QueryContext(ctx, `SELECT p.id, p.name, p.run_budget_limit, p.runs_used, p.max_run_seconds, p.revision, COALESCE(k.token_limit, 0), COALESCE(k.tokens_used, 0), p.specialist_runs, p.specialist_open_proposals FROM projects AS p LEFT JOIN project_tokens AS k ON k.project_id = p.id ORDER BY p.id`)
 	if err != nil {
 		return nil, fmt.Errorf("read public projects: %w", err)
 	}
@@ -214,8 +214,8 @@ func readPublicProjects(ctx context.Context, connection *sql.Conn) ([]ProjectSum
 	for rows.Next() {
 		var rawID []byte
 		var name string
-		var runBudget, runsUsed, maxRunSeconds, rawRevision, specialistRuns, openProposals int64
-		if err := rows.Scan(&rawID, &name, &runBudget, &runsUsed, &maxRunSeconds, &rawRevision, &specialistRuns, &openProposals); err != nil {
+		var runBudget, runsUsed, maxRunSeconds, rawRevision, tokenLimit, tokensUsed, specialistRuns, openProposals int64
+		if err := rows.Scan(&rawID, &name, &runBudget, &runsUsed, &maxRunSeconds, &rawRevision, &tokenLimit, &tokensUsed, &specialistRuns, &openProposals); err != nil {
 			return nil, fmt.Errorf("scan public project: %w", err)
 		}
 		id, idErr := ProjectIDFromBytes(rawID)
@@ -223,7 +223,7 @@ func readPublicProjects(ctx context.Context, connection *sql.Conn) ([]ProjectSum
 		if idErr != nil || revisionErr != nil || byteLen(name) < 1 || byteLen(name) > 128 || runBudget < 0 || runsUsed < 0 || maxRunSeconds < 0 || maxRunSeconds > maxProjectRunSeconds || runBudget != 0 && runsUsed > runBudget {
 			return nil, fmt.Errorf("%w: invalid public project", ErrCorruptState)
 		}
-		result = append(result, ProjectSummary{ID: id, Name: name, RunBudgetLimit: uint64(runBudget), RunsUsed: uint64(runsUsed), MaxRunSeconds: uint32(maxRunSeconds), SpecialistRuns: uint32(specialistRuns), SpecialistOpenProposals: uint32(openProposals), Revision: revision})
+		result = append(result, ProjectSummary{ID: id, Name: name, RunBudgetLimit: uint64(runBudget), RunsUsed: uint64(runsUsed), MaxRunSeconds: uint32(maxRunSeconds), Tokens: ProjectTokens{TokenLimit: uint64(tokenLimit), TokensUsed: uint64(tokensUsed)}, SpecialistRuns: uint32(specialistRuns), SpecialistOpenProposals: uint32(openProposals), Revision: revision})
 	}
 	return result, rows.Err()
 }
