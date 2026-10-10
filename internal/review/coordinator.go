@@ -313,7 +313,7 @@ func (c Coordinator) Advance(ctx context.Context, op Operation) (Operation, erro
 			// remains: mergeability can become queueable without changing checks
 			// or review state.
 			op.Refused, op.RefusedObservation = true, observation
-			op.Escalate(fmt.Sprintf("the merge queue refused this exact head: %v", err))
+			op.Escalate(fmt.Sprintf("%v: %v", ErrRefused, err))
 			op.UpdatedAt = c.Now()
 			return op, errors.Join(err, c.Store.Update(ctx, op))
 		} else if err != nil {
