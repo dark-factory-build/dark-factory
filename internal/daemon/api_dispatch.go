@@ -316,6 +316,12 @@ func (daemon *Daemon) markAttemptAPICall(ctx context.Context, call api.Call) {
 // methods; there is no forwarding service layer here.
 func (daemon *Daemon) dispatch(ctx context.Context, call api.Call) api.Reply {
 	switch call.Kind() {
+	case api.CallSnapshot, api.CallHumanRequests, api.CallTaskRead, api.CallIntake:
+		if raw, attempt := call.AttemptDigest(); attempt && !daemon.specialistRead(ctx, raw, call) {
+			return newErrorReply(api.RemoteForbidden)
+		}
+	}
+	switch call.Kind() {
 	case api.CallHealth:
 		return daemon.health(ctx, call)
 	case api.CallSnapshot:
@@ -519,6 +525,19 @@ func (daemon *Daemon) dispatch(ctx context.Context, call api.Call) api.Reply {
 	default:
 		return newErrorReply(api.RemoteInvalidRequest)
 	}
+}
+
+// specialistRead admits a specialist's review run (its carrier) to the
+// operator's read views, and of intake only its list; every other attempt,
+// and every write, is refused.
+func (daemon *Daemon) specialistRead(ctx context.Context, raw api.AttemptDigest, call api.Call) bool {
+	digest, err := attemptDigest(raw)
+	if err != nil {
+		return false
+	}
+	authority, err := daemon.store.AuthenticateAttempt(ctx, digest)
+	intake, _ := call.IntakeInput()
+	return err == nil && authority.Specialist && (call.Kind() != api.CallIntake || intake.Action == "list")
 }
 
 func (daemon *Daemon) agentPaths(ctx context.Context, call api.Call) api.Reply {

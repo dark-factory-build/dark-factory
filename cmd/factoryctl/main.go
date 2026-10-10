@@ -73,6 +73,7 @@ const (
   factoryctl attempt peer ask --task ID --idempotency-key HEX32 --question TEXT
   factoryctl attempt peer answer --question ID --revision REVISION --idempotency-key HEX32 --answer TEXT
   factoryctl attempt terminal observe --project ID --task ID --run ID [--cursor N] [--max-bytes N]
+  factoryctl attempt status | human list | intake list|config [--project ID] | task read --task ID --revision REVISION [--offset N] (a specialist's review run only)
   factoryctl terminal observe --project ID --task ID --run ID [--cursor N] [--max-bytes N] [--text]
   factoryctl attempt send-back --task ID [--head SHA] --note TEXT
   factoryctl overseer status [--task ID] [--offset N --head HEAD] [--text-offset RUNES --head HEAD]
@@ -249,6 +250,7 @@ type attemptCommand struct {
 	kind              commandKind
 	removeAttachments bool
 	operatorControl   bool
+	attemptRead       bool
 	home              string
 	idempotencyKey    string
 	text              string
@@ -760,6 +762,11 @@ func parse(args []string) (attemptCommand, bool, bool) {
 	}
 	if args[1] == "outcome" {
 		return parseOutcome(args)
+	}
+	if args[1] == "status" || args[1] == "human" || args[1] == "intake" || args[1] == "task" && len(args) > 2 {
+		command, help, ok := parse(args[1:])
+		command.attemptRead = true
+		return command, help, ok && (command.kind == commandStatus && command.project == "" || command.kind == commandHumanList || command.kind == commandTaskRead || command.kind == commandIntake && command.intake.Action == "list")
 	}
 	switch args[1] {
 	case "task":
@@ -2193,11 +2200,14 @@ func newOperatorID() (string, error) {
 func runOperator(ctx context.Context, command attemptCommand, getenv func(string) string, stdout, stderr io.Writer) int {
 	socket := getenv("DARK_FACTORY_SOCKET")
 	token := getenv("DARK_FACTORY_OPERATOR_TOKEN_FILE")
-	if socket == "" || token == "" {
+	if socket == "" || token == "" && !command.attemptRead {
 		_, _ = io.WriteString(stderr, "factoryctl: operator client configuration is invalid\n")
 		return exitFailure
 	}
 	client, err := api.NewOperatorClient(socket, token)
+	if command.attemptRead {
+		client, err = api.NewAttemptReaderFromEnvironment(socket)
+	}
 	if err != nil {
 		_, _ = io.WriteString(stderr, "factoryctl: operator client configuration is invalid\n")
 		return exitFailure
