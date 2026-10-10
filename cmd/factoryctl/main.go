@@ -111,8 +111,10 @@ const (
   factoryctl agent select-account --agent ID --revision REVISION --account ID
 	factoryctl agent select-model --agent ID --revision REVISION --model TEXT [--reasoning-effort low|medium|high|xhigh|max|ultra]
 	factoryctl agent paths --agent ID
-  factoryctl task add --project ID [--repository ID] --agent ID|any --title TEXT [--body TEXT] [--priority N] [--task-id ID --incarnation-id ID]
+	factoryctl agent appearance --agent ID --revision REVISION --appearance auto|SKIN/HAIR/HAIR_COLOUR/FACE/OUTFIT/CLOTHES_COLOUR/SHOES/TOOL/HEADWEAR
+  factoryctl task add --project ID [--repository ID] --agent ID|any --title TEXT [--body TEXT] [--priority N] [--content ID:REVISION[,ID:REVISION...]] [--task-id ID --incarnation-id ID]
     --agent any queues the task for any eligible worker in the project; the first worker admitted keeps it.
+    --content pins up to eight project content revisions before any worker can admit the task.
   factoryctl status
   factoryctl task send-back --task ID --note TEXT
   factoryctl task update --task ID --revision REVISION [--title TEXT] [--body TEXT] [--priority N] [--agent ID] [--cancel] [--retry]
@@ -312,6 +314,8 @@ type attemptCommand struct {
 	documentFile        string
 	prerequisites       []api.TaskPrerequisiteInput
 	conflictPaths       []string
+	content             []api.ContentPinInput
+	appearance          *string
 }
 
 func main() {
@@ -1546,7 +1550,7 @@ func parseOperator(args []string) (attemptCommand, bool, bool) {
 	}
 	if len(args) >= 3 && helpFlag(args[2]) {
 		switch args[0] + " " + args[1] {
-		case "project create", "project limits", "agent create", "agent idle-policy", "agent select-account", "agent select-model", "agent paths", "account link", "task add", "task send-back":
+		case "project create", "project limits", "agent create", "agent idle-policy", "agent select-account", "agent select-model", "agent paths", "agent appearance", "account link", "task add", "task send-back":
 			return attemptCommand{}, true, true
 		}
 	}
@@ -1591,10 +1595,12 @@ func parseOperator(args []string) (attemptCommand, bool, bool) {
 		command.kind, names = commandAgentSelectModel, []string{"--agent", "--model", "--reasoning-effort", "--revision"}
 	case "agent paths":
 		command.kind, names = commandAgentPaths, []string{"--agent"}
+	case "agent appearance":
+		command.kind, command.operatorControl, names = commandOverseerAgentUpdate, true, []string{"--agent", "--revision", "--appearance"}
 	case "account link":
 		command.kind, names = commandAccountLink, []string{"--provider", "--home", "--label"}
 	case "task add":
-		command.kind, names = commandTaskAdd, []string{"--project", "--repository", "--agent", "--title", "--body", "--priority", "--task-id", "--incarnation-id"}
+		command.kind, names = commandTaskAdd, []string{"--project", "--repository", "--agent", "--title", "--body", "--priority", "--content", "--task-id", "--incarnation-id"}
 	case "task send-back":
 		command.kind, names = commandTaskSendBack, []string{"--task", "--note"}
 	case "task read":
@@ -1617,7 +1623,7 @@ func parseOperator(args []string) (attemptCommand, bool, bool) {
 			command.project = value
 		case name == "--repository" && command.kind == commandTaskAdd && validHumanRequestKey(value):
 			command.repository = value
-		case name == "--revision" && (command.kind == commandProjectLimits || command.kind == commandAgentIdlePolicy || command.kind == commandAgentSelectAccount || command.kind == commandAgentSelectModel || command.kind == commandTaskRead) && isCount && count > 0:
+		case name == "--revision" && (command.kind == commandProjectLimits || command.kind == commandAgentIdlePolicy || command.kind == commandAgentSelectAccount || command.kind == commandAgentSelectModel || command.kind == commandOverseerAgentUpdate || command.kind == commandTaskRead) && isCount && count > 0:
 			command.expectedRevision = count
 		case name == "--run-budget" && command.kind == commandProjectLimits && isCount:
 			command.toolBudget = count
@@ -1631,7 +1637,7 @@ func parseOperator(args []string) (attemptCommand, bool, bool) {
 			command.wakeOn = value
 		case name == "--max-run-seconds" && command.kind == commandProjectLimits && isCount && count <= 86400:
 			command.maxRunSeconds = uint32(count)
-		case name == "--agent" && (command.kind == commandTaskAdd || command.kind == commandAgentIdlePolicy || command.kind == commandAgentSelectAccount || command.kind == commandAgentSelectModel || command.kind == commandAgentPaths) && (validHumanRequestKey(value) || command.kind == commandTaskAdd && value == "any"):
+		case name == "--agent" && (command.kind == commandTaskAdd || command.kind == commandAgentIdlePolicy || command.kind == commandAgentSelectAccount || command.kind == commandAgentSelectModel || command.kind == commandAgentPaths || command.kind == commandOverseerAgentUpdate) && (validHumanRequestKey(value) || command.kind == commandTaskAdd && value == "any"):
 			command.agent = value
 		case name == "--account" && validHumanRequestKey(value):
 			command.account = value
@@ -1669,6 +1675,22 @@ func parseOperator(args []string) (attemptCommand, bool, bool) {
 			command.id = value
 		case name == "--incarnation-id" && command.kind == commandTaskAdd && validHumanRequestKey(value):
 			command.run = value
+		case name == "--content" && command.kind == commandTaskAdd:
+			for _, pin := range strings.Split(value, ",") {
+				id, rawRevision, _ := strings.Cut(pin, ":")
+				revision, ok := parseRevision(rawRevision)
+				if !validHumanRequestKey(id) || !ok || len(command.content) == 8 {
+					return attemptCommand{}, false, false
+				}
+				command.content = append(command.content, api.ContentPinInput{ContentID: id, ContentRevision: revision})
+			}
+		case name == "--appearance" && command.kind == commandOverseerAgentUpdate:
+			if value == "auto" {
+				value = ""
+			} else if _, err := kernel.DecodeAgentAppearance(value); err != nil || value == "" {
+				return attemptCommand{}, false, false
+			}
+			command.appearance = &value
 		case name == "--task" && (command.kind == commandTaskSendBack || command.kind == commandTaskRead) && validHumanRequestKey(value):
 			command.id = value
 		case name == "--offset" && command.kind == commandTaskRead && isCount:
@@ -1714,6 +1736,10 @@ func parseOperator(args []string) (attemptCommand, bool, bool) {
 		}
 	case commandAgentPaths:
 		if command.agent == "" {
+			return attemptCommand{}, false, false
+		}
+	case commandOverseerAgentUpdate:
+		if command.agent == "" || command.expectedRevision == 0 || command.appearance == nil {
 			return attemptCommand{}, false, false
 		}
 	case commandAccountLink:
@@ -2396,7 +2422,7 @@ func runOperator(ctx context.Context, command attemptCommand, getenv func(string
 				return writeWebFailure(stderr, "task add", err)
 			}
 		}
-		result, callErr := client.EnqueueTask(callContext, api.EnqueueTaskInput{ID: id, ProjectID: command.project, RepositoryID: command.repository, AssignedAgentID: anyWorkerAgent(command.agent), IncarnationID: incarnation, Title: command.title, Body: command.body, Priority: command.priority})
+		result, callErr := client.EnqueueTask(callContext, api.EnqueueTaskInput{ID: id, ProjectID: command.project, RepositoryID: command.repository, AssignedAgentID: anyWorkerAgent(command.agent), IncarnationID: incarnation, Title: command.title, Body: command.body, Priority: command.priority, Content: command.content})
 		if callErr != nil {
 			return writeWebFailure(stderr, "task add", callErr)
 		}
@@ -2442,10 +2468,10 @@ func runOperator(ctx context.Context, command attemptCommand, getenv func(string
 		}
 		return writeJSON(stdout, result)
 	case commandOverseerAgentUpdate:
-		input := api.OverseerAgentUpdateInput{AgentID: command.agent, ExpectedRevision: command.expectedRevision}
+		input := api.OverseerAgentUpdateInput{AgentID: command.agent, ExpectedRevision: command.expectedRevision, Appearance: command.appearance}
 		if command.archiveSet {
 			input.Archived = &command.archived
-		} else {
+		} else if command.appearance == nil {
 			input.Paused = &command.paused
 		}
 		result, callErr := client.UpdateAgent(callContext, input)

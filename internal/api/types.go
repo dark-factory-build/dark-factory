@@ -850,6 +850,8 @@ type OverseerAgentUpdateInput struct {
 	ExpectedRevision uint64 `json:"expected_revision"`
 	Paused           *bool  `json:"paused,omitempty"`
 	Archived         *bool  `json:"archived,omitempty"`
+	// Appearance is operator-only, in the stored slot form; empty is automatic.
+	Appearance *string `json:"appearance,omitempty"`
 }
 
 // AgentIdlePolicyInput is the operator-only standing supervision edit. It
@@ -998,6 +1000,13 @@ type EnqueueTaskInput struct {
 	Priority        int64                   `json:"priority"`
 	Prerequisites   []TaskPrerequisiteInput `json:"prerequisites,omitempty"`
 	ConflictPaths   []string                `json:"conflict_paths,omitempty"`
+	// Content pins project content revisions in the enqueue transaction.
+	Content []ContentPinInput `json:"content,omitempty"`
+}
+
+type ContentPinInput struct {
+	ContentID       string `json:"content_id"`
+	ContentRevision uint64 `json:"content_revision"`
 }
 
 // HumanQuestionInput is the bounded provider-authored portion of a
