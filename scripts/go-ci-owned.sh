@@ -36,6 +36,7 @@ repository_root=$(CDPATH= cd -- "$script_dir/.." && pwd -P)
 CDPATH= cd -- "$repository_root"
 export GOTOOLCHAIN=local
 go=${DF_CI_GO-}
+[ -n "$go" ] || go=$(command -v go 2>/dev/null || true)
 [ -n "$go" ] || {
     echo "go-ci: Go is unavailable; add Go's bin directory to factoryd --tool-path (and its install root to --toolchain-read-roots)" >&2
     exit 1
