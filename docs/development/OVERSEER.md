@@ -172,17 +172,15 @@ private runtime home, with the clone at `repo` inside it.
 A specialist (a worker with a standing instruction) records a proposal as an
 `observation` whose metadata says `"record_type":"proposal"`. Each open one is
 a persistent wake item, `Proposal ID from AGENT: TITLE [proposal:ID]`, until a
-`decision` resolves it or it is attached to a task: attaching is the
-acceptance. To accept, `overseer task add` the work (to a worker or the shared
-queue, never the specialist) and `content attach` the proposal to it; attach is
-refused while another proposal's task is still queued, running or blocked, so
-one self-generated implementation is active at a time (several proposals may
-share one task). Record the reason as a `decision`: metadata
-`"record_type":"proposal"`, `"record_id":"ID"` and evidence `["proposal:ID"]`,
-with `"status":"tentative"` (an attempt credential cannot write `current`, and
-is refused as unauthorized if it tries), `"task_id"` set to the task. To decline
-or defer, record the decision without `task_id`, the reason in its description.
-Only you or the operator resolve a proposal.
+`decision` resolves it: metadata `"record_type":"proposal"`, `"record_id":"ID"`
+and evidence `["proposal:ID"]`, with `"status":"tentative"`: an attempt credential
+cannot write `current`, and is refused as unauthorized if it tries. To accept, `overseer task add` the work (to a
+worker or the shared queue, never the specialist), `content attach` the
+proposal to it, and record the decision with `"task_id"` set to that task. To
+decline or defer, record the decision without `task_id`, the reason in its
+description. Only you or the operator resolve a proposal, and an acceptance is
+refused while another accepted proposal's task is still queued, running or
+blocked: one self-generated implementation is active at a time.
 
 Read this runbook from that clone or the task-provided checkout. If neither
 is available, report the missing checkout. Scope searches to that checkout
@@ -547,12 +545,9 @@ factoryd wakes you with `Escalated: factoryd cannot advance OWNER/REPO#N at
 exact head HEAD: ...` only when it cannot advance a pull request: a review that
 failed twice, an enqueue the App refused, a send-back that reached no task, or
 a change past two repair rounds. An enqueue refused as UNPROCESSABLE (a
-required check that never ran on the head, or a code-owner approval only a
-person can give, as for a pull request touching CODEOWNERS paths) is final for
-that head: factoryd escalates once, never retries it, and only a new head is
-reviewed and enqueued. You cannot approve it: raise it at once with
-`attempt request-human` naming the pull request and head; never start another
-review.
+required check that never ran on the head) is final for that head: only a new
+head is reviewed and enqueued. Resolve that cause or raise it with
+`attempt request-human` naming the pull request; never start another review.
 
 A send-back of your own (for example a `dirty` worktree, section 1) carries a
 pointer note, never pasted findings.

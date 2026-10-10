@@ -27,25 +27,28 @@ const specialistCarrierHeldSQL = `((SELECT COUNT(*) FROM runs WHERE role = 'work
 		WHERE r.project_id = t.project_id AND r.phase <> 'terminal' AND s.role = 'worker' AND s.idle_policy = 'standing_instruction' AND c.title = '` + overseerWakeTitle + `')
 	>= (SELECT specialist_runs FROM projects WHERE id = t.project_id))`
 
-// metaC and metaD are the knowledge metadata of content c and d, or '{}'
+// metaC, metaD and metaP are the knowledge metadata of content c, d and p, or '{}'
 // when it is not JSON.
 const (
 	metaC = `CASE WHEN json_valid(c.source_references) THEN c.source_references ELSE '{}' END`
 	metaD = `CASE WHEN json_valid(d.source_references) THEN d.source_references ELSE '{}' END`
+	metaP = `CASE WHEN json_valid(p.source_references) THEN p.source_references ELSE '{}' END`
 )
 
 // A proposal is the live latest revision of an observation recorded as one;
-// its resolution is a live latest decision naming it, or a task it is attached
-// to (the acceptance). An open proposal has neither. Both read content revision c, and the resolution is d.
+// its resolution is a live latest decision naming it, and it is accepted once
+// a task pins one of its proposal revisions p (attachedProposalSQL, task
+// r.task_id), latest or not. An open proposal has neither. Both read content
+// revision c, and the resolution is d.
 const (
-	// proposalRevisionSQL is revision c recorded as a proposal, whichever
-	// revision is latest: an attachment pins the revision it was made at.
-	proposalRevisionSQL   = `c.kind = 'observation' AND json_extract(` + metaC + `, '$.record_type') = 'proposal'`
-	latestProposalSQL     = proposalRevisionSQL + ` AND c.deprecated = 0 AND c.revision = (SELECT MAX(revision) FROM project_content_revisions WHERE id = c.id)`
+	latestProposalSQL = `c.kind = 'observation' AND c.deprecated = 0 AND c.revision = (SELECT MAX(revision) FROM project_content_revisions WHERE id = c.id)
+	AND json_extract(` + metaC + `, '$.record_type') = 'proposal'`
 	proposalResolutionSQL = `d.project_id = c.project_id AND d.kind = 'decision' AND d.deprecated = 0 AND d.revision = (SELECT MAX(revision) FROM project_content_revisions WHERE id = d.id)
 	AND json_extract(` + metaD + `, '$.record_type') = 'proposal' AND lower(json_extract(` + metaD + `, '$.record_id')) = lower(hex(c.id))`
+	attachedProposalSQL = `task_content_references AS r JOIN project_content_revisions AS p ON p.id = r.content_id AND p.revision = r.content_revision
+	WHERE r.project_id = c.project_id AND r.content_id = c.id AND p.kind = 'observation' AND json_extract(` + metaP + `, '$.record_type') = 'proposal'`
 	openProposalSQL = latestProposalSQL + ` AND NOT EXISTS (SELECT 1 FROM project_content_revisions AS d WHERE ` + proposalResolutionSQL + `)
-	AND NOT EXISTS (SELECT 1 FROM task_content_references WHERE content_id = c.id)`
+	AND NOT EXISTS (SELECT 1 FROM ` + attachedProposalSQL + `)`
 	// authorAgentSQL is the agent that authored content c through an attempt.
 	authorAgentSQL = `unhex(substr(c.author, instr(c.author, ' agent:') + 7, 32))`
 )
@@ -207,7 +210,8 @@ func specialistWake(ctx context.Context, c *sql.Conn, agent Agent, state Special
 				THEN 'declined: ' || replace(substr(COALESCE(NULLIF(d.description, ''), d.title), 1, 120), char(10), ' ')
 				ELSE 'accepted task ' || lower(json_extract(`+metaD+`, '$.task_id')) || ' ' || COALESCE((SELECT status FROM tasks WHERE id = unhex(json_extract(`+metaD+`, '$.task_id'))), 'unknown') END
 			FROM project_content_revisions AS d WHERE `+proposalResolutionSQL+` ORDER BY d.created_at_ms DESC LIMIT 1),
-			(SELECT 'accepted task ' || lower(hex(r.task_id)) || ' ' || t.status FROM task_content_references r JOIN tasks t ON t.id = r.task_id WHERE r.content_id = c.id ORDER BY r.attached_at_ms DESC LIMIT 1), 'open'))
+			(SELECT 'accepted task ' || lower(hex(r.task_id)) || ' ' || COALESCE((SELECT status FROM tasks WHERE id = r.task_id), 'unknown')
+			FROM `+attachedProposalSQL+` ORDER BY r.attached_at_ms DESC LIMIT 1), 'open'))
 		FROM project_content_revisions AS c WHERE c.project_id = ? AND `+latestProposalSQL+` AND `+authorAgentSQL+` = ? ORDER BY c.created_at_ms DESC, c.id LIMIT 8`,
 		agent.ProjectID.Bytes(), agent.ID.Bytes())
 	if err != nil {
@@ -386,9 +390,9 @@ func validateSpecialistRecord(ctx context.Context, c *sql.Conn, spec NewContent,
 		var proposals, active int
 		if err := c.QueryRowContext(ctx, `SELECT (SELECT count(*) FROM project_content_revisions AS c WHERE c.id = ?2 AND c.project_id = ?1 AND `+latestProposalSQL+`),
 			(SELECT count(*) FROM project_content_revisions AS d JOIN tasks AS t ON t.id = unhex(json_extract(`+metaD+`, '$.task_id'))
-				WHERE d.project_id = ?1 AND d.id <> ?3 AND lower(json_extract(`+metaD+`, '$.task_id')) <> lower(?4) AND d.kind = 'decision' AND d.deprecated = 0 AND d.revision = (SELECT MAX(revision) FROM project_content_revisions WHERE id = d.id)
+				WHERE d.project_id = ?1 AND d.id <> ?3 AND d.kind = 'decision' AND d.deprecated = 0 AND d.revision = (SELECT MAX(revision) FROM project_content_revisions WHERE id = d.id)
 				AND json_extract(`+metaD+`, '$.record_type') = 'proposal' AND t.status IN ('queued', 'running', 'blocked'))`,
-			spec.ProjectID.Bytes(), id, spec.ID.Bytes(), m.TaskID).Scan(&proposals, &active); err != nil {
+			spec.ProjectID.Bytes(), id, spec.ID.Bytes()).Scan(&proposals, &active); err != nil {
 			return err
 		}
 		if proposals == 0 {

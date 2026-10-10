@@ -131,7 +131,7 @@ func (g *GroupRun) note(head string) string {
 // ErrRefused marks an enqueue GitHub refused as UNPROCESSABLE: a head the
 // queue will not take, such as one whose required check never ran. The same
 // request at the same head gets the same answer, so it is not repeated.
-var ErrRefused = errors.New("the merge queue refuses this exact head before execution (a required check that never ran, or a code-owner approval only a person can give), so factoryd will not enqueue it again: a person resolves it or a new head is pushed and reviewed afresh")
+var ErrRefused = errors.New("the merge queue refuses this exact head, so factoryd will not enqueue it again; a new head is reviewed afresh")
 
 // FailuresBeforeEscalation is how many consecutive merge-stage passes may
 // fail before the overseer is told: 30 minutes at the 5-minute merge tick.

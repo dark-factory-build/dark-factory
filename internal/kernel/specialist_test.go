@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"context"
 	"errors"
-	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -375,6 +374,65 @@ func TestSpecialistRecordLimits(t *testing.T) {
 	}
 }
 
+// A proposal is accepted only by a task pinning one of its proposal
+// revisions: an observation pinned as context and later revised into a
+// proposal stays open.
+func TestSpecialistAttachedObservationRevisedIntoProposalStaysOpen(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	store, run, _ := runningWorkerRun(t)
+	defer store.Close()
+	task, err := store.EnqueueTask(ctx, NewTask{ID: taskID(t, 100), ProjectID: run.ProjectID, IncarnationID: incarnationID(t, 101), Title: "context"}, mustTime(t, 40))
+	if err != nil {
+		t.Fatal(err)
+	}
+	spec := knowledgeSpec(t, run.ProjectID, 90, ContentObservation, KnowledgeMetadata{Status: "tentative"})
+	spec.Author = "run:00 agent:" + run.AgentID.String() + " role:worker"
+	observation, err := store.CreateContent(ctx, spec, mustTime(t, 41))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.AttachContentToTask(ctx, task.ID, run.ProjectID, observation.ID, observation.Revision, mustTime(t, 42)); err != nil {
+		t.Fatal(err)
+	}
+	spec.SourceReferences = `{"status":"tentative","record_type":"proposal"}`
+	proposal, err := store.ReviseContent(ctx, observation.Revision, spec, mustTime(t, 43))
+	if err != nil {
+		t.Fatal(err)
+	}
+	follow := func() (int, string) {
+		t.Helper()
+		conn, err := store.writer.Conn(ctx)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer conn.Close()
+		agent, _, err := agentByID(ctx, conn, run.AgentID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var open int
+		if err := conn.QueryRowContext(ctx, `SELECT count(*) FROM project_content_revisions AS c WHERE c.id = ? AND `+openProposalSQL, proposal.ID.Bytes()).Scan(&open); err != nil {
+			t.Fatal(err)
+		}
+		body, err := specialistWake(ctx, conn, agent, SpecialistState{}, specialistPrior{}, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return open, body
+	}
+	line := "- proposal " + proposal.ID.String() + ` "` + spec.Title + `": `
+	if open, body := follow(); open != 1 || !strings.Contains(body, line+"open") {
+		t.Fatalf("observation pin accepted the later proposal: open=%d body=%q", open, body)
+	}
+	if err := store.AttachContentToTask(ctx, task.ID, run.ProjectID, proposal.ID, proposal.Revision, mustTime(t, 44)); err != nil {
+		t.Fatal(err)
+	}
+	if open, body := follow(); open != 0 || !strings.Contains(body, line+"accepted task "+task.ID.String()+" queued") {
+		t.Fatalf("proposal pin = open=%d body=%q", open, body)
+	}
+}
+
 // Every record shape the specialist runbook uses is creatable by an attempt,
 // and each names what it is about.
 func TestSpecialistRunbookRecords(t *testing.T) {
@@ -544,88 +602,5 @@ func TestArchiveStopsSpecialist(t *testing.T) {
 	}
 	if task, _, _ := store.Task(ctx, shared.ID); task.Status != TaskQueued || task.Revision != shared.Revision {
 		t.Fatalf("shared task = %+v", task)
-	}
-}
-
-// Attaching a proposal to a task is its acceptance: it stops being open, and
-// only one task carrying proposals is active at a time.
-func TestSpecialistAttachAcceptsProposal(t *testing.T) {
-	t.Parallel()
-	ctx := context.Background()
-	store, run, _ := runningWorkerRun(t)
-	defer store.Close()
-	var proposals []ContentRevision
-	var tasks []Task
-	for index, seed := range []byte{110, 111, 112} {
-		p, err := store.CreateContent(ctx, knowledgeSpec(t, run.ProjectID, seed, ContentObservation, KnowledgeMetadata{Status: "tentative", RecordType: "proposal"}), mustTime(t, 40+int64(index)))
-		if err != nil {
-			t.Fatal(err)
-		}
-		proposals = append(proposals, p)
-		task, err := store.EnqueueTask(ctx, NewTask{ID: taskID(t, seed+10), ProjectID: run.ProjectID, IncarnationID: incarnationID(t, seed+11), Title: "implement"}, mustTime(t, 50))
-		if err != nil {
-			t.Fatal(err)
-		}
-		tasks = append(tasks, task)
-	}
-	attach := func(i, j int) error {
-		return store.AttachContentToTask(ctx, tasks[j].ID, run.ProjectID, proposals[i].ID, proposals[i].Revision, mustTime(t, 60))
-	}
-	open := func() (n int) {
-		c, err := store.beginRead(ctx)
-		if err != nil {
-			t.Fatal(err)
-		}
-		defer c.Close()
-		if err := c.connection.QueryRowContext(ctx, `SELECT count(*) FROM project_content_revisions AS c WHERE `+openProposalSQL).Scan(&n); err != nil {
-			t.Fatal(err)
-		}
-		return n
-	}
-	if open() != 3 {
-		t.Fatalf("open before attach = %d", open())
-	}
-	if err := attach(0, 0); err != nil {
-		t.Fatal(err)
-	}
-	if open() != 2 {
-		t.Fatalf("open after attach = %d", open())
-	}
-	// Revising the attached proposal leaves its pinned revision a proposal.
-	revised := knowledgeSpec(t, run.ProjectID, 110, ContentObservation, KnowledgeMetadata{Status: "tentative", RecordType: "proposal"})
-	revised.ID = proposals[0].ID
-	if _, err := store.ReviseContent(ctx, proposals[0].Revision, revised, mustTime(t, 60)); err != nil {
-		t.Fatal(err)
-	}
-	if err := attach(1, 1); !errors.Is(err, ErrConflict) {
-		t.Fatalf("proposal on a second active task after a revision = %v", err)
-	}
-	if err := attach(2, 0); err != nil {
-		t.Fatalf("second proposal on the same task: %v", err)
-	}
-	if err := attach(1, 1); !errors.Is(err, ErrConflict) {
-		t.Fatalf("proposal on a second active task = %v", err)
-	}
-	// Another project's active proposal task does not hold this one back.
-	other, err := store.CreateProject(ctx, NewProject{ID: projectID(t, 119), Name: "other", Root: filepath.Join(t.TempDir(), "other")}, mustTime(t, 61))
-	if err != nil {
-		t.Fatal(err)
-	}
-	otherProposal, err := store.CreateContent(ctx, knowledgeSpec(t, other.ID, 113, ContentObservation, KnowledgeMetadata{Status: "tentative", RecordType: "proposal"}), mustTime(t, 62))
-	if err != nil {
-		t.Fatal(err)
-	}
-	otherTask, err := store.EnqueueTask(ctx, NewTask{ID: taskID(t, 130), ProjectID: other.ID, IncarnationID: incarnationID(t, 131), Title: "implement"}, mustTime(t, 63))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := store.AttachContentToTask(ctx, otherTask.ID, other.ID, otherProposal.ID, otherProposal.Revision, mustTime(t, 64)); err != nil {
-		t.Fatalf("proposal in another project = %v", err)
-	}
-	if _, err := store.UpdateTask(ctx, tasks[0].ID, tasks[0].Revision, TaskPatch{Cancel: true}, mustTime(t, 70)); err != nil {
-		t.Fatal(err)
-	}
-	if err := attach(1, 1); err != nil {
-		t.Fatalf("proposal after the first task finished: %v", err)
 	}
 }
