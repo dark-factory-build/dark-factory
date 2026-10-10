@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -595,6 +596,22 @@ func TestSpecialistAttachAcceptsProposal(t *testing.T) {
 	}
 	if err := attach(1, 1); !errors.Is(err, ErrConflict) {
 		t.Fatalf("proposal on a second active task = %v", err)
+	}
+	// Another project's active proposal task does not hold this one back.
+	other, err := store.CreateProject(ctx, NewProject{ID: projectID(t, 119), Name: "other", Root: filepath.Join(t.TempDir(), "other")}, mustTime(t, 61))
+	if err != nil {
+		t.Fatal(err)
+	}
+	otherProposal, err := store.CreateContent(ctx, knowledgeSpec(t, other.ID, 113, ContentObservation, KnowledgeMetadata{Status: "tentative", RecordType: "proposal"}), mustTime(t, 62))
+	if err != nil {
+		t.Fatal(err)
+	}
+	otherTask, err := store.EnqueueTask(ctx, NewTask{ID: taskID(t, 130), ProjectID: other.ID, IncarnationID: incarnationID(t, 131), Title: "implement"}, mustTime(t, 63))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.AttachContentToTask(ctx, otherTask.ID, other.ID, otherProposal.ID, otherProposal.Revision, mustTime(t, 64)); err != nil {
+		t.Fatalf("proposal in another project = %v", err)
 	}
 	if _, err := store.UpdateTask(ctx, tasks[0].ID, tasks[0].Revision, TaskPatch{Cancel: true}, mustTime(t, 70)); err != nil {
 		t.Fatal(err)
