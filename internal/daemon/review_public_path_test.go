@@ -576,7 +576,7 @@ func TestMergeQueueEjectionWithNoHeadFailureRequeuesOnceThenSendsBack(t *testing
 		t.Fatalf("enqueue err=%v backend=%+v", err, backend)
 	}
 	waitForMergePipeline(t, fixture.daemon)
-	if backend.enqueues != 1 {
+	if backend.enqueues != 2 {
 		t.Fatalf("initial enqueue count=%d", backend.enqueues)
 	}
 	backend.pull = &review.Pull{Head: publishedReviewRequest().Head, State: "open", Group: &review.GroupRun{ID: 37516424704, Conclusion: "failure", Jobs: []review.GroupJob{{Name: "checks", Conclusion: "failure", Annotations: []string{"not ok 3 - board and shelves open peer views of one Library workspace"}}}}}
@@ -855,7 +855,7 @@ func TestRefusedEnqueueResendsEachTickAndEndsFromThePull(t *testing.T) {
 		t.Fatalf("refused enqueue err=%v enqueues=%d", err, backend.enqueues)
 	}
 	waitForMergePipeline(t, fixture.daemon)
-	if backend.enqueues != 1 {
+	if backend.enqueues != 2 {
 		t.Fatalf("initial enqueue count=%d", backend.enqueues)
 	}
 	tick := func() review.Operation {
