@@ -351,6 +351,14 @@ func pullRequestObservation(ctx context.Context, call maintainerMCP, repository 
 		if value.Number == 0 || len(value.Head) != 40 || strings.Trim(value.Head, "0123456789abcdef") != "" {
 			return kernel.ProductionObservation{}, fmt.Errorf("Maintainer returned an invalid pull request head")
 		}
+		if priorPull, ok := knownByNumber[value.Number]; ok && !pullRequestNeedsExactRead(value, knownByNumber) {
+			if value.Mergeable == nil {
+				value.Mergeable = priorPull.Mergeable
+			}
+			if value.MergeState == "" {
+				value.MergeState = priorPull.MergeState
+			}
+		}
 		pr := productionPullRequest(value)
 		if review, ok := prior[value.Number]; ok && strings.EqualFold(review.Head, value.Head) {
 			pr.Review = review
