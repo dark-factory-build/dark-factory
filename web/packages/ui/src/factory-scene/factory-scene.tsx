@@ -766,7 +766,7 @@ function WorkLine({ crates, connected, onLight, onSelect }: {
       return <details key={label} className="dfFloorMenu" name="floor-tools">
         <summary>{label} <strong>{!connected || crates === undefined ? "—" : members.length}</strong></summary>
         <div className="dfFloorMenu__body">
-          {!connected ? <p>Disconnected · showing last known changes</p> : crates === undefined ? <p>Reading changes…</p> : members.length === 0 ? <p>No changes</p> : null}
+          {!connected ? <p>{crates === undefined ? "Not connected yet" : "Disconnected · showing last known changes"}</p> : crates === undefined ? <p>Reading changes…</p> : members.length === 0 ? <p>No changes</p> : null}
           {members.map((crate) => <button type="button" key={crate.id} data-crate={crate.id} data-crate-station={crate.station} data-fault={crate.fault ? "" : undefined}
             aria-label={crate.number > 0 ? `PR #${crate.number} ${crate.title}: ${crate.stage || label}` : `A change request: ${label}${crate.fault ? ", needs correction" : ""}`}
             disabled={!connected || onSelect === undefined} onClick={(event) => { onSelect?.(crate.id); event.currentTarget.closest("details")?.removeAttribute("open"); }}
