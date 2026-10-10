@@ -19,36 +19,58 @@ test("the documented ?fixture page is the whole console, labelled, over the fixt
 
 test("fixture server advertises only after binding and has a bounded lifecycle", async () => {
   const first = spawnPreview();
-  const firstOutput = await first.stdout;
+  const firstOutput = await first.ready;
   assert.match(firstOutput, /http:\/\/127\.0\.0\.1:5196\/\?fixture/);
   assert.equal(firstOutput.trim(), "http://127.0.0.1:5196/?fixture");
   const second = spawnPreview();
-  assert.match(await second.stderr, /EADDRINUSE/);
-  assert.doesNotMatch(second.stdoutValue, /http:\/\/127\.0\.0\.1:5196/);
+  const [secondError, secondOutput] = await Promise.all([second.stderr, second.stdout]);
+  await second.exit;
+  assert.match(secondError, /EADDRINUSE/);
+  assert.doesNotMatch(secondOutput, /http:\/\/127\.0\.0\.1:5196/);
   first.kill("SIGINT");
-  second.kill("SIGINT");
+  await first.exit;
   assert.match(readFileSync(preview, "utf8"), /setTimeout\(stop, 30 \* 60 \* 1000\)/);
 });
 
 function spawnPreview() {
   const child = spawn(process.execPath, [preview, "fixture"]);
-  const stdout = captureOutput(child.stdout, child, "stdout");
-  const stderr = captureOutput(child.stderr, child, "stderr");
+  const stdout = captureOutput(child.stdout, child, "stdout", true);
+  const stderr = captureOutput(child.stderr, child, "stderr", false);
   return {
-    stdout: stdout.promise,
-    stderr: stderr.promise,
-    get stdoutValue() { return stdout.value; },
+    ready: stdout.ready,
+    stdout: stdout.output,
+    stderr: stderr.output,
+    exit: new Promise((resolve) => child.once("close", resolve)),
     kill: (signal) => child.kill(signal),
   };
 }
 
-function captureOutput(stream, child, label) {
+function captureOutput(stream, child, label, required) {
   let value = "";
-  const promise = new Promise((resolve, reject) => {
-    const fail = () => reject(new Error(`${label} closed before producing output`));
-    child.once("error", fail);
-    stream.once("close", fail);
-    stream.on("data", (chunk) => { value += chunk; resolve(value); });
+  let readyResolve;
+  let readyReject;
+  let outputResolve;
+  let outputReject;
+  let readySettled = false;
+  const ready = new Promise((resolve, reject) => { readyResolve = resolve; readyReject = reject; });
+  const output = new Promise((resolve, reject) => { outputResolve = resolve; outputReject = reject; });
+  const fail = () => {
+    const error = new Error(`${label} closed before producing output`);
+    if (!readySettled) { readySettled = true; (required ? readyReject : readyResolve)(required ? error : value); }
+    outputReject(error);
+  };
+  child.once("error", fail);
+  stream.on("data", (chunk) => {
+    value += chunk;
+    if (!readySettled) { readySettled = true; readyResolve(value); }
   });
-  return { promise, get value() { return value; } };
+  stream.once("close", () => {
+    if (!readySettled) {
+      readySettled = true;
+      const error = new Error(`${label} closed before producing output`);
+      (required ? readyReject : readyResolve)(required ? error : value);
+    }
+    outputResolve(value);
+  });
+  return { ready, output };
 }
