@@ -202,6 +202,11 @@ func TestOverseerFailedReleaseEscalatesOncePerCause(t *testing.T) {
 		}
 	}
 	rewake, settle := OverseerRewakeAfter.Milliseconds(), overseerWakeSettle.Milliseconds()
+	// An unrelated full wake that ran before the failure does not count for it.
+	if _, err := store.EnqueueTask(ctx, NewTask{ID: taskID(t, 88), IncarnationID: incarnationID(t, 89), ProjectID: worker.ProjectID, AssignedAgentID: agentID(t, 3), Title: overseerWakeTitle, Body: "Factory causal wake: mode=full"}, mustTime(t, 500)); err != nil {
+		t.Fatal(err)
+	}
+	settleCarrier(t, store, 501, 10, "ran")
 	at := int64(1000)
 	release('a', "failed", "drain", "drain_timeout: run 1 is admitted", at)
 	at += settle
