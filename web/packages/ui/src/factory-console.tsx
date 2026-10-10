@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
-import type { DiscoveredAccount, AccountItem, AgentItem, GitHubConnectionBody, OperationalNodeView, ProjectItem, RepositoryMutation, SpriteAppearance, TaskHistoryView, TaskItem, TaskListView, TelemetryIngest, TelemetryIngestBody } from "@dark-factory/client";
+import type { DiscoveredAccount, AccountItem, AgentItem, GitHubConnectionBody, OperationalNodeView, RepositoryMutation, SpriteAppearance, TaskHistoryView, TaskItem, TaskListView, TelemetryIngest, TelemetryIngestBody } from "@dark-factory/client";
 import { type FactoryAgentSelection, type FactoryAppSnapshot, type FactoryHumanRequestView } from "./factory-app-controller.js";
 import { AgentList, FactoryFloor } from "./console-screens.js";
 import { AgentPanel, ConsoleDialog, HumanRequestPanel, WorkPanel, TaskDetail, SettingsDialog, editErrorCopy, type AgentConfigEdit, type AgentPanelView, type TaskEdit, type TaskBrief, type TaskScope, type TaskContentChip, type AddTask, type WorkFilter } from "./console-sidebar.js";
@@ -37,7 +37,6 @@ export type FactoryConsoleProps = FactoryAppSnapshot & {
   appearanceAgentId?: string;
   onEditAppearance?: (agent: AgentItem) => void;
   onCloseAppearance?: () => void;
-  onSaveProjectLimits?: (project: Pick<ProjectItem, "id" | "revision">, limits: { runBudget: bigint; maxRunSeconds: number }) => void;
   onEditTask?: (task: TaskItem, change: TaskEdit) => Promise<boolean>;
   onAddTask?: AddTask;
   onLoadTaskDetail?: (task: TaskItem, peerOffset?: bigint, expectedHead?: bigint) => Promise<TaskBrief>;
@@ -128,7 +127,6 @@ export function FactoryConsole({
   appearanceAgentId,
   onEditAppearance,
   onCloseAppearance,
-  onSaveProjectLimits,
   onEditTask,
   onAddTask,
   onLoadTaskDetail,
@@ -442,7 +440,6 @@ export function FactoryConsole({
           github={github}
           onGitHub={onGitHub}
           edit={edit}
-          onSaveProjectLimits={onSaveProjectLimits}
           pairing={pairing ?? (!remoteInviteAllowed ? undefined : (
             <>
               <RemoteInvitePanel invite={remoteInvite} error={remoteInviteError} onInvite={onInviteRemote} onDismiss={onDismissRemoteInvite} devices={devices} devicesError={devicesError} ownClientId={ownClientId} onLoadDevices={onLoadDevices} onRevokeDevice={onRevokeDevice} />

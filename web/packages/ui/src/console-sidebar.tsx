@@ -1050,29 +1050,6 @@ function FloorAppearanceSection({ appearance, onChange, onReset }: {
   </section>;
 }
 
-function ProjectLimitsSection({ state, projectId, edit, ready, onSave }: {
-  state: StateView | undefined;
-  projectId?: string;
-  edit?: FactoryEditView;
-  ready: boolean;
-  onSave?: never;
-}) {
-  const projects = state === undefined ? [] : [...state.projects.values()].filter((project) => projectId === undefined || project.id === projectId);
-  return <div className="dfConsoleSidebar__section" aria-label="Project limits">
-    <h3>Project limits</h3>
-    {projects.length === 0 ? <p className="dfFactoryConsole__empty">No projects</p> : projects.map((project) => <ProjectLimitsForm key={`${project.id}:${project.revision}:${edit?.target === project.id && edit.error !== undefined ? "refused" : ""}`} project={project} edit={edit} ready={ready} onSave={onSave} />)}
-  </div>;
-}
-
-function ProjectLimitsForm({ project, edit, ready, onSave }: {
-  project: ProjectItem;
-  edit?: FactoryEditView;
-  ready: boolean;
-  onSave?: never;
-}) {
-  return <div className="dfConsoleSidebar__config"><h4>{project.name}</h4><p className="dfConsoleSidebar__inherit">{project.runs_used.toString()} runs used</p></div>;
-}
-
 /**
  * The provider logins on this machine. Linking registers one that already
  * exists; signing a CLI in is that CLI's own job, so there is no button for it.

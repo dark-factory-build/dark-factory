@@ -17,7 +17,6 @@ import {
   type TelemetryIngest,
   type AgentItem,
   type SpriteAppearance,
-  type ProjectItem,
   type AgentControlAction,
   type TaskHistoryView,
   type TaskDetailView,
@@ -169,7 +168,7 @@ export type FactoryAppStatus =
 type HumanSession = Pick<BrowserSession, "getHumanRequestDetail" | "replyHumanRequest" | "cancelHumanRequest">;
 type TerminalSession = Pick<BrowserSession, "resolveAgentTerminal" | "openTerminal" | "close">;
 type AgentTaskSession = Pick<BrowserSession, "enqueueAgentTaskWithFiles" | "enqueueAgentTask" | "controlAgent" | "getTaskHistory" | "getTaskDetail" | "resolveAgentTerminal">;
-type ConsoleSession = Pick<BrowserSession, "updateAgent" | "setProjectLimits" | "createProject" | "getRepositories" | "mutateRepository" | "intake" | "updateTask" | "getOperationalGraph" | "getOperationalNode" | "getRunPaths" | "getTaskList" | "discoverAccounts" | "linkAccount" | "updateAccount" | "listBrowserClients" | "revokeBrowserClient" | "githubConnection" | "clientId">;
+type ConsoleSession = Pick<BrowserSession, "updateAgent" | "createProject" | "getRepositories" | "mutateRepository" | "intake" | "updateTask" | "getOperationalGraph" | "getOperationalNode" | "getRunPaths" | "getTaskList" | "discoverAccounts" | "linkAccount" | "updateAccount" | "listBrowserClients" | "revokeBrowserClient" | "githubConnection" | "clientId">;
 type RemoteInviteSession = Pick<BrowserSession, "inviteRemote" | "telemetryIngest" | "capabilities">;
 type ControlledClient = Pick<BrowserClient, "connect" | "close"> & { readonly session?: HumanSession & TerminalSession & AgentTaskSession & ConsoleSession & RemoteInviteSession & Partial<Pick<BrowserSession, "projectContent" | "attachmentRetention" | "setDispatch">> };
 type ClientFactory = (options: BrowserSessionOptions) => ControlledClient;
@@ -564,25 +563,6 @@ export class FactoryAppController {
     }
     this.#publish();
     return false;
-  }
-
-  /** Save specialist limits against the project's exact revision. */
-  async updateProjectLimits(project: Pick<ProjectItem, "id" | "revision">, limits: { specialistRuns?: number; specialistOpenProposals?: number }): Promise<void> {
-    const session = this.#client?.session;
-    if (this.#closed || this.#status !== "ready" || session === undefined || this.#edit?.pending === true) return;
-    const generation = this.#generation;
-    const edit: FactoryEditView = { target: project.id, pending: true };
-    this.#edit = edit;
-    this.#publish();
-    try {
-      await session.setProjectLimits({ projectId: project.id, expectedRevision: project.revision, ...limits });
-      if (!this.#current(generation) || this.#edit !== edit) return;
-      this.#edit = undefined;
-    } catch (error) {
-      if (!this.#current(generation) || this.#edit !== edit) return;
-      this.#edit = { target: project.id, pending: false, error: finiteError(error) };
-    }
-    this.#publish();
   }
 
   /** Keep operator-authored task text outside a transient sidebar component. */
