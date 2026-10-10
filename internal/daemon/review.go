@@ -674,6 +674,9 @@ func (b *daemonReviewBackend) Enqueue(ctx context.Context, operation review.Oper
 // UNPROCESSABLE" as review.ErrRefused. One also RATE_LIMITED may pass later.
 func enqueueRefused(err error) error {
 	if why := fmt.Sprint(err); strings.Contains(why, "rejected operation: refused:") && strings.Contains(why, "UNPROCESSABLE") && !strings.Contains(why, "RATE_LIMITED") {
+		if strings.Contains(strings.ToLower(why), "required approval") || strings.Contains(why, "CODEOWNERS_APPROVAL") {
+			return fmt.Errorf("%w (%v)", review.ErrOwnerApproval, err)
+		}
 		return fmt.Errorf("%w (%v)", review.ErrRefused, err)
 	}
 	return err

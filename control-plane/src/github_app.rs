@@ -168,6 +168,7 @@ pub(crate) struct RejectionKinds {
     forbidden: bool,
     unprocessable: bool,
     rate_limited: bool,
+    codeowners_approval: bool,
 }
 
 impl std::fmt::Display for RejectionKinds {
@@ -178,6 +179,7 @@ impl std::fmt::Display for RejectionKinds {
             (self.forbidden, "FORBIDDEN"),
             (self.unprocessable, "UNPROCESSABLE"),
             (self.rate_limited, "RATE_LIMITED"),
+            (self.codeowners_approval, "CODEOWNERS_APPROVAL"),
         ] {
             if present {
                 if separate {
@@ -4876,6 +4878,8 @@ struct GraphQlError {
     /// select into, so the effect may already exist -- whatever the type says.
     #[serde(default)]
     path: Vec<serde_json::Value>,
+    #[serde(default)]
+    message: String,
 }
 
 /// Classify a GraphQL `errors` array into what it establishes about the
@@ -4917,7 +4921,13 @@ fn classify_graphql_errors(errors: &[GraphQlError]) -> Option<GraphQlFailure> {
         match error.kind.as_deref() {
             Some("NOT_FOUND") => kinds.not_found = true,
             Some("FORBIDDEN") => kinds.forbidden = true,
-            Some("UNPROCESSABLE") => kinds.unprocessable = true,
+            Some("UNPROCESSABLE") => {
+                kinds.unprocessable = true;
+                kinds.codeowners_approval |= error
+                    .message
+                    .to_ascii_lowercase()
+                    .contains("required approval");
+            }
             Some("RATE_LIMITED") => kinds.rate_limited = true,
             _ => return Some(GraphQlFailure::Unknown),
         }
@@ -5247,7 +5257,13 @@ mod tests {
                 serde_json::from_value(response["errors"].clone()).unwrap();
             assert!(matches!(
                 classify_graphql_errors(&errors),
-                Some(GraphQlFailure::Rejected(kinds)) if kinds.to_string() == "UNPROCESSABLE"
+                Some(GraphQlFailure::Rejected(kinds))
+                    if kinds.to_string()
+                        == if name == "enqueue-refused-before-codeowners-approval" {
+                            "UNPROCESSABLE+CODEOWNERS_APPROVAL"
+                        } else {
+                            "UNPROCESSABLE"
+                        }
             ));
             assert!(response["data"]["enqueuePullRequest"].is_null());
         }
@@ -6019,6 +6035,7 @@ mod tests {
                 .map(|kind| GraphQlError {
                     kind: kind.map(Into::into),
                     path: vec!["enqueuePullRequest".into()],
+                    message: String::new(),
                 })
                 .collect::<Vec<_>>()
         };
@@ -6026,6 +6043,7 @@ mod tests {
             vec![GraphQlError {
                 kind: Some(kind.into()),
                 path: path.iter().map(|part| (*part).into()).collect(),
+                message: String::new(),
             }]
         };
 
@@ -6215,10 +6233,12 @@ mod tests {
             GraphQlError {
                 kind: Some("NOT_FOUND".into()),
                 path: vec!["enqueuePullRequest".into()],
+                message: String::new(),
             },
             GraphQlError {
                 kind: Some("RATE_LIMITED".into()),
                 path: vec![],
+                message: String::new(),
             },
         ];
         match classify_graphql_errors(&mixed) {

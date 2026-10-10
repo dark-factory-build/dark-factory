@@ -303,9 +303,9 @@ func TestIndeterminateEnqueueIsSettledByTheNextObservation(t *testing.T) {
 	}
 }
 
-// A refusal keeps the exact-head operation live, escalates once, and waits for
-// checks or review state to change before retrying the same enqueue.
-func TestRefusedEnqueueWaitsForHeadObservationChange(t *testing.T) {
+// A transient refusal retries even when checks and review state are unchanged:
+// mergeability can clear without either signal changing.
+func TestRefusedEnqueueRetriesWithoutHeadObservationChange(t *testing.T) {
 	store := &memoryStore{}
 	backend := &fakeBackend{pull: &Pull{Head: reviewRequest().Head, State: "open"}, enqueueErr: fmt.Errorf("%w (rejected before execution as UNPROCESSABLE)", ErrRefused)}
 	c := Coordinator{Store: store, Backend: backend, Now: func() time.Time { return time.Unix(20, 0) }}
@@ -313,13 +313,22 @@ func TestRefusedEnqueueWaitsForHeadObservationChange(t *testing.T) {
 	if !errors.Is(err, ErrRefused) || op.State != "enqueued" || !op.Refused || op.Escalation == "" || len(store.values) != 1 {
 		t.Fatalf("operation=%+v err=%v", op, err)
 	}
-	backend.pull = &Pull{Head: op.Request.Head, State: "open"}
-	if waited, err := c.Advance(context.Background(), op); err != nil || waited.Refused != op.Refused || backend.enqueues != 0 {
-		t.Fatalf("unchanged refusal advanced: operation=%+v err=%v enqueues=%d", waited, err, backend.enqueues)
-	}
-	backend.pull, backend.enqueueErr = &Pull{Head: op.Request.Head, State: "open", Checks: []string{"checks=success"}}, nil
+	backend.enqueueErr = nil
 	if queued, err := c.Advance(context.Background(), op); err != nil || queued.State != "enqueued" || queued.Refused || queued.Escalation != "" || queued.Enqueues != 1 || backend.enqueues != 1 {
-		t.Fatalf("changed refusal did not retry: operation=%+v err=%v enqueues=%d", queued, err, backend.enqueues)
+		t.Fatalf("unchanged refusal did not retry: operation=%+v err=%v enqueues=%d", queued, err, backend.enqueues)
+	}
+}
+
+func TestOwnerApprovalRefusalEscalatesOnce(t *testing.T) {
+	store := &memoryStore{}
+	backend := &fakeBackend{pull: &Pull{Head: reviewRequest().Head, State: "open"}, enqueueErr: fmt.Errorf("%w (required approval is missing for .github/workflows/ci.yml)", ErrOwnerApproval)}
+	c := Coordinator{Store: store, Backend: backend, Now: func() time.Time { return time.Unix(20, 0) }}
+	op, err := c.Advance(context.Background(), Operation{ID: "op", Request: reviewRequest(), State: "enqueued", Verdict: "allow", Submitted: true})
+	if !errors.Is(err, ErrOwnerApproval) || !op.Refused || !op.OwnerApproval || backend.enqueues != 0 || !strings.Contains(op.Escalation, "#7") || !strings.Contains(op.Escalation, ".github/workflows/ci.yml") {
+		t.Fatalf("owner approval refusal = %+v err=%v enqueues=%d", op, err, backend.enqueues)
+	}
+	if next, err := c.Advance(context.Background(), op); err != nil || backend.enqueues != 0 || next.Escalation != op.Escalation {
+		t.Fatalf("owner approval refusal retried: %+v err=%v enqueues=%d", next, err, backend.enqueues)
 	}
 }
 

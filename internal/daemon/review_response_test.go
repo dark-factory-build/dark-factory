@@ -38,3 +38,10 @@ func TestOnlyAnUnprocessableEnqueueRefusalIsTerminal(t *testing.T) {
 		t.Fatal("success became a refusal")
 	}
 }
+
+func TestCodeownersEnqueueRefusalIsOwnerApproval(t *testing.T) {
+	err := errors.New("review: Maintainer rejected operation: refused: The request was refused: rejected before execution as UNPROCESSABLE+CODEOWNERS_APPROVAL.")
+	if !errors.Is(enqueueRefused(err), review.ErrOwnerApproval) {
+		t.Fatalf("err=%v", enqueueRefused(err))
+	}
+}
