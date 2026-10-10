@@ -5215,6 +5215,53 @@ async fn sign_rs256(private_key: &[u8], message: &[u8]) -> Result<Vec<u8>, Error
 mod tests {
     use super::*;
 
+    fn sourced_github_fixtures() -> serde_json::Value {
+        serde_json::from_str(include_str!("../tests/fixtures/github-behaviors.json")).unwrap()
+    }
+
+    fn fixture(name: &str) -> serde_json::Value {
+        sourced_github_fixtures()
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|fixture| fixture["name"] == name)
+            .cloned()
+            .unwrap_or_else(|| panic!("missing GitHub fixture {name}"))
+    }
+
+    #[test]
+    fn sourced_fixtures_name_the_production_evidence() {
+        for fixture in sourced_github_fixtures().as_array().unwrap() {
+            assert!(fixture["source"].as_str().unwrap().contains("2026-10-09"));
+        }
+    }
+
+    #[test]
+    fn sourced_enqueue_refusals_keep_the_real_root_error_shape() {
+        for name in [
+            "enqueue-refused-before-codeowners-approval",
+            "enqueue-refused-for-head-conflict",
+        ] {
+            let response = fixture(name)["response"].clone();
+            let errors: Vec<GraphQlError> =
+                serde_json::from_value(response["errors"].clone()).unwrap();
+            assert!(matches!(
+                classify_graphql_errors(&errors),
+                Some(GraphQlFailure::Rejected(kinds)) if kinds.to_string() == "UNPROCESSABLE"
+            ));
+            assert!(response["data"]["enqueuePullRequest"].is_null());
+        }
+    }
+
+    #[test]
+    fn an_explicit_author_commit_fixture_is_accepted_by_sha_not_signature() {
+        let response = fixture("commit-created-with-explicit-author")["response"].clone();
+        assert!(!response["verification"]["verified"].as_bool().unwrap());
+        assert_eq!(response["verification"]["reason"], "unsigned");
+        let commit: GitObjectId = serde_json::from_value(response).unwrap();
+        assert_eq!(valid_sha(&commit.sha), Ok(()));
+    }
+
     #[test]
     fn jwt_claims_are_bounded_and_use_the_numeric_app_id() {
         let unsigned = jwt_unsigned(4_673_420, 1_800_000_000);
