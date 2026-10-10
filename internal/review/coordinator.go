@@ -98,6 +98,7 @@ type Pull struct {
 	Queued    bool
 	Failing   []string  // required checks at the head that finished unsuccessfully
 	Pending   bool      // a required check at the head has not finished
+	Checks    []string  // stable name=conclusion values for every observed required check
 	Group     *GroupRun // the newest completed merge-group run that built the head
 }
 

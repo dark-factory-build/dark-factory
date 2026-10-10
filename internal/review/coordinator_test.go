@@ -317,7 +317,7 @@ func TestRefusedEnqueueWaitsForHeadObservationChange(t *testing.T) {
 	if waited, err := c.Advance(context.Background(), op); err != nil || waited.Refused != op.Refused || backend.enqueues != 0 {
 		t.Fatalf("unchanged refusal advanced: operation=%+v err=%v enqueues=%d", waited, err, backend.enqueues)
 	}
-	backend.pull, backend.enqueueErr = &Pull{Head: op.Request.Head, State: "open", Review: "allow"}, nil
+	backend.pull, backend.enqueueErr = &Pull{Head: op.Request.Head, State: "open", Checks: []string{"checks=success"}}, nil
 	if queued, err := c.Advance(context.Background(), op); err != nil || queued.State != "enqueued" || queued.Refused || queued.Escalation != "" || queued.Enqueues != 1 || backend.enqueues != 1 {
 		t.Fatalf("changed refusal did not retry: operation=%+v err=%v enqueues=%d", queued, err, backend.enqueues)
 	}
