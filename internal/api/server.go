@@ -111,6 +111,7 @@ type Call struct {
 	githubConnection   GitHubConnectionInput
 	intake             IntakeInput
 	attempt            bool
+	attemptTaskResumed bool
 	terminalObserve    TerminalObserveInput
 	peerIncludeTargets bool
 	kind               CallKind
@@ -203,6 +204,10 @@ func (call Call) AttemptDigest() (AttemptDigest, bool) {
 
 func (call Call) AttemptSourceTaskID() (string, bool) {
 	return call.sourceTaskID, call.kind == CallAttemptSource
+}
+
+func (call Call) AttemptTaskResumed() bool {
+	return call.kind == CallAttemptTask && call.attemptTaskResumed
 }
 
 func (call Call) OverseerTaskCreateInput() (OverseerTaskCreateInput, bool) {
@@ -830,10 +835,18 @@ func decodeCall(domain byte, bearer credential, encoded []byte) (Call, RemoteErr
 			return Call{}, RemoteInvalidRequest
 		}
 		call.text = input.ProjectID
-	case CallSnapshot, CallAttemptTask, CallWebStatus, CallWebPair, CallRemoteStatus, CallHumanRequests:
+	case CallSnapshot, CallWebStatus, CallWebPair, CallRemoteStatus, CallHumanRequests:
 		if err := decodeExact(request.Params, &struct{}{}); err != nil {
 			return Call{}, RemoteInvalidRequest
 		}
+	case CallAttemptTask:
+		var input struct {
+			Resumed bool `json:"resumed,omitempty"`
+		}
+		if err := decodeExact(request.Params, &input); err != nil {
+			return Call{}, RemoteInvalidRequest
+		}
+		call.attemptTaskResumed = input.Resumed
 	case CallAccountsDiscover:
 		var input struct {
 			Offset uint32 `json:"offset,omitempty"`

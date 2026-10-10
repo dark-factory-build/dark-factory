@@ -161,7 +161,12 @@ func runProvider(ctx context.Context) (resultErr error) {
 		_ = cwd.Close()
 		return provider.ErrInvalid
 	}
-	spec, err := runner.PrepareCommittedExecSpec(launch.Executable(), launch.Argv(), launch.Environment(), publishedPath)
+	environment := launch.Environment()
+	argv := launch.Argv()
+	if config.Role == kernel.RoleOrchestrator && config.Provider == kernel.ProviderCodex && len(argv) > 1 && argv[1] == "resume" {
+		environment = append(environment, "DARK_FACTORY_OVERSEER_SESSION_RESUMED=1")
+	}
+	spec, err := runner.PrepareCommittedExecSpec(launch.Executable(), argv, environment, publishedPath)
 	if err != nil {
 		_ = cwd.Close()
 		return err

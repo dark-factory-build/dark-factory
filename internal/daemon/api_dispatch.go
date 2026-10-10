@@ -1,6 +1,7 @@
 package daemon
 
 import (
+	"bytes"
 	"context"
 	"crypto/rand"
 	"encoding/hex"
@@ -777,6 +778,11 @@ func (daemon *Daemon) attemptTask(ctx context.Context, call api.Call) api.Reply 
 	task, suppliedKnowledge, err := daemon.prepareKnowledgeTask(ctx, contextRun, []byte(instruction), false)
 	if err != nil {
 		return newErrorReply(api.RemoteInternal)
+	}
+	if call.AttemptTaskResumed() && authority.Role == kernel.RoleOrchestrator && authority.Provider == kernel.ProviderCodex {
+		if marker := bytes.Index(task, []byte("\n\nFactory causal wake:")); marker >= 0 {
+			task = task[marker+2:]
+		}
 	}
 	assignment := api.AttemptTask{Task: string(task)}
 	accepted, found, err := daemon.store.IntakeAcceptanceForTask(ctx, authority.TaskID)

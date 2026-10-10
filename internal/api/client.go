@@ -39,6 +39,7 @@ const (
 	RestartRetryWindow   = 30 * time.Second
 	restartRetryInterval = 100 * time.Millisecond
 	attemptTokenFileEnv  = "DARK_FACTORY_ATTEMPT_TOKEN_FILE"
+	attemptResumedEnv    = "DARK_FACTORY_OVERSEER_SESSION_RESUMED"
 )
 
 type credential [credentialBytes]byte
@@ -486,7 +487,10 @@ func (client *AttemptClient) Succeed(ctx context.Context, result string) (Mutati
 
 func (client *AttemptClient) Task(ctx context.Context) (AttemptTask, error) {
 	var result AttemptTask
-	if err := client.client.call(ctx, "task", struct{}{}, &result); err != nil {
+	params := struct {
+		Resumed bool `json:"resumed,omitempty"`
+	}{Resumed: os.Getenv(attemptResumedEnv) == "1"}
+	if err := client.client.call(ctx, "task", params, &result); err != nil {
 		return AttemptTask{}, err
 	}
 	if !validAttemptTask(result) {
