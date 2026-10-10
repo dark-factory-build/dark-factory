@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/rand"
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"maps"
@@ -104,7 +105,8 @@ item AS (
 	WHERE json_extract(d.document, '$.state') <> 'verified' AND COALESCE(json_extract(d.document, '$.cause'), '') <> ''
 	UNION ALL SELECT NULL, c.created_at_ms, 3, 'Proposal ' || lower(hex(c.id)) || ' from ' || COALESCE((SELECT name FROM agents WHERE id = ` + authorAgentSQL + `), 'the operator') || ': '
 		|| replace(substr(c.title, 1, 100), char(10), ' ') || ` + proposalNotesSQL + `, '[proposal:' || lower(hex(c.id)) || ']'
-	FROM project_content_revisions AS c WHERE c.project_id = ?1 AND ` + openProposalSQL + `),
+	FROM project_content_revisions AS c WHERE c.project_id = ?1 AND ` + openProposalSQL + `
+	UNION ALL SELECT NULL, json_extract(value, '$.since'), 3, json_extract(value, '$.detail'), '[health:' || json_extract(value, '$.key') || ']' FROM json_each(?11)),
 numbered AS (SELECT *, row_number() OVER () AS n FROM item),
 counted AS (SELECT numbered.*, count(at) AS named, MAX(at) AS named_at, count(CASE WHEN started THEN 1 END) AS wakes,
 	unhex(substr(MAX(CASE WHEN started THEN printf('%020d', at) || hex(task) END), 21)) AS last
@@ -122,6 +124,17 @@ const proposalNotesSQL = `COALESCE((SELECT ' (' || count(*) || ' notes from ' ||
 		  AND lower(json_extract(CASE WHEN json_valid(n.source_references) THEN n.source_references ELSE '{}' END, '$.record_id')) = lower(hex(c.id))
 		HAVING count(*) > 0), '')`
 
+// OverseerHealth is a factoryd health condition held only in memory (the
+// owner's GitHub quota, an intake source's sync, the Maintainer's answers),
+// for every project when Project is zero. While held it is an overseer item
+// keyed [health:Key] at the version it began, so it wakes, re-wakes and
+// stalls into the operator's card like an escalation.
+type OverseerHealth struct {
+	Project     ProjectID
+	Key, Detail string
+	Since       UnixMillis
+}
+
 // overseerWakeNames is a carrier since the item's version that named it, by
 // its key (a task identity, or an escalation's reviewer record), or that named
 // no item at all (a full reconciliation, or a bare instruction when the causal
@@ -136,7 +149,7 @@ const overseerWakeNames = `at > version AND (NOT targeted OR instr(names, item_k
 // it left stalled become the operator's NEEDS YOU card (raiseStalledItems).
 // Each specialist without an unfinished carrier or an exhausted budget gets
 // one when specialistSchedule says it is due.
-func (store *Store) EnqueueOverseerWakeups(ctx context.Context, at UnixMillis) ([]Task, error) {
+func (store *Store) EnqueueOverseerWakeups(ctx context.Context, at UnixMillis, health ...OverseerHealth) ([]Task, error) {
 	tx, err := store.beginUncheckedWrite(ctx)
 	if err != nil {
 		return nil, err
@@ -215,11 +228,11 @@ func (store *Store) EnqueueOverseerWakeups(ctx context.Context, at UnixMillis) (
 			}
 			priority = specialistWakePriority
 		} else {
-			if err := raiseStalledItems(ctx, tx, agent, at, validate); err != nil {
+			if err := raiseStalledItems(ctx, tx, agent, at, health, validate); err != nil {
 				return nil, tx.Rollback(err)
 			}
 			var err error
-			if body, due, err = overseerWake(ctx, tx.connection, agent, at.Int64()); err != nil {
+			if body, due, err = overseerWake(ctx, tx.connection, agent, at.Int64(), health); err != nil {
 				return nil, tx.Rollback(err)
 			}
 		}
@@ -277,9 +290,17 @@ func setOverseerWakeCursor(ctx context.Context, connection *sql.Conn, agent Agen
 	return err
 }
 
-func overseerItemArgs(agent Agent, at int64) []any {
+func overseerItemArgs(agent Agent, at int64, health []OverseerHealth) []any {
+	held := []map[string]any{}
+	for _, condition := range health {
+		if condition.Project.zero() || condition.Project == agent.ProjectID {
+			since := time.UnixMilli(condition.Since.Int64()).UTC().Format(time.RFC3339)
+			held = append(held, map[string]any{"key": condition.Key, "since": condition.Since.Int64(), "detail": "Health since " + since + ": " + condition.Detail})
+		}
+	}
+	encoded, _ := json.Marshal(held)
 	return []any{agent.ProjectID.Bytes(), PublicationAttentionAfter.Milliseconds(), at, agent.ID.Bytes(), overseerWakeTitle,
-		OverseerRewakeAfter.Milliseconds(), overseerWakeSettle.Milliseconds(), overseerWakeMaxDelay.Milliseconds(), NeverStartedRunDetail, ProviderCapacityRunDetail}
+		OverseerRewakeAfter.Milliseconds(), overseerWakeSettle.Milliseconds(), overseerWakeMaxDelay.Milliseconds(), NeverStartedRunDetail, ProviderCapacityRunDetail, string(encoded)}
 }
 
 // stalledItemKey is the idempotency key of the one stalled-item card a
@@ -294,9 +315,9 @@ var stalledItemKey = [IDBytes]byte([]byte("stalled item key"))
 // most one such card; one still unfinished, or already carrying a request,
 // waits. A card closes only once none of its carrier's items is stalled, so
 // a later wake that moves an item's timing never strands it uncarded.
-func raiseStalledItems(ctx context.Context, tx *writeTx, agent Agent, at UnixMillis, validate func() error) error {
+func raiseStalledItems(ctx context.Context, tx *writeTx, agent Agent, at UnixMillis, health []OverseerHealth, validate func() error) error {
 	connection := tx.connection
-	rows, err := connection.QueryContext(ctx, overseerStalledItems, overseerItemArgs(agent, at.Int64())...)
+	rows, err := connection.QueryContext(ctx, overseerStalledItems, overseerItemArgs(agent, at.Int64(), health)...)
 	if err != nil {
 		return err
 	}
@@ -405,8 +426,8 @@ func raiseStalledItems(ctx context.Context, tx *writeTx, agent Agent, at UnixMil
 }
 
 // overseerWake returns the carrier body for agent's due items, if any.
-func overseerWake(ctx context.Context, connection *sql.Conn, agent Agent, at int64) (string, bool, error) {
-	rows, err := connection.QueryContext(ctx, overseerWakeItems, overseerItemArgs(agent, at)...)
+func overseerWake(ctx context.Context, connection *sql.Conn, agent Agent, at int64, health []OverseerHealth) (string, bool, error) {
+	rows, err := connection.QueryContext(ctx, overseerWakeItems, overseerItemArgs(agent, at, health)...)
 	if err != nil {
 		return "", false, err
 	}
