@@ -209,3 +209,21 @@ test("a repository nothing recognised is one unit with its marker beside it, not
   const layout = layoutScene(prepared.graph);
   assert.deepEqual(layout.stations.map((station) => [station.entityId, station.unit, station.shape]), [[hex(1), hex(1), "line"], [hex(2), hex(1), "crate"]]);
 });
+
+test("a standing specialist is marked on the floor and says what it is really doing", async () => {
+  const { fixtureFloorState, fixtureGraphs, fixtureRunPaths, operationsSpecialistID, securitySpecialistID } = await import("../../../fixtures/state.mjs");
+  const { FactoryScene } = await import("../dist/src/factory-scene/factory-scene.js");
+  const { renderToStaticMarkup } = await import("react-dom/server");
+  const state = { ...fixtureFloorState, humanRequests: new Map() };
+  const scene = projectFloor(state, projectGraph(fixtureGraphs, [...state.projects.keys()].sort()), fixtureRunPaths);
+  const worker = (id) => scene.workers.find((item) => item.id === id);
+  assert.deepEqual(worker(operationsSpecialistID).specialist, { title: "Operations specialist", remit: "Operations: make delivery reliable and every failure diagnosable.", stage: "working", text: "reviewing: make delivery reliable and every failure diagno…", next: "" });
+  assert.equal(worker(securitySpecialistID).specialist.text, "waiting: waiting for a free background slot");
+  assert.match(worker(securitySpecialistID).specialist.next, /^Next review .* \(scheduled\)$/);
+  assert.equal(worker(fixtureFloorState.tasks.get("31".repeat(16)).assigned_agent_id).specialist, undefined, "an ordinary worker is not one");
+  const markup = renderToStaticMarkup(createElement(FactoryScene, { graph: scene.graph, workers: scene.workers, tasks: scene.tasks, onOpenTasks() {} }));
+  assert.equal(markup.match(/data-specialist-mark/g)?.length, 2, "the lens marks the two specialists and nobody else");
+  assert.match(markup, /aria-label="operations, Operations specialist, reviewing: make delivery reliable/);
+  assert.match(markup, /data-tooltip="security · Security specialist · waiting: waiting for a free background slot\nNext review /);
+  assert.match(markup, /data-floor-inbox="1"/, "the tray holds the one ordinary queued task; a queued specialist review is its own");
+});
