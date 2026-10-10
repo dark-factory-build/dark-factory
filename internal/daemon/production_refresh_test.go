@@ -54,7 +54,7 @@ func TestRefreshObservesCurrentHeadChecks(t *testing.T) {
 		return json.RawMessage(`{"jsonrpc":"2.0","id":1,"result":{"structuredContent":` + content + `}}`), nil
 	}
 	settled := map[kernel.ProductionHead]bool{{Number: 7, Head: heads[7]}: true, {Number: 9, Head: head("d")}: true}
-	got, err := pullRequestObservation(context.Background(), call, "o/r", 1, nil, settled)
+	got, err := pullRequestObservation(context.Background(), call, "o/r", 1, nil, settled, func(error) {})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -96,7 +96,7 @@ func TestRefreshStopsAtTheObservationsCheckBound(t *testing.T) {
 		}
 		return json.RawMessage(`{"jsonrpc":"2.0","id":1,"result":{"structuredContent":` + content + `}}`), nil
 	}
-	got, err := pullRequestObservation(context.Background(), call, "o/r", 1, nil, nil)
+	got, err := pullRequestObservation(context.Background(), call, "o/r", 1, nil, nil, func(error) {})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -196,7 +196,7 @@ func TestDeploymentsChangeOverTheDeployedUnit(t *testing.T) {
 		return json.RawMessage(`{"jsonrpc":"2.0","id":1,"result":{"structuredContent":{"deployments":[` + list + `]}}}`), nil
 	}
 	store := opgraph.NewRuntime(time.Hour)
-	deployedAt, hosts, err := recordDeployments(context.Background(), call, "o/r", 1, units, nil, store, now.UnixMilli())
+	deployedAt, hosts, err := recordDeployments(context.Background(), call, "o/r", 1, units, nil, store, now.UnixMilli(), func(error) {})
 	if err != nil || deployedAt == nil || *deployedAt != now.Add(-10*time.Minute).UnixMilli() {
 		t.Fatalf("deployed at %v, %v", deployedAt, err)
 	}
@@ -221,7 +221,7 @@ func TestDeploymentsChangeOverTheDeployedUnit(t *testing.T) {
 		}
 		// Several deployed units and no services mapping: nothing lands.
 		quiet := opgraph.NewRuntime(time.Hour)
-		if _, _, err := recordDeployments(context.Background(), call, "o/r", 1, []string{"web", "worker"}, nil, quiet, now.UnixMilli()); err != nil {
+		if _, _, err := recordDeployments(context.Background(), call, "o/r", 1, []string{"web", "worker"}, nil, quiet, now.UnixMilli(), func(error) {}); err != nil {
 			t.Fatal(err)
 		}
 		if held, _ := quiet.Snapshot(now.UnixMilli()); len(held) != 0 {

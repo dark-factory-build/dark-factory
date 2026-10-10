@@ -32,7 +32,7 @@ import { IconButton } from "../icons.js";
 import { DEFAULT_FLOOR_APPEARANCE, type FloorAppearance } from "../floor-appearance.js";
 import { breakRoomHabit, restingItem, workerFrames, workerPhase } from "./appearance.js";
 import { catAt, catBed, chats, gossip, type Seat } from "./idle-life.js";
-import { endsAt, isPaper, messageAt, observe, send, type FloorMessage, type Seen } from "./messages.js";
+import { endsAt, fromTray, isPaper, messageAt, observe, send, type FloorMessage, type Seen } from "./messages.js";
 import { beltRoutes, type BeltStub, directionBetween, findRoute, pointOnRoute, samePoint, type WorkerMotion } from "./movement.js";
 import { spriteAtlas, spriteSheet, spriteSheetSize } from "./sprites/sprites.generated.js";
 
@@ -118,6 +118,19 @@ function shortLabel(label: string, limit = 18) {
   if (glyphs.reduce((width, glyph) => width + columns(glyph), 0) <= limit) return label;
   let width = 0;
   return `${glyphs.filter((glyph) => (width += columns(glyph)) <= limit - 2).join("")}…`;
+}
+
+function middleLabel(label: string, limit = 18) {
+  const glyphs = Array.from(LABEL_SEGMENTS.segment(label), ({ segment }) => segment);
+  const columns = (glyph: string) => /[^\u0000-\u00ff]/u.test(glyph) ? 2 : 1;
+  if (glyphs.reduce((width, glyph) => width + columns(glyph), 0) <= limit) return label;
+  let left = 0, right = glyphs.length - 1, used = 0;
+  const leftLimit = Math.ceil((limit - 2) / 2), rightLimit = limit - 2 - leftLimit;
+  while (left <= right && used + columns(glyphs[left]!) <= leftLimit) used += columns(glyphs[left++]!);
+  used = 0;
+  while (right >= left && used + columns(glyphs[right]!) <= rightLimit) used += columns(glyphs[right--]!);
+  const suffix = right + 1;
+  return `${glyphs.slice(0, left).join("")}…${glyphs.slice(suffix).join("")}`;
 }
 
 /** One 16px frame of the sheet, sized and placed in scene coordinates. */
@@ -431,7 +444,7 @@ function SceneWorkers({ knowledgeCues, nook, onOpenBoard, errands, peerQuestions
               <g data-seated={sitting ? placement.area === "resting" ? "coffee" : "planning" : undefined} data-active-pose={position.motion.action === "interacting" ? position.motion.frame : undefined}><g transform={`scale(${WORKER_SIZE / FRAME})${bob === 0 ? "" : ` translate(0 ${bob})`}${facingWest ? " scale(-1 1)" : ""}`}>{frames.map((frame) => <Frame key={frame} name={frame} x={-8} y={-8} />)}</g>
               </g>
             </g>
-            <g role="img" className="dfFactoryScene__target" data-tooltip={`${worker.name}${worker.specialist ? " · Specialist" : ""} · ${worker.activity}${worker.review ? `\nReview assignment: ${worker.review.scope}; representative visit, not exact file inspection` : ""}\n${placement.area === "work" ? `Working at ${worker.locationLabel ?? at ?? "observed changes"}` : placement.errand !== undefined ? `${placement.errandKey?.startsWith("use ") ? "Recorded use" : "Taking a break"} · at the ${IMPLEMENT_NAMES[placement.errand]}` : placement.area === "resting" ? `${worker.paused ? "Paused · taking a break" : "Taking a break"}${stroking === undefined ? "" : " · fussing the cat"}${said}` : worker.location === "unobserved" ? "Planning · location not yet observed" : "Planning · work outside the machines shown"}${worker.telemetry === undefined ? "" : recordedEffort(worker.telemetry)}${[...new Set(asking)].join("")}`} aria-label={`${worker.name}, ${worker.review ? "reviewer" : worker.role}, ${worker.activity}, ${worker.review?.scope ?? location}`} {...sceneAction(worker.review && onSelectProposal ? () => onSelectProposal(worker.review!.proposalId) : onSelectWorker === undefined ? undefined : () => onSelectWorker(worker.id))}>
+            <g role="img" className="dfFactoryScene__target" data-tooltip={`${worker.name} · ${worker.specialist === undefined ? worker.activity : `${worker.specialist.title} · ${worker.specialist.text}${worker.specialist.next === "" ? "" : `\n${worker.specialist.next}`}`}${worker.review ? `\nReview assignment: ${worker.review.scope}; representative visit, not exact file inspection` : ""}\n${placement.area === "work" ? `Working at ${worker.locationLabel ?? at ?? "observed changes"}` : placement.errand !== undefined ? `${placement.errandKey?.startsWith("use ") ? "Recorded use" : "Taking a break"} · at the ${IMPLEMENT_NAMES[placement.errand]}` : placement.area === "resting" ? `${worker.paused ? "Paused · taking a break" : "Taking a break"}${stroking === undefined ? "" : " · fussing the cat"}${said}` : worker.location === "unobserved" ? "Planning · location not yet observed" : "Planning · work outside the machines shown"}${worker.telemetry === undefined ? "" : recordedEffort(worker.telemetry)}${[...new Set(asking)].join("")}`} aria-label={`${worker.name}, ${worker.review ? "reviewer" : worker.specialist?.title ?? worker.role}, ${worker.specialist?.text ?? worker.activity}, ${worker.review?.scope ?? location}`} {...sceneAction(worker.review && onSelectProposal ? () => onSelectProposal(worker.review!.proposalId) : onSelectWorker === undefined ? undefined : () => onSelectWorker(worker.id))}>
                 <rect className="dfFactoryScene__focus" x={-12} y={-12} width="24" height="24" rx="3" fill="transparent" />
             </g>
             {worker.review === undefined ? null : <g aria-hidden="true"><rect x="7" y="1" width="10" height="13" fill="#e1d1aa" stroke="#5c787b" /><text x="12" y="10" textAnchor="middle" fill="#203d46" fontSize="8">R</text></g>}
@@ -552,7 +565,7 @@ export function FactoryScene({ proposals, crates, tools, onLoadNode, onInvestiga
   // Selecting a unit's main machine lights every machine it owns and every belt touching them, wherever they stand.
   const litUnit = selectedId !== undefined && unitOf.get(selectedId)?.id === selectedId ? selectedId : undefined;
   const members = new Set(litUnit === undefined ? [] : layout.stations.filter((station) => station.unit === litUnit).map((station) => station.entityId));
-  const queued = tasks.filter((order) => order.status === "queued").length;
+  const queued = tasks.filter((order) => order.status === "queued" && fromTray(order)).length;
   // The implements are always there: each opens its panel and the tray shows the queue. Coffee is scenery only.
   const implementsShown = nook.furniture;
   const opens: Partial<Record<BreakRoomErrand, readonly [((projectId?: string) => void) | undefined, string, string, string]>> = {
@@ -766,7 +779,7 @@ function WorkLine({ crates, connected, onLight, onSelect }: {
       return <details key={label} className="dfFloorMenu" name="floor-tools">
         <summary>{label} <strong>{!connected || crates === undefined ? "—" : members.length}</strong></summary>
         <div className="dfFloorMenu__body">
-          {!connected ? <p>Disconnected · showing last known changes</p> : crates === undefined ? <p>Reading changes…</p> : members.length === 0 ? <p>No changes</p> : null}
+          {!connected ? <p>{crates === undefined ? "Not connected yet" : "Disconnected · showing last known changes"}</p> : crates === undefined ? <p>Reading changes…</p> : members.length === 0 ? <p>No changes</p> : null}
           {members.map((crate) => <button type="button" key={crate.id} data-crate={crate.id} data-crate-station={crate.station} data-fault={crate.fault ? "" : undefined}
             aria-label={crate.number > 0 ? `PR #${crate.number} ${crate.title}: ${crate.stage || label}` : `A change request: ${label}${crate.fault ? ", needs correction" : ""}`}
             disabled={!connected || onSelect === undefined} onClick={(event) => { onSelect?.(crate.id); event.currentTarget.closest("details")?.removeAttribute("open"); }}
@@ -839,7 +852,8 @@ function machineInfo(machine: SceneMachine, unit?: SceneUnit) {
   const reading = machine.reading;
   const deployed = reading.deployedAt === undefined ? "" : `\nDeployed ${new Date(reading.deployedAt).toLocaleString([], { dateStyle: "short", timeStyle: "short" })}`;
   const activity = reading.state === "unknown" ? "" : reading.state === "idle" ? " · idle" : ` · ${reading.state} · ${rate(reading.ratePerHour)}${reading.errorPermille > 0 ? ` · ${reading.errorPermille / 10}% errors` : ""}${reading.latencyMs > 0 ? ` · p95 ${reading.latencyMs} ms` : ""}`;
-  return `${machine.label}\n${kindText(machine, unit)}${unit !== undefined && unit.id !== machine.id ? ` in ${unit.label}` : machine.owner ? ` from ${machine.owner}` : ""}\n${OBSERVATION_TEXT[reading.observation]}${activity}\n${EVIDENCE_TEXT[reading.evidence]}${deployed}`;
+  const routes = machine.routes === undefined ? "" : `\n${machine.routes.map((route) => middleLabel(route, 24)).join("\n")}`;
+  return `${machine.label}${routes}\n${kindText(machine, unit)}${unit !== undefined && unit.id !== machine.id ? ` in ${unit.label}` : machine.owner ? ` from ${machine.owner}` : ""}\n${OBSERVATION_TEXT[reading.observation]}${activity}\n${EVIDENCE_TEXT[reading.evidence]}${deployed}`;
 }
 
 function Coverage({ summary }: { summary: NonNullable<SceneGraph["summary"]> }) {

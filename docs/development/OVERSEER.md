@@ -25,8 +25,8 @@ rechecks blocked and failed tasks against current prerequisites and delivery
 proof. Preserve historical outcomes; reconsidering a task is not permission to
 blindly retry it or duplicate another owner's implementation.
 
-Workers should use `./scripts/go-check.sh` plus focused tests while implementing
-and record the exact head and checks before review. Process-sensitive checks use
+Workers run focused tests while implementing; factoryd sends a head whose
+pull-request check fails back before review. Process-sensitive checks use
 `./scripts/with-local-ci-lease.sh`; reviewers reproduce relevant risks instead
 of rerunning the full suite by default. The protected merge queue selects the
 appropriate fixed gates from its complete combined-tree diff and remains the
@@ -134,8 +134,8 @@ instruction configured, factoryd keeps one wake task at the head of your
 queue while any item needs you: a finished (except an intake task with a diff,
 which factoryd publishes), blocked or failed worker task, an
 unanswered worker question, unpublished or corrected work, or a pull request
-factoryd escalated. An item you leave unhandled is woken again at most three
-times (a publish failure never), 30 minutes apart, until it changes; only wakes that named it (or
+factoryd escalated, or the failed self-release. An item you leave unhandled is woken again at most three
+times (a publish failure or failed release never), 30 minutes apart, until it changes; only wakes that named it (or
 named no item at all) and actually started count. Half an hour after its last wake, factoryd raises a
 NEEDS YOU card naming what is still unresolved. Only a human answers it, so
 your status never lists it: the operator's reply (console or `factoryctl human
@@ -173,13 +173,25 @@ A specialist (a worker with a standing instruction) records a proposal as an
 `observation` whose metadata says `"record_type":"proposal"`. Each open one is
 a persistent wake item, `Proposal ID from AGENT: TITLE [proposal:ID]`, until a
 `decision` resolves it: metadata `"record_type":"proposal"`, `"record_id":"ID"`
-and evidence `["proposal:ID"]`. To accept, `overseer task add` the work (to a
-worker or the shared queue, never the specialist), `content attach` the
+and evidence `["proposal:ID"]`, with `"status":"tentative"`: an attempt credential
+cannot write `current`, and is refused as unauthorized if it tries. Before
+deciding, rerun the command or read the file:line the proposal cites as
+evidence; the decision's description names what you re-ran and its result, and
+evidence that does not reproduce is a reason to decline. To accept, first search queued and running tasks for existing work on it (one
+task per proposal), then `overseer task add` the work (to a
+worker or the shared queue, never the specialist) and `content attach` the
 proposal to it, and record the decision with `"task_id"` set to that task. To
 decline or defer, record the decision without `task_id`, the reason in its
 description. Only you or the operator resolve a proposal, and an acceptance is
 refused while another accepted proposal's task is still queued, running or
 blocked: one self-generated implementation is active at a time.
+
+Specialists may contribute to or challenge each other's proposals; the wake
+line counts those notes and names their authors (`(2 notes from security,
+architecture)`). Read them (`content search`, `content body`) before deciding.
+You decide what the factory works on: accept, decline, defer, or accept at a
+lower or higher task priority (`overseer task add --priority N`, or `task update
+--priority` later), and say in the decision which notes moved you.
 
 Read this runbook from that clone or the task-provided checkout. If neither
 is available, report the missing checkout. Scope searches to that checkout
@@ -378,12 +390,16 @@ below against `repo/.git` instead of `$git_directory`.
 A worker that integrated a merged prerequisite has main in its head's
 ancestry. Copying that head's files onto `from` reproduces the tree but not
 the ancestry, so GitHub merges main's own hunks against main again and
-reports a conflict that no source correction can clear. Let the script decide
-what the publication's parents are:
+reports a conflict that no source correction can clear. Choose the
+publication's parents:
 
 ```sh
-set -- $(repo/scripts/publication-parents.sh repo/.git "$from" "$head_commit" "$(git -C repo rev-parse origin/main)" "$branch_exists")
-from=$1 diff_from=$2 merge_parent=$3
+integrated=$(git -C repo merge-base "$head_commit" origin/main)
+diff_from=$from merge_parent=-
+if ! git -C repo merge-base --is-ancestor "$integrated" "$from"; then
+    diff_from=$integrated
+    if [ "$branch_exists" = 1 ]; then merge_parent=$integrated; else from=$integrated; fi
+fi
 ```
 
 `diff_from` replaces `from` in every diff below. When the branch does not
@@ -532,7 +548,8 @@ Write that body to a file; the review needs it.
 
 ## 5. After publication: factoryd reviews, merges and releases
 
-factoryd reviews every published PR head itself: it records one exact-head
+factoryd reviews every published PR head itself once its required pull-request
+check passes (a red head goes back unreviewed): it records one exact-head
 verdict through the App, enqueues an ALLOW, observes the merge and releases the
 runtime, and sends a REQUEST_CHANGES or a merge-queue ejection back to the
 original task with a pointer to the findings. The merge queue's required CI is
@@ -543,7 +560,9 @@ review task for a worker, record a verdict, enqueue, or wait on that pipeline.
 factoryd wakes you with `Escalated: factoryd cannot advance OWNER/REPO#N at
 exact head HEAD: ...` only when it cannot advance a pull request: a review that
 failed twice, an enqueue the App refused, a send-back that reached no task, or
-a change past two repair rounds. Resolve that cause or raise it with
+a change past two repair rounds. An enqueue refused as UNPROCESSABLE (a
+required check that never ran on the head) is final for that head: only a new
+head is reviewed and enqueued. Resolve that cause or raise it with
 `attempt request-human` naming the pull request; never start another review.
 
 A send-back of your own (for example a `dirty` worktree, section 1) carries a
@@ -572,7 +591,7 @@ Stop handling this change for now.
 ## 6. Hand off and finish
 
 If a merged PR touched `cmd/` or `internal/`, it may need a live-service
-reinstall, and if it touched `web/`, it may need a site re-vendor. Before a
+reinstall; a `web/` change ships in that same build. Before a
 runtime reinstall request, run `"$DARK_FACTORY_FACTORYCTL" --build-identity`.
 With its exact `source` as `installed`, run `git -C repo fetch origin "$installed" "<merge-commit>"`, then verify each with `git -C repo rev-parse --verify "<revision>^{commit}"`. Run `git -C repo merge-base --is-ancestor
 <merge-commit> "$installed"`: status 0 means that merge is already installed,
@@ -580,7 +599,7 @@ so skip that request and never recommend an older merge; only status 1 says it
 is absent. Require `"release": true`; a missing, malformed, or development
 identity, a fetch or verification failure, or any other ancestry error warrants
 a human request to verify the installed source, not a claim that the merge is
-absent. If the runtime merge is absent, or the site needs a re-vendor, raise
+absent. If the runtime merge is absent, raise
 one human request naming the merge commit and applicable deployment, then wait
 as below. A
 worker run whose worktree was gone at settlement ends failed with that

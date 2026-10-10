@@ -490,6 +490,64 @@ func TestUpdateTaskRetiresABlockedTaskButNeverEditsIt(t *testing.T) {
 	}
 }
 
+func TestUpdateTaskForOverseerRetiresUnpublishedSucceededTask(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	success, _ := NewSuccessProposal("completed result")
+	store, finalizing := finalizingReleasedRun(t, RoleWorker, success)
+	defer store.Close()
+	terminal, err := finalizeTestRun(t, store, finalizing, 70)
+	if err != nil {
+		t.Fatal(err)
+	}
+	workerTask, found, err := store.Task(ctx, terminal.TaskID)
+	if err != nil || !found || workerTask.Status != TaskSucceeded || workerTask.Result != "completed result" {
+		t.Fatalf("successful worker task = %+v, found=%v, err=%v", workerTask, found, err)
+	}
+	overseer, err := store.CreateAgent(ctx, NewAgent{ID: agentID(t, 180), ProjectID: terminal.ProjectID, Name: "overseer", Role: RoleOrchestrator, Provider: ProviderCodex, ToolBudgetLimit: 1}, mustTime(t, 71))
+	if err != nil {
+		t.Fatal(err)
+	}
+	queued, err := store.EnqueueTask(ctx, NewTask{ID: taskID(t, 181), ProjectID: terminal.ProjectID, AssignedAgentID: overseer.ID, IncarnationID: incarnationID(t, 182), Title: "overseer"}, mustTime(t, 72))
+	if err != nil {
+		t.Fatal(err)
+	}
+	keys := admissionKeys(t, 183, nil)
+	admission, err := store.AdmitNext(ctx, keys, mustTime(t, 73))
+	if err != nil || !admission.Admitted() || admission.Run.TaskID != queued.ID {
+		t.Fatalf("overseer admission = %+v, err=%v", admission, err)
+	}
+	resources := resourcesForRunTest(t, store, admission.Run.ID)
+	runtime := resourceOfKind(t, resources, ResourceRuntimeRoot)
+	runtimeIdentity, _ := NewPathResourceIdentity(190, 191)
+	_, err = store.ActivateResource(ctx, admission.Run.ID, runtime.ID, runtime.Revision, runtimeIdentity, mustTime(t, 74))
+	if err != nil {
+		t.Fatal(err)
+	}
+	runner := resourceOfKind(t, resources, ResourceRunnerProcess)
+	startedRun, startingRunner, err := store.BeginRunnerStart(ctx, admission.Run.ID, runner.ID, admission.Run.Revision, runner.Revision, mustTime(t, 75))
+	if err != nil {
+		t.Fatal(err)
+	}
+	activeRun, _, err := store.ActivateRunner(ctx, admission.Run.ID, runner.ID, startedRun.Revision, startingRunner.Revision, processIdentity(t, 192), mustTime(t, 76))
+	if err != nil {
+		t.Fatal(err)
+	}
+	provider := resourceOfKind(t, resources, ResourceProviderProcess)
+	group := resourceOfKind(t, resources, ResourceProviderGroup)
+	if _, _, err := store.ActivateProviderResources(ctx, admission.Run.ID, provider.ID, provider.Revision, group.ID, group.Revision, processIdentity(t, 193), mustTime(t, 77)); err != nil {
+		t.Fatal(err)
+	}
+	session := terminalSessionForRunTest(t, store, admission.Run.ID)
+	if _, err := store.ActivateRun(ctx, admission.Run.ID, session.ID, activeRun.Revision, session.Revision, mustTime(t, 78)); err != nil {
+		t.Fatal(err)
+	}
+	retired, err := store.UpdateTaskForOverseer(ctx, keys.AttemptDigest, workerTask.ID, workerTask.Revision, TaskPatch{Cancel: true}, mustTime(t, 79))
+	if err != nil || retired.Status != TaskCancelled || retired.Result != "" || retired.WorkRevision.Int64() != workerTask.WorkRevision.Int64()+1 {
+		t.Fatalf("retired successful task = %+v, err=%v", retired, err)
+	}
+}
+
 func TestExpireBlockedTasksCancelsOnlyStaleUnaskedBlockedTasks(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()

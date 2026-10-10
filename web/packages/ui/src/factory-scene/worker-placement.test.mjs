@@ -73,3 +73,13 @@ test("the fixtures stand in free floor between the machines, and only the machin
   assert.ok(tight.fixtures.every((piece) => piece.y + 88 <= tight.height), "the floor grows to hold what no gap could");
   for (const piece of tight.fixtures) assert.ok(standable(tight, piece.stand));
 });
+
+test("a worker at a line stands at its control panel; at anything else, in the middle of its front", () => {
+  const layout = layoutScene(sceneGraph([unit("api", { machines: [machine("api-db", "store")] })]));
+  const line = layout.stations.find((station) => station.shape === "line"), store = layout.stations.find((station) => station.shape === "silo");
+  assert.equal(line.anchor.x, line.x + line.width - 13, "under the panel at the line's right end");
+  assert.equal(store.anchor.x, store.x + store.width / 2);
+  assert.ok(standable(layout, line.anchor));
+  const [placed] = placeWorkers(layout, [worker("operator", { activity: "busy", location: "working", nodeId: "api" })]);
+  assert.deepEqual(placed, { id: "operator", area: "work", stationId: "api", ...line.anchor });
+});

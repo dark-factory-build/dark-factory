@@ -422,9 +422,8 @@ func TestBuildNativeReturnsExactArgvEnvironmentAndSafeStartupTask(t *testing.T) 
 			kind: kernel.ProviderClaudeCode, model: "claude-model", effort: "max", wantDelivery: TaskDeliveryAttemptAPI,
 			wantArgv: []string{"/usr/bin/true", "--permission-mode", "dontAsk", "--setting-sources", "", "--model", "claude-model", "--effort", "max", "--strict-mcp-config"},
 		},
-		{
-			kind: kernel.ProviderCodex, model: "codex-model", effort: "xhigh", wantDelivery: TaskDeliveryAttemptAPI,
-			wantArgv: []string{"/usr/bin/true", "-c", `notify=["<factoryctl>", "attempt", "turn-complete"]`, "--strict-config", "--no-alt-screen", "-c", `tui.resume_cwd="current"`, "-c", "check_for_update_on_startup=false", "-c", "tool_output_token_limit=32768", "-c", "projects=<working-directory>", "--model", "codex-model", "-c", `model_reasoning_effort="xhigh"`, bootstrapPrompt},
+		{kind: kernel.ProviderCodex, model: "codex-model", effort: "xhigh", wantDelivery: TaskDeliveryAttemptAPI,
+			wantArgv: []string{"/usr/bin/true", "-c", `hooks.Stop=[{hooks=[{type="command",command="<factoryctl>"}]}]`, "--strict-config", "--dangerously-bypass-hook-trust", "--no-alt-screen", "-c", `tui.resume_cwd="current"`, "-c", "check_for_update_on_startup=false", "-c", "tool_output_token_limit=32768", "-c", "projects=<working-directory>", "--model", "codex-model", "-c", `model_reasoning_effort="xhigh"`, bootstrapPrompt},
 		},
 	}
 	for _, test := range tests {
@@ -446,12 +445,13 @@ func TestBuildNativeReturnsExactArgvEnvironmentAndSafeStartupTask(t *testing.T) 
 				wantArgv = append(wantArgv, "--settings", wantClaudeSettings(t, request, "factory_attempt"), "--mcp-config", wantClaudeServers(t, request, nil), "--", bootstrapPrompt)
 			}
 			if test.kind == kernel.ProviderCodex {
-				wantArgv[2] = "notify=[" + tomlBasicString(runtime.factoryctl) + ", \"attempt\", \"turn-complete\"]"
+				stop := "'" + strings.ReplaceAll(runtime.factoryctl, "'", `'\''`) + "' attempt turn-complete"
+				wantArgv[2] = "hooks.Stop=[{hooks=[{type=\"command\",command=" + tomlBasicString(stop) + "}]}]"
 				permissions, err := codexPermissions(request)
 				if err != nil {
 					t.Fatal(err)
 				}
-				wantArgv = slices.Replace(wantArgv, 12, 13, codexUntrustedProjectConfig(request.workingDirectory), "-c", "default_permissions="+tomlBasicString(codexPermissionName(request.runtime)), "-c", `approval_policy="never"`, "-c", permissions, "--disable", "computer_use", "--disable", "browser_use", "--disable", "plugins", "-c", "mcp_servers."+codexAttemptServerName(request.runtime)+"={command="+tomlBasicString(runtime.factoryctl)+`,args=["attempt","mcp"],env_vars=["DARK_FACTORY_SOCKET","DARK_FACTORY_ATTEMPT_TOKEN_FILE"],enabled=true,required=true,tools={factory={approval_mode="approve"}}}`)
+				wantArgv = slices.Replace(wantArgv, 12, 14, "-c", codexUntrustedProjectConfig(request.workingDirectory), "-c", "default_permissions="+tomlBasicString(codexPermissionName(request.runtime)), "-c", `approval_policy="never"`, "-c", permissions, "--disable", "computer_use", "--disable", "browser_use", "--disable", "plugins", "-c", "mcp_servers."+codexAttemptServerName(request.runtime)+"={command="+tomlBasicString(runtime.factoryctl)+`,args=["attempt","mcp"],env_vars=["DARK_FACTORY_SOCKET","DARK_FACTORY_ATTEMPT_TOKEN_FILE"],enabled=true,required=true,tools={factory={approval_mode="approve"}}}`)
 				wantArgv[len(wantArgv)-1] = bootstrapPromptFor(request, codexAttemptServerName(request.runtime))
 			}
 			if got := launch.Argv(); !slices.Equal(got, wantArgv) {
@@ -1425,23 +1425,27 @@ func TestCodexToolchainRootsAndCachesStaySeparateFromAccount(t *testing.T) {
 	}
 }
 
-func TestClaudeLocalCICacheStaysInRuntimeHome(t *testing.T) {
-	installation, runtime, _ := nativeFixture(t, kernel.ProviderClaudeCode)
-	request := requestFor(t, kernel.ProviderClaudeCode, installation, runtime, "", "")
-	request.workingDirectory = t.TempDir()
-	launch, err := Build(request)
-	if err != nil {
-		t.Fatal(err)
-	}
-	wantCacheRoot := "DF_CI_CACHE_ROOT=" + filepath.Join(runtime.home, ".cache", "dark-factory", "local-ci", "trusted")
-	if !slices.Contains(launch.Environment(), wantCacheRoot) {
-		t.Fatalf("Claude local-CI cache root = %q, want %q", launch.Environment(), wantCacheRoot)
-	}
-	if !slices.Contains(launch.Environment(), "DF_CI_GO_MODULE_CACHE="+goModuleCachePath(runtime.accountHome)) {
-		t.Fatalf("Claude lost the trusted shared Go module cache: %q", launch.Environment())
-	}
-	if _, err := runner.PrepareCommittedExecSpec(launch.Executable(), launch.Argv(), launch.Environment(), request.workingDirectory); err != nil {
-		t.Fatalf("generated Claude environment rejected by runner: %v", err)
+func TestNativeLocalCICacheStaysInRuntimeHome(t *testing.T) {
+	for _, kind := range []kernel.Provider{kernel.ProviderCodex, kernel.ProviderClaudeCode} {
+		t.Run(kind.String(), func(t *testing.T) {
+			installation, runtime, _ := nativeFixture(t, kind)
+			request := requestFor(t, kind, installation, runtime, "", "")
+			request.workingDirectory = t.TempDir()
+			launch, err := Build(request)
+			if err != nil {
+				t.Fatal(err)
+			}
+			wantCacheRoot := "DF_CI_CACHE_ROOT=" + filepath.Join(runtime.home, ".cache", "dark-factory", "local-ci", "trusted")
+			if !slices.Contains(launch.Environment(), wantCacheRoot) {
+				t.Fatalf("local-CI cache root = %q, want %q", launch.Environment(), wantCacheRoot)
+			}
+			if !slices.Contains(launch.Environment(), "DF_CI_GO_MODULE_CACHE="+goModuleCachePath(runtime.accountHome)) {
+				t.Fatalf("lost the trusted shared Go module cache: %q", launch.Environment())
+			}
+			if _, err := runner.PrepareCommittedExecSpec(launch.Executable(), launch.Argv(), launch.Environment(), request.workingDirectory); err != nil {
+				t.Fatalf("generated environment rejected by runner: %v", err)
+			}
+		})
 	}
 }
 

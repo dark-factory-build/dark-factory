@@ -15,6 +15,7 @@ import {
 	PWA_ORIGIN,
 	RECORD_BINARY,
 	RECORD_CLOSE,
+	RECORD_CONSOLE,
 	RECORD_INGEST,
 	RECORD_INGEST_KEY,
 	RECORD_OPEN,
@@ -695,7 +696,7 @@ test('an unknown record type ends the host and every controller', async () => {
 	const bravo = await openControl(node, await controlCredential(node));
 	await host.tap.nextRecords(2);
 
-	host.tap.send(encodeRecord(0x09, 1, 'not a record type'));
+	host.tap.send(encodeRecord(0x0a, 1, 'not a record type'));
 	assert.equal((await host.tap.waitClosed()).code, 4004);
 	assert.equal((await alpha.tap.waitClosed()).code, 4001);
 	assert.equal((await bravo.tap.waitClosed()).code, 4001);
@@ -787,6 +788,27 @@ test('there is no listing and no history', async () => {
 	const unknown = await fetch(`${worker.origin}/public/${createNode().publicId}`);
 	assert.equal(unknown.status, 404);
 	assert.equal(unknown.headers.get('access-control-allow-origin'), SITE_ORIGIN);
+});
+
+test('a console is served by node id and by public id, one per host socket', async () => {
+	const { node, host } = await withHost();
+	const bundle = randomBytes(300 * 1024);
+	host.tap.send(encodeRecord(RECORD_CONSOLE, 0, bundle));
+	host.tap.send(encodeRecord(RECORD_CONSOLE, 0, 'a second console on the same socket'));
+	for (const [path, origin] of [[`/console/${node.id}`, PWA_ORIGIN], [`/public/${node.publicId}/console`, SITE_ORIGIN]]) {
+		let response;
+		for (let attempt = 0; attempt < 20; attempt += 1) {
+			response = await fetch(`${worker.origin}${path}`, { headers: { origin } });
+			if (response.status === 200) break;
+			await response.arrayBuffer();
+			await new Promise((resolve) => setTimeout(resolve, 150));
+		}
+		assert.equal(response.status, 200, path);
+		assert.deepEqual(Buffer.from(await response.arrayBuffer()), bundle, path);
+		assert.equal(response.headers.get('access-control-allow-origin'), origin, path);
+	}
+	assert.equal((await fetch(`${worker.origin}/console/${createNode().id}`)).status, 404);
+	assert.equal((await host.tap.quiet(100)).closed, null);
 });
 
 // -- remote ingest ------------------------------------------------------------
@@ -963,12 +985,12 @@ test('no frame, token, or payload reaches disk or the log', async () => {
 	]);
 
 	// And no object anywhere in this run wrote a key other than `host`, or
-	// `world` in a public object: the ticket and deny lists really are gone,
-	// not merely unused by this test.
+	// `world` in a public object, besides a host's signed `console`: the
+	// ticket and deny lists really are gone, not merely unused by this test.
 	assert.deepEqual(
 		objects.flatMap(({ node: name, records }) =>
 			records
-				.filter(({ key }) => key !== (name?.startsWith('public:') ? 'world' : 'host'))
+				.filter(({ key }) => key !== 'console' && key !== (name?.startsWith('public:') ? 'world' : 'host'))
 				.map(({ key }) => `${name}:${key}`),
 		),
 		[],

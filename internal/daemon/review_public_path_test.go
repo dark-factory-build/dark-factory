@@ -18,7 +18,8 @@ import (
 
 type publicReviewBackend struct {
 	killed, submitAmbiguous, requestChanges bool
-	enqueueRefused, queued                  bool
+	queued                                  bool
+	enqueueRefusal                          string // the broker's refusal class, if any
 	reviews, submits, enqueues              int
 	enqueuedBase, enqueuedSHA, enqueuedBody string
 	journal                                 map[string]string
@@ -56,8 +57,8 @@ func (b *publicReviewBackend) Submit(_ context.Context, operation review.Operati
 func (b *publicReviewBackend) Enqueue(_ context.Context, operation review.Operation) error {
 	b.enqueues++
 	b.enqueuedBase, b.enqueuedSHA, b.enqueuedBody = operation.Request.BaseRef, operation.Request.Base, operation.Request.Body
-	if b.enqueueRefused {
-		return errors.New("review: Maintainer rejected operation: refused: rejected before execution as UNPROCESSABLE")
+	if b.enqueueRefusal != "" {
+		return enqueueRefused(errors.New("review: Maintainer rejected operation: refused: The request was refused: rejected before execution as " + b.enqueueRefusal + "."))
 	}
 	b.queued = true
 	return nil
@@ -69,7 +70,7 @@ func (b *publicReviewBackend) ObservePull(_ context.Context, operation review.Op
 	if b.pull != nil {
 		return *b.pull, nil
 	}
-	return review.Pull{Head: operation.Request.Head, State: "open", Queued: b.queued}, nil
+	return review.Pull{Head: operation.Request.Head, State: "open", Queued: b.queued, Checks: []string{"required=success"}}, nil
 }
 
 func (b *publicReviewBackend) Observe(_ context.Context, operationID string) (review.Receipt, error) {
@@ -551,25 +552,29 @@ func TestMergeQueueEjectionWithNoHeadFailureRequeuesOnceThenSendsBack(t *testing
 	}
 }
 
-// An enqueue the App refused is escalated: the reason is recorded on the
-// operation, which is then an item due to the project's overseer.
+// An enqueue the App refused as UNPROCESSABLE retries each merge pass and
+// remains one escalated overseer item.
 func TestRefusedEnqueueBecomesAnOverseerItem(t *testing.T) {
 	fixture, project, _, settle := publishedTask(t)
 	settle()
 	customerMode(t, fixture)
 	ctx := context.Background()
-	fixture.daemon.reviewBackend = func(string, uint64) review.Backend { return &publicReviewBackend{enqueueRefused: true} }
-	if _, err := reviewNow(ctx, fixture.daemon, project, publishedReviewRequest()); err == nil {
-		t.Fatal("a refused enqueue reported success")
+	backend := &publicReviewBackend{enqueueRefusal: "UNPROCESSABLE"}
+	fixture.daemon.reviewBackend = func(string, uint64) review.Backend { return backend }
+	if _, err := reviewNow(ctx, fixture.daemon, project, publishedReviewRequest()); !errors.Is(err, review.ErrRefused) {
+		t.Fatalf("a refused enqueue reported %v", err)
 	}
-	for range review.FailuresBeforeEscalation - 1 {
+	now, offset := fixture.daemon.now, time.Duration(0)
+	fixture.daemon.now = func() time.Time { return now().Add(offset) }
+	for range 3 {
+		offset += 2 * reviewStuckAfter
 		if _, err := fixture.daemon.advanceReviewOperations(ctx, false); err != nil {
 			t.Fatal(err)
 		}
 	}
 	op := lastDurableReview(t, fixture.store, project)
-	if op.State != "enqueued" || op.RoutePending || !strings.Contains(op.Escalation, "failed 6 passes in a row") {
-		t.Fatalf("refused enqueue operation = %+v", op)
+	if op.State != "enqueued" || op.Handled || op.Retryable || !op.Refused || backend.enqueues != 4 || backend.reviews != 1 || !strings.Contains(op.Escalation, "refuses this exact head") || !strings.Contains(op.Escalation, "UNPROCESSABLE") {
+		t.Fatalf("refused enqueue operation = %+v enqueues=%d reviews=%d", op, backend.enqueues, backend.reviews)
 	}
 	overseer, err := fixture.store.CreateAgent(ctx, kernel.NewAgent{ID: mustAgentID(t, testID(234)), ProjectID: project, Name: "overseer", Role: kernel.RoleOrchestrator, Provider: kernel.ProviderCodex, ToolBudgetLimit: 2}, mustKernelTime(t, 1001))
 	if err != nil {
@@ -579,9 +584,31 @@ func TestRefusedEnqueueBecomesAnOverseerItem(t *testing.T) {
 	if _, err := fixture.store.UpdateAgent(ctx, overseer.ID, overseer.Revision, kernel.AgentPatch{IdlePolicy: &policy, IdleAfterSeconds: &after, IdleInstruction: &instruction}, mustKernelTime(t, 1002)); err != nil {
 		t.Fatal(err)
 	}
-	wakes, err := fixture.store.EnqueueOverseerWakeups(ctx, mustKernelTime(t, time.Now().Add(time.Minute).UnixMilli()))
+	wakes, err := fixture.store.EnqueueOverseerWakeups(ctx, mustKernelTime(t, fixture.daemon.now().Add(time.Minute).UnixMilli()))
 	if err != nil || len(wakes) != 1 || !strings.Contains(wakes[0].Body, "Escalated: factoryd cannot advance team/repo#12") {
 		t.Fatalf("escalation wake = %+v, %v", wakes, err)
+	}
+}
+
+func TestCodeownersRefusalEscalatesAndRecoversAfterApproval(t *testing.T) {
+	fixture, project, _, settle := publishedTask(t)
+	settle()
+	customerMode(t, fixture)
+	backend := &publicReviewBackend{enqueueRefusal: "required CODEOWNERS approval is missing"}
+	fixture.daemon.reviewBackend = func(string, uint64) review.Backend { return backend }
+	if _, err := reviewNow(context.Background(), fixture.daemon, project, publishedReviewRequest()); !errors.Is(err, review.ErrOwnerApproval) {
+		t.Fatalf("owner approval refusal reported %v", err)
+	}
+	op := lastDurableReview(t, fixture.store, project)
+	if op.Refused == false || !op.OwnerApproval || backend.enqueues != 1 || !strings.Contains(op.Escalation, "#12") || !strings.Contains(op.Escalation, "CODEOWNERS-protected path") {
+		t.Fatalf("owner approval escalation = %+v enqueues=%d", op, backend.enqueues)
+	}
+	backend.enqueueRefusal = ""
+	if _, err := fixture.daemon.advanceReviewOperations(context.Background(), false); err != nil {
+		t.Fatal(err)
+	}
+	if backend.enqueues != 2 || lastDurableReview(t, fixture.store, project).OwnerApproval {
+		t.Fatalf("owner approval did not recover after retry: enqueues=%d", backend.enqueues)
 	}
 }
 
@@ -762,15 +789,16 @@ func TestStuckSubmitEscalatesOnceAndKeepsResuming(t *testing.T) {
 	}
 }
 
-// An enqueue GitHub refuses with every required check passed is resent each
-// tick without escalating; it is queued when GitHub accepts it, and ends when
-// its pull request closes.
+// An enqueue GitHub refuses in a way a later attempt may pass (RATE_LIMITED,
+// unlike UNPROCESSABLE, #1510) with every required check passed is resent
+// each tick without escalating; it is queued when GitHub accepts it, and ends
+// when its pull request closes.
 func TestRefusedEnqueueResendsEachTickAndEndsFromThePull(t *testing.T) {
 	fixture, project, _, settle := publishedTask(t)
 	settle()
 	customerMode(t, fixture)
 	ctx := context.Background()
-	backend := &publicReviewBackend{enqueueRefused: true}
+	backend := &publicReviewBackend{enqueueRefusal: "RATE_LIMITED"}
 	fixture.daemon.reviewBackend = func(string, uint64) review.Backend { return backend }
 	if _, err := reviewNow(ctx, fixture.daemon, project, publishedReviewRequest()); err == nil || backend.enqueues != 1 {
 		t.Fatalf("refused enqueue err=%v enqueues=%d", err, backend.enqueues)
@@ -784,7 +812,7 @@ func TestRefusedEnqueueResendsEachTickAndEndsFromThePull(t *testing.T) {
 	if op := tick(); op.State != "enqueued" || op.Escalation != "" || op.Failures != 2 || backend.enqueues != 2 {
 		t.Fatalf("refused again: %+v (enqueues %d)", op, backend.enqueues)
 	}
-	backend.enqueueRefused = false
+	backend.enqueueRefusal = ""
 	if op := tick(); op.State != "enqueued" || op.Failures != 0 || op.Enqueues != 1 || backend.enqueues != 3 {
 		t.Fatalf("accepted: %+v (enqueues %d)", op, backend.enqueues)
 	}
@@ -824,21 +852,38 @@ func TestReviewBindsTheStoredBody(t *testing.T) {
 }
 
 // Only the checks the base branch's rules require gate the merge: an optional
-// check that fails (CodeQL), is cancelled or never finishes decides nothing.
+// check that fails (CodeQL), is cancelled or never finishes decides nothing,
+// though a failed shard's annotations name the failing tests.
 func TestOnlyRequiredChecksGateTheMerge(t *testing.T) {
-	failing, pending, err := requiredChecks(json.RawMessage(`{"checks":[
+	var pull review.Pull
+	err := requiredChecks(json.RawMessage(`{"checks":[
 		{"name":"checks","conclusion":"success","required":true},
 		{"name":"review","conclusion":"skipped","required":true},
 		{"name":"CodeQL","conclusion":"failure","required":false},
 		{"name":"stale lint","conclusion":"cancelled","required":false},
-		{"name":"preview","conclusion":null,"required":false}]}`))
-	if err != nil || len(failing) != 0 || pending {
-		t.Fatalf("optional checks decided: failing=%v pending=%v err=%v", failing, pending, err)
+		{"name":"preview","conclusion":null,"required":false}]}`), &pull)
+	if err != nil || len(pull.Failing) != 0 || pull.Pending || strings.Join(pull.Checks, ",") != "checks=success,review=skipped" {
+		t.Fatalf("optional checks decided: %+v err=%v", pull, err)
 	}
-	failing, pending, err = requiredChecks(json.RawMessage(`{"checks":[
+	pull = review.Pull{}
+	err = requiredChecks(json.RawMessage(`{"checks":[
+		{"name":"checks (source)","conclusion":"failure","required":false,"annotations":["--- FAIL: TestX (0.01s)"]},
 		{"name":"checks","conclusion":"failure","required":true},
-		{"name":"ui","conclusion":null,"required":true}]}`))
-	if err != nil || strings.Join(failing, ",") != "checks" || !pending {
-		t.Fatalf("required checks ignored: failing=%v pending=%v err=%v", failing, pending, err)
+		{"name":"ui","conclusion":null,"required":true}]}`), &pull)
+	if err != nil || strings.Join(pull.Failing, ",") != "checks" || !pull.Pending || strings.Join(pull.Checks, ",") != "checks=failure,ui=pending" || strings.Join(pull.Tests, ",") != "--- FAIL: TestX (0.01s)" {
+		t.Fatalf("required checks ignored: %+v err=%v", pull, err)
+	}
+}
+
+func TestRequiredCheckAppearanceChangesObservation(t *testing.T) {
+	var missing, passing review.Pull
+	if err := requiredChecks(json.RawMessage(`{"checks":[]}`), &missing); err != nil || missing.Pending || len(missing.Failing) != 0 || len(missing.Checks) != 0 {
+		t.Fatalf("missing check = %+v err=%v", missing, err)
+	}
+	if err := requiredChecks(json.RawMessage(`{"checks":[{"name":"checks","status":"completed","conclusion":"success","required":true}]}`), &passing); err != nil || passing.Pending || len(passing.Failing) != 0 || strings.Join(passing.Checks, ",") != "checks=success" {
+		t.Fatalf("passing check = %+v err=%v", passing, err)
+	}
+	if strings.Join(missing.Checks, ",") == strings.Join(passing.Checks, ",") {
+		t.Fatal("missing and passing required checks had the same observation")
 	}
 }

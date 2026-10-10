@@ -113,7 +113,21 @@ func (host *Host) Status(ctx context.Context) (Status, error) {
 	if err != nil {
 		return Status{}, err
 	}
-	return host.status(ctx, credential)
+	status, err := host.status(ctx, credential)
+	if err != nil {
+		return Status{}, err
+	}
+	status.Quota = host.client.quota.Load()
+	return status, nil
+}
+
+// Quota is the owner's GitHub quota the broker last reported, if any.
+func (host *Host) Quota() (Quota, bool) {
+	quota := host.client.quota.Load()
+	if quota == nil {
+		return Quota{}, false
+	}
+	return *quota, true
 }
 
 func (host *Host) Confirm(ctx context.Context, code string) error {

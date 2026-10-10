@@ -3,7 +3,6 @@ package main
 import (
 	"context"
 	"crypto/rand"
-	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -26,10 +25,11 @@ import (
 )
 
 const (
-	// Covers the daemon's ten-second dispatch budget: a shorter one abandons a
-	// mutation the daemon is still allowed to finish and reports the durable
-	// write it did make as a timeout.
-	attemptRequestTimeout           = 15 * time.Second
+	// Covers a release restart the attempt client waits out, then the daemon's
+	// ten-second dispatch budget: a shorter one abandons a mutation the daemon
+	// is still allowed to finish and reports the durable write it did make as
+	// a timeout.
+	attemptRequestTimeout           = api.RestartRetryWindow + 15*time.Second
 	retainedSourceRequestTimeout    = 10 * time.Minute
 	storageCompactionRequestTimeout = 10 * time.Minute
 	serviceRequestTimeout           = 30 * time.Second
@@ -68,7 +68,7 @@ const (
   factoryctl attempt block --detail TEXT
   factoryctl attempt fail [--detail TEXT]
   factoryctl attempt request-human --idempotency-key HEX32 --question TEXT [--option TEXT ...]
-  factoryctl attempt turn-complete [NOTIFICATION_JSON]
+	factoryctl attempt turn-complete
   factoryctl attempt peer status [--targets [--target-offset N]] [--offset N] [--head HEAD]
   factoryctl attempt peer ask --task ID --idempotency-key HEX32 --question TEXT
   factoryctl attempt peer answer --question ID --revision REVISION --idempotency-key HEX32 --answer TEXT
@@ -777,18 +777,6 @@ func parse(args []string) (attemptCommand, bool, bool) {
 	case "turn-complete":
 		if len(args) == 2 {
 			return attemptCommand{kind: commandTurnComplete}, false, true
-		}
-		if len(args) == 3 {
-			var notification struct {
-				Type     string `json:"type"`
-				ThreadID string `json:"thread-id"`
-				TurnID   string `json:"turn-id"`
-				CWD      string `json:"cwd"`
-			}
-			if json.Unmarshal([]byte(args[2]), &notification) == nil && notification.Type == "agent-turn-complete" && validOperatorText(notification.ThreadID, 1, 256) && validOperatorText(notification.TurnID, 1, 256) && validOperatorText(notification.CWD, 1, 4096) {
-				digest := sha256.Sum256([]byte(notification.ThreadID + "\x00" + notification.TurnID + "\x00" + notification.CWD))
-				return attemptCommand{kind: commandTurnComplete, idempotencyKey: hex.EncodeToString(digest[:16]), text: "Codex turn completed without a durable attempt outcome; resume this session and record succeed, block, or fail."}, false, true
-			}
 		}
 	case "peer":
 		if len(args) >= 3 && args[2] == "status" {

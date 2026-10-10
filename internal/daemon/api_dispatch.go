@@ -68,12 +68,27 @@ type Daemon struct {
 	publicRepoMu        sync.Mutex
 	publicRepos         map[string]*publicRepository
 	productionRefreshAt map[kernel.ProjectID]time.Time
+	// What factoryd knows of its health only in memory, for the overseer's
+	// wake (overseerHealth): each held condition, and the streak of
+	// Maintainer faults.
+	healthMu         sync.Mutex
+	heldHealth       map[string]kernel.OverseerHealth
+	maintainerFaults struct {
+		first, last time.Time
+		count       int
+		fault       string
+	}
 	// The scheduler's merge-pipeline pass (tickMergePipeline): the next pass
 	// time, read only by the scheduler loop, and whether a pass is running.
 	pipelineAt   atomic.Int64 // unix nanoseconds of the next merge-stage pass
 	pipelineBusy atomic.Bool
-	store        *kernel.Store
-	now          func() time.Time
+	// The scheduler's Change reclaim pass (tickChangeReclaim), alike, and the
+	// Changes it kept, each logged once; only the pass in flight touches it.
+	reclaimAt   atomic.Int64
+	reclaimBusy atomic.Bool
+	keptChanges map[kernel.ChangeID]bool
+	store       *kernel.Store
+	now         func() time.Time
 	// livenessClock is deliberately separate from now. The latter is also
 	// used by supervisor ordering tests and may be an injected, blocking
 	// clock; liveness telemetry must never enter that ordering boundary.
@@ -94,6 +109,9 @@ type Daemon struct {
 	browserLifecycleMu sync.Mutex
 	browsers           map[*BrowserRuntime]struct{}
 	browserClosing     bool
+	// console is the signed console bundle, its first 32 bytes the node
+	// public key (relayhost.SignConsole); nil without a home or a bundle.
+	console []byte
 	// relay is the optional outbound relay connector. It is a client of the
 	// browser listener above, not a second authority, so it shares that
 	// listener's lifecycle gate.
@@ -786,7 +804,7 @@ func (daemon *Daemon) attemptSource(ctx context.Context, call api.Call) api.Repl
 	}
 	// A shell provider has no read-only boundary for the receipt's paths.
 	if authority.Provider == kernel.ProviderShell {
-		return newErrorReply(api.RemoteUnavailable)
+		return newErrorReply(api.RemoteForbidden)
 	}
 	taskIDText, ok := call.AttemptSourceTaskID()
 	if !ok {

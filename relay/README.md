@@ -146,10 +146,22 @@ without ending the host. The world lives in a second object named
 arrived). The `PUBLIC_READS` rate limit allows 60 reads a minute per client
 address. Any method but `GET` gets 405. There is no listing and no history.
 
+## Console
+
+A `CONSOLE` record (0x09, host to relay, connection 0, at most 1 MiB, the
+first on each host socket only) carries the build's signed console bundle: the
+32-byte node public key, its Ed25519 signature over
+`"dark-factory-console\n" ‖ bundle`, then the gzipped bundle. The relay never
+checks it; the page shell does, against the key whose node id or public id it
+already holds. It is stored as `console` in the node object and in
+`public:<public id>`, and served with the same read limits at
+`GET /console/<node id>` (CORS for `PWA_ORIGIN`) and
+`GET /public/<public id>/console` (CORS for `SITE_ORIGIN` or `PWA_ORIGIN`).
+
 ## Storage and logging
 
-A node object persists exactly one record: `host` (`key`, `generation`,
-`sequence`). A `public:` object persists at most one: `world`. There is no ticket list and no deny list, so storage is O(1) per
+A node object persists `host` (`key`, `generation`, `sequence`) and
+`console`. A `public:` object persists at most `world` and `console`. There is no ticket list and no deny list, so storage is O(1) per
 factory and cannot grow with traffic. Nothing else is written, and no
 application frame, token, or payload is ever logged.
 

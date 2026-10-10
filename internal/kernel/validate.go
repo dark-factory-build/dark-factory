@@ -524,6 +524,9 @@ const (
 	workerChangeSettledAbandonedPrepared
 	workerChangeSettledAbandonedAvailableFresh
 	workerChangeSettledAbandonedAvailableRetained
+	// workerChangeReclaimed is a retained Change the daemon later abandoned
+	// after removing its worktree: one revision past its settlement.
+	workerChangeReclaimed
 )
 
 const (
@@ -538,7 +541,7 @@ func (ownership workerChangeOwnership) available() bool {
 func (ownership workerChangeOwnership) settled() bool {
 	switch ownership {
 	case workerChangeSettledRetainedRetry, workerChangeSettledRetainedFresh, workerChangeSettledAbandonedReserved, workerChangeSettledAbandonedPrepared,
-		workerChangeSettledAbandonedAvailableFresh, workerChangeSettledAbandonedAvailableRetained:
+		workerChangeSettledAbandonedAvailableFresh, workerChangeSettledAbandonedAvailableRetained, workerChangeReclaimed:
 		return true
 	default:
 		return false
@@ -604,6 +607,8 @@ func classifyWorkerChangeOwnership(ctx context.Context, connection *sql.Conn, ru
 		ownership = workerChangeSettledAbandonedAvailableFresh
 	case change.Phase == ChangeAbandoned && delta == 1 && provenance == workerChangeRetained && change.SettledRunID != nil && *change.SettledRunID == run.ID && refusedPublication(run):
 		ownership = workerChangeSettledAbandonedAvailableRetained
+	case change.Phase == ChangeAbandoned && (delta == 2 && provenance == workerChangeRetained || delta == 4 && provenance == workerChangeFresh) && change.SettledRunID != nil && *change.SettledRunID == run.ID && !refusedPublication(run):
+		ownership = workerChangeReclaimed
 	default:
 		return 0, fmt.Errorf("%w: impossible worker Change revision", ErrCorruptState)
 	}
@@ -690,14 +695,21 @@ func workerChangeProvenanceForRun(ctx context.Context, connection *sql.Conn, run
 			continue
 		}
 		if provenance == workerChangeRetained {
-			if delta != 2 {
+			switch delta {
+			case 2:
+			case 3:
+				// The predecessor's retained Change was reclaimed: +1
+				// settled, +1 abandoned, +1 reopened reserved.
+				provenance = workerChangeFresh
+			default:
 				return 0, fmt.Errorf("%w: invalid retained Change retry gap", ErrCorruptState)
 			}
 			continue
 		}
 		switch delta {
-		case 2, 3:
-			// A fresh abandoned predecessor stays on the fresh path.
+		case 2, 3, 5:
+			// A fresh abandoned predecessor stays on the fresh path; +5 is
+			// one retained at +3 and then reclaimed.
 		case 4:
 			provenance = workerChangeRetained
 		default:
@@ -771,7 +783,8 @@ func loadRunRelationshipsWithTopology(ctx context.Context, connection *sql.Conn,
 					}
 					return runRelationships{}, err
 				}
-				if run.TerminalAt == nil || value.UpdatedAt.Int64() > run.TerminalAt.Int64() {
+				lateRebase := run.TerminalAt != nil && value.AvailableAt != nil && value.AvailableAt.Int64() <= run.TerminalAt.Int64() && value.HeadCommit != nil && value.Selection != nil && !value.HeadCommit.equal(value.Selection.commit)
+				if run.TerminalAt == nil || value.UpdatedAt.Int64() > run.TerminalAt.Int64() && !lateRebase {
 					return runRelationships{}, fmt.Errorf("%w: terminal run predates Change settlement", ErrCorruptState)
 				}
 			}
@@ -1349,7 +1362,8 @@ func validateChanges(ctx context.Context, connection *sql.Conn) error {
 			return err
 		}
 		ownership, ownershipErr := classifyWorkerChangeOwnership(ctx, connection, run, change)
-		if run.Phase != RunTerminal || ownershipErr != nil || !ownership.settled() || run.TerminalAt == nil || change.UpdatedAt.Int64() > run.TerminalAt.Int64() {
+		lateRebase := run.TerminalAt != nil && change.AvailableAt != nil && change.AvailableAt.Int64() <= run.TerminalAt.Int64() && change.HeadCommit != nil && change.Selection != nil && !change.HeadCommit.equal(change.Selection.commit)
+		if run.Phase != RunTerminal || ownershipErr != nil || !ownership.settled() || run.TerminalAt == nil || change.UpdatedAt.Int64() > run.TerminalAt.Int64() && !lateRebase {
 			return fmt.Errorf("%w: invalid Change settlement authority", ErrCorruptState)
 		}
 	}

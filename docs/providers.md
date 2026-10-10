@@ -379,11 +379,13 @@ session separation, not hostile-code confinement or permission to operate the
 live factory. No native desktop-control tool is
 provided here.
 
-Run `python3 scripts/test-factory-browser.py` for the configuration checks. With
-the real labelled dev fixture running on a configured origin, run
-`python3 scripts/test-factory-browser-live.py CONFIG URL OUTPUT_DIRECTORY` for
-two-session storage isolation, direct unlisted navigation refusal, independent
-closure and desktop/phone screenshots. Use a URL containing `?fixture`.
+Serve the labelled console fixture with
+`cd web && corepack pnpm install --frozen-lockfile && corepack pnpm run preview:floor fixture`
+(static markup over simulated data on `http://127.0.0.1:5196/?fixture`; no
+clicks or live updates), then run
+`python3 scripts/test-factory-browser-live.py CONFIG http://127.0.0.1:5196/?fixture OUTPUT_DIRECTORY`
+for the labelled console render, two-session storage isolation, direct unlisted
+navigation refusal, independent closure and desktop/phone screenshots.
 
 No provider API key is copied into the environment. The native process still
 runs as the operator and may use its normal account or Keychain access. Before a Claude Code launch the Change

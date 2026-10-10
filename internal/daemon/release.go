@@ -122,8 +122,10 @@ var (
 	// releaseDrainLimit bounds how long admission stays held (#1121).
 	releaseDrainLimit = 10 * time.Minute
 	releaseDrainPoll  = time.Second
-	// releaseBuild, releaseUpgrade and releaseExit are package-test seams.
+	// releaseBuild, releaseWorker, releaseUpgrade and releaseExit are
+	// package-test seams.
 	releaseBuild   = buildRelease
+	releaseWorker  = deployWorker
 	releaseUpgrade = install.ServiceUpgrade
 	// SIGTERM shuts down cleanly; factoryd then supervises the staged build's
 	// trial because the upgrade marker names another build.
@@ -255,7 +257,12 @@ func (daemon *Daemon) FinishRelease(ctx context.Context, sha, state, reason stri
 	if err != nil || !found {
 		return err
 	}
-	delivery.State, delivery.Phase, delivery.Reason = state, "", reason
+	// Only the trial decides a release after the restart; a restored backup
+	// still records the phase before it.
+	delivery.State, delivery.Phase, delivery.Reason = state, "trial", reason
+	if state == "verified" {
+		delivery.Phase = ""
+	}
 	return daemon.writeRelease(ctx, project, &delivery)
 }
 
@@ -312,6 +319,29 @@ func (daemon *Daemon) release(project kernel.ProjectID, root string, source chan
 	}
 	delivery.Phase = "stage"
 	_ = daemon.writeRelease(ctx, project, &delivery)
+	// The worker record names the commit whose Worker is live. A release
+	// whose factoryd later fails keeps its Worker, so the record, not the
+	// running build, decides; any record but a verified one deploys again.
+	_, worker, found, err := daemon.store.Delivery(ctx, "worker")
+	live := ""
+	if err == nil && found && worker.State == "verified" {
+		live = worker.Revision
+	}
+	worker = kernel.ProductionDelivery{ID: "worker", Kind: "worker", Destination: "control-plane", Revision: delivery.Revision, State: "running", PullRequests: []uint64{}}
+	if err := daemon.writeRelease(ctx, project, &worker); err != nil {
+		fail("worker: " + err.Error())
+		return
+	}
+	err = releaseWorker(ctx, daemon, filepath.Join(directory, "tree"), live, delivery.Revision)
+	worker.State = "verified"
+	if err != nil {
+		worker.State, worker.Reason = "failed", err.Error()
+	}
+	_ = daemon.writeRelease(context.WithoutCancel(ctx), project, &worker)
+	if err != nil {
+		fail("worker: " + err.Error())
+		return
+	}
 	backup := install.UpgradeBackupPath(daemon.home)
 	_ = os.Remove(backup) // BackupTo refuses whatever this could not remove.
 	if err := daemon.store.BackupTo(ctx, backup); err != nil {
@@ -377,6 +407,29 @@ func buildRelease(ctx context.Context, daemon *Daemon, root string, source chang
 		command.Cancel = func() error { return syscall.Kill(-command.Process.Pid, syscall.SIGKILL) }
 		command.WaitDelay = 5 * time.Second
 	})
+}
+
+// deployWorker deploys the control-plane Worker at sha with the release
+// checkout's scripts/release.sh, which rolls back a Worker that does not come
+// up, whenever control-plane/ differs from the live Worker's commit (always
+// when that is unknown). It runs before factoryd is staged, so factoryd and
+// the Worker it calls are released together (#1512).
+func deployWorker(ctx context.Context, daemon *Daemon, tree, live, sha string) error {
+	if live != "" {
+		if _, err := gitOutput(ctx, filepath.Join(tree, ".git"), "diff", "--quiet", live, sha, "--", "control-plane"); err == nil {
+			return nil
+		}
+	}
+	command := exec.CommandContext(ctx, filepath.Join(tree, "scripts", "release.sh"), sha)
+	command.Dir, command.Env = tree, daemon.toolEnvironment()
+	command.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	command.Cancel = func() error { return syscall.Kill(-command.Process.Pid, syscall.SIGKILL) }
+	command.WaitDelay = 5 * time.Second
+	if output, err := command.CombinedOutput(); err != nil {
+		lines := strings.Split(strings.TrimSpace(string(output)), "\n")
+		return fmt.Errorf("%w: %s", err, lines[len(lines)-1])
+	}
+	return nil
 }
 
 // releaseDescends refuses a commit that is not the running build or one of

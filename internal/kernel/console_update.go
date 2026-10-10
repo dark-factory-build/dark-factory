@@ -231,7 +231,7 @@ func (store *Store) UpdateTask(ctx context.Context, id TaskID, expected Revision
 	return store.updateTask(ctx, nil, id, expected, patch, at)
 }
 
-// UpdateTaskForOverseer edits a queued worker task, or cancels a blocked one,
+// UpdateTaskForOverseer edits a queued worker task, or retires a terminal one,
 // in the running orchestrator's project, with authorization checked in the update transaction.
 func (store *Store) UpdateTaskForOverseer(ctx context.Context, digest AttemptDigest, id TaskID, expected Revision, patch TaskPatch, at UnixMillis) (Task, error) {
 	return store.updateTask(ctx, &digest, id, expected, patch, at)
@@ -313,10 +313,22 @@ func (store *Store) updateTask(ctx context.Context, digest *AttemptDigest, id Ta
 			return Task{}, tx.Rollback(err)
 		}
 	}
-	// A blocked task can only be cancelled. Its settled run stays matched to the
-	// old work revision, so the cancelled row takes the next one, exactly as a
-	// retry followed by a queued cancel would leave it.
-	retire := task.Status == TaskBlocked && patch.Cancel && patch.Title == nil && patch.Body == nil && patch.Priority == nil && patch.AssignedAgentID == nil
+	// A terminal worker task can only be retired. Its settled run stays matched
+	// to the old work revision, so the cancelled row takes the next one, exactly
+	// as a retry followed by a queued cancel would leave it. A successful task is
+	// eligible only while its Change has not been published.
+	retire := patch.Cancel && patch.Title == nil && patch.Body == nil && patch.Priority == nil && patch.AssignedAgentID == nil && (task.Status == TaskBlocked || task.Status == TaskFailed)
+	if digest != nil && patch.Cancel && task.Status == TaskSucceeded && patch.Title == nil && patch.Body == nil && patch.Priority == nil && patch.AssignedAgentID == nil {
+		var unpublished bool
+		if err := tx.connection.QueryRowContext(ctx, `SELECT EXISTS (
+			SELECT 1 FROM changes AS c
+			WHERE c.task_id = ? AND c.task_incarnation_id = ?
+			  AND NOT EXISTS (SELECT 1 FROM publication_tasks AS p WHERE p.change_id = c.id)
+		)`, task.ID.Bytes(), task.IncarnationID.Bytes()).Scan(&unpublished); err != nil {
+			return Task{}, tx.Rollback(err)
+		}
+		retire = unpublished
+	}
 	if task.Status != TaskQueued && !retire {
 		return Task{}, tx.Rollback(ErrConflict)
 	}
@@ -329,6 +341,9 @@ func (store *Store) updateTask(ctx context.Context, digest *AttemptDigest, id Ta
 		}
 	}
 	if patch.Title != nil {
+		if *patch.Title == overseerWakeTitle {
+			return Task{}, tx.Rollback(fmt.Errorf("%w: reserved standing instruction title", ErrInvalidValue))
+		}
 		task.Title = *patch.Title
 	}
 	if patch.Body != nil {
@@ -337,7 +352,9 @@ func (store *Store) updateTask(ctx context.Context, digest *AttemptDigest, id Ta
 	if patch.Priority != nil {
 		task.Priority = *patch.Priority
 	}
+	assignedAgentChanged := false
 	if patch.AssignedAgentID != nil {
+		assignedAgentChanged = *patch.AssignedAgentID != task.AssignedAgentID
 		agent, found, err := agentByID(ctx, tx.connection, *patch.AssignedAgentID)
 		if err != nil {
 			return Task{}, tx.Rollback(err)
@@ -351,6 +368,18 @@ func (store *Store) updateTask(ctx context.Context, digest *AttemptDigest, id Ta
 			return Task{}, tx.Rollback(ErrUnauthorized)
 		}
 		task.AssignedAgentID = agent.ID
+	}
+	if assignedAgentChanged && task.Title == overseerWakeTitle && !task.AssignedAgentID.zero() {
+		agent, found, err := agentByID(ctx, tx.connection, task.AssignedAgentID)
+		if err != nil {
+			return Task{}, tx.Rollback(err)
+		}
+		if !found {
+			return Task{}, tx.Rollback(ErrCorruptState)
+		}
+		if agent.Role == RoleWorker && agent.Idle.Policy == IdleStandingInstruction {
+			return Task{}, tx.Rollback(fmt.Errorf("%w: reserved standing instruction title", ErrInvalidValue))
+		}
 	}
 	bump := 0
 	if retire {
@@ -367,8 +396,9 @@ func (store *Store) updateTask(ctx context.Context, digest *AttemptDigest, id Ta
 	if task.SentBackInstructionBytes != nil {
 		sentBack = *task.SentBackInstructionBytes
 	}
-	result, err := tx.connection.ExecContext(ctx, `UPDATE tasks SET title = ?, body = ?, sent_back_instruction_bytes = ?, priority = ?, assigned_agent_id = ?, status = ?, completed_at_ms = ?, blocked_reason = NULL, work_revision = work_revision + ?, revision = revision + 1, updated_at_ms = ? WHERE id = ? AND status = ? AND revision = ?`,
-		task.Title, task.Body, sentBack, task.Priority, nullableAgentID(task.AssignedAgentID), status, completed, bump, at.Int64(), id.Bytes(), task.Status.String(), expected.Int64())
+	var taskResult any
+	result, err := tx.connection.ExecContext(ctx, `UPDATE tasks SET title = ?, body = ?, sent_back_instruction_bytes = ?, priority = ?, assigned_agent_id = ?, status = ?, result = ?, completed_at_ms = ?, blocked_reason = NULL, work_revision = work_revision + ?, revision = revision + 1, updated_at_ms = ? WHERE id = ? AND status = ? AND revision = ?`,
+		task.Title, task.Body, sentBack, task.Priority, nullableAgentID(task.AssignedAgentID), status, taskResult, completed, bump, at.Int64(), id.Bytes(), task.Status.String(), expected.Int64())
 	if err := requireOneRow(result, err); err != nil {
 		return Task{}, tx.Rollback(err)
 	}

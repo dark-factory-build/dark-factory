@@ -14,6 +14,8 @@ import (
 	"net/http"
 	"net/url"
 	"strconv"
+	"strings"
+	"sync/atomic"
 	"time"
 )
 
@@ -48,7 +50,24 @@ type Status struct {
 	State        string       `json:"state"`
 	User         *User        `json:"github_user,omitempty"`
 	Repositories []Delegation `json:"repositories"`
+	Quota        *Quota       `json:"quota,omitempty"` // set by the host, never read from the broker
 }
+
+// Quota is the owner's GitHub REST quota as GitHub last reported it to the
+// broker. The broker forwards GitHub's x-ratelimit-* headers from the
+// owner-token calls it makes for each request (#1510).
+type Quota struct {
+	Remaining int64 `json:"remaining"`
+	Limit     int64 `json:"limit"`
+	Reset     int64 `json:"reset"` // unix seconds
+}
+
+// Low reports a quota under a tenth of its limit before its reset, when
+// non-urgent polling waits for the reset.
+func (quota Quota) Low(now time.Time) bool {
+	return quota.Remaining*10 < quota.Limit && now.Unix() < quota.Reset
+}
+
 type Authorization struct {
 	ConnectionID string `json:"connection_id"`
 	URL          string `json:"authorization_url"`
@@ -88,6 +107,7 @@ type Repositories struct {
 type Client struct {
 	http   *http.Client
 	origin string
+	quota  atomic.Pointer[Quota]
 }
 
 func NewClient() *Client {
@@ -191,7 +211,20 @@ func (client *Client) request(ctx context.Context, credential Credential, method
 	return client.requestBounded(ctx, credential, method, path, input, output, 1<<20)
 }
 
+type operationKey struct{}
+
+// Operation names the broker operation of a request this package sends, for
+// per-operation accounting: "mcp" and the tool, or the connection route.
+func Operation(ctx context.Context) string {
+	name, _ := ctx.Value(operationKey{}).(string)
+	return name
+}
+
 func (client *Client) requestBounded(ctx context.Context, credential Credential, method, path string, input, output any, maximum int64) error {
+	if Operation(ctx) == "" {
+		route, _, _ := strings.Cut(strings.TrimPrefix(strings.TrimPrefix(path, prefix), "/"+credential.id), "?")
+		ctx = context.WithValue(ctx, operationKey{}, strings.ToLower(method)+" connection"+route)
+	}
 	if path != prefix {
 		if _, err := parseCredential(credential.id, credential.secret); err != nil {
 			return ErrDenied
@@ -219,6 +252,16 @@ func (client *Client) requestBounded(ctx context.Context, credential Credential,
 		return fmt.Errorf("%w: %v", ErrUnavailable, errors.Unwrap(err))
 	}
 	defer response.Body.Close()
+	header := func(name string) int64 {
+		value, err := strconv.ParseInt(response.Header.Get(name), 10, 64)
+		if err != nil {
+			return -1
+		}
+		return value
+	}
+	if quota := (Quota{Remaining: header("X-Ratelimit-Remaining"), Limit: header("X-Ratelimit-Limit"), Reset: header("X-Ratelimit-Reset")}); quota.Remaining >= 0 && quota.Limit > 0 && quota.Reset > 0 {
+		client.quota.Store(&quota)
+	}
 	if response.StatusCode == http.StatusUnauthorized || response.StatusCode == http.StatusForbidden {
 		return ErrDenied
 	}
