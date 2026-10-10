@@ -688,6 +688,7 @@ func TestMergeStageRunsOnlyOnTheCustomerPath(t *testing.T) {
 		if _, err := reviewNow(ctx, fixture.daemon, project, publishedReviewRequest()); err == nil {
 			t.Fatal("a running task accepted the send-back")
 		}
+		waitForMergePipeline(t, fixture.daemon)
 		settle()
 		if customer {
 			customerMode(t, fixture)
@@ -704,6 +705,7 @@ func TestMergeStageRunsOnlyOnTheCustomerPath(t *testing.T) {
 		if _, err := reviewNow(ctx, fixture.daemon, project, publishedReviewRequest()); err != nil {
 			t.Fatal(err)
 		}
+		waitForMergePipeline(t, fixture.daemon)
 		backend.pull = &review.Pull{Head: publishedReviewRequest().Head, State: "merged"}
 		if customer {
 			customerMode(t, fixture)
