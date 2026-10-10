@@ -527,7 +527,15 @@ func sendBackTask(ctx context.Context, connection *sql.Conn, task Task, head, no
 	if err := connection.QueryRowContext(ctx, `SELECT COALESCE((SELECT lower(hex(head_commit)) FROM changes WHERE task_id = ? AND task_incarnation_id = ?), '')`, task.ID.Bytes(), task.IncarnationID.Bytes()).Scan(&current); err != nil {
 		return Task{}, err
 	}
+	// The App publishes its own commit of the Change's tree, so a reviewer's
+	// note names the pull request head, never the local Change head.
+	var published bool
 	if current != "" && !strings.EqualFold(head, current) {
+		if err := connection.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM publication_tasks p JOIN production_records r ON r.project_id = p.project_id AND r.repository = p.repository AND r.kind = 'pull_request' AND r.identity = CAST(p.pull_number AS TEXT) WHERE p.task_id = ? AND ? <> '' AND lower(json_extract(r.document, '$.head')) = lower(?))`, task.ID.Bytes(), head, head).Scan(&published); err != nil {
+			return Task{}, err
+		}
+	}
+	if current != "" && !strings.EqualFold(head, current) && !published {
 		return Task{}, fmt.Errorf("%w: %w: the note was observed at head %q but the task's Change head is %q; observe it there before sending it back", ErrConflict, ErrSuperseded, head, current)
 	}
 	next := task.WorkRevision.Int64() + 1
