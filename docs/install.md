@@ -346,12 +346,14 @@ configured publication repository to the live GitHub connection. Fetch readiness
 and publication binding are separate checks. A verified publication binding
 still requires live write permission for every publication operation.
 
-Once a repository is bound to a project, factoryd also reviews its open pull
-requests, including ones it did not publish. A blocking verdict or merge-queue
-ejection on a head that has not moved goes back to the task that published the
-pull request. For a same-repository pull request factoryd did not publish, it
-first creates one `Repair OWNER/REPO#N` worker task and publishes its result to
-that pull request's own branch. Each send-back after the second repair round
+Once a repository is bound to a project, factoryd reviews the pull requests it
+publishes there. It does not review other pull requests on its own: start one
+with `factoryctl review --project PROJECT_ID --repository OWNER/REPO --pull N
+--head HEAD_SHA --base BASE_SHA --base-ref BRANCH`. A blocking verdict or
+merge-queue ejection on a head that has not moved goes back to the task that
+published the pull request. For a same-repository pull request factoryd did
+not publish, it first creates one `Repair OWNER/REPO#N` worker task and
+publishes its result to that pull request's own branch. Each send-back after the second repair round
 is also escalated to the project's overseer; it does not stop further repair.
 A pull request from a fork only receives the verdict on GitHub.
 
