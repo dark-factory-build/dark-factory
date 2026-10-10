@@ -119,7 +119,7 @@ elif [ -n "$ci_original_home" ] && [ "$ci_original_home" != /dev/null ]; then
     if [ "$ci_home_can_host_cache" -eq 1 ]; then
         ci_cache_root="$ci_original_home/Library/Caches/dark-factory/local-ci/trusted"
     else
-        # Some repository-contract fixtures intentionally run after the
+        # A nested gate may run after the
         # boundary has installed HOME=/var/empty. Do not probe that HOME by
         # creating Library/Caches there; run without a trusted cache instead.
         ci_cache_root=/var/empty
