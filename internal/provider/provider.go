@@ -1121,7 +1121,6 @@ func (runtime RuntimePaths) valid() bool {
 func (runtime RuntimePaths) environmentForRole(kind kernel.Provider, role kernel.AgentRole) []string {
 	environment := []string{
 		"DARK_FACTORY_TASK_ATTACHMENTS=" + filepath.Join(runtime.home, "task-attachments"),
-		"DARK_FACTORY_TASK_FILE=" + runtime.TaskFile(),
 		"DARK_FACTORY_SOCKET=" + runtime.socket,
 		"DARK_FACTORY_ATTEMPT_TOKEN_FILE=" + runtime.token,
 		"DARK_FACTORY_FACTORYCTL=" + runtime.factoryctl,
@@ -1145,6 +1144,7 @@ func (runtime RuntimePaths) environmentForRole(kind kernel.Provider, role kernel
 	// build caches live in the private runtime home rather than the account's.
 	if kind != kernel.ProviderShell {
 		environment = append(environment,
+			"DARK_FACTORY_TASK_FILE="+runtime.TaskFile(),
 			"GOENV=off",
 			"GOTOOLCHAIN=local",
 			"GOCACHE="+filepath.Join(runtime.home, ".cache", "go-build"),
