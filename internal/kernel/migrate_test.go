@@ -12,12 +12,13 @@ import (
 	"testing"
 )
 
-// A current home opens untouched; a v38 home (runs naming 'runner_exit' for
-// 'transient') and a v37 one (also without the specialist columns) migrate,
-// keep every row, and then record a transient failure.
+// A current home opens untouched; a v39 home (with browser_security_events), a
+// v38 one (also with runs naming 'runner_exit' for 'transient') and a v37 one
+// (also without the specialist columns) migrate, keep every row, and then
+// record a transient failure.
 func TestCurrentAndLegacyHomesOpenWithEveryRow(t *testing.T) {
 	t.Parallel()
-	for _, version := range []int{userVersion, v38UserVersion, v37UserVersion} {
+	for _, version := range []int{userVersion, v39UserVersion, v38UserVersion, v37UserVersion} {
 		t.Run(fmt.Sprintf("v%d", version), func(t *testing.T) { testHomeOpensWithEveryRow(t, version) })
 	}
 }
@@ -70,10 +71,15 @@ func downgradeHome(t *testing.T, store *Store, version int) {
 	if version == v37UserVersion {
 		statements = append(statements, "ALTER TABLE agents DROP COLUMN idle_wake_on", "ALTER TABLE projects DROP COLUMN specialist_open_proposals", "ALTER TABLE projects DROP COLUMN specialist_runs")
 	}
-	if version != userVersion {
+	if version < v39UserVersion {
 		statements = append(statements, "PRAGMA writable_schema = ON",
 			`UPDATE sqlite_schema SET sql = replace(sql, '''transient''', '''runner_exit''') WHERE name = 'runs'`,
-			"PRAGMA writable_schema = OFF", fmt.Sprintf("PRAGMA user_version = %d", version))
+			"PRAGMA writable_schema = OFF")
+	}
+	if version != userVersion {
+		statements = append(append(statements, browserSecurityEventStatements...),
+			`INSERT INTO browser_security_events(kind, client_id, occurred_at_ms) VALUES('challenge_minted', NULL, 1)`,
+			fmt.Sprintf("PRAGMA user_version = %d", version))
 	}
 	for _, statement := range statements {
 		if _, err := store.writer.ExecContext(context.Background(), statement); err != nil {
@@ -173,8 +179,12 @@ func snapshotRows(t *testing.T, ctx context.Context, connection *sql.Conn) map[s
 func TestSchemaDigestsArePinned(t *testing.T) {
 	t.Parallel()
 	sum := sha256.Sum256([]byte(strings.Join(schemaStatements, "\n")))
-	if got := hex.EncodeToString(sum[:]); got != "3a54481cb3246bb70309c06135c4b61d5efc739bcf5c38b6432aa4b698f5f25b" {
+	if got := hex.EncodeToString(sum[:]); got != "97d786b424ca0c3097e97738821298f75b60f3a29c49629fdc47de5dba623268" {
 		t.Errorf("current schema digest = %s", got)
+	}
+	sum = sha256.Sum256([]byte(strings.Join(legacySchemaStatements(v39UserVersion), "\n")))
+	if got := hex.EncodeToString(sum[:]); got != "3a54481cb3246bb70309c06135c4b61d5efc739bcf5c38b6432aa4b698f5f25b" {
+		t.Errorf("v39 schema digest = %s", got)
 	}
 	sum = sha256.Sum256([]byte(strings.Join(legacySchemaStatements(v38UserVersion), "\n")))
 	if got := hex.EncodeToString(sum[:]); got != "29c9a3043f03be927336f6331f7c7ce24bcab875fb4607fc55003b688739fc2e" {

@@ -5,7 +5,11 @@ package install
 import (
 	"bytes"
 	"context"
+	"crypto/ecdh"
+	"crypto/rand"
+	"crypto/sha256"
 	"database/sql"
+	"encoding/binary"
 	"errors"
 	"io"
 	"os"
@@ -1318,8 +1322,17 @@ func TestOperationalHomeValidatesDuringSQLiteWriterAndCheckpoint(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			for i := 0; i < 3000; i++ {
-				if _, err := seed.Exec("INSERT INTO browser_security_events(kind, client_id, occurred_at_ms) VALUES ('challenge_minted', NULL, ?)", i); err != nil {
+			for i := 1; i <= 3000; i++ {
+				key, err := ecdh.P256().GenerateKey(rand.Reader)
+				if err != nil {
+					_ = seed.Rollback()
+					t.Fatal(err)
+				}
+				publicKey := key.PublicKey().Bytes()
+				fingerprint := sha256.Sum256(publicKey)
+				id := make([]byte, 16)
+				binary.BigEndian.PutUint64(id[8:], uint64(i))
+				if _, err := seed.Exec("INSERT INTO browser_clients(id, public_key, fingerprint, capability_mask, revision, created_at_ms, updated_at_ms) VALUES (?, ?, ?, 1, 1, ?, ?)", id, publicKey, fingerprint[:], i, i); err != nil {
 					_ = seed.Rollback()
 					t.Fatal(err)
 				}
