@@ -547,9 +547,12 @@ factoryd wakes you with `Escalated: factoryd cannot advance OWNER/REPO#N at
 exact head HEAD: ...` only when it cannot advance a pull request: a review that
 failed twice, an enqueue the App refused, a send-back that reached no task, or
 a change past two repair rounds. An enqueue refused as UNPROCESSABLE (a
-required check that never ran on the head) is final for that head: only a new
-head is reviewed and enqueued. Resolve that cause or raise it with
-`attempt request-human` naming the pull request; never start another review.
+required check that never ran on the head, or a code-owner approval only a
+person can give, as for a pull request touching CODEOWNERS paths) is final for
+that head: factoryd escalates once, never retries it, and only a new head is
+reviewed and enqueued. You cannot approve it: raise it at once with
+`attempt request-human` naming the pull request and head; never start another
+review.
 
 A send-back of your own (for example a `dirty` worktree, section 1) carries a
 pointer note, never pasted findings.
