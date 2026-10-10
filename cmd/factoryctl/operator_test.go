@@ -6,7 +6,6 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
-	"fmt"
 	"strings"
 	"testing"
 
@@ -614,24 +613,32 @@ func TestAccountDiscoverCLICollectsPagesAndRejectsRepeatedCursor(t *testing.T) {
 func TestHumanCommandsUseOperatorClient(t *testing.T) {
 	id := strings.Repeat("11", 16)
 	operation := strings.Repeat("22", 16)
-	for _, reply := range []bool{false, true} {
-		t.Run(fmt.Sprint(reply), func(t *testing.T) {
+	for _, verb := range []string{"list", "reply", "cancel"} {
+		t.Run(verb, func(t *testing.T) {
 			fixture := newAPIFixture(t)
 			defer fixture.close(t)
-			args := []string{"human", "list"}
-			if reply {
-				args = []string{"human", "reply", "--operation-id", operation, "--request", id, "--revision", "3", "--reply", "Proceed"}
-			}
+			args := map[string][]string{
+				"list":   {"human", "list"},
+				"reply":  {"human", "reply", "--operation-id", operation, "--request", id, "--revision", "3", "--reply", "Proceed"},
+				"cancel": {"human", "cancel", "--request", id, "--revision", "3", "--run-revision", "5"},
+			}[verb]
 			done := serveOne(fixture.listener, func(call api.Call) api.Reply {
-				if !reply {
+				switch verb {
+				case "list":
 					if call.Kind() != api.CallHumanRequests {
 						t.Errorf("wrong list call %v", call.Kind())
 					}
 					return api.NewHumanRequestListReply(api.HumanRequestList{Requests: []api.HumanRequest{}})
-				}
-				input, ok := call.HumanReplyInput()
-				if !ok || input.RequestID != id || input.OperationID != operation || input.ExpectedRevision != 3 || input.Reply != "Proceed" {
-					t.Errorf("wrong reply input %+v", input)
+				case "reply":
+					input, ok := call.HumanReplyInput()
+					if !ok || input.RequestID != id || input.OperationID != operation || input.ExpectedRevision != 3 || input.Reply != "Proceed" {
+						t.Errorf("wrong reply input %+v", input)
+					}
+				default:
+					input, ok := call.HumanCancelInput()
+					if !ok || input.RequestID != id || input.ExpectedRevision != 3 || input.ExpectedRunRevision != 5 {
+						t.Errorf("wrong cancel input %+v", input)
+					}
 				}
 				result, err := api.NewMutationReply(api.MutationResult{Head: 7, Revision: 4})
 				if err != nil {

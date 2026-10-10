@@ -269,14 +269,15 @@ type OverseerHumanReplyResult struct {
 }
 
 type HumanRequest struct {
-	ID       string   `json:"id"`
-	RunID    string   `json:"run_id"`
-	TaskID   string   `json:"task_id"`
-	AgentID  string   `json:"agent_id"`
-	Status   string   `json:"status"`
-	Revision uint64   `json:"revision"`
-	Question string   `json:"question"`
-	Options  []string `json:"options"`
+	ID          string   `json:"id"`
+	RunID       string   `json:"run_id"`
+	TaskID      string   `json:"task_id"`
+	AgentID     string   `json:"agent_id"`
+	Status      string   `json:"status"`
+	Revision    uint64   `json:"revision"`
+	RunRevision uint64   `json:"run_revision"`
+	Question    string   `json:"question"`
+	Options     []string `json:"options"`
 }
 
 type HumanRequestList struct {
@@ -288,7 +289,7 @@ func validHumanRequestList(value HumanRequestList) bool {
 		return false
 	}
 	for _, request := range value.Requests {
-		if !validID(request.ID) || !validID(request.RunID) || !validID(request.TaskID) || !validID(request.AgentID) || request.Revision == 0 || !validText(request.Question, 1, 8192) || request.Status != "open" && request.Status != "delivering" && request.Status != "delivery_unknown" || request.Options == nil || kernel.ValidateHumanOptions(request.Options) != nil {
+		if !validID(request.ID) || !validID(request.RunID) || !validID(request.TaskID) || !validID(request.AgentID) || request.Revision == 0 || request.RunRevision == 0 || !validText(request.Question, 1, 8192) || request.Status != "open" && request.Status != "delivering" && request.Status != "delivery_unknown" || request.Options == nil || kernel.ValidateHumanOptions(request.Options) != nil {
 			return false
 		}
 	}
@@ -909,6 +910,17 @@ type OverseerHumanReplyInput struct {
 	RequestID        string `json:"request_id"`
 	ExpectedRevision uint64 `json:"expected_revision"`
 	Reply            string `json:"reply"`
+}
+
+// HumanCancelInput carries the exact revisions listed by human list.
+type HumanCancelInput struct {
+	RequestID           string `json:"request_id"`
+	ExpectedRevision    uint64 `json:"expected_revision"`
+	ExpectedRunRevision uint64 `json:"expected_run_revision"`
+}
+
+func validHumanCancelInput(value HumanCancelInput) bool {
+	return validID(value.RequestID) && value.ExpectedRevision != 0 && value.ExpectedRunRevision != 0
 }
 
 type CreateProjectInput struct {

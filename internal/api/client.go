@@ -227,6 +227,13 @@ func (client *OperatorClient) HumanReply(ctx context.Context, input OverseerHuma
 	return client.client.mutate(ctx, "human_reply", input)
 }
 
+func (client *OperatorClient) HumanCancel(ctx context.Context, input HumanCancelInput) (MutationResult, error) {
+	if !validHumanCancelInput(input) {
+		return MutationResult{}, ErrInvalidInput
+	}
+	return client.client.mutate(ctx, "human_cancel", input)
+}
+
 func (client *OperatorClient) StopRun(ctx context.Context, input OverseerRunStopInput) (MutationResult, error) {
 	if !validOverseerRunStopInput(input) {
 		return MutationResult{}, ErrInvalidInput

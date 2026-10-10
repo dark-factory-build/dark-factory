@@ -322,6 +322,8 @@ func (daemon *Daemon) dispatch(ctx context.Context, call api.Call) api.Reply {
 		return daemon.humanRequests(ctx)
 	case api.CallHumanReply:
 		return daemon.humanReplyOperator(ctx, call)
+	case api.CallHumanCancel:
+		return daemon.humanCancelOperator(ctx, call)
 	case api.CallCreateProject:
 		return daemon.createProject(ctx, call)
 	case api.CallProjectRepository:
@@ -657,7 +659,7 @@ func (daemon *Daemon) humanRequests(ctx context.Context) api.Reply {
 	}
 	result := api.HumanRequestList{Requests: make([]api.HumanRequest, 0, len(requests))}
 	for _, request := range requests {
-		result.Requests = append(result.Requests, api.HumanRequest{ID: request.ID.String(), RunID: request.RunID.String(), TaskID: request.TaskID.String(), AgentID: request.AgentID.String(), Status: request.Status.String(), Revision: uint64(request.Revision.Int64()), Question: request.QuestionText, Options: append([]string{}, request.Options...)})
+		result.Requests = append(result.Requests, api.HumanRequest{ID: request.ID.String(), RunID: request.RunID.String(), TaskID: request.TaskID.String(), AgentID: request.AgentID.String(), Status: request.Status.String(), Revision: uint64(request.Revision.Int64()), RunRevision: uint64(request.RunRevision.Int64()), Question: request.QuestionText, Options: append([]string{}, request.Options...)})
 	}
 	return api.NewHumanRequestListReply(result)
 }
@@ -719,6 +721,33 @@ func (daemon *Daemon) humanReplyOperator(ctx context.Context, call api.Call) api
 		return newErrorReply(remoteErrorCode(err))
 	}
 	return daemon.overseerHumanReplyMutation(projection)
+}
+
+func (daemon *Daemon) humanCancelOperator(ctx context.Context, call api.Call) api.Reply {
+	input, ok := call.HumanCancelInput()
+	if !ok {
+		return newErrorReply(api.RemoteInvalidRequest)
+	}
+	requestID, err := decodeID(input.RequestID, kernel.HumanRequestIDFromBytes)
+	if err != nil {
+		return newErrorReply(api.RemoteInvalidRequest)
+	}
+	expectedRequest, requestErr := kernel.NewRevision(int64(input.ExpectedRevision))
+	expectedRun, runErr := kernel.NewRevision(int64(input.ExpectedRunRevision))
+	if requestErr != nil || runErr != nil {
+		return newErrorReply(api.RemoteInvalidRequest)
+	}
+	at, err := daemon.timestamp()
+	if err != nil {
+		return newErrorReply(api.RemoteInternal)
+	}
+	_, request, err := daemon.fenceHumanRequestCancel(func() (kernel.Run, kernel.HumanRequest, error) {
+		return daemon.store.CancelHumanRequestRunForOperator(ctx, requestID, expectedRequest, expectedRun, at)
+	})
+	if err != nil {
+		return newErrorReply(remoteErrorCode(err))
+	}
+	return daemon.overseerHumanReplyMutation(kernel.HumanRequestProjection{ID: request.ID, Revision: request.Revision, Status: request.Status})
 }
 
 func (daemon *Daemon) attemptTask(ctx context.Context, call api.Call) api.Reply {

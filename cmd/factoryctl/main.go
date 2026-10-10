@@ -87,6 +87,7 @@ const (
   factoryctl overseer human reply --operation-id ID --request ID --revision REVISION --reply TEXT
   factoryctl human list
   factoryctl human reply --operation-id ID --request ID --revision REVISION --reply TEXT
+  factoryctl human cancel --request ID --revision REVISION --run-revision REVISION
   factoryctl project create --name TEXT --root ABSOLUTE
   factoryctl project repository list --project ID
 	factoryctl project repository add --project ID --name TEXT --root ABSOLUTE --base REF [--id HEX32]
@@ -222,6 +223,7 @@ const (
 	commandOverseerReplyHuman
 	commandHumanList
 	commandHumanReply
+	commandHumanCancel
 	commandWorkerOperation
 	commandContentCreate
 	commandContentRevise
@@ -404,7 +406,7 @@ func runWithDependencies(ctx context.Context, args []string, getenv func(string)
 	if command.kind == commandRemoteStatus {
 		return runRemote(ctx, getenv, stdout, stderr)
 	}
-	if command.kind == commandAgentPaths || command.kind == commandOperatorTerminalObserve || command.kind == commandWorkerOperation || command.kind == commandProjectCreate || command.kind == commandProjectRepository || command.kind == commandIntake || command.kind == commandProjectLimits || command.kind == commandAgentCreate || command.kind == commandAgentIdlePolicy || command.kind == commandAccountsDiscover || command.kind == commandAccountsList || command.kind == commandAccountLink || command.kind == commandAgentSelectAccount || command.kind == commandAgentSelectModel || command.kind == commandTaskAdd || command.kind == commandTaskSendBack || command.kind == commandTaskRead || command.kind == commandDispatch || command.kind == commandCapacity || command.kind == commandStatus || command.kind == commandCompactStorage || command.kind == commandBackupCreate || command.kind == commandBackupVerify || command.kind == commandHumanList || command.kind == commandHumanReply {
+	if command.kind == commandAgentPaths || command.kind == commandOperatorTerminalObserve || command.kind == commandWorkerOperation || command.kind == commandProjectCreate || command.kind == commandProjectRepository || command.kind == commandIntake || command.kind == commandProjectLimits || command.kind == commandAgentCreate || command.kind == commandAgentIdlePolicy || command.kind == commandAccountsDiscover || command.kind == commandAccountsList || command.kind == commandAccountLink || command.kind == commandAgentSelectAccount || command.kind == commandAgentSelectModel || command.kind == commandTaskAdd || command.kind == commandTaskSendBack || command.kind == commandTaskRead || command.kind == commandDispatch || command.kind == commandCapacity || command.kind == commandStatus || command.kind == commandCompactStorage || command.kind == commandBackupCreate || command.kind == commandBackupVerify || command.kind == commandHumanList || command.kind == commandHumanReply || command.kind == commandHumanCancel {
 		return runOperator(ctx, command, getenv, stdout, stderr)
 	}
 	if command.kind >= commandContentCreate && command.kind <= commandContentAttachments && len(args) > 0 && args[0] == "content" {
@@ -683,6 +685,13 @@ func parse(args []string) (attemptCommand, bool, bool) {
 	if len(args) >= 1 && args[0] == "human" {
 		if len(args) == 2 && args[1] == "list" {
 			return attemptCommand{kind: commandHumanList}, false, true
+		}
+		if len(args) >= 2 && args[1] == "cancel" {
+			values, ok := pairedFlagValues(args[2:], false, "--request", "--revision", "--run-revision")
+			revision, _ := strconv.ParseUint(values["--revision"], 10, 64)
+			runRevision, _ := strconv.ParseUint(values["--run-revision"], 10, 64)
+			ok = ok && validHumanRequestKey(values["--request"]) && validRevision(values["--revision"]) && validRevision(values["--run-revision"])
+			return attemptCommand{kind: commandHumanCancel, id: values["--request"], expectedRevision: revision, runRevision: runRevision}, false, ok
 		}
 		if len(args) < 2 || args[1] != "reply" {
 			return attemptCommand{}, false, false
@@ -2232,6 +2241,12 @@ func runOperator(ctx context.Context, command attemptCommand, getenv func(string
 		result, callErr := client.HumanReply(callContext, api.OverseerHumanReplyInput{OperationID: command.operationID, RequestID: command.id, ExpectedRevision: command.expectedRevision, Reply: command.text})
 		if callErr != nil {
 			return writeWebFailure(stderr, "human reply", callErr)
+		}
+		return writeJSON(stdout, result)
+	case commandHumanCancel:
+		result, callErr := client.HumanCancel(callContext, api.HumanCancelInput{RequestID: command.id, ExpectedRevision: command.expectedRevision, ExpectedRunRevision: command.runRevision})
+		if callErr != nil {
+			return writeWebFailure(stderr, "human cancel", callErr)
 		}
 		return writeJSON(stdout, result)
 	case commandAccountsDiscover:
