@@ -316,6 +316,7 @@ func TestBuildShellReturnsExactImmutableLaunchAndTask(t *testing.T) {
 	}
 	wantEnvironment := []string{
 		"DARK_FACTORY_TASK_ATTACHMENTS=" + filepath.Join(runtime.home, "task-attachments"),
+		"DARK_FACTORY_TASK_FILE=" + filepath.Join(runtime.home, "factory-task"),
 		"DARK_FACTORY_SOCKET=" + runtime.socket,
 		"DARK_FACTORY_ATTEMPT_TOKEN_FILE=" + runtime.token,
 		"DARK_FACTORY_FACTORYCTL=" + runtime.factoryctl,
@@ -1102,7 +1103,7 @@ func TestTaskValidationUsesDeliverySpecificBound(t *testing.T) {
 		t.Fatalf("Shell over-limit task error=%v, want ErrInvalid", err)
 	}
 	for _, kind := range []kernel.Provider{kernel.ProviderClaudeCode, kernel.ProviderCodex} {
-		maximum := bytes.Repeat([]byte{'x'}, runner.MaxNativeTaskBytes)
+		maximum := bytes.Repeat([]byte{'x'}, runner.MaxProviderTaskBytes)
 		if delivery, payload, err := PrepareTask(kind, maximum); err != nil || delivery != TaskDeliveryAttemptAPI || payload != nil {
 			t.Fatalf("%s maximum API task delivery=(%d, %d bytes), error=%v", kind, delivery, len(payload), err)
 		}
@@ -1774,7 +1775,7 @@ func TestCodexLaunchGrantsTheRepositoryGitDirectoryByRole(t *testing.T) {
 // Claude and Codex start from one bootstrap prompt, the last argv element,
 // naming only their own attempt server; neither has a task typed into its PTY.
 func TestNativeProvidersShareTheBootstrapPrompt(t *testing.T) {
-	if !strings.Contains(bootstrapPrompt, `argv ["attempt","task"] before doing anything else`) || !strings.Contains(bootstrapPrompt, "including corrections after send-back") || strings.Contains(bootstrapPrompt, "attempt source") || !strings.Contains(bootstrapPrompt, "Never substitute another task or private Change path") || !strings.Contains(bootstrapPrompt, "screenshots are illustrative only and never blocking evidence") {
+	if !strings.Contains(bootstrapPrompt, "DARK_FACTORY_TASK_FILE") || strings.Contains(bootstrapPrompt, `argv ["attempt","task"]`) {
 		t.Fatal("bootstrap prompt loses its task fetch or own-checkout instruction")
 	}
 	for _, role := range []kernel.AgentRole{kernel.RoleWorker, kernel.RoleOrchestrator} {
