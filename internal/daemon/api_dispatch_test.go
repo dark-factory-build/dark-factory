@@ -22,6 +22,7 @@ import (
 	"github.com/dark-factory-build/dark-factory/internal/api"
 	"github.com/dark-factory-build/dark-factory/internal/install"
 	"github.com/dark-factory-build/dark-factory/internal/kernel"
+	"github.com/dark-factory-build/dark-factory/internal/runner"
 )
 
 type dispatchFixture struct {
@@ -316,7 +317,7 @@ func TestDaemonDispatchesOperatorCallsAndBoundsProjection(t *testing.T) {
 	done = fixture.serve(t)
 	_, err = client.EnqueueTask(ctx, api.EnqueueTaskInput{
 		ID: testID(3), ProjectID: projectInput.ID, AssignedAgentID: testID(2), IncarnationID: testID(4),
-		Title: "oversized", Body: strings.Repeat("x", 8193), Priority: 7,
+		Title: "oversized", Body: strings.Repeat("x", runner.MaxProviderTaskBytes+1), Priority: 7,
 	})
 	var oversized *api.RemoteError
 	if !errors.As(err, &oversized) || oversized.Code() != api.RemoteInvalidRequest {
@@ -598,12 +599,12 @@ func TestDaemonDispatchesSendBackThroughBothDomains(t *testing.T) {
 	}
 	waitDispatch(t, done)
 	done = fixture.serve(t)
-	if _, err := operator.EnqueueTask(ctx, api.EnqueueTaskInput{ID: claudeTask, ProjectID: active.run.ProjectID.String(), AssignedAgentID: claude, IncarnationID: testID(63), Title: "typed", Body: strings.Repeat("x", 7000)}); err != nil {
+	if _, err := operator.EnqueueTask(ctx, api.EnqueueTaskInput{ID: claudeTask, ProjectID: active.run.ProjectID.String(), AssignedAgentID: claude, IncarnationID: testID(63), Title: "typed", Body: strings.Repeat("x", runner.MaxProviderTaskBytes-100)}); err != nil {
 		t.Fatal(err)
 	}
 	waitDispatch(t, done)
 	done = fixture.serve(t)
-	if _, err := operator.SendBackTask(ctx, api.SendBackInput{TaskID: claudeTask, Note: strings.Repeat("&", 1300)}); !errors.As(err, &remote) || remote.Code() != api.RemoteTooLarge {
+	if _, err := operator.SendBackTask(ctx, api.SendBackInput{TaskID: claudeTask, Note: strings.Repeat("&", 200)}); !errors.As(err, &remote) || remote.Code() != api.RemoteTooLarge {
 		t.Fatalf("a note past the provider's prompt = %v", err)
 	}
 	waitDispatch(t, done)
