@@ -335,11 +335,23 @@ make a private checkout fetchable.
 After registering a checkout, check its configured source with
 `factoryctl project repository fetch --id REPOSITORY_ID`. This uses the same
 Git selection and authentication boundary as new work, preserves operator edits
-and branch refs, and reports `ready` or `setup_required`. Configure private Git
-access for that checkout using your existing Git setup and retry when needed.
+and branch refs, and reports `ready` or `setup_required`. A `setup_required`
+message names the failed step, such as a remote that required authentication,
+without Git's own output or the remote URL.
 Credentials are never accepted as CLI flags or passed from the GitHub broker.
 An explicit check also verifies the checkout identity for migrated projects;
 ordinary repository listing performs no fetch or identity changes.
+
+A private checkout authenticates with its own repository configuration only.
+The sealed fetch runs with a fresh empty `HOME`, global and system Git config
+disabled, no `PATH` (Git searches only its own directory and `/usr/bin:/bin`),
+no SSH agent and no prompt. Your shell's `git fetch` working therefore says
+nothing about the factory's fetch. A `gh auth git-credential` helper fails here:
+`gh` is not on that path and keeps its login state under `HOME`. Use a read-only
+GitHub deploy key for that repository with an SSH origin and an absolute,
+passphrase-free key:
+`git -C CHECKOUT config core.sshCommand "/usr/bin/ssh -i /ABSOLUTE/KEY -o IdentitiesOnly=yes -o UserKnownHostsFile=/ABSOLUTE/known_hosts"`.
+Then rerun the fetch check.
 
 Use `factoryctl project repository github --id REPOSITORY_ID` to bind its
 configured publication repository to the live GitHub connection. Fetch readiness

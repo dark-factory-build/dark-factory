@@ -43,6 +43,7 @@ type Operation struct {
 	Failures           int       `json:"failures,omitempty"`   // consecutive merge-stage passes that failed
 	Refused            bool      `json:"refused,omitempty"`    // the last enqueue was refused; wait for its observation to change
 	RefusedObservation string    `json:"refused_observation,omitempty"`
+	RefusedAttempts    int       `json:"refused_attempts,omitempty"`
 	OwnerApproval      bool      `json:"owner_approval,omitempty"`
 	CreatedAt          time.Time `json:"created_at"`
 	UpdatedAt          time.Time `json:"updated_at"`
@@ -92,16 +93,17 @@ type Backend interface {
 // Pull is one observation of a published pull request. Queue, checks and
 // merge group are read only while it is open at the operation's head.
 type Pull struct {
-	Head      string
-	State     string // open, closed or merged
-	Review    string // current review state at this head
-	Mergeable *bool  // nil while GitHub computes it
-	Queued    bool
-	Failing   []string  // required checks at the head that finished unsuccessfully
-	Pending   bool      // a required check at the head has not finished
-	Checks    []string  // stable name=conclusion values for every observed required check
-	Tests     []string  // failure annotations of the head's failed checks: the failing tests CI names
-	Group     *GroupRun // the newest completed merge-group run that built the head
+	Head             string
+	State            string // open, closed or merged
+	Review           string // current review state at this head
+	MergeStateStatus string // GitHub's mergeability state: DIRTY, BLOCKED, CLEAN or UNKNOWN
+	Mergeable        *bool  // nil while GitHub computes it
+	Queued           bool
+	Failing          []string  // required checks at the head that finished unsuccessfully
+	Pending          bool      // a required check at the head has not finished
+	Checks           []string  // stable name=conclusion values for every observed required check
+	Tests            []string  // failure annotations of the head's failed checks: the failing tests CI names
+	Group            *GroupRun // the newest completed merge-group run that built the head
 }
 
 type GroupRun struct {
@@ -141,6 +143,8 @@ func (g *GroupRun) note(head string) string {
 var ErrRefused = errors.New("the merge queue refuses this exact head; factoryd will wait for its checks or review state to change")
 
 var ErrOwnerApproval = errors.New("the merge queue requires CODEOWNERS owner approval")
+
+const RefusedRetryLimit = 3
 
 // FailuresBeforeEscalation is how many consecutive merge-stage passes may
 // fail before the overseer is told: 30 minutes at the 5-minute merge tick.
@@ -266,8 +270,8 @@ func (c Coordinator) Advance(ctx context.Context, op Operation) (Operation, erro
 		return c.failedPass(ctx, op, err)
 	}
 	observation := pullObservation(pull)
-	if op.Refused {
-		op.Refused, op.RefusedObservation, op.OwnerApproval = false, "", false
+	if op.Refused && op.RefusedObservation != observation {
+		op.Refused, op.RefusedObservation, op.RefusedAttempts, op.OwnerApproval = false, "", 0, false
 	}
 	// A pass that observes a changed pull resets the failure count and any escalation.
 	failures, escalation, enqueues := op.Failures, op.Escalation, op.Enqueues
@@ -278,9 +282,10 @@ func (c Coordinator) Advance(ctx context.Context, op Operation) (Operation, erro
 		op.State = "superseded"
 	case pull.State == "merged" || pull.State == "closed":
 		op.State = pull.State
-	case pull.Mergeable != nil && !*pull.Mergeable:
+	case strings.EqualFold(pull.MergeStateStatus, "DIRTY") || pull.Mergeable != nil && !*pull.Mergeable:
 		op.State, op.RoutePending, op.Detail = "ejected", true, op.conflict()
 	case pull.Queued:
+		op.Refused, op.RefusedObservation, op.RefusedAttempts, op.OwnerApproval = false, "", 0, false
 	case len(pull.Failing) > 0:
 		op.State, op.RoutePending, op.Detail = "ejected", true, pull.failing()
 	case pull.Pending:
@@ -288,15 +293,27 @@ func (c Coordinator) Advance(ctx context.Context, op Operation) (Operation, erro
 		// Queued, removed, re-queued once and removed again.
 		op.State, op.RoutePending, op.Detail = "ejected", true, pull.Group.note(head)
 	default:
+		if op.RefusedAttempts >= RefusedRetryLimit {
+			op.Escalation = escalation
+			op.UpdatedAt = c.Now()
+			return op, errors.Join(ErrRefused, c.Store.Update(ctx, op))
+		}
 		if err := c.Backend.Enqueue(ctx, op); errors.Is(err, ErrOwnerApproval) {
 			op.Refused, op.OwnerApproval, op.RefusedObservation = true, true, observation
 			op.Escalate(fmt.Sprintf("pull request #%d requires owner approval for a CODEOWNERS-protected path: %v", op.Request.PullNumber, err))
 			op.UpdatedAt = c.Now()
 			return op, errors.Join(err, c.Store.Update(ctx, op))
 		} else if errors.Is(err, ErrRefused) {
+			if strings.EqualFold(pull.MergeStateStatus, "DIRTY") {
+				op.State, op.RoutePending, op.Detail = "ejected", true, op.conflict()
+				op.UpdatedAt = c.Now()
+				return op, c.Store.Update(ctx, op)
+			}
+			op.RefusedAttempts++
 			// Keep the operation live. A changed check or review observation is
-			// normal refresh trigger, but retry on every pass: mergeability can
-			// become queueable without changing checks or review state.
+			// normal refresh trigger, but retry while the small transient budget
+			// remains: mergeability can become queueable without changing checks
+			// or review state.
 			op.Refused, op.RefusedObservation = true, observation
 			op.Escalate(fmt.Sprintf("the merge queue refused this exact head: %v", err))
 			op.UpdatedAt = c.Now()
@@ -306,6 +323,7 @@ func (c Coordinator) Advance(ctx context.Context, op Operation) (Operation, erro
 			return c.failedPass(ctx, op, err)
 		}
 		op.Enqueues++
+		op.Refused, op.RefusedObservation, op.RefusedAttempts, op.OwnerApproval = false, "", 0, false
 	}
 	if op.State == "enqueued" && failures == 0 && escalation == "" && op.Enqueues == enqueues {
 		return op, nil // waiting, unchanged

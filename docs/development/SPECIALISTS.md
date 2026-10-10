@@ -91,7 +91,9 @@ Every record carries `status` (`tentative` unless verified), `evidence`
   --frozen-lockfile && corepack pnpm run preview:floor fixture` and open
   `http://127.0.0.1:5196/?fixture`. It is static markup over simulated data:
   layout, copy and phone width are reviewable; clicks, keyboard flow and
-  action feedback are not. Say so.
+  action feedback are not. Say so. If no URL is printed, treat it as a
+  bind/occupied-port failure and do not browse stale content on `:5196`; stop
+  any prior fixture and retry once.
 
 ## Limits
 

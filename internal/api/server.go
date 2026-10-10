@@ -873,7 +873,7 @@ func decodeCall(domain byte, bearer credential, encoded []byte) (Call, RemoteErr
 			return Call{}, RemoteInvalidRequest
 		}
 	case CallEnqueueTask:
-		if err := decodeExact(request.Params, &call.task); err != nil || !validID(call.task.ID) || !validID(call.task.ProjectID) || !validOptionalID(call.task.RepositoryID) || !validOptionalID(call.task.AssignedAgentID) || !validID(call.task.IncarnationID) || !validText(call.task.Title, 1, 1024) || !validText(call.task.Body, 0, 131072) || call.task.Priority < -1_000_000 || call.task.Priority > 1_000_000 {
+		if err := decodeExact(request.Params, &call.task); err != nil || !validEnqueueTaskInput(call.task) {
 			return Call{}, RemoteInvalidRequest
 		}
 	case CallTaskRead:
@@ -985,7 +985,7 @@ func decodeCall(domain byte, bearer credential, encoded []byte) (Call, RemoteErr
 			return Call{}, RemoteInvalidRequest
 		}
 	case CallOverseerUpdateAgent, CallOperatorUpdateAgent:
-		if err := decodeExact(request.Params, &call.overseerAgent); err != nil || !validID(call.overseerAgent.AgentID) || call.overseerAgent.ExpectedRevision == 0 {
+		if err := decodeExact(request.Params, &call.overseerAgent); err != nil || !validID(call.overseerAgent.AgentID) || call.overseerAgent.ExpectedRevision == 0 || kind == CallOverseerUpdateAgent && call.overseerAgent.Appearance != nil {
 			return Call{}, RemoteInvalidRequest
 		}
 	case CallOverseerStopRun, CallOperatorStopRun:

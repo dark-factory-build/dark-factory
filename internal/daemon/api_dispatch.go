@@ -1505,10 +1505,19 @@ func (daemon *Daemon) enqueueTask(ctx context.Context, call api.Call) api.Reply 
 	if err != nil {
 		return newErrorReply(api.RemoteInvalidRequest)
 	}
+	content := make([]kernel.TaskContentReference, len(input.Content))
+	for i, pin := range input.Content {
+		if content[i].ContentID, err = decodeID(pin.ContentID, kernel.ContentIDFromBytes); err != nil {
+			return newErrorReply(api.RemoteInvalidRequest)
+		}
+		if content[i].ContentRevision, err = kernel.NewRevision(int64(pin.ContentRevision)); err != nil {
+			return newErrorReply(api.RemoteInvalidRequest)
+		}
+	}
 	if err := prepareTaskEnqueue(ctx, daemon.store, spec, false); err != nil {
 		return newErrorReply(remoteErrorCode(err))
 	}
-	task, err := daemon.store.EnqueueTask(ctx, spec, at)
+	task, err := daemon.store.EnqueueTask(ctx, spec, at, content...)
 	if err != nil {
 		return newErrorReply(remoteErrorCode(err))
 	}
@@ -2063,8 +2072,16 @@ func (daemon *Daemon) operatorUpdateTask(ctx context.Context, call api.Call) api
 
 func (daemon *Daemon) operatorUpdateAgent(ctx context.Context, call api.Call) api.Reply {
 	input, ok := call.OverseerAgentUpdateInput()
-	if !ok || input.ExpectedRevision > uint64(^uint64(0)>>1) || input.Paused == nil && input.Archived == nil || input.Paused != nil && input.Archived != nil {
+	if !ok || input.ExpectedRevision > uint64(^uint64(0)>>1) {
 		return newErrorReply(api.RemoteInvalidRequest)
+	}
+	patch := kernel.AgentPatch{Paused: input.Paused, Archived: input.Archived}
+	if input.Appearance != nil {
+		appearance, err := kernel.DecodeAgentAppearance(*input.Appearance)
+		if err != nil {
+			return newErrorReply(api.RemoteInvalidRequest)
+		}
+		patch.Appearance = &appearance
 	}
 	id, err := decodeID(input.AgentID, kernel.AgentIDFromBytes)
 	if err != nil {
@@ -2078,7 +2095,7 @@ func (daemon *Daemon) operatorUpdateAgent(ctx context.Context, call api.Call) ap
 	if err != nil {
 		return newErrorReply(api.RemoteInternal)
 	}
-	agent, err := daemon.store.UpdateAgentForOperator(ctx, id, expected, kernel.AgentPatch{Paused: input.Paused, Archived: input.Archived}, at)
+	agent, err := daemon.store.UpdateAgentForOperator(ctx, id, expected, patch, at)
 	if err != nil {
 		return newErrorReply(remoteErrorCode(err))
 	}
