@@ -328,6 +328,13 @@ func TestOpenRejectsUnsafeWALSidecarsWithoutMutation(t *testing.T) {
 			if err := os.Chmod(path+"-wal", os.ModeSetuid|0o600); err != nil {
 				t.Fatal(err)
 			}
+			info, err := os.Stat(path + "-wal")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if info.Mode()&os.ModeSetuid == 0 {
+				t.Skip("filesystem does not preserve setuid mode bits")
+			}
 		},
 		"wrong WAL checksum": func(t *testing.T, path string) {
 			path, _ = walSnapshotFixtureAt(t, filepath.Dir(path), filepath.Base(path), "")

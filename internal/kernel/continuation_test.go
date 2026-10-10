@@ -72,7 +72,6 @@ func TestOrchestratorHumanQuestionYieldsAndRevokesBearer(t *testing.T) {
 }
 
 func TestSettledHumanQuestionYieldStillAcceptsReply(t *testing.T) {
-	t.Parallel()
 	ctx := context.Background()
 	store, run, keys := runningWorkerRun(t)
 	defer store.Close()
@@ -83,12 +82,19 @@ func TestSettledHumanQuestionYieldStillAcceptsReply(t *testing.T) {
 		t.Fatalf("create and yield question: %v", err)
 	}
 	observeMissingProcessExits(t, store, run.ID, 43)
-	releaseAllRunResources(t, store, run.ID, 44)
-	closed := closeTerminalSessionAtCurrent(t, store, run.ID, 45)
-	if _, err := store.FinalizeRun(ctx, run.ID, closed.Revision, mustTime(t, 46)); err != nil {
+	for index, resource := range resourcesForRunTest(t, store, run.ID) {
+		if resource.State == ResourceReleased {
+			continue
+		}
+		if _, err := store.ReleaseResource(ctx, run.ID, resource.ID, resource.Revision, resource.Identity, mustTime(t, int64(50+index))); err != nil {
+			t.Fatal(err)
+		}
+	}
+	closed := closeTerminalSessionAtCurrent(t, store, run.ID, 58)
+	if _, err := finalizeTestRun(t, store, closed, 60); err != nil {
 		t.Fatalf("settle yielded run: %v", err)
 	}
-	if replied, err := store.ResolveHumanContinuationForOperator(ctx, request.ID, request.Revision, humanDeliveryID(t, 236), "answer", mustTime(t, 47)); err != nil || !replied {
+	if replied, err := store.ResolveHumanContinuationForOperator(ctx, request.ID, request.Revision, humanDeliveryID(t, 236), "answer", mustTime(t, 61)); err != nil || !replied {
 		t.Fatalf("reply after settled yield: replied=%v err=%v", replied, err)
 	}
 }
