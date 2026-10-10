@@ -1112,7 +1112,7 @@ func TestTaskValidationUsesDeliverySpecificBound(t *testing.T) {
 		t.Fatalf("Shell over-limit task error=%v, want ErrInvalid", err)
 	}
 	for _, kind := range []kernel.Provider{kernel.ProviderClaudeCode, kernel.ProviderCodex} {
-		maximum := bytes.Repeat([]byte{'x'}, runner.MaxNativeTaskBytes)
+		maximum := bytes.Repeat([]byte{'x'}, runner.MaxProviderTaskBytes)
 		if delivery, payload, err := PrepareTask(kind, maximum); err != nil || delivery != TaskDeliveryAttemptAPI || !bytes.Equal(payload, maximum) {
 			t.Fatalf("%s maximum API task delivery=(%d, %d bytes), error=%v", kind, delivery, len(payload), err)
 		}

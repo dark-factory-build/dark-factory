@@ -9,14 +9,11 @@ import (
 	"testing"
 )
 
-func TestContinuationTaskFitsCodexProviderLimit(t *testing.T) {
+func TestContinuationTaskFitsNativeFileLimit(t *testing.T) {
 	t.Parallel()
 	context := ContinuationContext{ConditionKind: ConditionHumanRequest, ConditionRevision: mustRevision(t, 1), ResolutionDetail: strings.Repeat("答", 4096)}
-	if ContinuationTaskFits(ProviderCodex, strings.Repeat("x", 8192), []ContinuationContext{context}) {
-		t.Fatal("exact-limit Codex task was admitted without room for causal context")
-	}
-	if !ContinuationTaskCanUseFetchFallback(ProviderCodex, []ContinuationContext{context}) {
-		t.Fatal("oversized Codex continuation lost its bounded fetch fallback")
+	if !ContinuationTaskFits(ProviderCodex, strings.Repeat("x", 8192), []ContinuationContext{context}) {
+		t.Fatal("native task file rejected a valid causal envelope")
 	}
 }
 

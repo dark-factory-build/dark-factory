@@ -151,13 +151,13 @@ func TestCodexContinuationContextPreservesMaximumOriginalTask(t *testing.T) {
 	revision, _ := kernel.NewRevision(1)
 	task := bytes.Repeat([]byte{'x'}, runner.MaxNativeTaskBytes)
 	contexts := []kernel.ContinuationContext{{ConditionKind: kernel.ConditionHumanRequest, ConditionID: condition, ConditionRevision: revision, ResolutionDetail: "continue"}}
-	framed, err := providerTaskWithContinuationContext(kernel.ProviderCodex, task, contexts)
+	framed, err := attemptTaskWithContinuationContext(kernel.ProviderCodex, task, contexts)
 	if err == nil || framed != nil {
 		t.Fatalf("maximum Codex API continuation framing: bytes=%d err=%v", len(framed), err)
 	}
 	launchTask, err := providerTaskForContinuationLaunch(kernel.ProviderCodex, task, contexts)
-	if err == nil || launchTask != nil {
-		t.Fatalf("maximum Codex launch task = %q, want error", launchTask)
+	if err != nil || !bytes.Contains(launchTask, []byte("condition=human_request")) {
+		t.Fatalf("maximum Codex launch task = %q, %v", launchTask, err)
 	}
 	short := []byte("continue the exact task")
 	want, err := providerTaskWithContinuationContext(kernel.ProviderClaudeCode, short, contexts)

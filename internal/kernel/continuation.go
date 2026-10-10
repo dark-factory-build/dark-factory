@@ -103,29 +103,15 @@ func continuationTaskTextFull(task string, contexts []ContinuationContext) strin
 // ContinuationTaskFits reports whether a fresh provider can receive the full
 // causal envelope without dropping any task or condition data. Admission uses
 // this before consuming a queued task; an unfit resumed task is refused.
-func ContinuationTaskFits(provider Provider, task string, contexts []ContinuationContext) bool {
+func ContinuationTaskFits(_ Provider, task string, contexts []ContinuationContext) bool {
 	if len(contexts) == 0 {
 		return true
 	}
 	limit := 131072
-	if provider == ProviderCodex {
-		limit = 8192
-	}
 	if len(task) >= limit {
 		return false
 	}
 	return len(continuationTaskTextFull(task, contexts)) <= limit
-}
-
-// ContinuationTaskCanUseFetchFallback reports whether admission can preserve
-// progress when the causal envelope cannot fit inline. The daemon then starts
-// a fresh provider authority with a bounded instruction to fetch the durable
-// task and continuation context; no causal field is discarded.
-func ContinuationTaskCanUseFetchFallback(provider Provider, contexts []ContinuationContext) bool {
-	if len(contexts) == 0 {
-		return false
-	}
-	return provider == ProviderClaudeCode || provider == ProviderCodex
 }
 
 func validateContinuationSpec(spec NewContinuation) error {

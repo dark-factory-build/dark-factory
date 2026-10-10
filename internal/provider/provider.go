@@ -320,7 +320,7 @@ func (request Request) WithPreviousWorkingDirectory(path string) (Request, error
 
 // WithTask supplies the exact admission-owned task to native providers.
 func (request Request) WithTask(task []byte) (Request, error) {
-	if len(task) == 0 || len(task) > runner.MaxNativeTaskBytes || !utf8.Valid(task) || bytes.IndexByte(task, 0) >= 0 {
+	if len(task) == 0 || len(task) > runner.MaxProviderTaskBytes || !utf8.Valid(task) || bytes.IndexByte(task, 0) >= 0 {
 		return Request{}, ErrInvalid
 	}
 	request.task = bytes.Clone(task)
@@ -969,10 +969,7 @@ func PrepareTask(kind kernel.Provider, task []byte) (TaskDelivery, []byte, error
 	case kernel.ProviderShell:
 		return TaskDeliveryFD11, bytes.Clone(task), nil
 	case kernel.ProviderClaudeCode, kernel.ProviderCodex:
-		// The provider reads this value through a tool result. Keep the exact
-		// task comfortably below the model-visible result bound even after JSON
-		// turns every DEL/C1 code point into a six-byte escape.
-		if len(task) > runner.MaxNativeTaskBytes {
+		if len(task) > runner.MaxProviderTaskBytes {
 			return 0, nil, ErrInvalid
 		}
 		return TaskDeliveryAttemptAPI, bytes.Clone(task), nil
