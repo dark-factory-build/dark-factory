@@ -294,6 +294,13 @@ right. Providers must retain command children in the runner-owned group or
 offer an authenticated, provider-owned shutdown capability before such cleanup
 can be supported.
 
+One Darwin compatibility sweep (#1403) predates that rule: after group
+convergence the live runner kills same-user processes whose exec-time `TMPDIR`
+lies in the run's runtime root, signalling their numeric PIDs. Replacing it
+needs proof of current providers' Mac detached-process behavior, and Linux
+does not copy it. Any sweep failure counts as unproved cleanup, so the runner
+publishes no result and the attempt's resources stay unresolved.
+
 ## Provider boundary
 
 `internal/provider.Build(Request) (Launch, error)` is the one closed provider
