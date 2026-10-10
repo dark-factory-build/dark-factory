@@ -545,7 +545,7 @@ test("a drop while a reply is in flight keeps the unknown notice", async () => {
 
     const detail = sectionText(renderer, "dfRemote__detail");
     assert.ok(detail.includes("Delivery unknown — check the factory"), detail);
-    assert.equal(detail.includes("THIS QUESTION IS NO LONGER OPEN"), false, "no snapshot observed it closing");
+    assert.equal(detail.includes("This question is no longer open"), false, "no snapshot observed it closing");
   });
 });
 
@@ -560,7 +560,7 @@ test("a retryable detail read says to open the question again, not that it close
     await settle();
     const detail = sectionText(renderer, "dfRemote__detail");
     assert.ok(detail.includes("Could not load this question — open it again"), detail);
-    assert.equal(detail.includes("THIS QUESTION IS NO LONGER OPEN"), false);
+    assert.equal(detail.includes("This question is no longer open"), false);
     await act(async () => { buttons(renderer, "dfRemote__answer")[0].props.onClick(); });
     await settle();
     assert.equal(session.calls.detail.length, 2);
