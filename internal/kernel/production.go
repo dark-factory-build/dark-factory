@@ -382,6 +382,22 @@ func (store *Store) RecordDelivery(ctx context.Context, project ProjectID, repos
 		return err
 	}
 	defer tx.Close()
+	// Releases run one at a time, so the newest release record is this one's
+	// predecessor, or itself once it has started.
+	if strings.HasPrefix(delivery.ID, "release:") {
+		var state string
+		err := tx.connection.QueryRowContext(ctx, `SELECT json_extract(document, '$.state'), COALESCE(json_extract(document, '$.cause'), ''), COALESCE(json_extract(document, '$.failed_at'), 0)
+			FROM production_records WHERE project_id = ? AND kind = 'delivery' AND identity LIKE 'release:%' ORDER BY observed_at_ms DESC LIMIT 1`, project.Bytes()).Scan(&state, &delivery.Cause, &delivery.FailedAt)
+		if errors.Is(err, sql.ErrNoRows) || state == "verified" {
+			err, delivery.Cause, delivery.FailedAt = nil, "", 0
+		}
+		if err != nil {
+			return tx.Rollback(err)
+		}
+		if head, _, _ := strings.Cut(delivery.Reason, ":"); delivery.State == "failed" && delivery.Cause != delivery.Phase+" "+head {
+			delivery.Cause, delivery.FailedAt = delivery.Phase+" "+head, at.Int64()
+		}
+	}
 	if err := productionRecordOnConnection(ctx, tx.connection, project, repository, "delivery", delivery.ID, "", delivery, at.Int64()); err != nil {
 		return tx.Rollback(err)
 	}

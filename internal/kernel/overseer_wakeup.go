@@ -30,14 +30,11 @@ const (
 // question, finished work not yet published or corrected behind its open pull
 // request, a pull request factoryd escalated while it stays open at the
 // escalated head, the newest self-release while it failed); a succeeded worker
-// task needs one look. A failed release is keyed by its cause (its phase and
-// its reason up to the first colon) and dated by its failure, or, once a
-// wake named that cause after both the newest release record in any other
-// state or cause and the newest wake naming another release cause (which
-// survives a same-commit retry overwriting its record), just before that
-// wake. A retry failing the same way, even of the same commit, is then the
-// same item: it wakes once, never re-wakes, and so becomes one NEEDS YOU
-// card. An accepted intake task that succeeded with a diff needs none:
+// task needs one look. A failed release is keyed by its cause and dated by
+// when it first failed so, which factoryd carries over every release that
+// fails the same way, a same-commit retry included (RecordDelivery):
+// it wakes once, never re-wakes, and so becomes one NEEDS YOU card. An
+// accepted intake task that succeeded with a diff needs none:
 // factoryd publishes it, and the Change item covers a publication that never
 // happens. While factoryd records
 // that Change revision's publication refused, the item is that refusal, at the
@@ -68,9 +65,6 @@ const overseerItems = `WITH carrier AS MATERIALIZED (SELECT t.id AS task, t.crea
 	instr(t.body, 'wake: mode=targeted;') > 0 AS targeted,
 	EXISTS (SELECT 1 FROM runs AS r WHERE r.task_id = t.id AND r.terminal_detail IS NOT ?9 AND r.terminal_detail IS NOT ?10) AS started
 	FROM tasks AS t WHERE t.assigned_agent_id = ?4 AND t.title = ?5),
-release AS (SELECT *, CASE WHEN state = 'failed' THEN phase || ' ' || substr(reason, 1, instr(reason || ':', ':') - 1) END AS failure
-	FROM (SELECT identity, observed_at_ms AS at, json_extract(document, '$.state') AS state, COALESCE(json_extract(document, '$.phase'), '') AS phase,
-		replace(COALESCE(json_extract(document, '$.reason'), ''), char(10), ' ') AS reason FROM production_records WHERE project_id = ?1 AND kind = 'delivery' AND identity LIKE 'release:%')),
 item AS (
 	SELECT t.id, t.updated_at_ms AS version, CASE WHEN t.status IN ('blocked', 'failed') THEN 3 END AS rewakes, '' AS detail, lower(hex(t.id)) AS item_key
 	FROM tasks AS t JOIN agents AS a ON a.id = t.assigned_agent_id
@@ -101,11 +95,10 @@ item AS (
 	WHERE e.project_id = ?1 AND e.kind = 'reviewer' AND COALESCE(json_extract(e.document, '$.escalation'), '') <> ''
 	  AND COALESCE(json_extract(e.document, '$.route_pending'), 0) = 0 AND json_extract(p.document, '$.state') = 'open'
 	  AND lower(json_extract(p.document, '$.head')) = lower(json_extract(e.document, '$.request.Head'))
-	UNION ALL SELECT NULL, COALESCE((SELECT MIN(c.at) - 1 FROM carrier AS c WHERE instr(c.names, d.key) AND c.at > d.since), d.at), 0,
-	  printf('Escalated: factoryd %s failed in phase %s: %s', d.identity, d.phase, d.reason), d.key
-	FROM (SELECT *, max(COALESCE((SELECT MAX(o.at) FROM release AS o WHERE o.failure IS NOT r.failure), 0),
-		COALESCE((SELECT MAX(c.at) FROM carrier AS c WHERE instr(c.names, '[release:') AND NOT instr(c.names, r.key)), 0)) AS since
-		FROM (SELECT *, '[release:' || lower(hex(failure)) || ']' AS key FROM release ORDER BY at DESC LIMIT 1) AS r) AS d WHERE d.failure IS NOT NULL
+	UNION ALL SELECT NULL, COALESCE(json_extract(d.document, '$.failed_at'), d.observed_at_ms), 0, printf('Escalated: factoryd %s failed in phase %s: %s', d.identity,
+	  json_extract(d.document, '$.phase'), replace(json_extract(d.document, '$.reason'), char(10), ' ')), '[release:' || lower(hex(json_extract(d.document, '$.cause'))) || ']'
+	FROM (SELECT * FROM production_records WHERE project_id = ?1 AND kind = 'delivery' AND identity LIKE 'release:%' ORDER BY observed_at_ms DESC LIMIT 1) AS d
+	WHERE json_extract(d.document, '$.state') = 'failed'
 	UNION ALL SELECT NULL, c.created_at_ms, 3, 'Proposal ' || lower(hex(c.id)) || ' from ' || COALESCE((SELECT name FROM agents WHERE id = ` + authorAgentSQL + `), 'the operator') || ': '
 		|| replace(substr(c.title, 1, 100), char(10), ' '), '[proposal:' || lower(hex(c.id)) || ']'
 	FROM project_content_revisions AS c WHERE c.project_id = ?1 AND ` + openProposalSQL + `),

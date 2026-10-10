@@ -252,6 +252,22 @@ func TestOverseerFailedReleaseEscalatesOncePerCause(t *testing.T) {
 			t.Fatalf("long cause %s wake = %q", directory, bodies)
 		}
 	}
+	// A full wake that named no item (one overflowing with older items)
+	// handled a failure too: a same-commit retry failing the same way does
+	// not wake again.
+	settleCarrier(t, store, at+settle+1, 157, "ran")
+	at += rewake
+	release('e', "failed", "stage", "backup: disk full", at)
+	if _, err := store.EnqueueTask(ctx, NewTask{ID: taskID(t, 90), IncarnationID: incarnationID(t, 91), ProjectID: worker.ProjectID, AssignedAgentID: agentID(t, 3), Title: overseerWakeTitle, Body: "Factory causal wake: mode=full"}, mustTime(t, at+1)); err != nil {
+		t.Fatal(err)
+	}
+	settleCarrier(t, store, at+2, 178, "ran")
+	at += rewake
+	release('e', "running", "build", "", at)
+	release('e', "failed", "stage", "backup: disk still full", at+1)
+	if bodies := wakeBodies(t, store, at+1+settle); len(bodies) != 0 {
+		t.Fatalf("retry after a full wake re-woke = %q", bodies)
+	}
 }
 
 // A cancelled worker task is informational; a blocked one wakes the overseer
