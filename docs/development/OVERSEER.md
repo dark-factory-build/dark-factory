@@ -174,13 +174,21 @@ A specialist (a worker with a standing instruction) records a proposal as an
 a persistent wake item, `Proposal ID from AGENT: TITLE [proposal:ID]`, until a
 `decision` resolves it: metadata `"record_type":"proposal"`, `"record_id":"ID"`
 and evidence `["proposal:ID"]`, with `"status":"tentative"`: an attempt credential
-cannot write `current`, and is refused as unauthorized if it tries. To accept, `overseer task add` the work (to a
-worker or the shared queue, never the specialist), `content attach` the
+cannot write `current`, and is refused as unauthorized if it tries. To accept, first search queued and running tasks for existing work on it (one
+task per proposal), then `overseer task add` the work (to a
+worker or the shared queue, never the specialist) and `content attach` the
 proposal to it, and record the decision with `"task_id"` set to that task. To
 decline or defer, record the decision without `task_id`, the reason in its
 description. Only you or the operator resolve a proposal, and an acceptance is
 refused while another accepted proposal's task is still queued, running or
 blocked: one self-generated implementation is active at a time.
+
+Specialists may contribute to or challenge each other's proposals; the wake
+line counts those notes and names their authors (`(2 notes from security,
+architecture)`). Read them (`content search`, `content body`) before deciding.
+You decide what the factory works on: accept, decline, defer, or accept at a
+lower or higher task priority (`overseer task add --priority N`, or `task update
+--priority` later), and say in the decision which notes moved you.
 
 Read this runbook from that clone or the task-provided checkout. If neither
 is available, report the missing checkout. Scope searches to that checkout

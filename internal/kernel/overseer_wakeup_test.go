@@ -345,11 +345,13 @@ func TestOverseerWakeInstructionFallsBackToFull(t *testing.T) {
 	}
 }
 
-// A succeeded intake task with a diff is factoryd's to publish; any other
-// success still gets the overseer's one look.
+// A succeeded intake task with a diff is factoryd's to publish, and stays so
+// once its merged Change is reclaimed; any other success, an empty intake one
+// whose Change was reclaimed included, still gets the overseer's one look.
 func TestOverseerWakeSkipsPublishedIntakeSuccess(t *testing.T) {
 	t.Parallel()
-	for _, intake := range []bool{false, true} {
+	for _, mode := range []string{"plain", "intake", "reclaimed", "empty"} {
+		intake := mode != "plain"
 		ctx := context.Background()
 		succeeded, _ := NewSuccessProposal("done")
 		store, finalizing := finalizingReleasedRun(t, RoleWorker, succeeded)
@@ -359,6 +361,9 @@ func TestOverseerWakeSkipsPublishedIntakeSuccess(t *testing.T) {
 			t.Fatal(err)
 		}
 		moved, _ := NewCommitID(change.Selection.format, bytes.Repeat([]byte{0xd2}, change.Selection.format.oidLength()))
+		if mode == "empty" {
+			moved = change.Selection.commit
+		}
 		settlement, _ := NewRetainedChangeSettlement(change.Revision, &moved)
 		if _, err := store.FinalizeWorkerRun(ctx, finalizing.ID, finalizing.Revision, settlement, mustTime(t, 80)); err != nil {
 			t.Fatal(err)
@@ -381,12 +386,19 @@ func TestOverseerWakeSkipsPublishedIntakeSuccess(t *testing.T) {
 			t.Fatal(err)
 		}
 		head := hex.EncodeToString(moved.Bytes())
-		pr := ProductionPullRequest{Number: 7, Title: "Ship", URL: "https://github.com/example/factory/pull/7", Head: head, Branch: "factory/" + change.ID.String()[:12], Base: "main", State: "open", Review: ProductionReview{Head: head, State: "unknown"}}
-		if err := store.RecordPublication(ctx, finalizing.ProjectID, finalizing.TaskID, "example/factory", pr, mustTime(t, 84)); err != nil {
-			t.Fatal(err)
+		pr := ProductionPullRequest{Number: 7, Title: "Ship", URL: "https://github.com/example/factory/pull/7", Head: head, Branch: "factory/" + change.ID.String()[:12], Base: "main", State: map[bool]string{false: "open", true: "merged"}[mode == "reclaimed"], Review: ProductionReview{Head: head, State: "unknown"}}
+		if mode != "empty" {
+			if err := store.RecordPublication(ctx, finalizing.ProjectID, finalizing.TaskID, "example/factory", pr, mustTime(t, 84)); err != nil {
+				t.Fatal(err)
+			}
 		}
-		if bodies := wakeBodies(t, store, 1_000_000); len(bodies) != map[bool]int{false: 1, true: 0}[intake] {
-			t.Fatalf("intake=%v wake = %q", intake, bodies)
+		if mode == "reclaimed" || mode == "empty" {
+			if _, err := store.ReclaimChange(ctx, change.ID, mustRevision(t, change.Revision.Int64()+1), false, mustTime(t, 85)); err != nil {
+				t.Fatal(err)
+			}
+		}
+		if bodies := wakeBodies(t, store, 1_000_000); len(bodies) != map[bool]int{false: 1, true: 0}[intake && mode != "empty"] {
+			t.Fatalf("%s wake = %q", mode, bodies)
 		}
 	}
 }

@@ -11,6 +11,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"sort"
 	"strings"
 	"syscall"
 	"time"
@@ -698,13 +699,16 @@ func (b *daemonReviewBackend) ObservePull(ctx context.Context, operation review.
 			HeadSHA   string `json:"head_sha"`
 			State     string `json:"state"`
 			Mergeable *bool  `json:"mergeable"`
+			Review    struct {
+				State string `json:"state"`
+			} `json:"review"`
 		} `json:"pull_requests"`
 	}
 	if json.Unmarshal(response, &page) != nil || len(page.PullRequests) != 1 || page.PullRequests[0].Number != request.PullNumber || !review.HeadRE.MatchString(page.PullRequests[0].HeadSHA) {
 		return review.Pull{}, errors.New("review: Maintainer returned an invalid pull request")
 	}
 	value := page.PullRequests[0]
-	pull := review.Pull{Head: value.HeadSHA, State: value.State, Mergeable: value.Mergeable}
+	pull := review.Pull{Head: value.HeadSHA, State: value.State, Review: value.Review.State, Mergeable: value.Mergeable}
 	if pull.Head != request.Head || pull.State != "open" || (pull.Mergeable != nil && !*pull.Mergeable) {
 		return pull, nil
 	}
@@ -730,34 +734,43 @@ func (b *daemonReviewBackend) ObservePull(ctx context.Context, operation review.
 	if err != nil {
 		return review.Pull{}, err
 	}
-	pull.Failing, pull.Pending, err = requiredChecks(response)
+	pull.Failing, pull.Pending, pull.Checks, err = requiredChecks(response)
 	return pull, err
 }
 
 // requiredChecks reads the failing and unfinished checks the base branch's
 // rules require. An optional check that fails or never finishes decides
 // nothing: it cannot block the merge.
-func requiredChecks(response json.RawMessage) (failing []string, pending bool, err error) {
+func requiredChecks(response json.RawMessage) (failing []string, pending bool, states []string, err error) {
 	var checks struct {
 		Checks []struct {
 			Name       string  `json:"name"`
+			Status     string  `json:"status"`
 			Conclusion *string `json:"conclusion"`
 			Required   bool    `json:"required"`
 		} `json:"checks"`
 	}
 	if json.Unmarshal(response, &checks) != nil {
-		return nil, false, errors.New("review: Maintainer returned invalid checks")
+		return nil, false, nil, errors.New("review: Maintainer returned invalid checks")
 	}
 	for _, check := range checks.Checks {
+		if !check.Required {
+			continue
+		}
+		conclusion := "pending"
+		if check.Conclusion != nil {
+			conclusion = *check.Conclusion
+		}
+		states = append(states, check.Name+"="+conclusion)
 		switch {
-		case !check.Required:
 		case check.Conclusion == nil:
 			pending = true
 		case *check.Conclusion != "success" && *check.Conclusion != "neutral" && *check.Conclusion != "skipped":
 			failing = append(failing, check.Name)
 		}
 	}
-	return failing, pending, nil
+	sort.Strings(states)
+	return failing, pending, states, nil
 }
 
 func (b *daemonReviewBackend) call(ctx context.Context, name string, arguments map[string]any) error {
