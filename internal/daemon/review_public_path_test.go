@@ -864,7 +864,7 @@ func TestRefusedEnqueueResendsEachTickAndEndsFromThePull(t *testing.T) {
 		}
 		return lastDurableReview(t, fixture.store, project)
 	}
-	if op := tick(); op.State != "enqueued" || op.Escalation != "" || op.Failures != 2 || backend.enqueues != 3 {
+	if op := tick(); op.State != "enqueued" || op.Escalation != "" || op.Failures != 3 || backend.enqueues != 3 {
 		t.Fatalf("refused again: %+v (enqueues %d)", op, backend.enqueues)
 	}
 	backend.enqueueRefusal = ""
