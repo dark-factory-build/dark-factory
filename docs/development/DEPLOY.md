@@ -25,8 +25,16 @@ downgrades the factory. factoryd:
    taken over by the next daemon without stopping. A run still blocking at the
    limit fails the release as `drain_timeout`, names the run, and releases the
    hold;
-3. backs up the store with `VACUUM INTO` to `<home>.service/upgrade.sqlite3`;
-4. stages the three binaries as `bin/previous`, checks each is the exact
+3. when `control-plane/` differs from the live Worker's commit, deploys the
+   control-plane Worker at that commit with the clone's `scripts/release.sh`,
+   which rolls back a Worker that does not come up healthy. The production
+   delivery `worker` names the live Worker's commit; a release whose factoryd
+   trial later fails keeps its Worker, so the record, not the running build,
+   decides, and any state but `verified` deploys again. A failed deploy fails
+   the release at `stage` with a `worker:` reason and nothing is staged, so
+   factoryd never runs against a Worker contract older than its own;
+4. backs up the store with `VACUUM INTO` to `<home>.service/upgrade.sqlite3`;
+5. stages the three binaries as `bin/previous`, checks each is the exact
    release artifact and reports that identity when run, and writes the
    upgrade marker `<home>.service/upgrade` naming the release. Nothing launchd
    runs has changed.
