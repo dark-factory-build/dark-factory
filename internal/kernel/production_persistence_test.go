@@ -152,21 +152,21 @@ func TestPublishedReviewChangesAreSentBackToOriginExactlyOnce(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	// A production record that still shows a head the Change has moved off
+	// The App publishes its own commit of the Change's tree, so the pull
+	// request head is never the local Change head. A review of an older head
 	// sends nothing back: the worker could not reproduce its premise (#1673).
-	stale := strings.Repeat("a", 40)
-	pr := ProductionPullRequest{Number: 77, Title: "Review me", URL: "https://github.com/example/factory/pull/77", Head: stale, Branch: "factory/review", Base: "main", State: "open", Review: ProductionReview{Head: stale, State: "unknown"}}
+	published := strings.Repeat("a", 40)
+	pr := ProductionPullRequest{Number: 77, Title: "Review me", URL: "https://github.com/example/factory/pull/77", Head: published, Branch: "factory/review", Base: "main", State: "open", Review: ProductionReview{Head: published, State: "unknown"}}
 	if err := store.RecordPublication(ctx, finalizing.ProjectID, finalizing.TaskID, "example/factory", pr, mustTime(t, 80)); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := store.SendBackPublishedReview(ctx, finalizing.ProjectID, "example/factory", 77, "review-op-0", stale, "fix the findings", mustTime(t, 80)); !errors.Is(err, ErrSuperseded) {
+	if head := changeHead(t, store, finalizing.TaskID); head == "" || head == published {
+		t.Fatalf("change head %q must differ from the published head", head)
+	}
+	if _, err := store.SendBackPublishedReview(ctx, finalizing.ProjectID, "example/factory", 77, "review-op-0", strings.Repeat("b", 40), "fix the findings", mustTime(t, 80)); !errors.Is(err, ErrSuperseded) {
 		t.Fatalf("stale review send-back err=%v", err)
 	}
-	head := changeHead(t, store, finalizing.TaskID)
-	pr.Head, pr.Review.Head = head, head
-	if err := store.RecordProductionObservation(ctx, finalizing.ProjectID, ProductionObservation{Repository: "example/factory", ObservedAt: 81, PullRequests: []ProductionPullRequest{pr}}, mustTime(t, 81)); err != nil {
-		t.Fatal(err)
-	}
+	head := published
 	first, err := store.SendBackPublishedReview(ctx, finalizing.ProjectID, "example/factory", 77, "review-op-1", head, "fix the findings", mustTime(t, 82))
 	if err != nil || !strings.Contains(TaskFeedback(first), "review-operation: review-op-1") {
 		t.Fatalf("first review send-back=%+v err=%v", first, err)
