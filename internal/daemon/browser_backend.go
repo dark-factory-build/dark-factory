@@ -1423,7 +1423,7 @@ func projectAgentForClient(item kernel.AgentSummary, configHome string, provider
 		projected.AccountID = item.AccountID.String()
 	}
 	if state := item.Specialist; state != nil {
-		projected.Specialist = &browserprotocol.SpecialistItem{NextReviewAtMillis: browserprotocol.Decimal(state.NextReviewAt), NextReason: state.NextReason, Waiting: state.Waiting,
+		projected.Specialist = &browserprotocol.SpecialistItem{NextReviewAtMillis: uint64(max(state.NextReviewAt, 0)), NextReason: state.NextReason, Waiting: state.Waiting,
 			QuietReviews: uint8(state.QuietReviews), OpenProposals: uint16(state.OpenProposals), OpenProposalLimit: uint16(state.OpenProposalLimit), LastReviewTaskID: state.LastReviewTaskID}
 	}
 	return projected
