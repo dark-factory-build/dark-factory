@@ -103,23 +103,15 @@ func TestCodexConfigCarriesTaskBytes(t *testing.T) {
 	config := configFixture(t)
 	config.Provider = kernel.ProviderCodex
 	config.ProviderTask = nil
-	encoded, err := EncodeConfig(config)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if bytes.Contains(encoded, []byte("printf exact")) {
-		t.Fatal("Codex worker config contains private task text")
-	}
-	got, err := DecodeConfig(encoded)
-	if err != nil || got.Provider != kernel.ProviderCodex || len(got.ProviderTask) != 0 {
-		t.Fatalf("Codex config round trip = provider %s task %d bytes, err %v", got.Provider, len(got.ProviderTask), err)
+	if _, err := EncodeConfig(config); !errors.Is(err, ErrInvalidContract) {
+		t.Fatalf("Codex config without task = %v, want invalid", err)
 	}
 	config.ProviderTask = []byte("private task")
-	encoded, err = EncodeConfig(config)
+	encoded, err := EncodeConfig(config)
 	if err != nil {
 		t.Fatalf("Codex worker task bytes rejected: %v", err)
 	}
-	got, err = DecodeConfig(encoded)
+	got, err := DecodeConfig(encoded)
 	if err != nil || string(got.ProviderTask) != "private task" {
 		t.Fatalf("Codex task round trip = %q, err %v", got.ProviderTask, err)
 	}

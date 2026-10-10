@@ -500,8 +500,8 @@ func TestBuildNativeReturnsExactArgvEnvironmentAndSafeStartupTask(t *testing.T) 
 					break
 				}
 			}
-			if test.kind != kernel.ProviderShell && !strings.Contains(strings.Join(launch.Argv(), "\n"), privateTaskSentinel) {
-				t.Fatal("native provider did not receive the exact task prompt")
+			if test.kind != kernel.ProviderShell && !strings.Contains(strings.Join(launch.Argv(), "\n"), NativeTaskPath(runtime.home)) {
+				t.Fatal("native provider did not receive the exact task file path")
 			}
 			delivery, payload, err := PrepareTask(test.kind, task)
 			if err != nil {

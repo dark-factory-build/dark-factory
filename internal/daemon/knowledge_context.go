@@ -477,8 +477,5 @@ func (daemon *Daemon) prepareKnowledgeTask(ctx context.Context, run kernel.Run, 
 			}
 		}
 	}
-	if launch {
-		accesses = nil
-	}
 	return combined, accesses, nil
 }

@@ -146,6 +146,10 @@ func runProvider(ctx context.Context) (resultErr error) {
 		return err
 	}
 	if delivery == provider.TaskDeliveryAttemptAPI {
+		if err := os.WriteFile(provider.NativeTaskPath(home), program, 0o600); err != nil {
+			_ = cwd.Close()
+			return err
+		}
 		request, err = request.WithTask(program)
 		if err != nil {
 			_ = cwd.Close()

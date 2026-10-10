@@ -376,7 +376,8 @@ func (daemon *Daemon) runNext(ctx context.Context, spec SupervisorSpec) (resultR
 		return daemon.failRunBeforeRuntime(daemon.cleanupCtx, run, keys.resources.RuntimeRoot, kernel.FailureInternal, err)
 	}
 	rawProviderTask = []byte(instruction)
-	rawProviderTask, _, err = daemon.prepareKnowledgeTask(ctx, run, rawProviderTask, true)
+	var suppliedKnowledge []kernel.ContentAccess
+	rawProviderTask, suppliedKnowledge, err = daemon.prepareKnowledgeTask(ctx, run, rawProviderTask, true)
 	if err != nil {
 		return daemon.failRunBeforeRuntime(daemon.cleanupCtx, run, keys.resources.RuntimeRoot, kernel.FailureSpawn, err)
 	}
@@ -772,6 +773,9 @@ func (daemon *Daemon) runNext(ctx context.Context, spec SupervisorSpec) (resultR
 	run, err = daemon.store.ActivateRun(ctx, run.ID, session.ID, run.Revision, session.Revision, at)
 	if err != nil {
 		return daemon.failRun(run, kernel.FailureActivation, err)
+	}
+	if err := daemon.store.RecordSuppliedContentForAttempt(ctx, digest, suppliedKnowledge, at); err != nil {
+		return daemon.failRun(run, kernel.FailureInternal, err)
 	}
 	// Register the owner before provider release. The owner is not attachable
 	// until it observes TerminalReady, but it already owns the controller and
