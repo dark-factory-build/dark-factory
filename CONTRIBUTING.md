@@ -8,7 +8,7 @@ deterministic providers.
 ## Local development
 
 ```sh
-./scripts/new-worktree.sh <slug>
+git fetch origin main && git worktree add -b <slug> .worktrees/<slug> origin/main
 cd .worktrees/<slug>
 go build ./...
 ```
