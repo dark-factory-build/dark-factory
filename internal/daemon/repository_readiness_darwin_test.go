@@ -152,9 +152,11 @@ func TestRepositoryReadinessLocalBaseRepinsOnlyAFetchableOrigin(t *testing.T) {
 	if got, _, err := fixture.store.RepositorySourceIdentity(ctx, id); err != nil || got != first {
 		t.Fatalf("unfetchable origin re-pinned: %+v %v", got, err)
 	}
-	supervisorGit(t, git, "clone", "--bare", origin, replacement)
+	// Fetchable although its HEAD names a branch that does not exist.
+	supervisorGit(t, git, "init", "--quiet", "--bare", "--initial-branch=unborn", replacement)
+	supervisorGit(t, git, "-C", root, "push", "--quiet", replacement, "HEAD:refs/heads/release")
 	if view, err := fixture.daemon.RepositoryReadiness(ctx, id, true); err != nil || view.FetchState != "ready" {
-		t.Fatalf("fetchable origin: %+v %v", view, err)
+		t.Fatalf("fetchable origin with an unborn HEAD: %+v %v", view, err)
 	}
 	if got, _, err := fixture.store.RepositorySourceIdentity(ctx, id); err != nil || got.OriginDigest == first.OriginDigest {
 		t.Fatalf("fetchable origin not re-pinned: %+v %v", got, err)
