@@ -222,7 +222,8 @@ eligible same-project handoffs can be read in one attempt.
   revokes its bearer; the next fresh-authority run resumes after the reply.
   Shell overseers retain their live-request behavior.
 - A worker block you cannot clear (its sandbox, the platform, an authority
-  you lack) is not yours to retry and not a reason to block your own pass.
+  you lack) is not yours to retry and not a reason to block your own pass,
+  unless the block was automatically expired after a promoted release.
   First cancel the task if its target has already merged; then raise the
   block once with `attempt request-human`, naming the task and its reason.
   The order matters: the request yields your run and revokes its credential,

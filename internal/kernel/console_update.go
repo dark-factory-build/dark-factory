@@ -424,8 +424,13 @@ const (
 // ExpireBlockedTasks retires, through the operator cancel path and recorded as
 // an automatic end, every task blocked unchanged for BlockedExpiry that has no
 // open human request. Its Change is left retained. A task changed since the read loses the revision
-// race and is reconsidered on a later tick.
-func (store *Store) ExpireBlockedTasks(ctx context.Context, at UnixMillis) ([]TaskID, error) {
+// race and is reconsidered on a later tick. An optional cutoff expires older
+// tasks immediately after a promoted release.
+func (store *Store) ExpireBlockedTasks(ctx context.Context, at UnixMillis, cutoff ...UnixMillis) ([]TaskID, error) {
+	threshold := at.Int64() - BlockedExpiry.Milliseconds()
+	if len(cutoff) == 1 {
+		threshold = cutoff[0].Int64()
+	}
 	var ids [][]byte
 	var revisions []int64
 	read, err := store.beginRead(ctx)
@@ -433,7 +438,7 @@ func (store *Store) ExpireBlockedTasks(ctx context.Context, at UnixMillis) ([]Ta
 		return nil, err
 	}
 	rows, err := read.connection.QueryContext(ctx, `SELECT id, revision FROM tasks t WHERE status = 'blocked' AND updated_at_ms <= ?
- AND NOT EXISTS (SELECT 1 FROM human_requests h JOIN runs r ON r.id = h.run_id WHERE r.task_id = t.id AND h.status IN ('open', 'delivering', 'delivery_unknown'))`, at.Int64()-BlockedExpiry.Milliseconds())
+ AND NOT EXISTS (SELECT 1 FROM human_requests h JOIN runs r ON r.id = h.run_id WHERE r.task_id = t.id AND h.status IN ('open', 'delivering', 'delivery_unknown'))`, threshold)
 	for err == nil && rows.Next() {
 		var id []byte
 		var revision int64

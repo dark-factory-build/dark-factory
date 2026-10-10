@@ -548,4 +548,10 @@ func TestExpireBlockedTasksCancelsOnlyStaleUnaskedBlockedTasks(t *testing.T) {
 	if after, _, err := asked.Task(ctx, askedTask.ID); err != nil || after.Status != TaskBlocked {
 		t.Fatalf("asked task = %+v, %v", after, err)
 	}
+
+	promoted, promotedTask, _ := blockedFixture(t)
+	defer promoted.Close()
+	if expired, err := promoted.ExpireBlockedTasks(ctx, mustTime(t, promotedTask.UpdatedAt.Int64()+1), promotedTask.UpdatedAt); err != nil || len(expired) != 1 || expired[0] != promotedTask.ID {
+		t.Fatalf("expiry at release cutoff = %v, %v", expired, err)
+	}
 }
