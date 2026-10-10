@@ -20,6 +20,7 @@ import (
 const walFrameHeaderSizeForTest = 24
 
 func TestNewDatabaseImageIsExactAndOpens(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	at := mustTime(t, 42)
 	before := directoryEntryNames(t, ".")
@@ -85,6 +86,7 @@ func TestNewDatabaseImageIsExactAndOpens(t *testing.T) {
 }
 
 func TestNewDatabaseImageConcurrentConfigurationsDoNotCrossWire(t *testing.T) {
+	t.Parallel()
 	type result struct {
 		index int
 		image []byte
@@ -185,6 +187,7 @@ func TestDatabaseImageBuilderIsDeterministicAndScratchIsPrivate(t *testing.T) {
 }
 
 func TestNewDatabaseImageRejectsInvalidInput(t *testing.T) {
+	t.Parallel()
 	if image, err := NewDatabaseImage(context.Background(), FactoryConfig{Capacity: MaxFactoryCapacity + 1}, UnixMillis{}); !errors.Is(err, ErrInvalidValue) || image != nil {
 		t.Fatalf("invalid config image=%d error=%v", len(image), err)
 	}
@@ -196,6 +199,7 @@ func TestNewDatabaseImageRejectsInvalidInput(t *testing.T) {
 }
 
 func TestOpenRefusesRollbackImageWithHotJournalWithoutMutation(t *testing.T) {
+	t.Parallel()
 	image, err := NewDatabaseImage(context.Background(), FactoryConfig{}, mustTime(t, 1))
 	if err != nil {
 		t.Fatal(err)
@@ -237,6 +241,7 @@ func TestOpenRefusesRollbackImageWithHotJournalWithoutMutation(t *testing.T) {
 }
 
 func TestOpenValidatesWALOnDisposableCopy(t *testing.T) {
+	t.Parallel()
 	t.Run("valid committed state is recovered", func(t *testing.T) {
 		path, project := walSnapshotFixture(t, "")
 		store, err := Open(context.Background(), path)
@@ -256,6 +261,7 @@ func TestOpenValidatesWALOnDisposableCopy(t *testing.T) {
 }
 
 func TestOpenAcceptsSQLiteWALCrashTails(t *testing.T) {
+	t.Parallel()
 	for name, tail := range map[string]func([]byte, uint32) []byte{
 		"partial": func(wal []byte, _ uint32) []byte {
 			return append(wal, []byte("partial crash tail")...)
@@ -305,6 +311,7 @@ func TestOpenAcceptsSQLiteWALCrashTails(t *testing.T) {
 }
 
 func TestOpenRejectsUnsafeWALSidecarsWithoutMutation(t *testing.T) {
+	t.Parallel()
 	for name, mutate := range map[string]func(*testing.T, string){
 		"malformed pair": func(t *testing.T, path string) {
 			writeSidecar(t, path+"-wal", []byte("thirteen-byte!"), 0o600)
@@ -439,6 +446,7 @@ func TestWALPreflightAlwaysRemovesPrivateCopy(t *testing.T) {
 }
 
 func TestWALPreflightCancellationIsBoundedAndReadOnly(t *testing.T) {
+	t.Parallel()
 	path, _ := walSnapshotFixture(t, "")
 	before := captureSQLiteSet(t, path)
 	ctx, cancel := context.WithCancel(context.Background())
@@ -450,6 +458,7 @@ func TestWALPreflightCancellationIsBoundedAndReadOnly(t *testing.T) {
 }
 
 func TestValidateWALHeaderFailsClosed(t *testing.T) {
+	t.Parallel()
 	path, _ := walSnapshotFixture(t, "")
 	main, err := os.Open(path)
 	if err != nil {
@@ -481,6 +490,7 @@ func TestValidateWALHeaderFailsClosed(t *testing.T) {
 }
 
 func TestDatabaseFileBindingsAreRecheckedAfterPreflight(t *testing.T) {
+	t.Parallel()
 	newStandalone := func(t *testing.T) string {
 		t.Helper()
 		image, err := NewDatabaseImage(context.Background(), FactoryConfig{}, mustTime(t, 1))
@@ -555,6 +565,7 @@ func TestDatabaseFileBindingsAreRecheckedAfterPreflight(t *testing.T) {
 }
 
 func TestRejectedOpenPreservesStoreCloseError(t *testing.T) {
+	t.Parallel()
 	cause := errors.New("rejected open")
 	closeFailure := errors.New("store close failure")
 	store := &Store{}
@@ -569,6 +580,7 @@ func TestRejectedOpenPreservesStoreCloseError(t *testing.T) {
 }
 
 func TestOpenFreshRollbackRequiresExactChronology(t *testing.T) {
+	t.Parallel()
 	for name, statement := range map[string]string{
 		"revision":               `UPDATE factory SET revision = 2`,
 		"head":                   `UPDATE factory SET next_invalidation_sequence = 2`,
@@ -589,6 +601,7 @@ func TestOpenFreshRollbackRequiresExactChronology(t *testing.T) {
 }
 
 func TestInspectImmutableValidStateIsReadOnlyAndKeepsReaderOpen(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	image, err := NewDatabaseImage(ctx, FactoryConfig{}, mustTime(t, 1))
 	if err != nil {
@@ -635,6 +648,7 @@ func TestInspectImmutableValidStateIsReadOnlyAndKeepsReaderOpen(t *testing.T) {
 }
 
 func TestInspectPristineRequiresExactFreshRollbackState(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	image, err := NewDatabaseImage(ctx, FactoryConfig{Capacity: 3}, mustTime(t, 1))
 	if err != nil {
@@ -674,6 +688,7 @@ func TestInspectPristineRequiresExactFreshRollbackState(t *testing.T) {
 }
 
 func TestInspectPristineRejectsReversibleHistory(t *testing.T) {
+	t.Parallel()
 	for name, mutate := range map[string]func(*testing.T, *sql.DB){
 		"factory changed and restored": func(t *testing.T, raw *sql.DB) {
 			if _, err := raw.Exec(`UPDATE factory SET capacity = 2`); err != nil {
@@ -772,6 +787,7 @@ func TestDatabaseImageInspectionRequiresPrivateScratch(t *testing.T) {
 }
 
 func TestDatabaseImageScratchCleanupPreservesEveryError(t *testing.T) {
+	t.Parallel()
 	primary := errors.New("primary sqlite image failure")
 	cleanup := errors.New("sqlite image cleanup failure")
 	called := false
@@ -788,6 +804,7 @@ func TestDatabaseImageScratchCleanupPreservesEveryError(t *testing.T) {
 }
 
 func TestInspectImmutableRejectsForeignTruncatedAndCorruptState(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	image, err := NewDatabaseImage(ctx, FactoryConfig{}, mustTime(t, 1))
 	if err != nil {
@@ -878,6 +895,7 @@ func TestInspectImmutableRejectsForeignTruncatedAndCorruptState(t *testing.T) {
 }
 
 func TestInspectImmutableRejectsOversizeBeforeReading(t *testing.T) {
+	t.Parallel()
 	reader := &readExtentRecorder{reader: bytes.NewReader(nil)}
 	if err := inspectImmutable(context.Background(), reader, maxImmutableDatabaseImageSize+1, false); !errors.Is(err, ErrInvalidValue) {
 		t.Fatalf("oversized immutable image error = %v", err)
@@ -888,6 +906,7 @@ func TestInspectImmutableRejectsOversizeBeforeReading(t *testing.T) {
 }
 
 func TestInspectImmutableExactSizeBoundReachesReader(t *testing.T) {
+	t.Parallel()
 	image, err := NewDatabaseImage(context.Background(), FactoryConfig{}, mustTime(t, 1))
 	if err != nil {
 		t.Fatal(err)
@@ -902,6 +921,7 @@ func TestInspectImmutableExactSizeBoundReachesReader(t *testing.T) {
 }
 
 func TestOpenUsesPrivateSQLiteSidecars(t *testing.T) {
+	t.Parallel()
 	store, path := newTestStore(t)
 	defer store.Close()
 	for _, suffix := range []string{"-wal", "-shm"} {
@@ -916,6 +936,7 @@ func TestOpenUsesPrivateSQLiteSidecars(t *testing.T) {
 }
 
 func TestFailedActivationLeavesExactReservedSidecarEvidence(t *testing.T) {
+	t.Parallel()
 	image, err := NewDatabaseImage(context.Background(), FactoryConfig{}, mustTime(t, 1))
 	if err != nil {
 		t.Fatal(err)
@@ -956,6 +977,7 @@ func TestFailedActivationLeavesExactReservedSidecarEvidence(t *testing.T) {
 }
 
 func TestInspectImmutableEnforcesDeclaredSizeBeforeReader(t *testing.T) {
+	t.Parallel()
 	image, err := NewDatabaseImage(context.Background(), FactoryConfig{}, mustTime(t, 1))
 	if err != nil {
 		t.Fatal(err)
@@ -971,6 +993,7 @@ func TestInspectImmutableEnforcesDeclaredSizeBeforeReader(t *testing.T) {
 }
 
 func TestInspectImmutableConcurrentImagesDoNotCrossWire(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	image, err := NewDatabaseImage(ctx, FactoryConfig{}, mustTime(t, 1))
 	if err != nil {

@@ -92,6 +92,19 @@ func newClient(socketPath, tokenPath string, domain byte) (client, error) {
 	return client{socketPath: socketPath, tokenPath: tokenPath, token: token, domain: domain}, nil
 }
 
+// WebPair mints a one-shot browser pairing link. The caller must hand it
+// straight to a browser and never print or persist it.
+func (client *OperatorClient) WebPair(ctx context.Context) (string, error) {
+	var result WebPair
+	if err := client.client.call(ctx, "web_pair", struct{}{}, &result); err != nil {
+		return "", err
+	}
+	if !strings.HasPrefix(result.Link, "https://") {
+		return "", ErrProtocol
+	}
+	return result.Link, nil
+}
+
 func (client *OperatorClient) WebStatus(ctx context.Context) (WebStatus, error) {
 	var result WebStatus
 	if err := client.client.call(ctx, "web_status", struct{}{}, &result); err != nil {

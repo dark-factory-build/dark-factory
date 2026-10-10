@@ -21,6 +21,10 @@ export const RECORD_TEXT = 0x02;
 export const RECORD_BINARY = 0x03;
 export const RECORD_CLOSE = 0x04;
 export const RECORD_REVOKE = 0x05;
+export const RECORD_PUBLISH = 0x06;
+export const RECORD_INGEST_KEY = 0x07;
+export const RECORD_INGEST = 0x08;
+export const SITE_ORIGIN = 'https://www.darkfactory.build';
 
 const BASE32_LOWER = 'abcdefghijklmnopqrstuvwxyz234567';
 
@@ -55,8 +59,10 @@ export function createNode() {
 	const { publicKey, privateKey } = generateKeyPairSync('ed25519');
 	const raw = Buffer.from(publicKey.export({ format: 'jwk' }).x, 'base64url');
 	const digest = createHash('sha256').update(raw).digest();
+	const published = createHash('sha256').update('dark-factory-relay/public\n').update(raw).digest();
 	return {
 		id: base32Lower(digest.subarray(0, 20)),
+		publicId: base32Lower(published.subarray(0, 20)),
 		key: base64url(raw),
 		privateKey,
 	};
@@ -393,6 +399,9 @@ export async function startWorker(persistence) {
 			persistence,
 			'--log-level',
 			'log',
+			// Ingest refill off, so a burst test does not depend on how fast CI uploads.
+			'--var',
+			'INGEST_BYTES_PER_SECOND:0',
 		],
 		{
 			cwd: root,

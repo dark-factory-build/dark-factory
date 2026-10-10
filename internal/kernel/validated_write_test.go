@@ -9,6 +9,7 @@ import (
 )
 
 func TestNullableDurableBlobsPreservePresenceAndFailClosed(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name       string
 		corrupt    func(*testing.T, *Store)
@@ -94,6 +95,7 @@ func TestNullableDurableBlobsPreservePresenceAndFailClosed(t *testing.T) {
 }
 
 func TestNullableBlobRejectsWrongSQLiteStorageClass(t *testing.T) {
+	t.Parallel()
 	var value nullableBlob
 	if err := value.Scan(nil); err != nil || value.valid {
 		t.Fatalf("NULL scan = valid %v, error %v", value.valid, err)
@@ -112,6 +114,7 @@ func TestNullableBlobRejectsWrongSQLiteStorageClass(t *testing.T) {
 }
 
 func TestEveryPublicMutationValidatesDurableGraphBeforeDecision(t *testing.T) {
+	t.Parallel()
 	selection := testChangeSelection(t)
 	pathIdentity, _ := NewPathResourceIdentity(90, 100)
 	processIdentity := processIdentity(t, 101)
@@ -278,6 +281,7 @@ func TestEveryPublicMutationValidatesDurableGraphBeforeDecision(t *testing.T) {
 	for _, test := range tests {
 		for _, corruption := range corruptions {
 			t.Run(test.name+"/"+corruption.name, func(t *testing.T) {
+				t.Parallel()
 				store, _ := newTestStore(t)
 				defer store.Close()
 				seedDurableAuthority(t, store)
@@ -295,6 +299,7 @@ func TestEveryPublicMutationValidatesDurableGraphBeforeDecision(t *testing.T) {
 }
 
 func TestResourceActivationAndReplayRefusePreexistingGraphCorruption(t *testing.T) {
+	t.Parallel()
 	for _, replay := range []bool{false, true} {
 		t.Run(map[bool]string{false: "first transition", true: "idempotent replay"}[replay], func(t *testing.T) {
 			store, _ := newTestStore(t)
@@ -319,6 +324,7 @@ func TestResourceActivationAndReplayRefusePreexistingGraphCorruption(t *testing.
 }
 
 func TestChangePreparedAndReplayRefusePreexistingOwnershipCorruption(t *testing.T) {
+	t.Parallel()
 	for _, replay := range []bool{false, true} {
 		t.Run(map[bool]string{false: "first checkpoint", true: "idempotent replay"}[replay], func(t *testing.T) {
 			store, _, project, agent := newAdmissionStore(t, RoleWorker, 2)
@@ -468,6 +474,7 @@ func benchmarkValidationStore(b *testing.B) *Store {
 }
 
 func TestValidatedWriteChecksCancelledRunAndRelationships(t *testing.T) {
+	t.Parallel()
 	for _, test := range []struct{ name, corrupt string }{
 		{"valid", ""},
 		{"run row", `UPDATE runs SET proposal_kind = 'unknown'`},

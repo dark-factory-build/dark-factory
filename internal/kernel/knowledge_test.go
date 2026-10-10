@@ -23,6 +23,7 @@ func knowledgeSpec(t *testing.T, project ProjectID, seed byte, kind ContentKind,
 }
 
 func TestKnowledgeMetadataRequiresCanonicalKeys(t *testing.T) {
+	t.Parallel()
 	for _, raw := range []string{
 		`{"status":"tentative","Branch":"other"}`,
 		`{"status":"tentative","Environment":"private"}`,
@@ -38,6 +39,7 @@ func TestKnowledgeMetadataRequiresCanonicalKeys(t *testing.T) {
 }
 
 func TestKnowledgeAuthorityScopeAndImmutableThreads(t *testing.T) {
+	t.Parallel()
 	store, run, _ := runningWorkerRun(t)
 	defer store.Close()
 	ctx := context.Background()
@@ -141,6 +143,7 @@ func TestKnowledgeAuthorityScopeAndImmutableThreads(t *testing.T) {
 }
 
 func TestKnowledgeFilterBeforePaginationAndAccessFreeze(t *testing.T) {
+	t.Parallel()
 	store, run, _ := runningWorkerRun(t)
 	defer store.Close()
 	ctx := context.Background()
@@ -196,6 +199,7 @@ func TestKnowledgeFilterBeforePaginationAndAccessFreeze(t *testing.T) {
 }
 
 func TestKnowledgeEmptyContextSurvivesRestart(t *testing.T) {
+	t.Parallel()
 	store, run, _, path := runningWorkerRunWithPath(t)
 	ctx := context.Background()
 	if _, err := store.FreezeKnowledgeContext(ctx, run.ID, nil, mustTime(t, 40)); err != nil {
@@ -219,6 +223,7 @@ func TestKnowledgeEmptyContextSurvivesRestart(t *testing.T) {
 }
 
 func TestKnowledgeOpenThreadsFilterBeforePagination(t *testing.T) {
+	t.Parallel()
 	store, run, _ := runningWorkerRun(t)
 	defer store.Close()
 	ctx := context.Background()
@@ -241,6 +246,7 @@ func TestKnowledgeOpenThreadsFilterBeforePagination(t *testing.T) {
 }
 
 func TestKnowledgeAttachmentScopeAndLifecycle(t *testing.T) {
+	t.Parallel()
 	store, run, _ := runningWorkerRun(t)
 	defer store.Close()
 	ctx := context.Background()
@@ -278,6 +284,7 @@ func TestKnowledgeAttachmentScopeAndLifecycle(t *testing.T) {
 }
 
 func TestKnowledgeProjectScopeAcrossRepositories(t *testing.T) {
+	t.Parallel()
 	store, run, _ := runningWorkerRun(t)
 	defer store.Close()
 	ctx := context.Background()

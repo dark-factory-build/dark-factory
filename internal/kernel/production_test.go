@@ -7,12 +7,14 @@ import (
 	"fmt"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/ncruces/go-sqlite3"
 	sqliteDriver "github.com/ncruces/go-sqlite3/driver"
 )
 
 func TestProductionReviewUpsertsBeforeRefresh(t *testing.T) {
+	t.Parallel()
 	store, _, project, _ := newAdmissionStore(t, RoleOrchestrator, 2)
 	defer store.Close()
 	ctx := context.Background()
@@ -20,7 +22,7 @@ func TestProductionReviewUpsertsBeforeRefresh(t *testing.T) {
 	if err := store.RecordProductionReview(ctx, project.ID, "example/factory", 7, ProductionReview{Head: head, State: "allow"}, mustTime(t, 10)); err != nil {
 		t.Fatal(err)
 	}
-	page, err := store.Production(ctx, project.ID, 0, 8)
+	page, err := store.Production(ctx, project.ID, 0, 8, UnixMillis{})
 	if err != nil || len(page.Records) != 1 {
 		t.Fatalf("page=%+v err=%v", page, err)
 	}
@@ -37,6 +39,7 @@ func TestProductionReviewUpsertsBeforeRefresh(t *testing.T) {
 // snapshot carrying that copy. A verdict recorded during the wait must
 // survive the later write.
 func TestProductionObservationKeepsAReviewRecordedDuringTheRefresh(t *testing.T) {
+	t.Parallel()
 	store, _, project, _ := newAdmissionStore(t, RoleOrchestrator, 2)
 	defer store.Close()
 	ctx := context.Background()
@@ -54,7 +57,7 @@ func TestProductionObservationKeepsAReviewRecordedDuringTheRefresh(t *testing.T)
 	if err := store.RecordProductionObservation(ctx, project.ID, snapshot, mustTime(t, 12)); err != nil {
 		t.Fatal(err)
 	}
-	page, err := store.Production(ctx, project.ID, 0, 8)
+	page, err := store.Production(ctx, project.ID, 0, 8, UnixMillis{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -74,7 +77,8 @@ func TestProductionObservationKeepsAReviewRecordedDuringTheRefresh(t *testing.T)
 	t.Fatal("pull request record missing")
 }
 
-func TestProductionReviewBlockNeedsItsNamedCorrection(t *testing.T) {
+func TestProductionReviewBlockSurvivesASameHeadAllow(t *testing.T) {
+	t.Parallel()
 	store, _, project, _ := newAdmissionStore(t, RoleOrchestrator, 2)
 	defer store.Close()
 	ctx := context.Background()
@@ -86,7 +90,7 @@ func TestProductionReviewBlockNeedsItsNamedCorrection(t *testing.T) {
 	if err := store.RecordProductionReview(ctx, project.ID, "example/factory", 7, ProductionReview{Head: head, State: "allow", OperationID: "plain-allow"}, mustTime(t, 11)); err != nil {
 		t.Fatal(err)
 	}
-	page, err := store.Production(ctx, project.ID, 0, 8)
+	page, err := store.Production(ctx, project.ID, 0, 8, UnixMillis{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -101,29 +105,10 @@ func TestProductionReviewBlockNeedsItsNamedCorrection(t *testing.T) {
 	if pull.Review.State != "block" || pull.Review.Findings != block.Findings || pull.Review.OperationID != block.OperationID {
 		t.Fatalf("plain allow replaced block: %+v", pull.Review)
 	}
-	correction := ProductionReview{Head: head, State: "allow", Findings: "the finding was explicitly refuted", OperationID: "correction-operation", CorrectsReviewOperationID: block.OperationID}
-	if err := store.RecordProductionReview(ctx, project.ID, "example/factory", 7, correction, mustTime(t, 12)); err != nil {
-		t.Fatal(err)
-	}
-	page, err = store.Production(ctx, project.ID, 0, 8)
-	if err != nil {
-		t.Fatal(err)
-	}
-	for _, record := range page.Records {
-		if record.Kind == "pull_request" {
-			if err := json.Unmarshal(record.Document, &pull); err != nil {
-				t.Fatal(err)
-			}
-			if pull.Review.State != "allow" || pull.Review.CorrectsReviewOperationID != block.OperationID {
-				t.Fatalf("valid correction did not replace block: %+v", pull.Review)
-			}
-			return
-		}
-	}
-	t.Fatal("pull request record missing")
 }
 
 func TestProductionReviewIdentitylessBlockSurvivesPlainAllow(t *testing.T) {
+	t.Parallel()
 	store, _, project, _ := newAdmissionStore(t, RoleOrchestrator, 2)
 	defer store.Close()
 	ctx := context.Background()
@@ -135,7 +120,7 @@ func TestProductionReviewIdentitylessBlockSurvivesPlainAllow(t *testing.T) {
 	if err := store.RecordProductionReview(ctx, project.ID, "example/factory", 8, ProductionReview{Head: head, State: "allow", OperationID: "plain-allow"}, mustTime(t, 21)); err != nil {
 		t.Fatal(err)
 	}
-	page, err := store.Production(ctx, project.ID, 0, 8)
+	page, err := store.Production(ctx, project.ID, 0, 8, UnixMillis{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -156,6 +141,7 @@ func TestProductionReviewIdentitylessBlockSurvivesPlainAllow(t *testing.T) {
 }
 
 func TestCorrectedProductionHeadStoresRecoverableReviewClaimAtomically(t *testing.T) {
+	t.Parallel()
 	store, path, project, _ := newAdmissionStore(t, RoleOrchestrator, 2)
 	ctx := context.Background()
 	oldHead := strings.Repeat("a", 40)
@@ -184,7 +170,7 @@ func TestCorrectedProductionHeadStoresRecoverableReviewClaimAtomically(t *testin
 	if count, err := restarted.RecoverRunningReviewOperations(ctx, mustTime(t, 21)); err != nil || count != 1 {
 		t.Fatalf("recovered corrected review count=%d err=%v", count, err)
 	}
-	page, err := restarted.Production(ctx, project.ID, 0, 8)
+	page, err := restarted.Production(ctx, project.ID, 0, 8, UnixMillis{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -211,6 +197,7 @@ func TestCorrectedProductionHeadStoresRecoverableReviewClaimAtomically(t *testin
 }
 
 func TestRequestChangesReviewRecoveryPreservesRoutePending(t *testing.T) {
+	t.Parallel()
 	store, _, project, _ := newAdmissionStore(t, RoleOrchestrator, 2)
 	defer store.Close()
 	ctx := context.Background()
@@ -254,6 +241,7 @@ func TestRequestChangesReviewRecoveryPreservesRoutePending(t *testing.T) {
 }
 
 func TestRequestChangesBeforeSubmitDoesNotBecomeRoutePending(t *testing.T) {
+	t.Parallel()
 	store, _, project, _ := newAdmissionStore(t, RoleOrchestrator, 2)
 	defer store.Close()
 	ctx := context.Background()
@@ -295,6 +283,7 @@ func TestRequestChangesBeforeSubmitDoesNotBecomeRoutePending(t *testing.T) {
 }
 
 func TestProductionPersistsRevisionEvidenceWithoutRewinding(t *testing.T) {
+	t.Parallel()
 	store, _, project, _ := newAdmissionStore(t, RoleOrchestrator, 2)
 	defer store.Close()
 	ctx := context.Background()
@@ -310,7 +299,7 @@ func TestProductionPersistsRevisionEvidenceWithoutRewinding(t *testing.T) {
 	if err := store.RecordProductionReview(ctx, project.ID, "example/factory", 7, ProductionReview{Head: head, State: "block", Findings: strings.Repeat("f", 16001)}, mustTime(t, 10)); !errors.Is(err, ErrInvalidValue) {
 		t.Fatalf("oversized review findings = %v", err)
 	}
-	page, err := store.Production(ctx, project.ID, 0, 8)
+	page, err := store.Production(ctx, project.ID, 0, 8, UnixMillis{})
 	if err != nil || len(page.Records) != 3 {
 		t.Fatalf("page=%+v err=%v", page, err)
 	}
@@ -335,7 +324,7 @@ func TestProductionPersistsRevisionEvidenceWithoutRewinding(t *testing.T) {
 	if err := store.RecordProductionObservation(ctx, project.ID, ProductionObservation{Repository: "example/factory", ObservedAt: 14, Unavailable: "read failed"}, mustTime(t, 14)); err != nil {
 		t.Fatal(err)
 	}
-	page, err = store.Production(ctx, project.ID, 0, 8)
+	page, err = store.Production(ctx, project.ID, 0, 8, UnixMillis{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -365,7 +354,7 @@ func TestProductionPersistsRevisionEvidenceWithoutRewinding(t *testing.T) {
 	if err := store.RecordProductionObservation(ctx, project.ID, observation, mustTime(t, 15)); !errors.Is(err, ErrInvalidValue) {
 		t.Fatalf("bad input=%v", err)
 	}
-	page, err = store.Production(ctx, project.ID, 0, 8)
+	page, err = store.Production(ctx, project.ID, 0, 8, UnixMillis{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -377,6 +366,7 @@ func TestProductionPersistsRevisionEvidenceWithoutRewinding(t *testing.T) {
 }
 
 func TestProductionHealthRoundTripsAndInvalidObservationRollsBack(t *testing.T) {
+	t.Parallel()
 	store, _, project, _ := newAdmissionStore(t, RoleOrchestrator, 2)
 	defer store.Close()
 	ctx := context.Background()
@@ -384,7 +374,7 @@ func TestProductionHealthRoundTripsAndInvalidObservationRollsBack(t *testing.T) 
 	if err := store.RecordProductionObservation(ctx, project.ID, observation, mustTime(t, 20)); err != nil {
 		t.Fatal(err)
 	}
-	page, err := store.Production(ctx, project.ID, 0, 8)
+	page, err := store.Production(ctx, project.ID, 0, 8, UnixMillis{})
 	if err != nil || len(page.Records) != 1 {
 		t.Fatalf("health page = %+v, err=%v", page, err)
 	}
@@ -408,7 +398,7 @@ func TestProductionHealthRoundTripsAndInvalidObservationRollsBack(t *testing.T) 
 	if err := store.RecordProductionObservation(ctx, project.ID, bad, mustTime(t, 21)); !errors.Is(err, ErrInvalidValue) {
 		t.Fatalf("invalid observation = %v", err)
 	}
-	page, err = store.Production(ctx, project.ID, 0, 8)
+	page, err = store.Production(ctx, project.ID, 0, 8, UnixMillis{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -419,13 +409,16 @@ func TestProductionHealthRoundTripsAndInvalidObservationRollsBack(t *testing.T) 
 	}
 }
 
-func TestProductionPrioritizesLiveFactsOverTerminalConstruction(t *testing.T) {
+func TestProductionReadsTheRelevantSetWithoutACap(t *testing.T) {
+	t.Parallel()
 	store, _, project, agent := newAdmissionStore(t, RoleOrchestrator, 2)
 	defer store.Close()
 	ctx := context.Background()
-	insert := func(kind, id, document string) {
+	now := time.Now().UnixMilli()
+	stale := now - ProductionRecent.Milliseconds() - 60_000
+	insert := func(kind, id, document string, at int64) {
 		t.Helper()
-		if _, err := store.writer.ExecContext(ctx, `INSERT INTO production_records(project_id, repository, kind, identity, visual_id, document, observed_at_ms) VALUES(?, 'example/factory', ?, ?, '', ?, 1)`, project.ID.Bytes(), kind, id, document); err != nil {
+		if _, err := store.writer.ExecContext(ctx, `INSERT INTO production_records(project_id, repository, kind, identity, visual_id, document, observed_at_ms) VALUES(?, 'example/factory', ?, ?, '', ?, ?)`, project.ID.Bytes(), kind, id, document, at); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -459,58 +452,111 @@ func TestProductionPrioritizesLiveFactsOverTerminalConstruction(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	insert("repository", "example/factory", `{"overflow":0}`)
-	insert("pull_request", "7", `{"number":7,"title":"current","state":"open","head":"`+strings.Repeat("a", 40)+`","review":{"head":"`+strings.Repeat("a", 40)+`","state":"allow"}}`)
-	insert("pull_request", "8", `{"number":8,"state":"merged"}`)
-	insert("check", "workflow:7", `{"id":"workflow:7","state":"completed"}`)
-	insert("delivery", "delivery:7", `{"id":"delivery:7","state":"verified"}`)
-	page, err := store.Production(ctx, project.ID, 0, 8)
-	if err != nil {
+	// Recently updated construction is relevant whatever its status.
+	if _, err := store.writer.ExecContext(ctx, `UPDATE changes SET updated_at_ms = ? WHERE id IN (SELECT id FROM changes ORDER BY id LIMIT 3)`, now); err != nil {
 		t.Fatal(err)
 	}
-	if page.Total != 255 || len(page.Records) != 8 {
-		t.Fatalf("page total/size = %d/%d", page.Total, len(page.Records))
+	insert("repository", "example/factory", `{"overflow":0}`, stale)
+	insert("pull_request", "7", `{"number":7,"title":"current","state":"open"}`, stale)
+	insert("check", "workflow:7", `{"id":"workflow:7","state":"completed","pull_requests":[7]}`, stale)
+	insert("reviewer", "reviewer:7", `{"number":7,"state":"allow"}`, stale)
+	insert("reviewer", "operation:7", `{"id":"operation:7","request":{"PullNumber":7}}`, stale)
+	insert("pull_request", "8", `{"number":8,"state":"merged"}`, stale)
+	insert("check", "workflow:8", `{"state":"completed","pull_requests":[8]}`, stale)
+	insert("reviewer", "reviewer:8", `{"number":8,"state":"allow"}`, stale)
+	insert("delivery", "delivery:8", `{"state":"verified","pull_requests":[8]}`, stale)
+	insert("pull_request", "9", `{"number":9,"state":"merged"}`, now)
+	insert("check", "workflow:9", `{"state":"completed","pull_requests":[9]}`, stale)
+	insert("reviewer", "reviewer:9", `{"number":9,"state":"allow"}`, stale)
+	insert("delivery", "delivery:9", `{"state":"verified","pull_requests":[8,9]}`, stale)
+	// A delivery still running keeps its merged PR relevant.
+	insert("pull_request", "10", `{"number":10,"state":"merged"}`, stale)
+	insert("delivery", "delivery:10", `{"state":"running","pull_requests":[10]}`, stale)
+	for index := 0; index < 300; index++ {
+		insert("delivery", fmt.Sprintf("old:%d", index), `{"state":"verified","pull_requests":[]}`, stale)
+		insert("pull_request", fmt.Sprint(1000+index), fmt.Sprintf(`{"number":%d,"state":"merged"}`, 1000+index), stale)
+		// More relevant records than the old 256-record ceiling.
+		insert("pull_request", fmt.Sprint(2000+index), fmt.Sprintf(`{"number":%d,"state":"merged"}`, 2000+index), now-int64(index))
 	}
-	want := []string{"repository", "pull_request", "delivery", "pull_request", "check"}
-	for index, kind := range want {
-		if page.Records[index].Kind != kind {
-			t.Fatalf("record %d = %+v, want %s", index, page.Records[index], kind)
+	// A blocked delivery stays until a later verified one at its destination.
+	insert("delivery", "blocked:old", `{"kind":"release","destination":"site:a","state":"blocked","updated_at":100,"pull_requests":[]}`, stale)
+	insert("delivery", "verified:a", `{"kind":"release","destination":"site:a","state":"verified","updated_at":200,"pull_requests":[]}`, stale)
+	insert("delivery", "blocked:live", `{"kind":"release","destination":"site:b","state":"blocked","updated_at":300,"pull_requests":[]}`, stale)
+	insert("delivery", "verified:b", `{"kind":"release","destination":"site:b","state":"verified","updated_at":200,"pull_requests":[]}`, stale)
+	// An unaccepted mission keeps its old PR; an accepted one lets it age out.
+	insert("pull_request", "11", `{"number":11,"state":"merged"}`, stale)
+	insert("check", "workflow:11", `{"state":"completed","pull_requests":[11]}`, stale)
+	insert("pull_request", "12", `{"number":12,"state":"merged"}`, stale)
+	for index, mission := range []struct{ state []string }{{[]string{"open"}}, {[]string{"open", "accepted"}}} {
+		missionID, task := append([]byte{0xee, byte(index)}, make([]byte, IDBytes-2)...), append([]byte{byte(index + 5)}, make([]byte, IDBytes-1)...)
+		for revision, state := range mission.state {
+			if _, err := store.writer.ExecContext(ctx, `INSERT INTO project_outcome_revisions(id, project_id, revision, document, author, authority, objective_hash, objective_work_revision, created_at_ms) VALUES(?, ?, ?, ?, 'test', 'human', ?, 1, 0)`, missionID, project.ID.Bytes(), revision+1, `{"kind":"mission","state":"`+state+`"}`, make([]byte, 32)); err != nil {
+				t.Fatal(err)
+			}
+		}
+		if _, err := store.writer.ExecContext(ctx, `INSERT INTO mission_task_bindings(mission_id, task_id, project_id, created_at_ms) VALUES(?, ?, ?, 0)`, missionID, task, project.ID.Bytes()); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := store.writer.ExecContext(ctx, `INSERT INTO publication_tasks(project_id, repository, pull_number, task_id, created_at_ms) VALUES(?, 'example/factory', ?, ?, 0)`, project.ID.Bytes(), 11+index, task); err != nil {
+			t.Fatal(err)
 		}
 	}
-	page, err = store.Production(ctx, project.ID, 2, 1)
-	if err != nil || len(page.Records) != 1 || page.Records[0].Kind != "delivery" {
-		t.Fatalf("delivery must precede merged work across pages: %+v, %v", page, err)
+	if _, err := store.writer.ExecContext(ctx, `UPDATE tasks SET assigned_agent_id = ?, status = 'blocked', completed_at_ms = NULL, blocked_reason = 'dependency_failed' WHERE title = 'terminal-100'`, agent.ID.Bytes()); err != nil {
+		t.Fatal(err)
 	}
-	page, err = store.Production(ctx, project.ID, 5, 3)
-	if err != nil || len(page.Records) != 3 {
-		t.Fatalf("construction page = %+v, %v", page, err)
+	read := func() ([]ProductionRecord, int) {
+		t.Helper()
+		var records []ProductionRecord
+		for offset := 0; ; {
+			page, err := store.Production(ctx, project.ID, offset, 8, mustTime(t, now))
+			if err != nil {
+				t.Fatal(err)
+			}
+			records = append(records, page.Records...)
+			if page.NextOffset == 0 {
+				return records, page.Total
+			}
+			offset = page.NextOffset
+		}
+	}
+	records, total := read()
+	got := map[string]bool{}
+	for _, record := range records {
+		if record.Kind != "construction" && !strings.HasPrefix(record.ID, "2") {
+			got[record.Kind+":"+record.ID] = true
+		}
+	}
+	want := []string{"repository:example/factory", "pull_request:7", "check:workflow:7", "reviewer:reviewer:7", "reviewer:operation:7", "pull_request:9", "check:workflow:9", "reviewer:reviewer:9", "delivery:delivery:9", "pull_request:10", "delivery:delivery:10", "delivery:blocked:live", "pull_request:11", "check:workflow:11"}
+	for _, key := range want {
+		if !got[key] {
+			t.Fatalf("relevant record %s missing from %v", key, got)
+		}
+	}
+	if len(got) != len(want) || total != len(records) || total != len(want)+4+300 {
+		t.Fatalf("relevant set = %v (%d records, total %d), want %v plus 4 constructions and 300 recent PRs", got, len(records), total, want)
+	}
+	var constructions []map[string]any
+	for _, record := range records {
+		if record.Kind == "construction" {
+			var construction map[string]any
+			if err := json.Unmarshal(record.Document, &construction); err != nil {
+				t.Fatal(err)
+			}
+			constructions = append(constructions, construction)
+		}
+	}
+	if constructions[3]["status"] != "blocked" {
+		t.Fatalf("stale blocked construction missing: %+v", constructions)
 	}
 	for index, want := range []any{false, true, nil} {
-		var construction map[string]any
-		if err := json.Unmarshal(page.Records[index].Document, &construction); err != nil {
-			t.Fatal(err)
-		}
-		if construction["has_changes"] != want {
-			t.Fatalf("construction %d has_changes = %#v, want %#v", index, construction["has_changes"], want)
+		if constructions[index]["has_changes"] != want {
+			t.Fatalf("construction %d has_changes = %#v, want %#v", index, constructions[index]["has_changes"], want)
 		}
 	}
-	// More than a page of receipts must not displace queued/running/blocked work.
-	for index := 0; index < 9; index++ {
-		insert("delivery", fmt.Sprintf("delivery:%d", index+10), `{"state":"verified"}`)
-	}
-	for _, status := range []string{"queued", "running", "blocked"} {
-		if _, err := store.writer.ExecContext(ctx, `UPDATE tasks SET assigned_agent_id = ?, status = ?, completed_at_ms = NULL, blocked_reason = CASE WHEN ? = 'blocked' THEN 'dependency_failed' ELSE NULL END WHERE title = 'terminal-000'`, agent.ID.Bytes(), status, status); err != nil {
-			t.Fatal(err)
-		}
-		page, err = store.Production(ctx, project.ID, 0, 8)
-		if err != nil || len(page.Records) != 8 || page.Records[2].Kind != "construction" {
-			t.Fatalf("%s construction must precede deliveries: %+v, %v", status, page, err)
-		}
-	}
-
 }
 
 func TestProductionCanonicalizesLegacyRuntimeDestinationsAndDeduplicates(t *testing.T) {
+	t.Parallel()
 	store, _, project, _ := newAdmissionStore(t, RoleOrchestrator, 2)
 	defer store.Close()
 	ctx := context.Background()
@@ -534,7 +580,7 @@ func TestProductionCanonicalizesLegacyRuntimeDestinationsAndDeduplicates(t *test
 	if _, err := store.writer.ExecContext(ctx, `INSERT INTO production_records (project_id, repository, kind, identity, visual_id, document, observed_at_ms) VALUES (?, ?, 'delivery', ?, '', ?, ?)`, project.ID.Bytes(), "example/factory", canonicalID, string(newerBody), 12); err != nil {
 		t.Fatal(err)
 	}
-	before, err := store.Production(ctx, project.ID, 0, 8)
+	before, err := store.Production(ctx, project.ID, 0, 8, UnixMillis{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -559,7 +605,7 @@ func TestProductionCanonicalizesLegacyRuntimeDestinationsAndDeduplicates(t *test
 	if err := store.RecordProductionObservation(ctx, project.ID, observation, mustTime(t, 20)); err != nil {
 		t.Fatal(err)
 	}
-	page, err := store.Production(ctx, project.ID, 0, 8)
+	page, err := store.Production(ctx, project.ID, 0, 8, UnixMillis{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -588,6 +634,7 @@ func TestProductionCanonicalizesLegacyRuntimeDestinationsAndDeduplicates(t *test
 }
 
 func TestCorrectedHeadSupersedesOlderInFlightReview(t *testing.T) {
+	t.Parallel()
 	store, _, project, _ := newAdmissionStore(t, RoleOrchestrator, 2)
 	defer store.Close()
 	ctx := context.Background()
@@ -596,8 +643,8 @@ func TestCorrectedHeadSupersedesOlderInFlightReview(t *testing.T) {
 	if err := store.RecordProductionObservation(ctx, project.ID, old, mustTime(t, 10)); err != nil {
 		t.Fatal(err)
 	}
-	stale := map[string]any{"id": "stale", "state": "enqueuing", "request": map[string]any{"Repository": "example/factory", "PullNumber": 7, "Head": oldHead}}
-	other := map[string]any{"id": "other", "state": "enqueuing", "request": map[string]any{"Repository": "example/factory", "PullNumber": 8, "Head": oldHead}}
+	stale := map[string]any{"id": "stale", "state": "enqueued", "request": map[string]any{"Repository": "example/factory", "PullNumber": 7, "Head": oldHead}}
+	other := map[string]any{"id": "other", "state": "enqueued", "request": map[string]any{"Repository": "example/factory", "PullNumber": 8, "Head": oldHead}}
 	for id, op := range map[string]any{"stale": stale, "other": other} {
 		if err := store.RecordReviewOperation(ctx, project.ID, "example/factory", id, op, mustTime(t, 11)); err != nil {
 			t.Fatal(err)
@@ -640,6 +687,7 @@ func TestCorrectedHeadSupersedesOlderInFlightReview(t *testing.T) {
 // The refresh runs every five minutes over every production record; paging
 // the UI view cost a sorted UNION per eight rows and outran its deadline.
 func TestKnownProductionPullsIsOneBoundedQuery(t *testing.T) {
+	t.Parallel()
 	store, _, project, _ := newAdmissionStore(t, RoleOrchestrator, 2)
 	defer store.Close()
 	ctx := context.Background()
@@ -701,5 +749,75 @@ func TestKnownProductionPullsIsOneBoundedQuery(t *testing.T) {
 	many, published := read(100)
 	if few == 0 || many != few || len(published) != 1 || !published[3] {
 		t.Fatalf("statements few=%d many=%d published=%v", few, many, published)
+	}
+}
+
+// A pull head is settled once every stored head check on it has completed
+// without failing; one running or failed check, or a merge-group run, never
+// settles it.
+func TestSettledProductionChecks(t *testing.T) {
+	t.Parallel()
+	store, _, project, _ := newAdmissionStore(t, RoleOrchestrator, 2)
+	defer store.Close()
+	ctx := context.Background()
+	a, b := strings.Repeat("a", 40), strings.Repeat("b", 40)
+	check := func(id, revision, scope, state string, pull uint64) ProductionCheck {
+		conclusion := ""
+		if state == "completed" {
+			conclusion = "success"
+		}
+		return ProductionCheck{ID: id, Name: "go", Revision: revision, Scope: scope, State: state, Conclusion: conclusion, URL: "https://github.com/o/r/runs/" + id, PullRequests: []uint64{pull}, Jobs: []ProductionJob{}}
+	}
+	observation := ProductionObservation{Repository: "example/factory", ObservedAt: 10, Checks: []ProductionCheck{
+		check("1", a, "head", "completed", 1), check("2", a, "head", "completed", 1),
+		check("3", b, "head", "completed", 2), check("4", b, "head", "in_progress", 2),
+		check("5", a, "merge_group", "completed", 3),
+	}}
+	for index, conclusion := range []string{"failure", "timed_out", "cancelled", "action_required", "startup_failure"} {
+		failed := check(fmt.Sprint(10+index), b, "head", "completed", uint64(4+index))
+		failed.Conclusion = conclusion
+		observation.Checks = append(observation.Checks, check(fmt.Sprint(20+index), b, "head", "completed", uint64(4+index)), failed)
+	}
+	if err := store.RecordProductionObservation(ctx, project.ID, observation, mustTime(t, 10)); err != nil {
+		t.Fatal(err)
+	}
+	settled, err := store.SettledProductionChecks(ctx, project.ID, "Example/Factory")
+	if err != nil || len(settled) != 1 || !settled[ProductionHead{Number: 1, Head: a}] {
+		t.Fatalf("settled %v, %v", settled, err)
+	}
+}
+
+// Deployment records, once seen, survive a refresh that could not read them
+// and only move forward, so a failed read never ships or unships a merge.
+func TestProductionRepositoryKeepsItsNewestDeployment(t *testing.T) {
+	t.Parallel()
+	store, _, project, _ := newAdmissionStore(t, RoleOrchestrator, 2)
+	defer store.Close()
+	ctx := context.Background()
+	deployed := func(at int64) *int64 { return &at }
+	var got []string
+	for index, value := range []*int64{nil, deployed(0), deployed(7), nil, deployed(5)} {
+		at := int64(10 + index)
+		if err := store.RecordProductionObservation(ctx, project.ID, ProductionObservation{Repository: "example/factory", ObservedAt: at, DeployedAt: value}, mustTime(t, at)); err != nil {
+			t.Fatal(err)
+		}
+		page, err := store.Production(ctx, project.ID, 0, 8, UnixMillis{})
+		if err != nil || len(page.Records) != 1 {
+			t.Fatalf("page=%+v err=%v", page, err)
+		}
+		var health struct {
+			DeployedAt *int64 `json:"deployed_at"`
+		}
+		if err := json.Unmarshal(page.Records[0].Document, &health); err != nil {
+			t.Fatal(err)
+		}
+		if health.DeployedAt == nil {
+			got = append(got, "none")
+		} else {
+			got = append(got, fmt.Sprint(*health.DeployedAt))
+		}
+	}
+	if strings.Join(got, " ") != "none 0 7 7 7" {
+		t.Fatalf("deployed_at over refreshes = %v", got)
 	}
 }

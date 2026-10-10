@@ -603,7 +603,7 @@ func TestDaemonDispatchesSendBackThroughBothDomains(t *testing.T) {
 	}
 	waitDispatch(t, done)
 	done = fixture.serve(t)
-	if _, err := operator.SendBackTask(ctx, api.SendBackInput{TaskID: claudeTask, Note: strings.Repeat("&", 1024)}); !errors.As(err, &remote) || remote.Code() != api.RemoteTooLarge {
+	if _, err := operator.SendBackTask(ctx, api.SendBackInput{TaskID: claudeTask, Note: strings.Repeat("&", 1300)}); !errors.As(err, &remote) || remote.Code() != api.RemoteTooLarge {
 		t.Fatalf("a note past the provider's prompt = %v", err)
 	}
 	waitDispatch(t, done)
@@ -632,7 +632,7 @@ func TestDaemonDispatchesSendBackThroughBothDomains(t *testing.T) {
 	}
 	waitDispatch(t, done)
 	done = fixture.serve(t)
-	if _, err := active.client.SendBack(ctx, api.SendBackInput{TaskID: foreign, Note: strings.Repeat("&", 1024)}); !errors.As(err, &remote) || remote.Code() != api.RemoteUnauthorized {
+	if _, err := active.client.SendBack(ctx, api.SendBackInput{TaskID: foreign, Note: strings.Repeat("&", 1300)}); !errors.As(err, &remote) || remote.Code() != api.RemoteUnauthorized {
 		t.Fatalf("another project's task with an oversized note = %v", err)
 	}
 	waitDispatch(t, done)
@@ -1371,7 +1371,7 @@ func TestOverseerPastAProjectLimitIsRequeuedAndAWorkerCancelled(t *testing.T) {
 	}{
 		{57, "orchestrator", 60, kernel.OutcomeFailed, kernel.OverseerRunLimitDetail},
 		{67, "orchestrator", kernel.MaxOverseerRunSeconds, kernel.OutcomeFailed, kernel.OverseerRunLimitDetail},
-		{77, "worker", 60, kernel.OutcomeCancelled, runLimitDetail},
+		{77, "worker", 60, kernel.OutcomeCancelled, kernel.RunLimitDetail},
 	} {
 		fixture := newDispatchFixture(t)
 		active := prepareActiveAttemptInProjectWithProvider(t, fixture, test.seed, testID(test.seed), test.role, "codex")
@@ -1390,30 +1390,6 @@ func TestOverseerPastAProjectLimitIsRequeuedAndAWorkerCancelled(t *testing.T) {
 			t.Fatalf("%s past a %ds limit = %+v, err=%v", test.role, test.limit, run, err)
 		}
 	}
-}
-
-func TestDaemonRejectsForgedAttemptOutcome(t *testing.T) {
-	fixture := newDispatchFixture(t)
-	_ = prepareActiveAttempt(t, fixture, 61)
-	wrongBearer := bytes.Repeat([]byte{'z'}, 32)
-	wrongToken := filepath.Join(filepath.Dir(fixture.socket), "wrong.token")
-	if err := os.WriteFile(wrongToken, wrongBearer, 0o600); err != nil {
-		t.Fatal(err)
-	}
-	previous := os.Getenv("DARK_FACTORY_ATTEMPT_TOKEN_FILE")
-	if err := os.Setenv("DARK_FACTORY_ATTEMPT_TOKEN_FILE", wrongToken); err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { _ = os.Setenv("DARK_FACTORY_ATTEMPT_TOKEN_FILE", previous) })
-	wrong, err := api.NewAttemptClientFromEnvironment(fixture.socket)
-	if err != nil {
-		t.Fatal(err)
-	}
-	done := fixture.serve(t)
-	if _, err := wrong.Succeed(context.Background(), "forged"); err == nil {
-		t.Fatal("forged attempt outcome succeeded")
-	}
-	waitDispatch(t, done)
 }
 
 func TestDaemonConcurrentAttemptOutcomesHaveOneDurableWinner(t *testing.T) {

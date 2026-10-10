@@ -156,7 +156,7 @@ func migrateProductionRuntimeRecords(ctx context.Context, c *sql.Conn, project P
 }
 
 func validProductionPull(pr ProductionPullRequest) bool {
-	return pr.Number > 0 && pr.Number <= 1<<53-1 && validOutcomeText(pr.Title, 1024) && pr.Title != "" && productionURL(pr.URL) && productionSHA(pr.Head) && productionSHA(pr.BaseSHA) && productionSHA(pr.Merge) && productionSHA(pr.Review.Head) && (pr.HeadRepository == "" || productionRepository.MatchString(pr.HeadRepository)) && validOutcomeText(pr.Branch, 256) && validOutcomeText(pr.Base, 256) && validOutcomeText(pr.MergeQueue, 64) && validOutcomeText(pr.MergedAt, 64) && validOutcomeText(pr.NextAction, 2048) && validOutcomeText(pr.Review.State, 64) && validOutcomeText(pr.Review.Findings, maxProductionReviewFindings) && validOutcomeText(pr.Review.OperationID, 128) && validOutcomeText(pr.Review.CorrectsReviewOperationID, 128) && productionURL(pr.Review.URL) && (pr.State == "open" || pr.State == "closed" || pr.State == "merged")
+	return pr.Number > 0 && pr.Number <= 1<<53-1 && validOutcomeText(pr.Title, 1024) && pr.Title != "" && productionURL(pr.URL) && productionSHA(pr.Head) && productionSHA(pr.BaseSHA) && productionSHA(pr.Merge) && productionSHA(pr.Review.Head) && (pr.HeadRepository == "" || productionRepository.MatchString(pr.HeadRepository)) && validOutcomeText(pr.Branch, 256) && validOutcomeText(pr.Base, 256) && validOutcomeText(pr.MergeQueue, 64) && validOutcomeText(pr.MergedAt, 64) && validOutcomeText(pr.NextAction, 2048) && validOutcomeText(pr.Review.State, 64) && validOutcomeText(pr.Review.Findings, maxProductionReviewFindings) && validOutcomeText(pr.Review.OperationID, 128) && productionURL(pr.Review.URL) && (pr.State == "open" || pr.State == "closed" || pr.State == "merged")
 }
 
 func productionRecordOnConnection(ctx context.Context, c *sql.Conn, project ProjectID, repo, kind, id, visual string, value any, at int64) error {
@@ -219,8 +219,12 @@ func (store *Store) PublishingProjects(ctx context.Context) ([]ProjectID, error)
 	return projects, rows.Err()
 }
 
+// MaxObservationChecks is the most check records one production observation
+// may write.
+const MaxObservationChecks = 256
+
 func validProductionObservation(project ProjectID, observation ProductionObservation, at UnixMillis) bool {
-	return !project.zero() && productionRepository.MatchString(observation.Repository) && observation.ObservedAt >= 1 && observation.ObservedAt <= at.Int64()+5000 && observation.Overflow >= 0 && validOutcomeText(observation.Unavailable, 256) && len(observation.PullRequests) <= 256 && len(observation.Checks) <= 256 && len(observation.Reviewers) <= 256 && len(observation.Deliveries) <= 128
+	return !project.zero() && productionRepository.MatchString(observation.Repository) && observation.ObservedAt >= 1 && observation.ObservedAt <= at.Int64()+5000 && observation.Overflow >= 0 && validOutcomeText(observation.Unavailable, 256) && len(observation.PullRequests) <= 256 && len(observation.Checks) <= MaxObservationChecks && len(observation.Reviewers) <= 256 && len(observation.Deliveries) <= 128 && (observation.DeployedAt == nil || *observation.DeployedAt >= 0)
 }
 
 // RecordProductionObservation accepts facts only from the operator authority.
@@ -309,7 +313,7 @@ func (store *Store) recordProductionObservation(ctx context.Context, c *sql.Conn
 		}
 		if _, err := c.ExecContext(ctx, `UPDATE production_records SET document = json_set(document, '$.state', 'superseded'), observed_at_ms = ?
 			WHERE project_id = ? AND repository = ? AND kind = 'reviewer' AND json_extract(document, '$.request.PullNumber') = ?
-			  AND lower(json_extract(document, '$.request.Head')) <> lower(?) AND json_extract(document, '$.state') IN ('running', 'submitting', 'enqueuing')`,
+			  AND lower(json_extract(document, '$.request.Head')) <> lower(?) AND json_extract(document, '$.state') IN ('running', 'submitting', 'enqueued')`,
 			at.Int64(), project.Bytes(), observation.Repository, int64(pr.Number), pr.Head); err != nil {
 			return err
 		}
@@ -343,7 +347,21 @@ func (store *Store) recordProductionObservation(ctx context.Context, c *sql.Conn
 			return err
 		}
 	}
-	if err := write("repository", observation.Repository, "", map[string]any{"unavailable": observation.Unavailable, "overflow": observation.Overflow}); err != nil {
+	health := map[string]any{"unavailable": observation.Unavailable, "overflow": observation.Overflow}
+	// Deployment records are kept once seen, and only move forward: a refresh
+	// that could not read them never ships or unships a merged pull request.
+	var deployed sql.NullInt64
+	if err := c.QueryRowContext(ctx, `SELECT json_extract(document, '$.deployed_at') FROM production_records WHERE project_id = ? AND repository = ? AND kind = 'repository' AND identity = ?`,
+		project.Bytes(), observation.Repository, observation.Repository).Scan(&deployed); err != nil && !errors.Is(err, sql.ErrNoRows) {
+		return err
+	}
+	if observation.DeployedAt != nil {
+		deployed.Int64, deployed.Valid = max(deployed.Int64, *observation.DeployedAt), true
+	}
+	if deployed.Valid {
+		health["deployed_at"] = deployed.Int64
+	}
+	if err := write("repository", observation.Repository, "", health); err != nil {
 		return err
 	}
 	return nil
@@ -502,6 +520,9 @@ type PublishableChange struct {
 	Revision   Revision
 	Base, Head string
 	Accepted   IntakeAcceptance
+	Repository RepositoryID
+	Repair     bool
+	Branch     string
 	Pull       uint64
 }
 
@@ -516,36 +537,46 @@ const factorydPublishesAcceptance = `(SELECT count(*) FROM intake_task_bindings 
 	WHERE s.acceptance_id = a.id AND sa.role IS NOT 'orchestrator') = 1
 	AND EXISTS (SELECT 1 FROM repository_source_identities i WHERE i.repository_id = a.repository_id AND i.github_repository_id = a.github_repository_id)`
 
+// PublishRetryAfter is how long a recorded publish failure holds back its
+// Change revision; then the next pass retries it, so a refusal fixed outside
+// factoryd heals itself.
+const PublishRetryAfter = time.Hour
+
 // PublishFailureID names the one reviewer record of factoryd failing to
-// publish a Change revision; while it exists that revision is not retried.
+// publish a Change revision.
 func PublishFailureID(change ChangeID, revision Revision) string {
 	return fmt.Sprintf("publish-%s-%d", change, revision.Int64())
 }
 
 // PublishableChanges lists, oldest first, the current settled Changes of
 // succeeded tasks bound to a live intake acceptance factoryd publishes, whose
-// head differs from their base, with no recorded publish failure at that
-// Change revision: with no publication of that Change or task, at any work
-// revision, or above work revision 1 settled since factoryd last published
-// that Change on its still-open pull request (publication_tasks.created_at_ms).
-func (store *Store) PublishableChanges(ctx context.Context) ([]PublishableChange, error) {
+// head differs from their base, with no publish failure at that Change
+// revision recorded within PublishRetryAfter of at: with no publication of
+// that Change or task, at any work revision, or above work revision 1
+// settled since factoryd last published that Change on its still-open pull
+// request (publication_tasks.created_at_ms).
+func (store *Store) PublishableChanges(ctx context.Context, at UnixMillis) ([]PublishableChange, error) {
 	tx, err := store.beginRead(ctx)
 	if err != nil {
 		return nil, err
 	}
 	defer tx.Close()
-	rows, err := tx.connection.QueryContext(ctx, `SELECT c.id, c.task_id, c.revision, lower(hex(c.base_commit)), lower(hex(c.head_commit)), COALESCE(p.pull_number, 0) FROM changes c
+	rows, err := tx.connection.QueryContext(ctx, `SELECT c.id, c.task_id, c.revision, lower(hex(c.base_commit)), lower(hex(c.head_commit)), COALESCE(p.pull_number, 0), COALESCE((SELECT lower(hex(repository_id)) FROM task_repository_bindings WHERE task_id = c.task_id), ''), COALESCE((SELECT json_extract(r.document, '$.branch') FROM production_records r WHERE r.project_id = p.project_id AND r.repository = p.repository AND r.kind = 'pull_request' AND r.identity = CAST(p.pull_number AS TEXT)), '') FROM changes c
 		JOIN tasks t ON t.id = c.task_id AND t.incarnation_id = c.task_incarnation_id
-		JOIN intake_task_bindings b ON b.task_id = c.task_id JOIN intake_acceptances a ON a.id = b.acceptance_id
-		LEFT JOIN publication_tasks p ON p.change_id = c.id AND p.task_id = c.task_id AND t.work_revision > 1 AND c.updated_at_ms > p.created_at_ms
+		LEFT JOIN intake_task_bindings b ON b.task_id = c.task_id LEFT JOIN intake_acceptances a ON a.id = b.acceptance_id
+		LEFT JOIN publication_tasks p ON p.task_id = c.task_id AND c.updated_at_ms > p.created_at_ms
+		  AND (t.work_revision > 1 OR p.change_id IS NULL)
 		  AND EXISTS (SELECT 1 FROM production_records r WHERE r.project_id = p.project_id AND r.repository = p.repository AND r.kind = 'pull_request'
 		      AND r.identity = CAST(p.pull_number AS TEXT) AND json_extract(r.document, '$.state') = 'open')
 		WHERE c.phase = 'retained' AND t.status = 'succeeded' AND a.withdrawn_at_ms IS NULL AND c.head_commit <> c.base_commit
-		  AND `+factorydPublishesAcceptance+`
+		  AND ((a.id IS NOT NULL AND `+factorydPublishesAcceptance+`) OR (a.id IS NULL AND EXISTS (SELECT 1 FROM publication_tasks repair WHERE repair.project_id = c.project_id AND repair.task_id = c.task_id)))
 		  AND (p.pull_number IS NOT NULL OR NOT EXISTS (SELECT 1 FROM publication_tasks q WHERE q.change_id = c.id OR q.task_id = c.task_id))
 		  AND NOT EXISTS (SELECT 1 FROM production_records r WHERE r.project_id = c.project_id AND r.kind = 'reviewer'
-		      AND r.identity = 'publish-' || lower(hex(c.id)) || '-' || c.revision)
-		ORDER BY c.updated_at_ms`)
+		      AND r.identity = 'publish-' || lower(hex(c.id)) || '-' || c.revision
+		      AND (json_extract(r.document, '$.retryable') = 0 OR
+		          ((json_extract(r.document, '$.retryable') = 1 OR json_extract(r.document, '$.retryable') IS NULL)
+		              AND r.observed_at_ms + ? > ?)))
+		ORDER BY c.updated_at_ms`, PublishRetryAfter.Milliseconds(), at.Int64())
 	if err != nil {
 		return nil, err
 	}
@@ -553,11 +584,22 @@ func (store *Store) PublishableChanges(ctx context.Context) ([]PublishableChange
 	for rows.Next() {
 		var change, task []byte
 		var revision int64
+		var repository string
+		var branch string
 		var value PublishableChange
-		if err := rows.Scan(&change, &task, &revision, &value.Base, &value.Head, &value.Pull); err != nil {
+		if err := rows.Scan(&change, &task, &revision, &value.Base, &value.Head, &value.Pull, &repository, &branch); err != nil {
 			rows.Close()
 			return nil, err
 		}
+		if repository != "" {
+			raw, decodeErr := hex.DecodeString(repository)
+			if decodeErr != nil {
+				rows.Close()
+				return nil, decodeErr
+			}
+			value.Repository, err = RepositoryIDFromBytes(raw)
+		}
+		value.Branch = branch
 		if value.Change, err = ChangeIDFromBytes(change); err == nil {
 			if value.Task.ID, err = TaskIDFromBytes(task); err == nil {
 				value.Revision, err = NewRevision(revision)
@@ -577,8 +619,14 @@ func (store *Store) PublishableChanges(ctx context.Context) ([]PublishableChange
 		if found[i].Task, ok, err = taskByID(ctx, tx.connection, found[i].Task.ID); err == nil {
 			found[i].Accepted, bound, err = intakeAcceptanceForTask(ctx, tx.connection, found[i].Task.ID)
 		}
-		if err == nil && (!ok || !bound) {
+		if err == nil && !ok {
 			err = ErrCorruptState
+		}
+		if err == nil {
+			found[i].Repair = !bound
+			if !bound && found[i].Repository.zero() {
+				err = ErrCorruptState
+			}
 		}
 		if err != nil {
 			return nil, err
@@ -597,7 +645,7 @@ func (store *Store) RecordCorrectionPublished(ctx context.Context, c Publishable
 		return err
 	}
 	defer tx.Close()
-	if _, err := tx.connection.ExecContext(ctx, `UPDATE publication_tasks SET created_at_ms = ? WHERE pull_number = ? AND task_id = ? AND change_id = ?`, at.Int64(), c.Pull, c.Task.ID.Bytes(), c.Change.Bytes()); err != nil {
+	if _, err := tx.connection.ExecContext(ctx, `UPDATE publication_tasks SET change_id = ?, created_at_ms = ? WHERE pull_number = ? AND task_id = ? AND (change_id = ? OR change_id IS NULL)`, c.Change.Bytes(), at.Int64(), c.Pull, c.Task.ID.Bytes(), c.Change.Bytes()); err != nil {
 		return tx.Rollback(err)
 	}
 	return tx.Commit(ctx)
@@ -685,6 +733,46 @@ func (store *Store) KnownProductionPulls(ctx context.Context, project ProjectID,
 	return pulls, published, rows.Err()
 }
 
+// ProductionHead is one pull request at one head commit.
+type ProductionHead struct {
+	Number uint64
+	Head   string // lower-case
+}
+
+// SettledProductionChecks is every pull head whose stored head checks have
+// all completed without failing: a refresh need not read them again. A
+// failed head stays unsettled, since re-runs mostly follow failures.
+func (store *Store) SettledProductionChecks(ctx context.Context, project ProjectID, repo string) (map[ProductionHead]bool, error) {
+	if project.zero() {
+		return nil, ErrInvalidValue
+	}
+	tx, err := store.beginRead(ctx)
+	if err != nil {
+		return nil, err
+	}
+	defer tx.Close()
+	rows, err := tx.connection.QueryContext(ctx, `SELECT CAST(j.value AS INTEGER), lower(json_extract(r.document, '$.revision'))
+		FROM production_records r, json_each(r.document, '$.pull_requests') j
+		WHERE r.project_id = ? AND r.repository = ? AND r.kind = 'check' AND json_extract(r.document, '$.scope') = 'head'
+		GROUP BY 1, 2 HAVING MIN(json_extract(r.document, '$.state') = 'completed'
+			AND COALESCE(json_extract(r.document, '$.conclusion'), '') NOT IN ('failure', 'timed_out', 'cancelled', 'action_required', 'startup_failure')) = 1`, project.Bytes(), strings.ToLower(repo))
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	settled := map[ProductionHead]bool{}
+	for rows.Next() {
+		var head ProductionHead
+		var number int64
+		if err := rows.Scan(&number, &head.Head); err != nil {
+			return nil, err
+		}
+		head.Number = uint64(number)
+		settled[head] = true
+	}
+	return settled, rows.Err()
+}
+
 // RecordProductionReview preserves the exact commit covered by a review.
 // Refreshes may move the live PR to a newer head; that older head is evidence,
 // not permission to rewrite the review onto the new source.
@@ -700,8 +788,20 @@ func storedProductionReview(ctx context.Context, c *sql.Conn, project ProjectID,
 	return pr.Review, true
 }
 
+// ProductionReviewBlocks reports a block of record at this exact head: no
+// plain ALLOW clears it (RecordProductionReview), and neither does the gate.
+func (store *Store) ProductionReviewBlocks(ctx context.Context, project ProjectID, repo string, number uint64, head string) (bool, error) {
+	tx, err := store.beginRead(ctx)
+	if err != nil {
+		return false, err
+	}
+	defer tx.Close()
+	review, ok := storedProductionReview(ctx, tx.connection, project, strings.ToLower(repo), number)
+	return ok && review.State == "block" && strings.EqualFold(review.Head, head), nil
+}
+
 func (store *Store) RecordProductionReview(ctx context.Context, project ProjectID, repo string, number uint64, review ProductionReview, at UnixMillis) error {
-	if project.zero() || !productionRepository.MatchString(repo) || number == 0 || number > 1<<53-1 || !productionSHA(review.Head) || !validOutcomeText(review.State, 64) || !validOutcomeText(review.Findings, maxProductionReviewFindings) || !validOutcomeText(review.OperationID, 128) || !validOutcomeText(review.CorrectsReviewOperationID, 128) || (review.CorrectsReviewOperationID != "" && review.State != "allow") || !productionURL(review.URL) {
+	if project.zero() || !productionRepository.MatchString(repo) || number == 0 || number > 1<<53-1 || !productionSHA(review.Head) || !validOutcomeText(review.State, 64) || !validOutcomeText(review.Findings, maxProductionReviewFindings) || !validOutcomeText(review.OperationID, 128) || !productionURL(review.URL) {
 		return ErrInvalidValue
 	}
 	repo = strings.ToLower(repo)
@@ -727,10 +827,8 @@ func (store *Store) RecordProductionReview(ctx context.Context, project ProjectI
 	if json.Unmarshal([]byte(body), &pr) != nil || pr.Number != number || !validProductionPull(pr) {
 		return tx.Rollback(ErrCorruptState)
 	}
-	correction := pr.Review.OperationID != "" && review.CorrectsReviewOperationID == pr.Review.OperationID
-	if review.State == "allow" && pr.Review.Head == review.Head && pr.Review.State == "block" && !correction {
-		// A plain or unrelated ALLOW is not a correction. An identity-less
-		// block cannot be implicitly corrected by an empty identity.
+	if review.State == "allow" && pr.Review.Head == review.Head && pr.Review.State == "block" {
+		// Nothing clears a block at the same head.
 		return tx.Commit(ctx)
 	}
 	pr.Review = review
@@ -833,8 +931,8 @@ func (store *Store) ReviewOperation(ctx context.Context, project ProjectID, oper
 }
 
 // InFlightReviewOperations returns every unfinished review operation: reviews
-// to relaunch, review writes whose external receipts may have been lost, enqueued
-// heads awaiting the merge queue, results whose task routing has not landed,
+// to relaunch, verdict writes whose external receipts may have been lost,
+// allowed heads awaiting merge, results whose task routing has not landed,
 // and unhandled failures of a still-open pull request at the same head.
 func (store *Store) InFlightReviewOperations(ctx context.Context) ([]PendingReviewOperation, error) {
 	tx, err := store.beginRead(ctx)
@@ -844,7 +942,7 @@ func (store *Store) InFlightReviewOperations(ctx context.Context) ([]PendingRevi
 	defer tx.Close()
 	rows, err := tx.connection.QueryContext(ctx, `SELECT project_id, repository, identity, document, (SELECT json_extract(p.document, '$.state') = 'open' AND lower(json_extract(p.document, '$.head')) = lower(json_extract(r.document, '$.request.Head'))
                 FROM production_records p WHERE p.project_id = r.project_id AND p.repository = r.repository AND p.kind = 'pull_request' AND p.identity = CAST(json_extract(r.document, '$.request.PullNumber') AS TEXT)) AS live
-        FROM production_records r WHERE kind = 'reviewer' AND (json_extract(document, '$.state') IN ('running', 'submitting', 'enqueuing', 'enqueued') OR json_extract(document, '$.route_pending') = 1
+        FROM production_records r WHERE kind = 'reviewer' AND (json_extract(document, '$.state') IN ('running', 'submitting', 'enqueued') OR json_extract(document, '$.route_pending') = 1
             OR (json_extract(document, '$.state') = 'failed' AND json_extract(document, '$.handled') IS NOT 1 AND live))
           AND json_type(document, '$.request') = 'object'`)
 	if err != nil {
@@ -875,9 +973,9 @@ func (store *Store) InFlightReviewOperations(ctx context.Context) ([]PendingRevi
 }
 
 // RecoverRunningReviewOperations reconciles review claims left by a stopped
-// daemon. A REQUEST_CHANGES verdict with a durable submit receipt and without
-// an enqueue receipt remains a completed, route-pending operation; a claim with
-// no verdict or enqueue stays running for startup to relaunch; others fail.
+// daemon. A submitted REQUEST_CHANGES verdict remains a completed,
+// route-pending operation; a claim with no verdict stays running for startup
+// to relaunch; others fail.
 // A 'gating' claim from before the pre-review gate was removed is the same.
 // An external reviewer observation uses the same projection kind but does not
 // have the durable operation request object.
@@ -921,16 +1019,13 @@ func (store *Store) RecoverRunningReviewOperations(ctx context.Context, at UnixM
 		if err := json.Unmarshal(fields["id"], &operationID); err != nil || operationID == "" {
 			continue
 		}
-		var verdict, enqueueID, retryOf, state string
-		var submitted bool
+		var verdict, retryOf, state string
 		_ = json.Unmarshal(fields["verdict"], &verdict)
-		_ = json.Unmarshal(fields["enqueue_id"], &enqueueID)
-		if _ = json.Unmarshal(fields["state"], &state); state == "running" && verdict == "" && enqueueID == "" {
+		if _ = json.Unmarshal(fields["state"], &state); state == "running" && verdict == "" {
 			continue // startup relaunches it as it stands
 		}
 		_ = json.Unmarshal(fields["retry_of"], &retryOf)
-		_ = json.Unmarshal(fields["submitted"], &submitted)
-		retryable, _ := json.Marshal(verdict == "" && enqueueID == "" && retryOf == "")
+		retryable, _ := json.Marshal(verdict == "" && retryOf == "")
 		fields["retryable"] = retryable
 		candidates = append(candidates, candidate{project: project, repository: repository, identity: identity, document: fields})
 	}
@@ -946,12 +1041,11 @@ func (store *Store) RecoverRunningReviewOperations(ctx context.Context, at UnixM
 		return 0, tx.Rollback(err)
 	}
 	for _, item := range candidates {
-		var verdict, enqueueID string
+		var verdict string
 		var submitted bool
 		_ = json.Unmarshal(item.document["verdict"], &verdict)
-		_ = json.Unmarshal(item.document["enqueue_id"], &enqueueID)
 		_ = json.Unmarshal(item.document["submitted"], &submitted)
-		if verdict == "request_changes" && submitted && enqueueID == "" {
+		if verdict == "request_changes" && submitted {
 			// The provider write and completed state may already be durable,
 			// while task routing was interrupted immediately afterward.
 			// Preserve a recoverable route marker instead of converting this
@@ -959,7 +1053,7 @@ func (store *Store) RecoverRunningReviewOperations(ctx context.Context, at UnixM
 			item.document["state"] = json.RawMessage(`"completed"`)
 			item.document["route_pending"] = json.RawMessage(`true`)
 			delete(item.document, "detail")
-		} else if verdict == "" && enqueueID == "" {
+		} else if verdict == "" {
 			// Nothing external was written: startup relaunches it, so a
 			// daemon restart (every release) never fails a review.
 			item.document["state"] = json.RawMessage(`"running"`)
@@ -993,7 +1087,36 @@ const productionRows = `SELECT repository, kind, identity, visual_id, document, 
  LEFT JOIN project_repositories r ON r.id = b.repository_id
  WHERE c.project_id = ? AND NOT EXISTS (SELECT 1 FROM publication_tasks p WHERE p.change_id = c.id)`
 
-func (store *Store) Production(ctx context.Context, project ProjectID, offset, limit int) (ProductionPage, error) {
+// ProductionRecent matches the floor's SHIPPED window: work settled longer ago
+// is history, not production.
+const ProductionRecent = 24 * time.Hour
+
+// Production reads what is relevant now, defined by state rather than a count:
+// repository rows; open PRs; queued, running, blocked or needs-you
+// constructions; deliveries that are not terminal, including blocked ones no
+// later verified delivery of the same kind and destination supersedes;
+// anything observed within ProductionRecent before at; the PRs those
+// deliveries name; PRs whose tasks belong to a mission not yet accepted; and
+// every check, reviewer and delivery of each of those PRs.
+const productionRelevant = `WITH recs AS (` + productionRows + `),
+ flagged AS (SELECT *, kind = 'repository' OR observed_at_ms >= ?
+	OR (kind = 'pull_request' AND json_extract(document, '$.state') = 'open')
+	OR (kind = 'construction' AND (json_extract(document, '$.status') IN ('queued', 'running', 'blocked') OR json_extract(document, '$.needs_you')))
+	OR (kind = 'delivery' AND COALESCE(json_extract(document, '$.state'), '') NOT IN ('verified', 'failed', 'blocked'))
+	OR (kind = 'delivery' AND json_extract(document, '$.state') = 'blocked' AND NOT EXISTS (SELECT 1 FROM recs v WHERE v.kind = 'delivery' AND v.repository = r.repository
+		AND json_extract(v.document, '$.kind') IS json_extract(r.document, '$.kind') AND json_extract(v.document, '$.destination') IS json_extract(r.document, '$.destination')
+		AND json_extract(v.document, '$.state') = 'verified' AND COALESCE(json_extract(v.document, '$.updated_at'), v.observed_at_ms) > COALESCE(json_extract(r.document, '$.updated_at'), r.observed_at_ms))) AS live FROM recs r),
+ missions AS (SELECT o.id FROM project_outcome_revisions o WHERE o.project_id = ? AND json_extract(o.document, '$.kind') = 'mission' AND json_extract(o.document, '$.state') <> 'accepted'
+	AND o.revision = (SELECT MAX(revision) FROM project_outcome_revisions WHERE id = o.id)),
+ pulls AS (SELECT repository, CAST(identity AS INTEGER) AS number FROM flagged WHERE kind = 'pull_request' AND live
+	UNION SELECT f.repository, j.value FROM flagged f, json_each(f.document, '$.pull_requests') j WHERE f.kind = 'delivery' AND f.live
+	UNION SELECT t.repository, t.pull_number FROM publication_tasks t JOIN mission_task_bindings b ON b.task_id = t.task_id WHERE b.mission_id IN (SELECT id FROM missions))
+ SELECT repository, kind, identity, visual_id, document, observed_at_ms FROM flagged f WHERE live
+	OR (kind = 'pull_request' AND EXISTS (SELECT 1 FROM pulls p WHERE p.repository = f.repository AND p.number = CAST(f.identity AS INTEGER)))
+	OR (kind IN ('check', 'delivery') AND EXISTS (SELECT 1 FROM pulls p, json_each(f.document, '$.pull_requests') j WHERE p.repository = f.repository AND p.number = j.value))
+	OR (kind = 'reviewer' AND EXISTS (SELECT 1 FROM pulls p WHERE p.repository = f.repository AND p.number = COALESCE(json_extract(f.document, '$.number'), json_extract(f.document, '$.request.PullNumber'))))`
+
+func (store *Store) Production(ctx context.Context, project ProjectID, offset, limit int, at UnixMillis) (ProductionPage, error) {
 	if project.zero() || offset < 0 || limit < 1 || limit > 8 {
 		return ProductionPage{}, ErrInvalidValue
 	}
@@ -1003,14 +1126,11 @@ func (store *Store) Production(ctx context.Context, project ProjectID, offset, l
 	}
 	defer tx.Close()
 	page := ProductionPage{Records: []ProductionRecord{}}
-	attentionAfter := PublicationAttentionAfter.Milliseconds()
-	if err := tx.connection.QueryRowContext(ctx, "SELECT count(*) FROM ("+productionRows+")", project.Bytes(), attentionAfter, project.Bytes()).Scan(&page.Total); err != nil {
+	args := []any{project.Bytes(), PublicationAttentionAfter.Milliseconds(), project.Bytes(), at.Int64() - ProductionRecent.Milliseconds(), project.Bytes()}
+	if err := tx.connection.QueryRowContext(ctx, "SELECT count(*) FROM ("+productionRelevant+")", args...).Scan(&page.Total); err != nil {
 		return page, err
 	}
-	// Load delivery evidence before merged PRs so bounded reads can identify completed work.
-	rows, err := tx.connection.QueryContext(ctx, "SELECT * FROM ("+productionRows+") ORDER BY CASE\n"+
-		" WHEN kind = 'repository' THEN 0\n"+
-		" WHEN kind = 'pull_request' AND json_extract(document, '$.state') = 'open' THEN 1\n"+" WHEN kind = 'construction' AND json_extract(document, '$.status') IN ('queued', 'running', 'blocked') THEN 2\n"+" WHEN kind = 'delivery' THEN 3\n"+" WHEN kind IN ('pull_request', 'check', 'reviewer') THEN 4\n"+" WHEN kind = 'construction' THEN 5\n"+" ELSE 6 END, repository, identity LIMIT ? OFFSET ?", project.Bytes(), attentionAfter, project.Bytes(), limit, offset)
+	rows, err := tx.connection.QueryContext(ctx, "SELECT * FROM ("+productionRelevant+") ORDER BY kind, repository, identity LIMIT ? OFFSET ?", append(args, limit, offset)...)
 	if err != nil {
 		return page, err
 	}

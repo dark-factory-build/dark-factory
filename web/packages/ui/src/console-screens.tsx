@@ -4,16 +4,18 @@ import {
   agentStatus,
   agentActivity,
   agentCurrentTask,
+  isSpecialist,
   projectGraph,
   projectFloor,
   projectProposals,
   type RunPathSample,
 } from "./console-view.js";
 import { FactoryScene, AgentSprite } from "./factory-scene/factory-scene.js";
-import { type ProductionContraption } from "./production-view.js";
+import { projectCrates, type ProductionContraption } from "./production-view.js";
 import { type ProjectContentCall } from "./project-library.js";
-import type { SceneHall, SceneMachine } from "./factory-scene/scene.js";
+import type { SceneUnit, SceneMachine } from "./factory-scene/scene.js";
 import { SectionHeader, Status } from "./console-kit.js";
+import { KnowledgeActivityList, activityLabel, onBoard, type KnowledgeActivity, type KnowledgeCue } from "./project-board.js";
 import { DEFAULT_FLOOR_APPEARANCE, type FloorAppearance } from "./floor-appearance.js";
 
 function shortID(value: string): string {
@@ -84,14 +86,21 @@ const NO_CHANGES: readonly ProductionContraption[] = [];
 
 /** The operational floor; every action opens an existing inspector or control. */
 export function FactoryFloor({
-  changes = NO_CHANGES, selectedChange, onSelectChange, state, graphs, onLoadNode, onAddTask, runPaths, lastRunPaths, selectedAgentId, onSelectAgent,
-  onSelectHumanRequest, selectedTaskId, onSelectTask, onOpenTasks, onOpenMissions, onOpenLibrary, onOpenBoard, requestedEntity, connected = true, floorAppearance = DEFAULT_FLOOR_APPEARANCE, projectId,
+  changes = NO_CHANGES, changesRead = false, selectedChange, onSelectChange, state, graphs, graphErrors, onLoadNode, onAddTask, runPaths, lastRunPaths, selectedAgentId, onSelectAgent,
+  onSelectHumanRequest, selectedTaskId, onSelectTask, onOpenTasks, onOpenMissions, onOpenLibrary, onOpenBoard, requestedEntity, connected = true, floorAppearance = DEFAULT_FLOOR_APPEARANCE, projectId, activity = [], activityCues = [], onOpenActivity,
 }: {
+  /** Recorded Board and Library operations, newest first, and the few just cued. */
+  activity?: readonly KnowledgeActivity[];
+  activityCues?: readonly KnowledgeCue[];
+  onOpenActivity?: (item: KnowledgeActivity) => void;
   changes?: readonly ProductionContraption[];
+  /** Whether `changes` were read on this connection; until then the work line has nothing to look at. */
+  changesRead?: boolean;
   selectedChange?: string;
   onSelectChange?: (key: string) => void;
   state: StateView | undefined;
   graphs: ReadonlyMap<string, OperationalGraphView> | undefined;
+  graphErrors?: ReadonlyMap<string, string>;
   onLoadNode?: (projectId: string, nodeId: string) => Promise<OperationalNodeView>;
   onAddTask?: (agent: AgentItem, instruction: string, mode: "queue" | "any") => Promise<boolean>;
   runPaths?: ReadonlyMap<string, RunPathSample>;
@@ -112,14 +121,16 @@ export function FactoryFloor({
   onProjectContent?: ProjectContentCall;
 }) {
   const projects = useMemo(() => [...state?.projects.values() ?? []].map(({ id }) => id).sort(), [JSON.stringify([...state?.projects.keys() ?? []].sort())]);
-  const prepared = useMemo(() => projectGraph(graphs, projects, floorAppearance.detail ?? "auto"), [graphs, projects, floorAppearance.detail]);
+  const prepared = useMemo(() => projectGraph(graphs, projects), [graphs, projects]);
   const scene = useMemo(() => projectFloor(state, prepared, runPaths, lastRunPaths), [state, prepared, runPaths, lastRunPaths]);
   const proposed = useMemo(() => projectProposals(prepared, changes), [prepared, changes]);
+  const crates = useMemo(() => changesRead ? projectCrates(changes) : undefined, [changes, changesRead]);
   const peerQuestions = useMemo(() => [...(state?.peerQuestions?.values() ?? [])], [state]);
   const projectOf = (nodeId: string) => projects.find((id) => graphs?.get(id)?.nodes.some((node) => node.id === nodeId || nodeId.startsWith(`${node.id}:`)));
-  const unplaced = proposed.proposals.filter((proposal) => proposal.state === "unavailable" || proposal.operations.some((operation) => operation.roomId === undefined)).length;
+  const unplaced = proposed.proposals.filter((proposal) => proposal.state === "unavailable" || proposal.operations.some((operation) => operation.entityId === undefined)).length;
   const unavailable = projects.flatMap((id) => graphs?.get(id)?.sources.filter((source) => source.kind === "unavailable") ?? []);
-  const investigate = onAddTask === undefined || state === undefined ? undefined : (machine: SceneMachine, hall?: SceneHall) => {
+  const refused = projects.flatMap((id) => { const code = graphErrors?.get(id); return code === undefined ? [] : [`${state?.projects.get(id)?.name ?? id} · ${code}`]; });
+  const investigate = onAddTask === undefined || state === undefined ? undefined : (machine: SceneMachine, unit?: SceneUnit) => {
     const project = projectOf(machine.id) ?? projectId;
     const agent = [...state.agents.values()].filter((candidate) => !candidate.archived && candidate.project_id === project).sort((left, right) => Number(left.role === "orchestrator") - Number(right.role === "orchestrator") || left.id.localeCompare(right.id))[0];
     if (agent === undefined) return;
@@ -128,7 +139,7 @@ export function FactoryFloor({
     const reading = machine.reading;
     const label = reading.evidence === "runtime" ? `runtime-only ${machine.kind}` : machine.label;
     void onAddTask(agent, [
-      `Investigate the ${machine.kind} "${label}"${hall !== undefined && hall.id !== machine.id ? ` in ${hall.label}` : ""} (operational node ${machine.represented?.join(", ") ?? machine.id}).`,
+      `Investigate the ${machine.kind} "${label}"${unit !== undefined && unit.id !== machine.id ? ` in ${unit.label}` : ""} (operational node ${machine.represented?.join(", ") ?? machine.id}).`,
       `Observation: ${reading.observation}; state: ${reading.state}; evidence: ${reading.evidence}; ${reading.ratePerHour} events/hour; ${reading.errorPermille / 10}% errors; p95 ${reading.latencyMs} ms.`,
       reading.evidence === "runtime" ? "The code does not explain this runtime activity. Find what serves it and make the static model and the code agree, or report why it cannot be explained."
         : reading.observation === "unobserved" ? "Nothing observes this component. Find a way to observe it with the project's existing tooling, or report why it cannot be observed."
@@ -136,16 +147,20 @@ export function FactoryFloor({
     ].join("\n"), "any");
   };
   return <div className="dfFactoryFloor">
-    <div className="dfFactoryFloor__scene">
     <FactoryScene
       tools={<>
+        {onOpenActivity === undefined ? null : <KnowledgeActivityList items={activity} state={state} onOpen={onOpenActivity} />}
+        {unplaced + refused.length + unavailable.length === 0 ? null : <details className="dfFloorMenu" name="floor-tools"><summary>Notices · {unplaced + refused.length + unavailable.length}</summary><div className="dfFloorMenu__body">
         {unplaced > 0 ? <p className="dfFactoryEntityTools__notice" role="status">{unplaced} {unplaced === 1 ? "change is" : "changes are"} not fully placed on the floor; its pull request in Work lists every path.</p> : null}
-        {unavailable.length > 0 ? <p className="dfFactoryEntityTools__notice" role="status">Source unavailable for {unavailable.map((source) => source.name).join(", ")}; those halls cannot be inferred.</p> : null}
+        {refused.length > 0 ? <p className="dfFactoryEntityTools__notice" role="status">Plant unavailable: {refused.join(", ")}; retrying.</p> : null}
+        {unavailable.length > 0 ? <p className="dfFactoryEntityTools__notice" role="status">Source unavailable for {unavailable.map((source) => source.name).join(", ")}; those units cannot be inferred.</p> : null}
+        </div></details>}
       </>}
       onLoadNode={onLoadNode === undefined ? undefined : (nodeId) => { const project = projectOf(nodeId); return project === undefined ? Promise.reject(new Error("unknown node")) : onLoadNode(project, nodeId); }}
       onInvestigate={investigate}
       onDiscussSource={onOpenBoard === undefined ? undefined : (nodeId) => { const project = projectOf(nodeId); onOpenBoard(project, project === undefined ? undefined : `${project}:${nodeId}`); }}
       proposals={{ items: proposed.proposals, selected: selectedChange, onSelect: (id) => onSelectChange?.(id) }}
+      crates={crates}
       appearance={floorAppearance}
       selectedWorkerId={selectedAgentId}
       selectedTaskId={selectedTaskId}
@@ -153,8 +168,11 @@ export function FactoryFloor({
       projectId={projectId}
       workers={[...scene.workers, ...proposed.reviewers.filter((worker) => !selectedChange || worker.review?.proposalId === selectedChange)]}
       connected={connected}
+      unavailable={refused.length === 0 ? undefined : refused.join(", ")}
+      reading={graphs === undefined || projects.some((id) => !graphs.has(id) && !graphErrors?.has(id))}
       tasks={scene.tasks}
       peerQuestions={peerQuestions}
+      knowledgeCues={activityCues.map((cue) => ({ key: cue.key, agentId: cue.agent_id, board: onBoard(cue), reading: cue.operation === "read", label: activityLabel(cue, state), open: onOpenActivity === undefined ? undefined : () => onOpenActivity(cue) }))}
       requestedEntity={requestedEntity}
       onSelectTask={onSelectTask}
       onOpenTasks={onOpenTasks}
@@ -171,12 +189,11 @@ export function FactoryFloor({
         else { const reviewer = proposed.reviewers.find((actor) => actor.id === workerID); if (reviewer?.review) onSelectChange?.(reviewer.review.proposalId); }
       }}
     />
-    </div>
   </div>;
 }
 
-export function rankLabel(role: AgentItem["role"]): string {
-  return role === "orchestrator" ? "Overseer" : "Worker";
+export function rankLabel(role: AgentItem["role"] | "specialist"): string {
+  return role === "orchestrator" ? "Overseer" : role === "specialist" ? "Specialist" : "Worker";
 }
 
 /** Agents grouped by rank, oversight first. */
@@ -198,8 +215,8 @@ export function AgentList({
     <div className="dfAgentList">
       <label><input type="checkbox" checked={showArchived} onChange={(event) => setShowArchived(event.currentTarget.checked)} /> Show archived</label>
       {agents.length === 0 ? <p className="dfFactoryConsole__empty">no agents</p> : null}
-      {(["orchestrator", "worker"] as const).map((role) => {
-        const members = agents.filter((agent) => agent.role === role);
+      {(["orchestrator", "specialist", "worker"] as const).map((role) => {
+        const members = agents.filter((agent) => role === "specialist" ? isSpecialist(agent) : agent.role === role && !isSpecialist(agent));
         if (members.length === 0) return null;
         return (
           <section key={role} aria-label={rankLabel(role)}>

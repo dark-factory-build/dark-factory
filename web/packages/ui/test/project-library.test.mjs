@@ -6,7 +6,7 @@ import { ProjectLibrary } from "../dist/src/project-library.js";
 import { fixtureState } from "../../../fixtures/state.mjs";
 
 globalThis.IS_REACT_ACT_ENVIRONMENT = true;
-const metadata = { id: "ab".repeat(16), revision: 2, latest_revision: 3, kind: "procedure", title: "Optional guide", description: "Release instructions", author: "worker", source_references: "" };
+const metadata = { id: "ab".repeat(16), revision: 2, latest_revision: 3, created_at_ms: 1700000000000, kind: "procedure", title: "Optional guide", description: "Release instructions", author: "worker", source_references: "" };
 const words = (node) => typeof node === "string" ? node : (node.children ?? []).map(words).join("");
 const button = (renderer, label) => { const found = renderer.root.findAllByType("button").find((item) => words(item).includes(label)); assert.ok(found, label); return found; };
 const click = async (renderer, label) => { await act(async () => button(renderer, label).props.onClick()); };
@@ -58,9 +58,9 @@ test("intentional entry is flat and a document click reads its exact revision an
   assert.equal(renderer.root.findAllByType("details").length, 0, "open library has no nested disclosures");
   assert.ok(!renderer.root.findAllByType("button").some(node => words(node) === "Retire document"));
   await click(renderer, "Sources & history");
-  const originalFormData = globalThis.FormData;
-  globalThis.FormData = class { get() { return "1"; } };
-  try { await act(async () => renderer.root.findByProps({ "aria-label": "Read a revision" }).props.onSubmit({ preventDefault() {}, currentTarget: {} })); } finally { globalThis.FormData = originalFormData; }
+  assert.match(words(renderer.root.findByProps({ "aria-label": "Document history" })), /2023/);
+  assert.ok(!renderer.root.findAllByProps({ "aria-label": "Read a revision" }).length, "numeric revision ceremony is removed");
+  await click(renderer, "Revision 1");
   assert.deepEqual(calls.slice(-2).map(({ operation, input }) => [operation, input.revision]), [["read", 1], ["body", 1]]);
 });
 
@@ -176,7 +176,7 @@ test("board shares immutable threads, resolves by revision, and retains linked c
   assert.equal(reset, true);
   assert.deepEqual(renderer.root.findByType("pre").children, ["Concrete evidence, not a permission grant."], "posting keeps the thread in view");
   await click("Save conclusion");
-  assert.equal(renderer.root.findByProps({ name: "kind" }).props.defaultValue, "lesson");
+  assert.equal(renderer.root.findAllByProps({ name: "kind" }).length, 0, "specialized conclusion keeps its intent without a category selector");
   assert.deepEqual(renderer.root.findByProps({ name: "evidence" }).props.defaultValue.split("\n"), ["test:regression", `content:${metadata.id}@3`], "conclusion retains existing and thread evidence");
   const originalFormData = globalThis.FormData;
   const values = { kind: "lesson", repository_id: metadata.repository_id, title: "Retained conclusion", body: "Use exact authority", status: "tentative", evidence: `content:${metadata.id}@3`, entities: source, thread_id: metadata.id, branch: "topic", environment: "staging" };
@@ -235,18 +235,17 @@ const visibleWords = (node) => typeof node === "string" ? node : node.type === "
 test("reader keeps named actions visible and opens one workspace at a time", async (t) => {
   const source = "project:opaque-one", other = "project:opaque-two", task = "aa".repeat(16), opened = [];
   const doc = { ...metadata, revision: 3, title: "Deployment guide", description: "Deployment guide", author: "run:opaque-author", repository_id: "bb".repeat(16), commit: "d".repeat(40), path: ".dark-factory/content/doc.md", source_references: JSON.stringify({ status: "current", source_revision: "c".repeat(40), branch: "private-branch", environment: "test-environment", entities: [source, other], record_type: "task", record_id: task, task_id: task }) };
-  const renderer = await mount(t, { open: true, onSource: (ref) => opened.push(ref), onRecord: (...args) => opened.push(args), call: async (operation) => operation === "search" ? { items: [doc] } : operation === "read" ? doc : { body: "Useful deployment steps.", complete: true } });
+  const renderer = await mount(t, { open: true, onSource: (ref) => opened.push(ref), onRecord: (...args) => opened.push(args), onUseInTask: (chip) => opened.push(chip), call: async (operation) => operation === "search" ? { items: [doc] } : operation === "read" ? doc : { body: "Useful deployment steps.", complete: true } });
   await click(renderer, "Deployment guide");
   const reader = renderer.root.findByProps({ "aria-label": "Selected library revision" });
   assert.match(visibleWords(reader), /Deployment guide.*Revision.*current.*Useful deployment steps/);
-  assert.match(visibleWords(reader), /Edit document.*Use in a task.*Sources & history/);
-  assert.doesNotMatch(visibleWords(reader), /opaque|Repository|Attach revision|unspecified|Manage/);
+  assert.match(visibleWords(reader), /Edit document.*Use in a new task.*Sources & history/);
+  assert.doesNotMatch(visibleWords(reader), /opaque|Repository|Attach|unspecified|Manage/);
   assert.equal(renderer.root.findAllByType("details").length, 0);
   assert.equal(renderer.root.findByProps({ type: "search" }).parent.type, "label", "search is visible at entry");
-  await click(renderer, "Use in a task");
-  assert.ok(renderer.root.findByProps({ "aria-label": "Attach to a task" }));
-  assert.equal(reader.findAllByType("pre").length, 0, "form replaces the body rather than stacking below it");
-  await click(renderer, "Cancel");
+  await click(renderer, "Use in a new task");
+  assert.deepEqual(opened.splice(0), [{ content_id: doc.id, revision: 3n, title: "Deployment guide", project_id: [...fixtureState.projects.keys()][0] }], "hands the exact revision to the New task form");
+  assert.equal(renderer.root.findAllByType("form").filter((form) => form.props["aria-label"] !== undefined && /task/i.test(form.props["aria-label"])).length, 0, "the Library keeps no task form");
   assert.deepEqual(reader.findByType("pre").children, ["Useful deployment steps."]);
   await click(renderer, "Sources & history");
   assert.equal(reader.findAllByType("pre").length, 0);
@@ -300,7 +299,7 @@ test("editor preserves scope fields in one form, and the Library contains curate
   assert.ok(!calls.some(({ operation }) => operation.startsWith("outcome")), "documents never fetch outcomes");
   assert.ok(!renderer.root.findAllByType("button").some((node) => words(node) === "Outcomes"));
   assert.ok(!calls.some(({ operation }) => operation.startsWith("outcome")), "the Library never fetches outcomes");
-  await click(renderer, "All documents"); assert.ok(renderer.root.findByProps({ type: "search" }));
+  await click(renderer, "Documents"); assert.ok(renderer.root.findByProps({ type: "search" }));
 });
 
 
@@ -355,23 +354,23 @@ test("discussion renders exact reply bodies and appends the next page", async t 
   assert.equal(renderer.root.findAllByType("article").length, 2);
 });
 
-test("new decisions, lessons and briefs retain required references and scope", async t => {
-  for (const kind of ["decision", "lesson", "project_brief"]) {
-    let write;
-    const renderer = await mount(t, { open: true, call: async (operation, input) => {
-      if (operation === "search") return { items: [] };
-      write = input; return { ...input, revision: 1, latest_revision: 1 };
-    } });
-    await click(renderer, "New document");
-    await act(async () => renderer.root.findByProps({ name: "kind" }).props.onChange({ target: { value: kind } }));
-    assert.ok(renderer.root.findByProps({ name: "evidence" }));
-    const original = globalThis.FormData;
-    globalThis.FormData = class { get(name) { return { kind, title: "Guidance", body: "Supported", status: "current", evidence: "content:source@1" }[name] ?? null; } };
-    try { await act(async () => renderer.root.findByProps({ "aria-label": "Knowledge editor" }).props.onSubmit({ preventDefault() {}, currentTarget: {} })); } finally { globalThis.FormData = original; }
-    const meta = JSON.parse(write.source_references);
-    assert.deepEqual(meta.evidence, ["content:source@1"]);
-    assert.equal(meta.scope, kind === "project_brief" ? "project" : "repository");
-  }
+test("ordinary Add note keeps links as evidence and does not promote status", async t => {
+  let write;
+  const renderer = await mount(t, { open: true, call: async (operation, input) => {
+    if (operation === "search") return { items: [] };
+    write = input; return { ...input, revision: 1, latest_revision: 1 };
+  } });
+  await click(renderer, "Add note");
+  assert.equal(renderer.root.findAllByProps({ name: "kind" }).length, 0, "ordinary notes do not expose storage categories");
+  assert.ok(renderer.root.findByProps({ name: "links" }));
+  const original = globalThis.FormData;
+  globalThis.FormData = class { get(name) { return { title: "A useful note", body: "Supported", links: "https://example.test/evidence" }[name] ?? null; } };
+  try { await act(async () => renderer.root.findByProps({ "aria-label": "Knowledge editor" }).props.onSubmit({ preventDefault() {}, currentTarget: {} })); } finally { globalThis.FormData = original; }
+  const meta = JSON.parse(write.source_references);
+  assert.equal(write.kind, "observation");
+  assert.deepEqual(meta.evidence, ["https://example.test/evidence"]);
+  assert.equal(meta.status, "tentative");
+  assert.equal(meta.scope, "repository");
 });
 
 test("a scheduled search cannot interrupt a document save", async t => {

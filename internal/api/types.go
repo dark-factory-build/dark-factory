@@ -149,6 +149,14 @@ type WebStatus struct {
 	Build            BuildIdentity `json:"build,omitzero"`
 }
 
+// WebPair carries a one-shot browser pairing link to the operator. The link
+// is a credential: callers hand it straight to a browser and never print it.
+type WebPair struct {
+	Link string `json:"link"`
+}
+
+func (WebPair) String() string { return "WebPair(<redacted>)" }
+
 // BuildIdentity is the bounded public identity of the daemon serving this
 // status. Development builds keep Release false even when VCS metadata is
 // available as a useful source revision.
@@ -425,6 +433,7 @@ type Content struct {
 	Commit           string `json:"commit,omitempty"`
 	Path             string `json:"path,omitempty"`
 	Revision         uint64 `json:"revision"`
+	CreatedAtMs      uint64 `json:"created_at_ms"`
 	Deprecated       bool   `json:"deprecated"`
 	LatestRevision   uint64 `json:"latest_revision"`
 }
@@ -598,14 +607,16 @@ type FactorySummary struct {
 }
 
 type ProjectSummary struct {
-	ID             string `json:"id"`
-	Name           string `json:"name"`
-	RunBudgetLimit uint64 `json:"run_budget_limit"`
-	RunsUsed       uint64 `json:"runs_used"`
-	MaxRunSeconds  uint32 `json:"max_run_seconds"`
-	TokenLimit     uint64 `json:"token_limit"`
-	TokensUsed     uint64 `json:"tokens_used"`
-	Revision       uint64 `json:"revision"`
+	ID                      string `json:"id"`
+	Name                    string `json:"name"`
+	RunBudgetLimit          uint64 `json:"run_budget_limit"`
+	RunsUsed                uint64 `json:"runs_used"`
+	MaxRunSeconds           uint32 `json:"max_run_seconds"`
+	TokenLimit              uint64 `json:"token_limit"`
+	TokensUsed              uint64 `json:"tokens_used"`
+	Revision                uint64 `json:"revision"`
+	SpecialistRuns          uint32 `json:"specialist_runs"`
+	SpecialistOpenProposals uint32 `json:"specialist_open_proposals"`
 }
 
 type AgentSummary struct {
@@ -626,6 +637,7 @@ type AgentSummary struct {
 	IdleInstruction  string `json:"idle_instruction"`
 	IdleRunBudget    uint32 `json:"idle_run_budget"`
 	IdleRunsUsed     uint32 `json:"idle_runs_used"`
+	IdleWakeOn       string `json:"idle_wake_on"`
 	Revision         uint64 `json:"revision"`
 }
 
@@ -849,13 +861,15 @@ type AgentIdlePolicyInput struct {
 	AfterSeconds     uint32 `json:"after_seconds"`
 	Instruction      string `json:"instruction"`
 	RunBudget        uint64 `json:"run_budget"`
+	// WakeOn is a specialist's event classes; empty is none.
+	WakeOn string `json:"wake_on,omitempty"`
 }
 
 func validAgentIdlePolicyInput(input AgentIdlePolicyInput) bool {
 	if !validID(input.AgentID) || input.ExpectedRevision == 0 || input.AfterSeconds > kernel.MaxIdleAfterSeconds || input.RunBudget > uint64(kernel.MaxIdleRunBudget) || !validText(input.Instruction, 0, 32768) {
 		return false
 	}
-	return input.Policy == "wait" && input.AfterSeconds == 0 && input.Instruction == "" && input.RunBudget == 0 || input.Policy == "standing_instruction" && input.AfterSeconds > 0 && input.Instruction != ""
+	return input.Policy == "wait" && input.AfterSeconds == 0 && input.Instruction == "" && input.RunBudget == 0 && input.WakeOn == "" || input.Policy == "standing_instruction" && input.AfterSeconds > 0 && input.Instruction != ""
 }
 
 type OverseerRunStopInput struct {
@@ -942,6 +956,9 @@ type ProjectLimitsInput struct {
 	// TokenBudget permits this many more provider tokens than are already
 	// recorded; zero removes the ceiling and absent leaves it as it is.
 	TokenBudget *uint64 `json:"token_budget,omitempty"`
+	// The specialist limits; absent leaves each as it is.
+	SpecialistRuns          *uint32 `json:"specialist_runs,omitempty"`
+	SpecialistOpenProposals *uint32 `json:"specialist_open_proposals,omitempty"`
 }
 
 type CreateAgentInput struct {

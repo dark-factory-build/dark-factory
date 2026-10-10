@@ -59,16 +59,21 @@ func browserIntakeResult(value api.IntakeResult) browserprotocol.IntakeResult {
 		for _, source := range value.Sources {
 			view := browserprotocol.IntakeSource{LinearTeamID: source.LinearTeamID, PriorityDefault: source.PriorityDefault, PriorityByLabel: source.PriorityByLabel, Repository: source.Repository, TargetRepositoryID: source.TargetRepositoryID, OverseerAgentID: source.OverseerAgentID, Label: source.Label, Policy: source.Policy, TrustedAuthors: append([]string(nil), source.TrustedAuthors...), PollSeconds: source.PollSeconds, AdmissionLimit: source.AdmissionLimit, ID: source.ID, ProjectID: source.ProjectID, GitHubRepositoryID: browserprotocol.Decimal(source.GitHubRepositoryID), Enabled: browserprotocol.Bool(source.Enabled), Revision: browserprotocol.Decimal(source.Revision)}
 			if source.Sync != nil {
-				view.Sync = &browserprotocol.IntakeSync{LastAttemptAt: browserprotocol.Decimal(source.Sync.LastAttemptAt), LastSuccessAt: browserprotocol.Decimal(source.Sync.LastSuccessAt), ImportedTasks: source.Sync.ImportedTasks, State: source.Sync.State, Error: source.Sync.Error}
+				view.Sync = &browserprotocol.IntakeSync{LastAttemptAt: browserprotocol.Decimal(source.Sync.LastAttemptAt), LastSuccessAt: browserprotocol.Decimal(source.Sync.LastSuccessAt), ImportedTasks: source.Sync.ImportedTasks, State: source.Sync.State, Error: source.Sync.Error, Waiting: browserIntakeCandidates(source.Sync.Waiting)}
 			}
 			result.Sources = append(result.Sources, view)
 		}
 	}
 	if value.Candidates != nil {
-		result.Candidates = make([]browserprotocol.IntakeCandidate, 0, len(value.Candidates))
-		for _, candidate := range value.Candidates {
-			result.Candidates = append(result.Candidates, browserprotocol.IntakeCandidate{Number: browserprotocol.Decimal(candidate.Number), URL: candidate.URL, Title: candidate.Title, Body: candidate.Body, Author: candidate.Author, Labels: append([]string(nil), candidate.Labels...), ContentHash: candidate.ContentHash, Reason: candidate.Reason, AcceptanceID: candidate.AcceptanceID, TaskID: candidate.TaskID, Truncated: browserprotocol.Bool(candidate.Truncated)})
-		}
+		result.Candidates = browserIntakeCandidates(value.Candidates)
+	}
+	return result
+}
+
+func browserIntakeCandidates(values []api.IntakeCandidate) []browserprotocol.IntakeCandidate {
+	result := make([]browserprotocol.IntakeCandidate, 0, len(values))
+	for _, candidate := range values {
+		result = append(result, browserprotocol.IntakeCandidate{Number: browserprotocol.Decimal(candidate.Number), URL: candidate.URL, Title: candidate.Title, Body: candidate.Body, Author: candidate.Author, Labels: append([]string{}, candidate.Labels...), ContentHash: candidate.ContentHash, Reason: candidate.Reason, AcceptanceID: candidate.AcceptanceID, TaskID: candidate.TaskID, Truncated: browserprotocol.Bool(candidate.Truncated)})
 	}
 	return result
 }

@@ -7,6 +7,7 @@ import {
   type RepositoryView,
   type IntakeView,
   type GitHubConnectionResult,
+  type TelemetryIngest,
 } from "@dark-factory/client";
 
 const LOOPBACK_GRANT = CAPABILITIES.human_actions | CAPABILITIES.terminal_input;
@@ -19,7 +20,7 @@ export type FactoryRemoteInvite = Readonly<{
 
 export type FactoryGitHubView = Readonly<{ result?: GitHubConnectionResult; pending: boolean; error?: string }>;
 
-type SettingsSession = Pick<BrowserSession, "discoverAccounts" | "linkAccount" | "updateAccount" | "inviteRemote" | "listBrowserClients" | "revokeBrowserClient" | "githubConnection" | "intake" | "getRepositories" | "mutateRepository" | "createProject" | "capabilities" | "clientId">;
+type SettingsSession = Pick<BrowserSession, "discoverAccounts" | "linkAccount" | "updateAccount" | "inviteRemote" | "telemetryIngest" | "listBrowserClients" | "revokeBrowserClient" | "githubConnection" | "intake" | "getRepositories" | "mutateRepository" | "createProject" | "capabilities" | "clientId">;
 
 type SettingsOwner = Readonly<{
   session(): SettingsSession | undefined;
@@ -125,12 +126,16 @@ export class FactorySettingsCoordinator {
   async loadIntake(projectId: string): Promise<void> {
     await this.#observe(["intake", projectId], async (session, current) => {
       const result = await session.intake({ action: "list", project_id: projectId });
-      if (current()) this.#intake.set(projectId, result);
+      // A refresh keeps an open issue review and the last action's outcome.
+      const prior = this.#intake.get(projectId);
+      if (current()) this.#intake.set(projectId, prior === undefined ? result : { ...prior, sources: result.sources });
     }, { scoped: true });
   }
 
   async intakeAction(projectId: string, request: Parameters<BrowserSession["intake"]>[0]): Promise<void> {
     if (!this.#owner.ready() || this.#owner.session() === undefined) return;
+    // Accepting from Work refreshes the local list; only an open issue review reads the backlog again.
+    const previewed = this.#intake.get(projectId)?.candidates !== undefined;
     if (["preview","refresh","accept","update"].includes(request.action)) {
       const prior = this.#intake.get(projectId);
       if (prior !== undefined) this.#intake.set(projectId, { ...prior, candidates: undefined, reviewed_revision: undefined, next_page: undefined });
@@ -153,8 +158,11 @@ export class FactorySettingsCoordinator {
         ...(result.imported_tasks === undefined ? { imported_tasks: [] } : {}),
       }));
       if (request.action === "accept" && result.state === "imported" && request.source_id !== undefined) {
-        const preview = await session.intake({action:"preview",source_id:request.source_id,page:1});
-        if (current()) this.#intake.set(projectId,{...this.#intake.get(projectId),...preview});
+        for (const next of [{action:"list" as const,project_id:projectId}, ...(previewed ? [{action:"preview" as const,source_id:request.source_id,page:1}] : [])]) {
+          const refreshed = await session.intake(next);
+          if (!current()) return;
+          this.#intake.set(projectId,{...this.#intake.get(projectId),...refreshed});
+        }
       }
     }, { scoped: true, overlap: true });
   }
@@ -292,6 +300,13 @@ export class FactorySettingsCoordinator {
       const invite = await session.inviteRemote();
       if (current()) this.#remoteInvite = { link: invite.link, svg: invite.svg, expiresAtMs: invite.expiresAtMs };
     }, { quiet: true, release: true, failed: () => { this.#remoteInvite = undefined; } });
+  }
+
+  /** A minted secret goes only to the caller, never into published state. */
+  async telemetryIngest(action: Parameters<BrowserSession["telemetryIngest"]>[0]): Promise<TelemetryIngest> {
+    const session = this.#owner.session();
+    if (!this.#owner.ready() || session === undefined) throw new Error("unavailable");
+    try { return await session.telemetryIngest(action); } catch (error) { throw new Error(this.#owner.errorCode(error)); }
   }
 
   dismissRemoteInvite(): void {

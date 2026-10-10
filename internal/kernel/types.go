@@ -570,9 +570,13 @@ type Project struct {
 	RunBudgetLimit uint64
 	RunsUsed       uint64
 	MaxRunSeconds  uint32
-	Revision       Revision
-	CreatedAt      UnixMillis
-	UpdatedAt      UnixMillis
+	// SpecialistRuns bounds the project's specialist reviews running at once;
+	// SpecialistOpenProposals bounds each agent's open proposals.
+	SpecialistRuns          uint32
+	SpecialistOpenProposals uint32
+	Revision                Revision
+	CreatedAt               UnixMillis
+	UpdatedAt               UnixMillis
 }
 
 // IdlePolicy is what an agent does with no run: wait for work, or enqueue a
@@ -600,6 +604,9 @@ type IdleRule struct {
 	Instruction  string
 	RunBudget    uint32
 	RunsUsed     uint32
+	// WakeOn is a specialist's event classes: "", "failures", "merges" or
+	// "failures,merges".
+	WakeOn string
 }
 
 type Agent struct {
@@ -622,6 +629,12 @@ type Agent struct {
 	UpdatedAt       UnixMillis
 }
 
+// Specialist is a worker that runs a standing instruction: it reviews on its
+// own schedule (specialistSchedule) and never claims shared work.
+func (a Agent) Specialist() bool {
+	return a.Role == RoleWorker && a.Idle.Policy == IdleStandingInstruction
+}
+
 type Task struct {
 	ID                       TaskID
 	ProjectID                ProjectID
@@ -642,13 +655,15 @@ type Task struct {
 }
 
 type ProjectSummary struct {
-	ID             ProjectID
-	Name           string
-	RunBudgetLimit uint64
-	RunsUsed       uint64
-	MaxRunSeconds  uint32
-	Tokens         ProjectTokens
-	Revision       Revision
+	ID                      ProjectID
+	Name                    string
+	RunBudgetLimit          uint64
+	RunsUsed                uint64
+	MaxRunSeconds           uint32
+	Tokens                  ProjectTokens
+	SpecialistRuns          uint32
+	SpecialistOpenProposals uint32
+	Revision                Revision
 }
 
 type AgentSummary struct {
@@ -677,7 +692,10 @@ type AgentSummary struct {
 	ToolBudgetLimit uint64 `json:"-"`
 	ToolCallsUsed   uint64 `json:"-"`
 	Idle            IdleRule
-	Revision        Revision
+	// Specialist is a specialist's review schedule. It changes without the
+	// agent revision, as the tasks and content it reads change.
+	Specialist *SpecialistState
+	Revision   Revision
 }
 
 // AccountSummary is the served account fact: which login it is and where its

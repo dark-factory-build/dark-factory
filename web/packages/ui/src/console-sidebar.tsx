@@ -1,10 +1,12 @@
 import { useEffect, useId, useRef, useState, type FormEvent, type ReactNode } from "react";
-import { MAX_TASK_ATTACHMENTS, MAX_TASK_ATTACHMENT_BYTES, MAX_TASK_PRIORITY, type IntakeView, type IntakeBody, type DiscoveredAccount, type AccountItem, type AgentItem, type GitHubConnectionBody, type GitHubDelegationBody, type HumanRequestItem, type ProjectItem, type RepositoryMutation, type RepositoryView, type StateView, type TaskHistoryView, type TaskItem, type TaskListView, type TaskPeerQuestion } from "@dark-factory/client";
+import { MAX_TASK_ATTACHMENTS, MAX_TASK_ATTACHMENT_BYTES, MAX_TASK_PRIORITY, type IntakeView, type IntakeBody, type DiscoveredAccount, type AccountItem, type AgentItem, type IdleWakeOn, type GitHubConnectionBody, type GitHubDelegationBody, type HumanRequestItem, type ProjectItem, type RepositoryMutation, type RunTelemetry, type RepositoryView, type StateView, type TaskHistoryView, type TaskItem, type TaskListView, type TaskPeerQuestion, type TaskContentPin } from "@dark-factory/client";
 import type { FactoryEditView, FactoryHumanRequestView } from "./factory-app-controller.js";
 import type { FactoryGitHubView } from "./factory-settings-coordinator.js";
 import { rankLabel } from "./console-screens.js";
+import { activityLabel, type KnowledgeActivity } from "./project-board.js";
 import { AgentSprite } from "./factory-scene/factory-scene.js";
-import { agentStatus, agentCurrentTask, agentActivity, type WorkRow, type WorkState } from "./console-view.js";
+import { telemetryLine } from "./factory-scene/scene.js";
+import { agentStatus, agentCurrentTask, agentActivity, isSpecialist, needsYou, type WorkRow, type WorkState } from "./console-view.js";
 import { productionKey, productionStages } from "./production-view.js";
 import { AnswerControls } from "./console-interactions.js";
 import { Icon, IconButton, type IconName } from "./icons.js";
@@ -13,7 +15,7 @@ import type { FloorAppearance } from "./floor-appearance.js";
 import type { PublishedRelease, RuntimeBuild } from "./production-data.js";
 
 /** Only the controls the operator actually changed; the rest are left alone. */
-export type AgentConfigEdit = Readonly<{ model?: string; reasoningEffort?: string; accountId?: string; paused?: boolean; archived?: boolean; idlePolicy?: "wait" | "standing_instruction"; idleAfterSeconds?: number; idleInstruction?: string; idleRunBudget?: number }>;
+export type AgentConfigEdit = Readonly<{ model?: string; reasoningEffort?: string; accountId?: string; paused?: boolean; archived?: boolean; idlePolicy?: "wait" | "standing_instruction"; idleAfterSeconds?: number; idleInstruction?: string; idleRunBudget?: number; idleWakeOn?: IdleWakeOn }>;
 
 export type TaskEdit = Readonly<{ title?: string; body?: string; priority?: number; assignedAgentId?: string; cancel?: boolean; retry?: boolean }>;
 export type TaskBrief = Readonly<{ taskId: string; revision: bigint; head: bigint; instruction: string; feedback: string; outcome?: string; peerQuestions: readonly TaskPeerQuestion[]; nextPeerOffset?: bigint }>;
@@ -56,10 +58,16 @@ export function AgentPanel({
   terminalContent,
   panel: panelProp,
   onPanel,
+  telemetry,
+  contributions = [],
+  onOpenActivity,
 }: {
   agent: AgentItem;
   state: StateView | undefined;
   edit?: FactoryEditView;
+  /** A specialist's recorded Board and Library operations, already filtered to it. */
+  contributions?: readonly KnowledgeActivity[];
+  onOpenActivity?: (item: KnowledgeActivity) => void;
   ready: boolean;
   onSaveConfig?: (config: AgentConfigEdit) => void;
   onEditAppearance?: (agent: AgentItem) => void;
@@ -70,7 +78,10 @@ export function AgentPanel({
   terminalContent?: ReactNode;
   panel?: AgentPanelView;
   onPanel?: (panel: AgentPanelView) => void;
+  /** What the current run's agent CLI recorded; absent when it recorded nothing. */
+  telemetry?: RunTelemetry;
 }) {
+  const effort = telemetry === undefined ? "" : telemetryLine(telemetry);
   const activity = state === undefined ? "ready" : agentStatus(agent, state);
   const current = state === undefined ? undefined : agentCurrentTask(agent, state);
   const queued = state === undefined ? [] : [...state.tasks.values()]
@@ -80,6 +91,7 @@ export function AgentPanel({
   const selectPanel = onPanel ?? setLocalPanel;
   const errorCopy = edit?.target === agent.id ? editErrorCopy(edit) : undefined;
   const archived = agent.archived === true;
+  const specialist = isSpecialist(agent);
   const queueHint = !archived && agent.paused
     ? "Queue paused"
     : current === undefined && queued.length > 0
@@ -100,14 +112,15 @@ export function AgentPanel({
           <Icon name="pencil" className="dfAgentSpriteEdit__icon" />
         </button>
         <div>
-          <p className="dfFactoryConsole__eyebrow">{rankLabel(agent.role)} · {agent.provider}{agent.effective_model === "" ? "" : ` · ${agent.effective_model}`}</p>
+          <p className="dfFactoryConsole__eyebrow">{rankLabel(specialist ? "specialist" : agent.role)} · {agent.provider}{agent.effective_model === "" ? "" : ` · ${agent.effective_model}`}</p>
           <h2>{agent.name}</h2>
           <p className="dfConsoleItem__meta">{state?.projects.get(agent.project_id)?.name ?? agent.project_id}</p>
         </div>
       </div>
 
-      <p className="dfConsoleSidebar__status"><Status stage={archived ? "archived" : activity} /></p>
-      {queueHint === undefined ? null : <p className="dfConsoleSidebar__inherit">{queueHint}</p>}
+      {specialist && state !== undefined ? <SpecialistSummary agent={agent} state={state} activity={activity} pending={edit?.pending === true} ready={ready} contributions={contributions} onOpenActivity={onOpenActivity} onSaveConfig={onSaveConfig} /> : <p className="dfConsoleSidebar__status"><Status stage={archived ? "archived" : activity} /></p>}
+      {queueHint === undefined || specialist ? null : <p className="dfConsoleSidebar__inherit">{queueHint}</p>}
+      {effort === "" ? null : <p className="dfConsoleSidebar__inherit" aria-label={`Recorded by the agent: ${effort}`}>{effort}</p>}
 
       {archived ? null : <div className="dfConsoleViewToggle" role="group" aria-label="Agent controls">
         <button type="button" aria-pressed={panel === "terminal"} onClick={() => selectPanel("terminal")}>Terminal</button>
@@ -118,7 +131,7 @@ export function AgentPanel({
       </section>}
 
       <section className="dfConsoleSidebar__section" aria-label="Agent configuration" hidden={!archived && panel !== "config"}>
-        <AgentConfig key={formKey(agent.id)} agent={agent} accounts={state === undefined ? [] : [...state.accounts.values()]} pending={edit?.pending === true} ready={ready} onSave={onSaveConfig} />
+        <AgentConfig key={formKey(agent.id)} agent={agent} accounts={state === undefined ? [] : [...state.accounts.values()]} pending={edit?.pending === true} ready={ready} onSave={onSaveConfig} running={current !== undefined} />
       </section>
 
       <RecentWork
@@ -131,6 +144,42 @@ export function AgentPanel({
       />
     </section>
   );
+}
+
+const WAITING: Record<string, string> = { budget: "review budget used", queued: "queued behind other work", capacity: "waiting for a free background slot" };
+const clock = (ms: number) => new Date(ms).toLocaleString([], { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" });
+
+/** What a specialist is doing, owes and has done; nothing here is inferred beyond what the factory serves. */
+function SpecialistSummary({ agent, state, activity, pending, ready, contributions, onOpenActivity, onSaveConfig }: {
+  agent: AgentItem; state: StateView; activity: string; pending: boolean; ready: boolean;
+  contributions: readonly KnowledgeActivity[]; onOpenActivity?: (item: KnowledgeActivity) => void; onSaveConfig?: (config: AgentConfigEdit) => void;
+}) {
+  const info = agent.specialist;
+  const failed = info !== undefined && state.tasks.get(info.last_review_task_id)?.status === "failed";
+  const [stage, text] = agent.archived ? ["stopped", "stopped"]
+    : activity === "working" || activity === "needs-you" ? [activity, activity === "working" ? "working: a review is running" : "needs you"]
+    : agent.paused ? ["paused", "paused: no new reviews"]
+    : failed ? ["failed", "failed: its latest review failed; open it under Recent work"]
+    : info?.waiting && WAITING[info.waiting] ? ["waiting", `waiting: ${WAITING[info.waiting]}`]
+    : ["ready", "ready: between reviews"];
+  const wake = (agent.idle_wake_on ?? "") === "" ? "" : ` or sooner on ${(agent.idle_wake_on ?? "").replace(",", " and ")}`;
+  const next = agent.archived || agent.paused || info === undefined || info.next_review_at_ms === 0 ? "" : `Next review ${clock(info.next_review_at_ms)}${info.next_reason === "" ? "" : ` (${info.next_reason})`}${wake}`;
+  const remit = agent.idle_instruction.split("\n", 1)[0]!.slice(0, 120);
+  const mine = contributions.filter((item) => item.agent_id === agent.id);
+  return <>
+    <p className="dfConsoleSidebar__status"><Status stage={stage}>{text}</Status></p>
+    {remit === "" ? null : <p className="dfConsoleItem__meta" aria-label="Remit">{remit}</p>}
+    {next === "" ? null : <p className="dfConsoleSidebar__inherit">{next}</p>}
+    <p className="dfConsoleSidebar__inherit" aria-label="Specialist usage">
+      Reviews {agent.idle_runs_used}/{agent.idle_run_budget === 0 ? "unlimited" : agent.idle_run_budget}
+      {info === undefined ? "" : ` · open proposals ${info.open_proposals}/${info.open_proposal_limit}`}
+    </p>
+    {agent.archived || onSaveConfig === undefined ? null : <button type="button" disabled={pending || !ready} onClick={() => onSaveConfig({ paused: !agent.paused })}>{agent.paused ? "Resume" : "Pause"}</button>}
+    <section className="dfConsoleSidebar__section" aria-label="Contributions">
+      <h3>Contributions</h3>
+      {mine.length === 0 ? <p className="dfFactoryConsole__empty">No recorded contributions yet.</p> : <ul>{mine.map((item) => <li key={item.key}><button type="button" disabled={!onOpenActivity} onClick={() => onOpenActivity?.(item)}>{activityLabel(item, state)}</button></li>)}</ul>}
+    </section>
+  </>;
 }
 
 function pullRequests(value: string): readonly Readonly<{ href: string; label: string }>[] {
@@ -202,7 +251,7 @@ function RecentWork({
   }, [open, Object.values(scope)[0], completionRevision]);
   const selected = page.find((task) => task.id === selectedId) ?? page[0];
   return <div className="dfConsoleRecentWork dfConsoleSidebar__section">
-    {icon ? <IconButton icon={icon} aria-label={label} title={total === undefined ? label : `${label} · ${total}`} onClick={() => setOpen(true)} /> : <button type="button" onClick={() => setOpen(true)}>{label}{total === undefined ? "" : ` · ${total}`}</button>}
+    {icon ? <IconButton icon={icon} aria-label={label} title={total === undefined ? label : `${label} · ${total}`} onClick={() => setOpen(true)}><Badge n={total === undefined ? undefined : Number(total)} /></IconButton> : <button type="button" onClick={() => setOpen(true)}>{label}{total === undefined ? "" : ` · ${total}`}</button>}
     {!open ? null : <ConsoleDialog className="dfRecentWorkDialog" label={`${label} for ${name}`} title={`${label} · ${name}`} onClose={() => setOpen(false)}>
         {failed ? <p role="alert">Recent work unavailable <button type="button" onClick={() => load(false)}>Retry</button></p> : null}
         <div className="dfRecentWorkLayout">
@@ -282,14 +331,21 @@ function WorkRowShell({ title, chips, meta, onOpen, disabled = false, pressed, e
   </li>;
 }
 
+/** A Library revision the operator chose for the next task, named for its chip. */
+export type TaskContentChip = TaskContentPin & { title: string; project_id: string };
+export type AddTask = (agent: AgentItem, instruction: string, mode: "queue" | "any", files?: readonly File[], content?: readonly TaskContentChip[]) => Promise<boolean>;
+
 /** One list for everything open: what needs you, what is in review, running and queued. */
 export function WorkPanel({
-  state, rows, projectId, filter, onFilter, byMission, onByMission, missions, edit, ready, onEditTask, onAddTask, onLoadTaskDetail, onLoadTaskHistory, onLoadTaskList,
-  selectedTaskId, onSelectTask, selectedHumanRequest, onSelectHumanRequest, onCloseHumanRequest, requestContent, onSelectProduction, onMission, sources, onManageSources,
+  state, rows, projectId, filter, onFilter, byMission, onByMission, missions, edit, ready, onEditTask, onAddTask, taskContent = [], onTaskContent = () => undefined, onLoadTaskDetail, onLoadTaskHistory, onLoadTaskList,
+  selectedTaskId, onSelectTask, selectedHumanRequest, onSelectHumanRequest, onCloseHumanRequest, requestContent, onSelectProduction, onMission, sources, onManageSources, onIntakeAction, intake,
 }: {
   /** The local source list for the shown project; undefined until loaded. */
   sources?: readonly { id: string; repository: string; label: string; enabled: boolean }[];
   onManageSources?: () => void;
+  onIntakeAction?: (projectId: string, request: IntakeBody) => void;
+  /** The shown project's last intake outcome; a failed Accept routes to Sources for fresh content. */
+  intake?: Readonly<{ state?: string; failed: boolean; busy: boolean }>;
   selectedTaskId?: string;
   onSelectTask?: (taskId: string) => void;
   state: StateView | undefined;
@@ -304,7 +360,10 @@ export function WorkPanel({
   edit?: FactoryEditView;
   ready: boolean;
   onEditTask?: (task: TaskItem, change: TaskEdit) => Promise<boolean>;
-  onAddTask?: (agent: AgentItem, instruction: string, mode: "queue" | "any", files?: readonly File[]) => Promise<boolean>;
+  onAddTask?: AddTask;
+  /** Library revisions chosen with "Use in a new task", pinned when the task is added. */
+  taskContent?: readonly TaskContentChip[];
+  onTaskContent?: (content: readonly TaskContentChip[]) => void;
   onLoadTaskDetail?: (task: TaskItem, peerOffset?: bigint, expectedHead?: bigint) => Promise<TaskBrief>;
   onLoadTaskHistory?: (task: TaskItem) => Promise<TaskHistoryView>;
   onLoadTaskList?: (scope: TaskScope, cursor?: TaskCursor) => Promise<TaskListView>;
@@ -318,7 +377,7 @@ export function WorkPanel({
   const [overseer, setOverseer] = useState(false);
   if (state === undefined) return <section className="dfConsoleSidebar__panel" aria-label="Work"><p className="dfFactoryConsole__empty">Waiting for the latest state…</p></section>;
   const agents = [...state.agents.values()];
-  const shown = rows.filter((row) => (filter === "all" || row.state === filter) && (overseer || row.origin !== "overseer" || row.state === "needs-you"));
+  const shown = rows.filter((row) => (filter === "all" || row.state === filter || filter === "needs-you" && needsYou(row)) && (overseer || row.origin !== "overseer" && row.origin !== "specialist" || row.state === "needs-you"));
   const busy = selectedHumanRequest?.phase === "replying" || selectedHumanRequest?.phase === "cancelling";
   const owner = (task?: TaskItem) => task === undefined ? "" : task.assigned_agent_id === "" ? "Any eligible worker" : state.agents.get(task.assigned_agent_id)?.name ?? "Agent";
   const chips = (row: WorkRow) => <>
@@ -328,6 +387,12 @@ export function WorkPanel({
   </>;
   const item = (row: WorkRow) => {
     const { task, request } = row;
+    if (row.intake !== undefined) {
+      const { source, candidate } = row.intake;
+      return <WorkRowShell key={row.key} title={row.title} chips={chips(row)} meta={`${source.repository} · by ${candidate.author}`}>
+        <div className="dfConsoleSidebar__taskActions"><button type="button" aria-label={`Accept ${row.title}`} disabled={!ready || !source.enabled || intake?.busy === true || onIntakeAction === undefined} onClick={() => onIntakeAction?.(source.project_id, { action: "accept", source_id: source.id, expected_revision: source.revision, issue_number: candidate.number, content_hash: candidate.content_hash })}>Accept</button></div>
+      </WorkRowShell>;
+    }
     const named = projectId === undefined && state.projects.size > 1 ? state.projects.get(task?.project_id ?? request?.project_id ?? row.pr?.projectId ?? "")?.name : undefined;
     const blocked = task?.status === "blocked";
     const meta = [named, request === undefined ? owner(task) : `${state.agents.get(request.agent_id)?.name ?? "Agent"} asks`, blocked && formatTime(task.updated_at_ms) ? `since ${formatTime(task.updated_at_ms)}` : ""].filter(Boolean).join(" · ");
@@ -347,29 +412,37 @@ export function WorkPanel({
   return <section className="dfConsoleSidebar__panel" aria-label="Work">
     {onManageSources === undefined ? null : <p className="dfConsoleItem__meta" role="status" aria-label="Task sources">{sources === undefined ? "Sources: not loaded yet" : sources.length === 0 ? "No sources — tasks come only from New task" : `Sources: ${sources.map((item) => `${item.repository} · ${item.label === "" ? "every issue" : `label ${item.label}`}${item.enabled ? "" : " (paused)"}`).join("; ")}`} <button type="button" onClick={onManageSources}>Manage</button></p>}
     {state.factory.dispatch_enabled ? null : <p role="status">New work is paused. Queued tasks wait; active processes continue. An administrator can resume new work above.</p>}
-    {onAddTask === undefined ? null : <NewTask agents={agents} state={state} disabled={!ready || edit?.pending === true} onAddTask={onAddTask} />}
+    {onAddTask === undefined ? null : <NewTask agents={agents} state={state} disabled={!ready || edit?.pending === true} onAddTask={onAddTask} content={taskContent} onContent={onTaskContent} />}
     <div className="dfWorkBar">
       <div className="dfConsoleViewToggle" role="group" aria-label="Work filter">
-        {FILTERS.map(([value, label]) => <button key={value} type="button" aria-pressed={!byMission && filter === value} disabled={!ready} onClick={() => onFilter(value)}>{label} {value === "needs-you" ? <Badge n={rows.filter((row) => row.state === value).length} /> : null}</button>)}
+        {FILTERS.map(([value, label]) => <button key={value} type="button" aria-pressed={!byMission && filter === value} disabled={!ready} onClick={() => onFilter(value)}>{label} {value === "needs-you" ? <Badge n={rows.filter(needsYou).length} /> : null}</button>)}
         <button type="button" aria-pressed={byMission} disabled={!ready} onClick={onByMission}>By mission</button>
       </div>
-      {byMission ? null : <IconButton icon="terminal" aria-label="Show overseer passes" aria-pressed={overseer} disabled={!ready} onClick={() => setOverseer(!overseer)} />}
+      {byMission ? null : <IconButton icon="terminal" aria-label="Show overseer and specialist passes" aria-pressed={overseer} disabled={!ready} onClick={() => setOverseer(!overseer)} />}
       {projectId === undefined ? <IconButton icon="history" aria-label="History" title="Choose a project" disabled /> : <RecentWork scope={{ project_id: projectId }} name={state.projects.get(projectId)?.name ?? projectId} label="History" icon="history" completionRevision={[...state.tasks.values()].map((task) => `${task.id}:${task.revision}`).join(" ")} onLoadTaskList={onLoadTaskList} onLoadTaskDetail={onLoadTaskDetail} onLoadTaskHistory={onLoadTaskHistory} />}
     </div>
     <div hidden={byMission}>
+      {rows.some((row) => row.intake !== undefined) && (intake?.failed || !["ok", "accepted", "imported", "withdrawn", "withdrawal_pending", undefined].includes(intake?.state)) ? <p role="alert">Could not accept: {intake?.failed ? "try again" : intake?.state?.replaceAll("_", " ")}. {onManageSources === undefined ? null : <button type="button" onClick={onManageSources}>Review in Sources</button>}</p> : null}
       {shown.length === 0 ? <p className="dfFactoryConsole__empty">{filter === "all" ? "No open work" : "Nothing here"}</p> : <ul className="dfConsoleItems">{shown.map(item)}</ul>}
     </div>
     <div hidden={!byMission}>{missions}</div>
   </section>;
 }
 
-/** The target is one agent, or "any:" plus a project whose first worker names the shared queue. */
-function NewTask({ agents, state, disabled, onAddTask }: {
+/**
+ * The target is one agent, or "any:" plus a project whose first worker names the shared queue.
+ * Library context limits the targets to its project, since a pin cannot cross projects.
+ */
+function NewTask({ agents, state, disabled, onAddTask, content, onContent }: {
   agents: readonly AgentItem[];
   state: StateView;
   disabled: boolean;
-  onAddTask: (agent: AgentItem, instruction: string, mode: "queue" | "any", files?: readonly File[]) => Promise<boolean>;
+  onAddTask: AddTask;
+  content: readonly TaskContentChip[];
+  onContent: (content: readonly TaskContentChip[]) => void;
 }) {
+  const [open, setOpen] = useState(content.length > 0);
+  useEffect(() => { if (content.length > 0) setOpen(true); }, [content]);
   const [files, setFiles] = useState<readonly File[]>([]);
   const [fileError, setFileError] = useState("");
   const [submitting, setSubmitting] = useState(false);
@@ -381,12 +454,13 @@ function NewTask({ agents, state, disabled, onAddTask }: {
     if (incoming.some((file) => file.size === 0 || new TextEncoder().encode(file.name).length > 255 || /[\u0000-\u001f\u007f-\u009f]/u.test(file.name))) { setFileError("Choose nonempty files with names under 256 bytes and no control characters."); return; }
     setFiles(next); setFileError("");
   };
-  const live = agents.filter((agent) => !agent.archived);
+  const scope = content[0]?.project_id;
+  const live = agents.filter((agent) => !agent.archived && (scope === undefined || agent.project_id === scope));
   const shared = [...state.projects.values()].flatMap((project) => {
     const worker = live.find((agent) => agent.project_id === project.id && agent.role === "worker");
     return worker === undefined ? [] : [{ project, worker }];
   });
-  return <details className="dfConsoleSidebar__section"><summary>New task</summary>
+  return <details className="dfConsoleSidebar__section" open={open} onToggle={(event) => setOpen(event.currentTarget.open)}><summary>New task</summary>
     <form className="dfFactoryConsole__reply" aria-label="New task"
       onDragOver={(event) => { if (event.dataTransfer.types.includes("Files")) event.preventDefault(); }}
       onDrop={(event) => { if (event.dataTransfer.files.length > 0) { event.preventDefault(); addFiles(Array.from(event.dataTransfer.files)); } }}
@@ -400,13 +474,14 @@ function NewTask({ agents, state, disabled, onAddTask }: {
       const instruction = String(data.get("instruction"));
       if (busy || agent === undefined || instruction.trim() === "") return;
       setSubmitting(true);
-      void onAddTask(agent, instruction, target.startsWith("any:") ? "any" : "queue", files).then((added) => { if (added) { form.reset(); setFiles([]); setFileError(""); } }).catch(() => setFileError("Submission failed. Your files are still here; try again.")).finally(() => setSubmitting(false));
+      void onAddTask(agent, instruction, target.startsWith("any:") ? "any" : "queue", files, content).then((added) => { if (added) { form.reset(); setFiles([]); setFileError(""); onContent([]); } }).catch(() => setFileError("Submission failed. Your files are still here; try again.")).finally(() => setSubmitting(false));
     }}>
       <label htmlFor="df-new-task-target">For</label>
       <select id="df-new-task-target" name="target" required disabled={busy}>
         {shared.map(({ project }) => <option key={project.id} value={`any:${project.id}`}>Any eligible worker · {project.name}</option>)}
         {live.map((agent) => <option key={agent.id} value={agent.id}>{agent.name}</option>)}
       </select>
+      {content.length === 0 ? null : <ul aria-label="Library context">{content.map((item) => <li key={item.content_id}><span>{item.title} · Revision {String(item.revision)}</span><button type="button" aria-label={`Remove ${item.title}`} disabled={busy} onClick={() => onContent(content.filter((other) => other !== item))}>Remove</button></li>)}</ul>}
       <label htmlFor="df-new-task-instruction">Instruction</label>
       <textarea id="df-new-task-instruction" name="instruction" rows={4} required disabled={busy} />
       <label htmlFor="df-new-task-files">Attach files</label>
@@ -446,12 +521,15 @@ function AgentConfig({
   pending,
   ready,
   onSave,
+  running = false,
 }: {
   agent: AgentItem;
   accounts: readonly AccountItem[];
   pending: boolean;
   ready: boolean;
   onSave?: (config: AgentConfigEdit) => void;
+  /** A live run: the daemon refuses to archive under it. */
+  running?: boolean;
 }) {
   const [model, setModel] = useState(agent.model);
   const [reasoningEffort, setReasoningEffort] = useState(agent.reasoning_effort);
@@ -461,6 +539,8 @@ function AgentConfig({
   const [idlePolicy, setIdlePolicy] = useState(agent.idle_policy);
   const [idleAfterSeconds, setIdleAfterSeconds] = useState(String(agent.idle_after_seconds));
   const [idleInstruction, setIdleInstruction] = useState(agent.idle_instruction);
+  const [runBudget, setRunBudget] = useState(String(agent.idle_run_budget));
+  const [wakeOn, setWakeOn] = useState<IdleWakeOn>(agent.idle_wake_on ?? "");
   const served = useRef({ model: agent.model, reasoningEffort: agent.reasoning_effort, accountId: agent.account_id, paused: agent.paused, idlePolicy: agent.idle_policy, idleAfterSeconds: String(agent.idle_after_seconds), idleInstruction: agent.idle_instruction });
   useEffect(() => {
     const previous = served.current;
@@ -482,6 +562,13 @@ function AgentConfig({
   const idleAfter = Math.max(0, Math.floor(Number(idleAfterSeconds) || 0));
   const standing = idlePolicy === "standing_instruction";
   const supervising = agent.role === "orchestrator";
+  const specialist = isSpecialist(agent);
+  const budget = Math.max(0, Math.floor(Number(runBudget) || 0));
+  const toggleWake = (class_: "failures" | "merges", on: boolean) => {
+    const classes = new Set(wakeOn === "" ? [] : wakeOn.split(","));
+    if (on) classes.add(class_); else classes.delete(class_);
+    setWakeOn(["failures", "merges"].filter((item) => classes.has(item)).join(",") as IdleWakeOn);
+  };
   // Submit the complete standing rule when its wait or instruction changes.
   const ruleMoved = idlePolicy !== agent.idle_policy || idleAfter !== agent.idle_after_seconds || idleInstruction !== agent.idle_instruction;
   const ruleIncomplete = standing && (idleAfter < 1 || idleInstruction.trim() === "");
@@ -494,6 +581,8 @@ function AgentConfig({
       ...(accountId === agent.account_id ? {} : { accountId }),
       ...(paused === agent.paused ? {} : { paused }),
       ...(!ruleMoved ? {} : standing ? { idlePolicy, idleAfterSeconds: idleAfter, idleInstruction } : { idlePolicy }),
+      ...(!standing || budget === agent.idle_run_budget ? {} : { idleRunBudget: budget }),
+      ...(!standing || supervising || wakeOn === (agent.idle_wake_on ?? "") ? {} : { idleWakeOn: wakeOn }),
     });
   };
   return (
@@ -518,7 +607,7 @@ function AgentConfig({
         <input id={`df-paused-${agent.id}`} type="checkbox" checked={paused} disabled={pending} onChange={(event) => setPaused(event.currentTarget.checked)} />
         Paused
       </label>
-      {agent.role !== "worker" || agent.archived === undefined ? null : archiveConfirm ? <span><button type="button" className="dfDanger" autoFocus disabled={pending || !ready} onClick={() => onSave({ archived: true })}>Confirm archive</button><button type="button" disabled={pending} onClick={() => setArchiveConfirm(false)}>Keep worker</button></span> : <button type="button" className="dfDanger" disabled={pending || !ready} onClick={() => setArchiveConfirm(true)}>Archive worker</button>}
+      {agent.role !== "worker" || agent.archived === undefined ? null : archiveConfirm ? <span><button type="button" className="dfDanger" autoFocus disabled={pending || !ready} onClick={() => onSave({ archived: true })}>{specialist ? (running ? "Confirm stop (ends the running review)" : "Confirm stop") : "Confirm archive"}</button><button type="button" disabled={pending} onClick={() => setArchiveConfirm(false)}>{specialist ? "Keep specialist" : "Keep worker"}</button></span> : <button type="button" className="dfDanger" disabled={pending || !ready} onClick={() => setArchiveConfirm(true)}>{specialist ? "Stop specialist" : "Archive worker"}</button>}
       <h3>{supervising ? "Supervision" : "Rules"}</h3>
       <label htmlFor={`df-idle-${agent.id}`}>{supervising ? "When work changes" : "When ready"}</label>
       <select id={`df-idle-${agent.id}`} value={idlePolicy} disabled={pending} onChange={(event) => setIdlePolicy(event.currentTarget.value as typeof idlePolicy)}>
@@ -531,6 +620,14 @@ function AgentConfig({
           <input id={`df-idle-after-${agent.id}`} inputMode="numeric" value={idleAfterSeconds} disabled={pending} onChange={(event) => setIdleAfterSeconds(event.currentTarget.value)} />
           <label htmlFor={`df-idle-instruction-${agent.id}`}>Instruction</label>
           <textarea id={`df-idle-instruction-${agent.id}`} rows={3} value={idleInstruction} disabled={pending} onChange={(event) => setIdleInstruction(event.currentTarget.value)} />
+          {supervising ? null : <>
+            <label htmlFor={`df-idle-budget-${agent.id}`}>Review budget (0 = unlimited)</label>
+            <input id={`df-idle-budget-${agent.id}`} inputMode="numeric" value={runBudget} disabled={pending} onChange={(event) => setRunBudget(event.currentTarget.value)} />
+            <fieldset disabled={pending}><legend>Also review sooner on</legend>
+              <label><input type="checkbox" checked={wakeOn.includes("failures")} onChange={(event) => toggleWake("failures", event.currentTarget.checked)} /> failures</label>
+              <label><input type="checkbox" checked={wakeOn.includes("merges")} onChange={(event) => toggleWake("merges", event.currentTarget.checked)} /> merges</label>
+            </fieldset>
+          </>}
           <p className="dfConsoleSidebar__inherit">{agent.idle_runs_used} idle runs</p>
           {supervising ? <p className="dfConsoleSidebar__inherit">initial inspection, then worker events</p> : null}
           {ruleIncomplete ? <p className="dfConsoleSidebar__inherit">a standing instruction needs at least a second and text</p> : null}
@@ -952,10 +1049,8 @@ function FloorAppearanceSection({ appearance, onChange, onReset }: {
 }) {
   return <section className="dfConsoleSidebar__section dfFloorAppearance" aria-label="Floor appearance">
     <h3>Floor appearance</h3>
-    <p>Saved in this browser. Automatic groups broad areas; Fine exposes directories on the same floor.</p>
+    <p>Saved in this browser.</p>
     <label>Scenery<select value={appearance.scenery} onChange={(event) => onChange({ ...appearance, scenery: event.currentTarget.value as FloorAppearance["scenery"] })}><option value="off">Off</option><option value="subtle">Subtle</option><option value="rich">Rich</option></select></label>
-    <label>Floor detail<select value={appearance.detail ?? "auto"} onChange={(event) => onChange({ ...appearance, detail: event.currentTarget.value as FloorAppearance["detail"] })}><option value="auto">Halls: routes folded past six</option><option value="fine">Stations: every route</option></select></label>
-    <label>Social furniture<select value={appearance.social ?? "nearby"} onChange={(event) => onChange({ ...appearance, social: event.currentTarget.value as FloorAppearance["social"] })}><option value="nearby">Within the base</option><option value="commons">Common tables</option></select></label>
     <label>Animation<select value={appearance.animation} onChange={(event) => onChange({ ...appearance, animation: event.currentTarget.value as FloorAppearance["animation"] })}><option value="follow-device">Follow device</option><option value="off">Off</option></select></label>
     <button type="button" onClick={onReset}>Reset floor appearance</button>
   </section>;

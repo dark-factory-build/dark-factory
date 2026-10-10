@@ -135,7 +135,17 @@ queue while any item needs you: a finished (except an intake task with a diff,
 which factoryd publishes), blocked or failed worker task, an
 unanswered worker question, unpublished or corrected work, or a pull request
 factoryd escalated. An item you leave unhandled is woken again at most three
-times, 30 minutes apart, until it changes. A Change whose task is queued or
+times (a publish failure never), 30 minutes apart, until it changes; only wakes that named it (or
+named no item at all) and actually started count. Half an hour after its last wake, factoryd raises a
+NEEDS YOU card naming what is still unresolved. Only a human answers it, so
+your status never lists it: the operator's reply (console or `factoryctl human
+reply`) resumes that wake task with the question and the decision, cancelling
+it in the console leaves the items to the operator, and it closes by itself
+once its items resolve. A wake that never started does not count, but no item
+is woken more than once in 30 minutes. An open, labelled intake issue retries
+its own task up to three times after an automatic end (a failure, a run-limit
+cancel, a blocked expiry). Your `task update --retry` also takes automatic
+ends only; an operator's cancel is the operator's to undo. A Change whose task is queued or
 running (sent back) cannot be published. A factory-wide overseer slot lets you supervise alongside
 workers even when worker capacity is one.
 
@@ -156,6 +166,20 @@ prepared prompt is capped at 8 KiB:
 
 Every command below runs from the directory the session starts in, its
 private runtime home, with the clone at `repo` inside it.
+
+### Deciding specialist proposals
+
+A specialist (a worker with a standing instruction) records a proposal as an
+`observation` whose metadata says `"record_type":"proposal"`. Each open one is
+a persistent wake item, `Proposal ID from AGENT: TITLE [proposal:ID]`, until a
+`decision` resolves it: metadata `"record_type":"proposal"`, `"record_id":"ID"`
+and evidence `["proposal:ID"]`. To accept, `overseer task add` the work (to a
+worker or the shared queue, never the specialist), `content attach` the
+proposal to it, and record the decision with `"task_id"` set to that task. To
+decline or defer, record the decision without `task_id`, the reason in its
+description. Only you or the operator resolve a proposal, and an acceptance is
+refused while another accepted proposal's task is still queued, running or
+blocked: one self-generated implementation is active at a time.
 
 Read this runbook from that clone or the task-provided checkout. If neither
 is available, report the missing checkout. Scope searches to that checkout
@@ -320,9 +344,13 @@ and replaces its body. The App refuses your `publish_commit` and
 `create_pull_request` on that branch. When it cannot
 (a refused path, a symlink, a file over the bound, an indeterminate write), it
 wakes you once with `Escalated: factoryd cannot publish change CHANGE for task
-TASK: ...` and never retries that Change revision: send the task back to fix
-the cause, or raise it with `attempt request-human`. What follows is for
-the work factoryd does not publish.
+TASK: ...` and retries that Change revision on its own every hour, without
+waking you again: send the task back if the Change itself is the cause.
+Otherwise (the App, the Worker or GitHub refused the write) succeed without a
+human request: half an hour after that wake factoryd puts its refusals, with
+the Changes they strand, on one NEEDS YOU card, which closes once they
+publish. Record only the observed refusal, never an inferred cause, in any
+lesson. What follows is for the work factoryd does not publish.
 
 The branch is `factory/<first 12 hex of change_id>`. The task's
 `work_revision` from section 1 says which publication this is:
@@ -508,8 +536,8 @@ factoryd reviews every published PR head itself: it records one exact-head
 verdict through the App, enqueues an ALLOW, observes the merge and releases the
 runtime, and sends a REQUEST_CHANGES or a merge-queue ejection back to the
 original task with a pointer to the findings. The merge queue's required CI is
-the full gate. The reviewer is a separate read-only session, never the author
-or overseer. Never create a
+the full gate. The reviewer is a separate session that can read only the reviewed
+checkout (see providers.md), never the author or overseer. Never create a
 review task for a worker, record a verdict, enqueue, or wait on that pipeline.
 
 factoryd wakes you with `Escalated: factoryd cannot advance OWNER/REPO#N at

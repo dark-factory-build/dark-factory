@@ -4,12 +4,14 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 )
 
 func TestEnqueueTaskForBrowserAgentBindsAuthorityAndKeepsInstructionPrivate(t *testing.T) {
+	t.Parallel()
 	store, _, project, agent := newAdmissionStore(t, RoleOrchestrator, 2)
 	defer store.Close()
 	ctx := context.Background()
@@ -90,6 +92,7 @@ func TestEnqueueTaskForBrowserAgentBindsAuthorityAndKeepsInstructionPrivate(t *t
 }
 
 func TestEnqueueTaskForBrowserAgentRejectsUnauthorizedStaleAndPaused(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name       string
 		capability BrowserCapabilityMask
@@ -149,6 +152,7 @@ func TestEnqueueTaskForBrowserAgentRejectsUnauthorizedStaleAndPaused(t *testing.
 }
 
 func TestEnqueueTaskForBrowserAgentRejectsInvalidInstruction(t *testing.T) {
+	t.Parallel()
 	store, _, _, agent := newAdmissionStore(t, RoleOrchestrator, 2)
 	defer store.Close()
 	client := terminalTargetClient(t, store, browserTestID(t, 210), BrowserCapabilityObserve|BrowserCapabilityHumanActions)
@@ -160,6 +164,7 @@ func TestEnqueueTaskForBrowserAgentRejectsInvalidInstruction(t *testing.T) {
 }
 
 func TestEnqueueTaskForBrowserAgentRequiresIdleAgent(t *testing.T) {
+	t.Parallel()
 	t.Run("queued task permits only its exact creation replay", func(t *testing.T) {
 		store, _, _, agent := newAdmissionStore(t, RoleOrchestrator, 2)
 		defer store.Close()
@@ -230,6 +235,7 @@ func TestEnqueueTaskForBrowserAgentRequiresIdleAgent(t *testing.T) {
 }
 
 func TestEnqueueTaskForBrowserAgentConcurrentTabsCreateExactlyOneTask(t *testing.T) {
+	t.Parallel()
 	store, _, _, agent := newAdmissionStore(t, RoleOrchestrator, 2)
 	defer store.Close()
 	client := terminalTargetClient(t, store, browserTestID(t, 231), BrowserCapabilityObserve|BrowserCapabilityHumanActions)
@@ -309,6 +315,7 @@ func pauseBrowserTaskAgent(t *testing.T, store *Store, agent Agent) Agent {
 }
 
 func TestBrowserQueueAcceptsBusyPausedAgentWithoutChangingCurrentWork(t *testing.T) {
+	t.Parallel()
 	store, _, _, agent := newAdmissionStore(t, RoleOrchestrator, 2)
 	defer store.Close()
 	ctx := context.Background()
@@ -335,6 +342,7 @@ func TestBrowserQueueAcceptsBusyPausedAgentWithoutChangingCurrentWork(t *testing
 }
 
 func TestBrowserTaskReplayRetainsRepositoryAfterSettingsChange(t *testing.T) {
+	t.Parallel()
 	for _, explicit := range []bool{false, true} {
 		name := "default"
 		if explicit {
@@ -350,7 +358,7 @@ func TestBrowserTaskReplayRetainsRepositoryAfterSettingsChange(t *testing.T) {
 				selected = RepositoryID(project.ID)
 			}
 			task, incarnation := taskID(t, 181), incarnationID(t, 182)
-			created, err := store.EnqueueTaskForBrowserAgentRepositoryMode(ctx, client.ID, task, incarnation, agent.ID, agent.Revision, selected, "keep this work", BrowserEnqueueQueue, mustTime(t, 102))
+			created, err := store.EnqueueTaskForBrowserAgentRepositoryMode(ctx, client.ID, task, incarnation, agent.ID, agent.Revision, selected, "keep this work", BrowserEnqueueQueue, mustTime(t, 102), nil)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -368,7 +376,7 @@ func TestBrowserTaskReplayRetainsRepositoryAfterSettingsChange(t *testing.T) {
 			if _, err := store.SetProjectRepositoryEnabled(ctx, original.ID, original.Revision, false, mustTime(t, 105)); err != nil {
 				t.Fatal(err)
 			}
-			replay, err := store.EnqueueTaskForBrowserAgentRepositoryMode(ctx, client.ID, task, incarnation, agent.ID, agent.Revision, selected, "keep this work", BrowserEnqueueQueue, mustTime(t, 106))
+			replay, err := store.EnqueueTaskForBrowserAgentRepositoryMode(ctx, client.ID, task, incarnation, agent.ID, agent.Revision, selected, "keep this work", BrowserEnqueueQueue, mustTime(t, 106), nil)
 			if err != nil || replay.Task != created.Task {
 				t.Fatalf("retained replay: %+v, %v", replay, err)
 			}
@@ -376,12 +384,60 @@ func TestBrowserTaskReplayRetainsRepositoryAfterSettingsChange(t *testing.T) {
 			if err != nil || !found || binding.ID != original.ID || binding.BaseRef != original.BaseRef {
 				t.Fatalf("replay redirected repository: %+v, %v", binding, err)
 			}
-			if _, err := store.EnqueueTaskForBrowserAgentRepositoryMode(ctx, client.ID, task, incarnation, agent.ID, agent.Revision, second.ID, "keep this work", BrowserEnqueueQueue, mustTime(t, 107)); !errors.Is(err, ErrConflict) {
+			if _, err := store.EnqueueTaskForBrowserAgentRepositoryMode(ctx, client.ID, task, incarnation, agent.ID, agent.Revision, second.ID, "keep this work", BrowserEnqueueQueue, mustTime(t, 107), nil); !errors.Is(err, ErrConflict) {
 				t.Fatalf("changed explicit route: %v", err)
 			}
-			if _, err := store.EnqueueTaskForBrowserAgentRepositoryMode(ctx, client.ID, taskID(t, 184), incarnationID(t, 185), agent.ID, agent.Revision, original.ID, "new work", BrowserEnqueueQueue, mustTime(t, 108)); !errors.Is(err, ErrConflict) {
+			if _, err := store.EnqueueTaskForBrowserAgentRepositoryMode(ctx, client.ID, taskID(t, 184), incarnationID(t, 185), agent.ID, agent.Revision, original.ID, "new work", BrowserEnqueueQueue, mustTime(t, 108), nil); !errors.Is(err, ErrConflict) {
 				t.Fatalf("new use of disabled repository: %v", err)
 			}
 		})
+	}
+}
+
+func TestBrowserEnqueuePinsContentAtomically(t *testing.T) {
+	t.Parallel()
+	store, _, project, agent := newAdmissionStore(t, RoleOrchestrator, 2)
+	defer store.Close()
+	ctx := context.Background()
+	client := terminalTargetClient(t, store, browserTestID(t, 190), BrowserCapabilityObserve|BrowserCapabilityHumanActions)
+	content, err := store.CreateContent(ctx, knowledgeSpec(t, project.ID, 191, ContentObservation, KnowledgeMetadata{Status: "tentative"}), mustTime(t, 101))
+	if err != nil {
+		t.Fatal(err)
+	}
+	other, err := store.AddProjectRepository(ctx, NewProjectRepository{ID: repositoryID(t, 192), ProjectID: project.ID, Name: "other", Root: filepath.Join(t.TempDir(), "other"), BaseRef: "main"}, mustTime(t, 101))
+	if err != nil {
+		t.Fatal(err)
+	}
+	spec := knowledgeSpec(t, project.ID, 193, ContentObservation, KnowledgeMetadata{Status: "tentative"})
+	spec.RepositoryID, spec.RepositoryInode = other.ID, 3
+	outside, err := store.CreateContent(ctx, spec, mustTime(t, 101))
+	if err != nil {
+		t.Fatal(err)
+	}
+	pin := TaskContentReference{ContentID: content.ID, ContentRevision: content.Revision}
+	enqueue := func(seed byte, refs ...TaskContentReference) (BrowserTaskEnqueue, error) {
+		return store.EnqueueTaskForBrowserAgentRepositoryMode(ctx, client.ID, taskID(t, seed), incarnationID(t, seed), agent.ID, agent.Revision, RepositoryID{}, "use the note", BrowserEnqueueAnyWorker, mustTime(t, 102), refs)
+	}
+	for name, refs := range map[string][]TaskContentReference{
+		"out of scope":     {pin, {ContentID: outside.ID, ContentRevision: outside.Revision}},
+		"unknown revision": {pin, {ContentID: content.ID, ContentRevision: mustRevision(t, 2)}},
+	} {
+		if _, err := enqueue(194, refs...); err == nil {
+			t.Fatalf("%s: enqueue accepted", name)
+		}
+		if _, found, err := store.Task(ctx, taskID(t, 194)); err != nil || found {
+			t.Fatalf("%s: refused enqueue left a task: %v %v", name, found, err)
+		}
+	}
+	result, err := enqueue(195, pin)
+	if err != nil {
+		t.Fatal(err)
+	}
+	refs, err := store.TaskContentReferences(ctx, project.ID, result.Task.ID, result.Task.WorkRevision)
+	if err != nil || len(refs) != 1 || refs[0].ContentID != content.ID || refs[0].ContentRevision != content.Revision {
+		t.Fatalf("pinned references: %+v %v", refs, err)
+	}
+	if _, err := enqueue(195, pin); err != nil {
+		t.Fatalf("exact replay: %v", err)
 	}
 }

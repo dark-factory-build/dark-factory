@@ -31,7 +31,7 @@ Work was mapped onto the tree by changed paths. `RUN_PATHS` sampled a running
 Change's touched directories, and the UI matched those to the deepest room.
 
 Everything that brings the floor to life was independent of that tree:
-movement, idle life, the break room and cat, messages and peer questions,
+movement, idle life, the cat and coffee, messages and peer questions,
 sprites, worker identity, reviewers and the production panel. That code
 survives.
 
@@ -46,8 +46,8 @@ whether it was happening, or whether we could even tell.
 | Worker sprites, identity, appearance, sprite editor | `layoutScene`, `composeRoom`: rooms from directories | `internal/topology` graph, IDs and inventories |
 | `movement.ts` routing over doors and corridors | `wires()`: import cables become flow lines between machines | `internal/daemon/topology.go`, the `projectTopology` wire builder |
 | `idle-life.ts` (cat, chatter), `messages.ts` (paper, peer pulses) | `console-view.ts` floor selection: units and halls replace room selection | `TOPOLOGY_GET` / `TOPOLOGY`, client decode, fixtures |
-| Break room, errands, commons, Missions/Tasks/Library stations | `runFootprint`: changed paths now map to operational nodes | Name-based `responsibility()` motifs, file-count `equipmentScale` |
-| Reviewer pseudo-workers, change marks (`ProposalMark`) | Proposal relationships: import deltas give way to changed operational nodes | Inventory inspector, `source_files`, the "detail" grouping setting |
+| Errands and the board/Missions/Tasks/Library fixtures | `runFootprint`: changed paths now map to operational nodes | Name-based `responsibility()` motifs, file-count `equipmentScale` |
+| Reviewer pseudo-workers | Proposal relationships: import deltas give way to changed operational nodes | Inventory inspector, `source_files`, the "detail" grouping setting |
 | `RUN_PATHS` sampling, the production panel and its delivery data | Floor legend and help | `FACTORY_FLOOR.md` |
 | Camera, scrolling, search, inspector shell, reduced motion | | Knowledge `entities` validation and context paths now resolve through operational node IDs and their sources (`kernel/knowledge.go`, `daemon/knowledge.go`, `daemon/knowledge_context.go`, the Library form). The live database held zero entity references on 7 Oct 2026 (5 revisions checked). |
 
@@ -67,10 +67,11 @@ navigation.
 | Framework and platform config: `wrangler.toml`/`.jsonc`, `vercel.json`, `package.json`, `go.mod`, `Cargo.toml`, Next.js `app/` conventions, compose files | **Used.** Most structure is declared. The extractors parse what the frameworks themselves read. |
 | Dependency manifests: `requirements.txt`, `pyproject.toml`, `Gemfile`, `pom.xml`, `build.gradle`, `go.mod`, `package.json`, `Cargo.toml` | **Used.** A small table maps well-known clients to stores, queues and external parties. For example, psycopg or pg becomes a Postgres store, and celery, sidekiq or bullmq becomes a queue. |
 | Deployment declarations: compose services, `Procfile`, `fly.toml`, wrangler, Next.js | **Used.** They declare units in any language. |
-| ast-grep, Tree-sitter | Not adopted. A tool that is optional on `PATH` would make the node set, and so the IDs and layout, depend on the machine. Cgo bindings break the pure-Go build. Route and call patterns in TypeScript, Python, Ruby, Java and Rust are instead a small table of `inferred` regular expressions. The upgrade path is ast-grep rules with the same table shape, if precision ever needs it. |
+| Tree-sitter grammars as WebAssembly, run by wazero | **Used** for TypeScript/JavaScript, Python, Ruby, Java, Kotlin and Rust (`internal/opgraph/treesitter`). The released web-tree-sitter runtime and grammar `.wasm` builds are embedded and pinned by SHA-256, so the result never depends on the machine and the build stays `CGO_ENABLED=0`. Queries shape calls, decorators, annotations, bindings and imports; Go code decides what each shape means per framework, resolves string constants within a file, and follows in-file router mounts. A match is `declared` when the file imports the framework that runs it, else `inferred`. Files over 256 KiB, past 32 MiB per repository, or past a deterministic work budget yield nothing; a 2 s per-file deadline backs the budget for pathologically nested input. Script files a package's entry (`main`, `bin`, `start`) never imports belong to no unit, as Go functions no binary calls do. Reachability follows relative imports only: a file reached solely through a path alias (`@/…`) or a dynamic `require` belongs to no unit. |
+| ast-grep | Not adopted. A tool that is optional on `PATH` would make the node set, and so the IDs and layout, depend on the machine. |
 | SCIP (scip-go, scip-typescript), gopls, tsserver | Not adopted. Each needs a build or type check. They provide precise references, which an operational graph does not need. Symbol strings embed versions, so they are unstable as identities. |
 | CodeQL | Rejected. Its licence restricts it to open-source codebases, and it builds a database in minutes, not milliseconds. |
-| Semgrep CE / Opengrep | Rejected. It is a heavy runtime, and Semgrep's maintained rules carry a restrictive licence. The pattern table covers the same cases. |
+| Semgrep CE / Opengrep | Rejected. It is a heavy runtime, and Semgrep's maintained rules carry a restrictive licence. The tree-sitter queries cover the same cases. |
 | stack-graphs | Rejected: archived in 2025. |
 
 The bespoke part is small and declarative. Each extractor maps a framework's
@@ -144,7 +145,7 @@ table is configured.
 **Evidence.** Each item records:
 
 - origin: `static` or `runtime`
-- extractor or source: `go-ast`, `wrangler`, `nextjs`, `otlp`, `cloudflare`
+- extractor or source: `go-ast`, `tree-sitter`, `wrangler`, `nextjs`, `otlp`, `cloudflare`
 - a short detail
 - `confidence`:
   - `declared`: parsed from a declaration the framework executes
@@ -168,7 +169,7 @@ Edges carry the same evidence and states.
 A **system** is a Dark Factory project. Its registered repositories are its
 sources; the site, relay and control plane are not separate demos. Each node
 records its repository and source paths, so ownership stays inspectable.
-Repository does not decide placement: halls are deployment units, and one
+Repository does not decide placement: units are deployment units, and one
 repository can hold several units (`dark-factory` holds factoryd, factoryctl,
 factory-runner, the relay Worker and the control-plane Worker).
 
@@ -203,7 +204,8 @@ on it by name, across repositories.
   - `db: postgres` becomes a store and `redis` a store
   - `celery` in requirements becomes a queue that both units use (a manifest
     cannot say which side publishes)
-  - `urls.py` `path()` entries become ingress at `inferred` confidence
+  - `urls.py` `path()` entries become ingress, mounted under the routes that
+    `include()` them, `declared` when the file imports `django.urls`
 - **Rails:**
   - `config.ru` becomes a unit
   - `config/routes.rb` verbs become ingress
@@ -239,7 +241,7 @@ renderer never sees a provider.
 
 ```text
 Observation {
-  source        adapter id ("factoryd", "otlp", "cloudflare", "vercel", "github")
+  source        adapter id ("factoryd", "otlp", "otlp-remote", "cloudflare", "github")
   scope         local | remote | client | operational
   environment   "local", "production", …
   window        [start, end) in ms
@@ -268,51 +270,244 @@ granularity is a fixed table in code, not a runtime claim.
 | Adapter | Granularity |
 | --- | --- |
 | `cloudflare` | `service.name` only (per Worker) |
-| `vercel` | `service.name`, method, path |
 | `factoryd` | `service.name`, `rpc.method`, `url.path`, `process.executable.name`, `server.address` |
-| `otlp` | whatever keys a span carried for that service |
+| `otlp`, `otlp-remote` | whatever keys a span carried for that service |
+| `github` | `service.name`, `cicd.pipeline.task.name` (per workflow job) |
 
 **Adapters, in order of yield:**
 
-- **`factoryd`**: the daemon observes itself. That covers browser messages,
-  local API operations, provider process launches and GitHub calls. They are
-  counted with `rpc.method`, `process.executable.name` and `server.address`
-  attributes. Coverage is local and current while the daemon runs.
-- **`otlp`**: an optional OTLP/HTTP JSON receiver for local runs of an
-  unfamiliar system. Systems already exporting OTel to a vendor need a vendor
-  adapter, so OTLP is not where a remote system's truth comes from. on the loopback listener
-  (`POST /v1/traces`). It accepts spans from any local process, folds them
-  into observations, and discards them. It rejects protobuf, browser origins
-  and oversized bodies. Coverage is claimed per `service.name` it has seen.
+- **`factoryd`**: the daemon observes its own listeners: browser messages,
+  HTTP requests and local API operations, counted with `rpc.method`,
+  `url.path` and `network.transport`. Its outgoing work is client spans:
+  each HTTP request (Maintainer, Linear, release check, push, Cloudflare
+  pull) by peer `server.address` and `http.request.method`, failing on a
+  transport error or a 5xx, never with its URL, path, query, headers or
+  body; and each factory-runner or reviewer CLI launch by peer
+  `process.executable.name`, failing only when the process cannot start,
+  which lands on the unit of that name when the system has one. Each scheduler tick is an internal span with
+  `code.function.name`, binding to its timer. SQLite and relay traffic are
+  not observed. Only the listeners are claimed as coverage, so silent
+  outgoing work reads partial, never idle. Coverage is local and current
+  while the daemon runs.
+- **`otlp`**: an OTLP/HTTP receiver on the loopback listener
+  (`POST /v1/traces`) for any local process of any system. It takes the
+  protobuf most SDKs send by default as well as JSON, optionally gzipped,
+  folds spans into observations and discards them. It refuses browser
+  origins and oversized bodies. Coverage is claimed per `service.name` it has
+  seen. Systems already exporting OTel to a vendor need a vendor adapter, so
+  OTLP is not where a remote system's truth comes from.
 - **`cloudflare`**: the Workers GraphQL Analytics API
   (`workersInvocationsAdaptive`). Requests, errors and CPU time per script are
   generated by the platform, so coverage is claimed per Worker with no
-  instrumentation needed.
-- **Not yet built:** `vercel` (runtime logs), `github` (workflow runs and
-  deployments), Sentry and PostHog. Each is an adapter of the same shape. They
-  are added when a system that needs one is configured. An unused adapter is
-  dead code.
+  instrumentation needed. Each poll also reads the account's Worker custom
+  domains (`GET /accounts/{id}/workers/domains`): a mapped Worker's domains
+  are its unit's hosts, served like a declared route, so a call to one, read
+  from code or seen at runtime, reaches the unit instead of an outside party.
+  This is how a Worker whose `wrangler.toml` deliberately declares no route
+  still shows who calls it. A 403 means the domains are not visible, not an
+  error.
+- **`github`**: CI for any repository the factory publishes to, through the
+  Maintainer broker it already holds; no token of its own. Inference reads
+  `.github/workflows/*.yml` into one `GitHub Actions · <repository>` unit per repository, named after it
+  (`service.name` `github-actions:<repository id>`), each workflow job a job
+  node labelled `<workflow> / <job>`. The production refresh already reads
+  `observe_pull_request_checks` for each pull head whose checks can still
+  change; each check run it stores becomes one observation on the job its name matches (matrix
+  suffixes `" (…)"` dropped), failing on `failure`, `timed_out` or
+  `startup_failure`. Only jobs of workflows a pull request triggers carry the
+  selector, since the broker reads checks of pull request heads alone; a
+  push-only workflow's jobs stay partial. Coverage is claimed only when no read
+  failed and the pull page was complete. No API call is added.
+- **`github` deploys:** GitHub Deployments are written by whatever deploys
+  (Vercel's GitHub integration, Actions, any CD tool), so one read covers
+  every platform that records them. The broker's `list_deployments
+  {repository, per_page ≤ 30}` mints `deployments: read` and `metadata: read`
+  and returns each deployment, newest first, as `{id, environment,
+  production_environment, sha, ref, created_at, state, updated_at,
+  environment_host}`, the state, time and environment URL's host from its
+  newest status (`pending` at `created_at` when it has none); no URLs,
+  payloads, descriptions or creators. The production refresh
+  calls it once per repository whose plant has a deployed unit. A deployment
+  whose newest status is `success` becomes one `deploy` observation (`End` its
+  status time) on a unit: the one a `github` source's `services` maps its
+  environment to, else, for the production environment, the repository's only
+  deployed unit; with several and no mapping it lands on none. A `failure` or
+  `error` since the last refresh counts as an error there; other states are
+  not drawn, and no coverage is claimed. A successful deployment's
+  `environment_host` is its unit's host, as a Worker's custom domain is. The
+  production environment is the
+  `github` source's `environment`, else the one GitHub flags
+  `production_environment`:
+
+  ```json
+  {"adapter": "github", "environment": "Production", "services": {"Production": "web"}}
+  ```
+
+  The newest successful production deployment also moves the work line: see
+  *SHIPPED* in section 13. A customer's installation accepts the
+  `Deployments: read` request before its deploys show. Deployments are read
+  only for a repository pinned to its GitHub id (`project repository github`,
+  through a connection the repository is delegated to). A disabled repository
+  can be pinned: the factory then reads its production state but still takes
+  no new work on it.
+- **`otlp-remote` (push):** a deployed system exports its own OpenTelemetry
+  traces to its factory through the relay, on any platform and any plan. See
+  *Remote ingest* below. There is no platform-specific code.
+- **Not yet built:** Sentry and PostHog pull adapters. Each is an adapter of
+  the same shape, added when a system that needs one is configured. An unused
+  adapter is dead code.
 
 Pull adapters are configured in `observe.json` in the factory home:
 
 ```json
 {"sources": [{"adapter": "cloudflare", "environment": "production",
-  "account": "<account id>", "token_file": "/path/to/read-only-token",
+  "account": "<account id>", "token": "<read-only API token>",
   "services": {"dark-factory-relay": "dark-factory-relay"}}]}
 ```
 
 - `services` maps a platform name to the unit's `service.name`, and doubles
   as the alias table for correlation.
 - The token is an operator-created read-only API token (Account Analytics
-  Read). It is read from its file at each poll and never served.
+  Read, and Workers Scripts Read for custom domains). It lives in `observe.json`, inside the owner-only factory home like
+  `operator.token`, and is never served.
 - factoryd polls each source at most every five minutes, in the background,
   for the last five minutes.
-- With no configuration, the remote halls truthfully read `unobserved`.
+- With no configuration, the remote units truthfully read `unobserved`.
 
-Local processes export to `http://127.0.0.1:43123/v1/traces` with the
-standard `OTEL_EXPORTER_OTLP_ENDPOINT` and the JSON protocol
-(`OTEL_EXPORTER_OTLP_PROTOCOL=http/json`). factoryd folds every span into the
-runtime store and never keeps it.
+Local processes export with the standard
+`OTEL_EXPORTER_OTLP_TRACES_ENDPOINT=http://127.0.0.1:43123/v1/traces` (the
+browser listener's port), in the SDK's default `http/protobuf` or in
+`http/json`. factoryd folds every span into the runtime store and never keeps
+it.
+
+Agents' runs export there with no per-project setup: a worker's environment
+carries `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT` for that listener and
+`OTEL_RESOURCE_ATTRIBUTES=deployment.environment.name=local`, so the tests,
+dev servers and scripts it runs light up the plant if they are instrumented.
+An observation's environment is the span resource's
+`deployment.environment.name` (or the older `deployment.environment`),
+defaulting to `local`; it remains only what that process claimed, and its
+source stays `otlp`.
+
+**Agent telemetry.** The same listener takes `POST /v1/metrics` and
+`POST /v1/logs` from a worker's own agent CLI, on the same terms as traces.
+The worker's `OTEL_RESOURCE_ATTRIBUTES` adds `dark_factory.run.id=<run id>`,
+and only an export whose resource names a run factoryd is running (or ended
+within the last 15 minutes) is counted; anything else is dropped. Claude Code
+is enabled with `CLAUDE_CODE_ENABLE_TELEMETRY=1`, the `otlp` metrics and logs
+exporters and the metrics and logs endpoints; Codex through per-run
+`-c otel.exporter=…` and `-c otel.metrics_exporter=…` overrides, since only its
+configuration turns its exporters on. factoryd keeps, per run and in memory only:
+input and output tokens and cost (from `*token*usage*` and `*cost*` metrics,
+either temporality), tool calls and API requests (log events whose
+`event.name` ends `tool_result` or `api_request`), and the time of the last
+one. They ride the console's `RUN_PATHS` answer as `telemetry`; the floor
+tooltip and agent panel show only non-zero recorded counts, and a busy worker
+whose agent recorded nothing for two minutes is drawn waiting. Prompt text,
+tool input and output and every other attribute are discarded while decoding.
+Spend is never in the public projection.
+
+### Remote ingest
+
+A remote system's truth comes from the system itself, so the deployed app
+exports its own traces to its factory. The factory has no inbound address;
+the relay it already dials carries them. This is the one path for every
+platform: it needs no platform feature, plan or vendor drain, only an OTel
+SDK in the app, which the factory can add itself as an ordinary change.
+
+- **Endpoint.** `POST https://relay.darkfactory.build/ingest/<node id>/v1/traces`
+  with `Authorization: Bearer <secret>`, `Content-Type`
+  `application/x-protobuf` or `application/json`, optionally
+  `Content-Encoding: gzip`. The secret is never in the URL.
+- **App setup.** The standard exporter variables, set in the platform's
+  production environment:
+  `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT=<that URL>` and
+  `OTEL_EXPORTER_OTLP_TRACES_HEADERS=Authorization=Bearer%20<secret>` (the
+  value is URL-encoded), with `service.name` the unit's name. A Next.js app on
+  Vercel registers `@vercel/otel` in `instrumentation.ts` with an OTLP
+  exporter. Each server invocation exports its own spans; static and
+  CDN-cached responses run no code and send none, so they stay unknown, never
+  idle.
+- **Secret.** The operator asks for one in the console (Settings → Devices &
+  pairing → Telemetry ingest).
+  factoryd mints 32 random bytes, shows them once, and keeps only their
+  SHA-256 in `<home>/ingest.sha256` (0600). Minting again rotates: the old
+  secret stops at once. Revoking deletes the file.
+- **Relay.** On every relay connection, and whenever the digest changes,
+  factoryd sends an `INGEST_KEY` record (0x07, host to relay, connection 0)
+  carrying the 32-byte digest, or nothing to revoke. factoryd keeps the
+  current digest in memory and queues it first on each new connection. The
+  relay keeps it in the host socket's attachment, so it lives exactly as long
+  as that socket: no storage, nothing to delete on close, replace or redeploy.
+  The Worker refuses, bodiless and before waking any object: anything but
+  `POST` to `/v1/traces`, a bearer that is not 43 base64url characters, a
+  missing `Content-Length` or one over 1 MiB. The node object then refuses:
+  no connected host, or a bearer whose SHA-256 is not the host's digest (401
+  either way, so a stranger learns nothing about whether the factory is up);
+  an unsupported `Content-Type` or `Content-Encoding` (415); a byte bucket
+  that cannot cover the `Content-Length` plus 4 KiB per push (429; 4 MiB of
+  burst refilled at 1 MiB a second, in memory per object). Bytes, not requests: an app sends one
+  small export per invocation where a collector sends a few large ones.
+  Only then is the body read, bounded to 1 MiB, and sent to the host as one
+  `INGEST` record (0x08, relay to host, connection 0): one byte of flags
+  (protobuf, gzip) and the body. The relay answers 200 `{}` without waiting,
+  and stores and logs nothing of it.
+- **factoryd.** The connector never fails the relay connection over an
+  export. It copies the record and delivers it off the relay reader; exports
+  awaiting delivery are bounded at 4 MiB of memory (a gzipped export counts
+  as the 1 MiB it may unpack to), past which one is dropped. Delivery posts it to the loopback
+  receiver (`/v1/traces`) exactly as a local exporter would, marked remote: the
+  same 1 MiB bound after decompression, the same decoding and fold. Remote
+  spans are recorded with source `otlp-remote`, and their environment is the
+  resource's `deployment.environment.name` or `remote`; a claim of `local` is
+  read as `remote`. Only traces are taken: the metrics and logs paths count a
+  running agent's own telemetry and nothing remote belongs there.
+- **Correlation.** A pushed span lands on the unit whose `service.name` it
+  carries, or the one `observe.json`'s `services` alias table names for it.
+  Coverage is per `service.name` that sent spans, exactly as for local OTLP.
+
+#### Threat note (remote ingest)
+
+Reviewed adversarially before building; the review moved the rate limit
+before the body read and out of the per-location rate-limit binding, the
+digest from storage into the socket attachment, and the decode off the relay
+reader.
+
+- **Forged telemetry.** Writing into a factory's plant needs its secret,
+  256 random bits. A holder of a leaked secret can make that factory's remote
+  units, and its public projection in buckets, show activity that did not
+  happen, up to the rate. Remote spans carry their own source and never pass
+  as local. The operator rotates or revokes in the console.
+- **Secret exposure.** The secret is never in a URL. The relay's code never
+  logs headers, and Cloudflare's invocation logs were checked for the
+  `Authorization` header on the first deploy. It is shown once, over the
+  authenticated operator connection (relayed controller frames pass through
+  the relay, which already carries them). factoryd and the relay keep only its
+  digest; an unreadable `ingest.sha256` counts as revoked.
+- **Node id in the URL.** The node id already names `/host` and
+  `/controller`. Alone it opens neither: a host needs a token signed by the
+  node key, a controller a ticket signed by it. The URL sits in the
+  operator's platform settings, not on any public page.
+- **Unauthenticated load.** Malformed requests stop in the Worker. A
+  well-formed one with the wrong secret costs one object request and is
+  refused before its body is read. The bucket is spent only after
+  authentication, so strangers cannot spend a factory's budget.
+- **Authenticated flood.** 4 MiB of burst, then 1 MiB a second, charged by
+  `Content-Length` plus 4 KiB per push (so at most 256 empty pushes a second)
+  before any body is read, so concurrent pushes cannot pile
+  bodies into the object's memory. factoryd delivers off the relay reader with
+  at most 4 MiB pending, gzipped exports counted at their 1 MiB unpacked
+  bound, so controllers are never stalled and a bad export
+  never drops the connection.
+- **Decoder exposure.** The OTLP decoder was reachable only from local
+  processes. It is now reachable by a secret holder. It is memory-safe Go,
+  bounded at 1 MiB after decompression, and every span, with or without a
+  `service.name`, counts toward the per-export observation cap.
+- **Stale or revoked secrets.** A digest lives only in its socket's
+  attachment, and each connection starts with the current one. A secret
+  revoked while offline never delivers.
+- **Storage at rest.** None. The digest is socket state; pushes are in flight
+  only.
 
 ## 7. Correlation
 
@@ -334,7 +529,7 @@ Correlation runs for each observation:
 2. **No unit.** An observation whose `service.name` names no unit of this
    project (and no alias) is not this project's. Runtime evidence is
    factory-wide, so it may belong to another project. It never binds into a
-   hall and never enters this project's quarantine. A name that two units
+   unit and never enters this project's quarantine. A name that two units
    answer to binds nowhere at all.
    Client and producer spans bind to the party or the ingress they name:
    - a shared store or queue by its selectors;
@@ -380,10 +575,10 @@ node and nothing inside it.
 | Observation state | Meaning |
 | --- | --- |
 | `observed` | A covering source saw activity within the window. |
-| `quiet` | A covering source is current and saw nothing in the window, and the source has bound traffic to this node before. Silence is not claimed for a static guess the source has never matched: a route whose prefix the code hid stays `partial`. A timer is never `quiet`, because it can be silent for longer than any window held. |
+| `quiet` | A covering source is current and saw nothing in the window, and the source has bound traffic to this node before. Silence is not claimed for a static guess the source has never matched: a route whose prefix the code hid stays `partial`. A timer is never `quiet`, because it can be silent for longer than any window held. An outside host matched exactly by `server.address` is `quiet` only when every caller is `factoryd`, whose self-observation records all its outbound HTTP (launches and other non-HTTP calls never read `quiet`), and none called in the window: there is no guessed prefix to be wrong about. |
 | `partial` | Only a coarser source sees it. For a leaf, the unit is covered but the node is not, so the unit's traffic may or may not pass through it. For a processor, some of its nodes are covered and some are not. |
 | `stale` | It was covered, but the source has not reported within its TTL. |
-| `unobserved` | No source can see it. |
+| `unobserved` | No source can see it. An outside host whose integration `factoryd` knows is not configured (Linear with no key) is also `unobserved`, drawn `not connected`: there is nothing to observe, which is not a silence. |
 | `opaque` | An external party. Calls to it may be observed from the caller's side, but its own state never is. |
 
 | Operational state | Allowed when |
@@ -396,6 +591,8 @@ Static evidence never produces an operational state. Tests in
 `internal/opgraph` assert that only `quiet` is ever `idle`. A further test
 covers a unit that is observed while its child is unbound: the child is not
 idle.
+
+`factoryd`'s launches of `factory-runner` are recorded as a client call with `process.executable.name`; the overlay binds that name to the unit whose `service.name` it is, so the unit lights from the caller's side.
 
 Edges follow the same rule. An edge is observed only through a source that
 reports peers, such as `factoryd`'s outbound calls or client spans. Otherwise
@@ -415,7 +612,7 @@ repositories ── static extractors ─┐
 adapters ─> observations ─ correlate ┘      + runtime state + coverage
                                               │   OPERATIONAL_GRAPH frame
 browser:  graph + work state (tasks, runs, run paths, proposals)
-            └─> world.ts   (halls, stations, flows, worker targets)
+            └─> world.ts   (units, stations, flows, worker targets)
                   └─> layout.ts / factory-scene.tsx / movement / idle life
 ```
 
@@ -434,15 +631,14 @@ data.
 
 | Meaning | Picture |
 | --- | --- |
-| Deployment unit | A **hall**: a walled production building with the unit's name plate. Repository is a coloured tag on the plate, not a wall. |
-| Ingress | An **intake dock** on the hall's left wall. Arriving material comes in from the yard. More than six routes fold into one manifold with a count. |
-| Processor work | The hall's **main line**: a press or assembler. |
-| Job | A **cell** with an arm. |
-| Timer ingress | A **clock** on the hall wall, sending a pulse. |
-| Queue | An **accumulation conveyor** between halls. Backlog piles up visibly on it. |
+| Deployment unit | Its **main line** (a press or assembler, named for the unit) and the machines it owns, standing together on the one shared floor over a faint tint: its **area**. An area is paint, not a wall or a door; it may come in several lobes. The unit's runtime is said in its tooltip and inspector. Selecting the main line lights every machine the unit owns and every belt touching them. |
+| Ingress | An **intake dock** beside its unit's main line. More than six routes fold into one manifold with a count; zoomed in to twice the fitted scale or more, the manifold lists its routes inside its own footprint. |
+| Job | A **cell** with an arm, standing on a base; its belt rises from the main line into the base. |
+| Timer ingress | A **clock** beside its unit, sending a pulse. |
+| Queue | An **accumulation conveyor**, one machine however many units use it, standing near them on neutral floor. Backlog piles up visibly on it. |
 | Store | A **silo**, tank or rack store. Reads and writes are pipe pulses. |
-| External | Gates in the **perimeter fence**, with lorries or pipes passing through. Opaque parties sit behind fog-hatched gates. |
-| Unknown | A **quarantine bay** of crates marked `?`. |
+| External | A **gate** to the outside near whoever calls it, labelled with how much of it can be seen; opaque parties sit behind fog-hatched gates. |
+| Unknown | A crate marked `?`, on neutral floor near the unit it claims, if any; never inside an area. |
 
 | Physical state | Picture |
 | --- | --- |
@@ -450,12 +646,12 @@ data.
 | Latency | Dwell: items wait visibly inside a machine's window. |
 | Errors | Items drop into a scrap bin, which fills with error rate. The andon lamp turns amber or red. |
 | Retries | Items loop back on a recirculation belt. |
-| Deploy | Changeover: scaffold and a version plate flip. Change marks remain for 24 hours. |
+| Deploy | A muted "deployed" tag on the unit's main machine for 24 hours; the tooltip gives the time. |
 | Dormant | **Observed quiet**: the machine is solid and lit, but still. |
-| Unobserved | **Blueprint**: cyan outline, no fill, no material, plaque "no telemetry". Never drawn as a still machine. |
-| Partial | Solid machine with a blueprint quarter and a half-lit lamp. |
+| Unobserved | **Greyed machine**: built but translucent and colourless, an unknown (grey-blue) lamp, plate "no telemetry", no material. Never drawn as an idle machine, whose lamp is dark. |
+| Partial | Solid machine with a half-lit lamp; the tooltip says "partly observed". |
 | Stale | Desaturated, with a "last seen" tag. |
-| Inferred-only edge | Dashed blueprint belt with no material. |
+| Inferred-only edge | Faint grey dashed belt with no material. |
 | Observed edge | Solid belt carrying material. |
 | Runtime-only edge | Solid belt with a `?` tag. |
 | Contradicted | A red tag. |
@@ -477,13 +673,18 @@ and those are exactly latency, backlog, errors and retries.
 There is one detailed floor, and the viewer zooms and scrolls it. Detail
 never depends on data:
 
-- **Overview** (always visible): a minimap of the whole plant in the floor's
-  corner. It shows halls coloured by coverage, gates, workers and the visible
-  window. Clicking or dragging it moves the floor.
-- **Floor** (zoomable): one station per node. Ingress beyond 6 per hall folds
-  into a manifold unless the viewer picks "every route", and the quarantine
-  bay aggregates unknowns. Zoom (buttons, or ctrl/pinch and the wheel) scales
-  the floor without moving anything on it.
+- **Overview** (zoomed past fit only): a minimap of the whole plant in the
+  floor's corner, a quarter of the pane on a phone. It shows machines
+  coloured by coverage, areas, workers and the visible window; clicking or
+  dragging it moves the floor. It folds to a button, and the browser
+  remembers that.
+- **Floor** (zoomable): one station per node. Ingress beyond 6 per unit always
+  folds into a manifold. Fit shows the whole floor, facilities and externals
+  included, by the pane's width and height; the pane's size comes from CSS
+  and is watched, never the floor. Zoom
+  (buttons, or ctrl/pinch and the wheel) scales the floor without moving
+  anything on it. At twice the fitted scale or more, a manifold lists its
+  routes by label inside its own footprint; there is no detail setting.
 - **Station** (on selection): the inspector shows selectors, evidence and
   sources.
 
@@ -497,23 +698,141 @@ Selectors, evidence and the full source list come from
 `OPERATIONAL_NODE_GET` when the inspector opens. This keeps 4,096 nodes inside
 the 1 MiB frame.
 
-Layout is deterministic and stable:
+### The connected floor
 
-1. Halls sit in fixed bands by runtime: browser units, then edge and server
-   units (Workers, web servers), then long-running processes, then
-   command-line tools. Within a band they are ordered by ID. Adding an edge
-   never reorders halls. A hall's width grows with its static machines, so a
-   new route can move later halls along its band; it never moves them
-   between bands.
-2. Within a hall, stations sit in fixed zones by kind.
-3. A shared store or queue sits in the yard beside the hall of its lowest-ID
-   user.
-4. External gates follow the fence in ID order.
-5. Runtime-only nodes go only into the quarantine bay, so live data never
-   moves static machines.
+There are no halls. The floor is one connected space: machines are placed
+first, at their drawn sizes, and everything else (areas, aisles, belts,
+walks) is derived from where they stand. Three things stay separate:
 
-Bounds: 4,096 nodes and 4,096 edges served; 64 halls drawn, with the rest
-folded into "N more units".
+- the **software graph**: units, operations, ownership, flows, evidence;
+- the **physical layout**: footprints, interaction positions, belt routes and
+  the free floor workers walk on;
+- **areas**: one faint region per neighbourhood of a unit's machines,
+  painted after layout and never read by it.
+
+Approach (`factory-scene/scene.ts`, `factory-scene/movement.ts`; nothing in
+`web/` offered graph layout or geometry, so no dependency was added):
+
+1. **Footprints.** Every station's footprint is its body, its label and the
+   spot a worker stands at to use it, grown by a margin on every side.
+   Footprints never overlap; the margins of two neighbours make an aisle wide
+   enough for a worker, so every interaction position is reachable by
+   construction.
+2. **Placement.** Stations are linked by ownership (a member to its unit's
+   main machine, weighted most) and by flows; a runtime-only node is linked
+   only to the unit the graph says it claims. Linked stations form connected
+   groups. Within a group, the most linked station goes first, then the
+   station most linked to those already placed (ties by ID). Each is tried
+   against every side and corner of every placed neighbour and takes the
+   free spot with the shortest weighted distance to its neighbours plus a
+   charge for growing the group's bounds; if none is free it takes the
+   nearest free spot on a spiral. Two bounded passes then move each station
+   to a better free spot if one exists. Placement has a work cap in
+   proportion to the links it must honour (4,000 tries plus 200 a link end;
+   ordinary groups, a store shared by forty services included, use a fifth
+   of it). Only a runaway group, such as thousands of machines all linked
+   to one hub, passes it; that group, or that comes out longer than 2.2 times its width either way (a
+   chain), is laid instead in rows near 16:10 in placement order, each row
+   running back the way the last came, so neighbours stay side by side.
+   Then the groups are packed on
+   shelves, tallest first, with a gap that keeps unrelated groups visibly
+   apart; the shelf width is the one that keeps the floor smallest and
+   nearest 16:10 (chains of unrelated units do not make a strip). The
+   outbound line's block goes last, at the bottom, at a fixed size. Only IDs, kinds, labels,
+   ownership and flows enter; traffic, state, workers, the agent count and
+   the pane never do, so input order, a busy hour, zoom or a resize cannot
+   move anything.
+3. **Stability.** Given the previous layout, a structural change keeps every
+   station that still exists where it was, places new ones beside their
+   placed neighbours (or beside the floor for a new group), and leaves the
+   gaps that removals open. A kept station that has grown into a neighbour
+   (a longer label) is placed afresh beside its neighbours. When more than a
+   quarter of the stations would be placed afresh, the floor is laid out cold
+   again. Nothing is stored: a reload lays the same structure out exactly
+   as before, and only a structural change between sessions (machines,
+   flows or ownership) can rebuild it. Neither the agent count nor
+   which fixtures are offered moves anything.
+4. **Walking.** One geometry serves placement, solids, interaction positions
+   and navigation. Machine bodies and the fixtures are solid; labels, belts, area tints and the work line are
+   floor markings. Workers walk an occupancy grid (6 px cells; a cell is
+   free when a worker anywhere in it clears every solid) with
+   diagonal steps that never cut a corner, then the path is pulled straight
+   wherever the exact segment clears every solid by a worker's radius. A
+   seat or a standing place inside a table's or machine's clearance is
+   reached by one short step from the nearest free cell; nobody walks the
+   length of a table past the people at it. A walk always
+   starts from where the worker is drawn. If no route exists the worker is
+   put at its destination, marked as not walked, and never drawn through a
+   machine. Execution never waits for a sprite.
+5. **Belts.** Belts run on their own 8 px grid, square. They keep off
+   machine bodies, every label, the spots workers stand at and the
+   development block, and they leave a machine only from its sides or its
+   top, never its front. They are laid shortest first; each takes the
+   facing ports and the run cheapest in length, bends and crossings. When
+   every port of a machine is taken, a belt joins a belt already serving it
+   square-on, at a junction dot. For every routed belt these hold: it is
+   square; it never runs along another belt (belts between the same places
+   lie a cell apart, as a bundle); it crosses another only straight
+   through, at a right angle, never where the other turns and never within
+   10 px of a label, a port, a junction or a machine; and every crossing is
+   drawn as a bridge (a deck and two rails), unlike a junction's dot.
+   Each run is searched only in a window round its two ends and its work is
+   bounded by its length. Belt searches share one budget and link searches
+   another, each 150,000 steps plus 200 a connection, so all the work grows
+   linearly with the number of connections. A connection with no belt route
+   inside its budget is an **overhead link**: a thin, faint, dashed line,
+   square, laid round machine bodies and labels only. It never passes
+   through a machine or a label, but it may cross or follow belts and other
+   links and carries no bridges or material; the crossing rules above are
+   for belts alone. Past the link budget too, a connection is drawn as a
+   short dashed stub out of a free port of its own at each end. Each stub
+   names the machine at the other end where the name touches no machine,
+   label, belt, link or other name (a few spots by its end, then a shorter
+   name); otherwise the name is the stub's title. A machine with no port
+   left shows no stub, and the other end still names it. No connection is
+   ever dropped.
+6. **Areas.** A unit's members whose footprints face each other, side to
+   side or corner to corner, across no more than two aisles merge into one
+   irregular region, the gap
+   bridged only where no other machine is in the way; members further apart
+   are separate lobes. A region covers only its members' footprints and the
+   gaps between them, never another machine. Each region is named once, at
+   its top left, in floor its own footprints leave clear, and neighbouring
+   areas never share a hue while the palette of eight allows.
+
+**Fixtures and rest.** There is no break room. The five fixtures (board,
+Missions, task tray, library, coffee) are placed once the machines are, each
+in the free floor nearest the middle of the machinery, in a fixed order: between
+machines when there is a gap, below them when there is none. Only the machines
+decide it, so who is at work, which fixtures a floor offers or how many agents
+there are never moves a fixture or a machine. A worker not at work (resting,
+planning, outside the machines shown, or with its machine full) stands beside
+a machine: the one it last worked at, else beside someone who is alone, else
+the first free one. Rows fan out beside it and then below it, with no cap on
+how many. The outbound line has a block of its own, with a fixed size.
+
+Trade-offs: the greedy placement is not an optimiser. It keeps related
+machines close and the floor compact on the fixtures, but a long chain or a
+unit used by many others still gets some long belts, which are drawn rather
+than hidden by duplicating machines. Square belts that keep off labels and
+standing spots are longer than straight ones (about 1.6 to 1.9 times on the
+fixtures), and on a dense floor they fill the aisles like a circuit board.
+Laying belts costs up to about half a second on the largest fixture, once
+per structural change. Kept positions after a change can leave
+holes until the next cold layout, and a new machine whose neighbours are
+surrounded takes the nearest free floor, which can be a few machines away.
+Large, highly connected graphs make the group nearly square, so a very wide
+or very tall pane leaves margin. On dense random floors with long flows
+across the whole floor, about half the connections become overhead links.
+Rendering a floor (layout, areas and belts, measured with
+`renderToStaticMarkup`) takes about 0.1 s at 200 nodes, 0.3 s at 1,000 and
+1 s at 4,100 nodes with 3,900 edges on a laptop; at the documented bound,
+4,000 machines all flowing to one hub take about 1.3 s, and 800 units
+sharing one store about 1.1 s, most of their connections then being links
+or stubs. It runs only when the structure changes; a reading, a worker or
+the agent count never reruns it.
+
+Bounds: 4,096 nodes and 4,096 edges served.
 
 ## 12. Workers
 
@@ -523,12 +842,13 @@ The plant is what the software does. Workers are what agents do to it.
   the paths (longest prefix). With no node match it falls back to the unit
   whose source root contains them. The worker walks to that machine and
   works there.
-- With no sample, the worker waits in the hall's office. With no task, the
-  worker rests.
+- With no sample, the worker waits beside the machine its unit names. With no task, the
+  worker rests beside the machine it last worked at, else beside a machine
+  with someone alone, else the first free one.
 - Reviewers carry a clipboard at the changed machines. CI and checks show on
-  the hall's test rig while the Change's checks run. A merge followed by a
+  the outbound line's Checks station while the Change's checks run. A merge followed by a
   deploy observation for that unit plays the changeover.
-- A machine whose state is `failing`, or a quarantine bay with unknowns, is
+- A machine whose state is `failing`, or an unexplained crate, is
   inspectable. The inspector's **Investigate** action creates an ordinary
   task. The task carries only the node ID, kind, static label, source paths
   and counts. Runtime-only selector values come from unauthenticated local
@@ -542,46 +862,146 @@ The plant is what the software does. Workers are what agents do to it.
 One state, two projections, both computed by factoryd:
 
 - **Operator** (paired browser): everything above.
-- **Public** (`dark-factory-site`): an allowlist built by
-  `opgraph.Public`.
+- **Public** (`dark-factory-site`): built by `opgraph.Public`.
 
-`opgraph.Public` contains only:
+The projection has one switch, the anonymous visibility read described below.
+A node is **named** when it has static sources and every one of them is in a
+repository GitHub serves to an anonymous reader. A named node publishes its
+real static label (unit, route, store, external host, job or check name), its
+source paths and its exact rate per hour, and an edge between two named nodes
+its exact rate. Every other node is anonymous: a node from a private repository,
+and a runtime-only node (no static source, so its label could come from an
+unauthenticated sender) get the ordinal projection.
+
+For a node that is not named, `opgraph.Public` contains only:
 
 - node kind, an anonymous stable ID (`HMAC(project secret, id)`), and an
-  ordinal label ("Intake 3")
-- hall grouping, edges and their evidence state
+  ordinal label in plain words, counted per word: a unit by its runtime
+  ("Web app", "Web server", "Edge function", "Service", "Tool",
+  "CI pipeline"), an ingress by its trigger ("Entrance", "Timer",
+  "Inbox"), a job by its unit ("Check" in CI, else "Loop", short enough
+  to fit its station), then "Store", "Queue", "Outside service" and "Unknown"
+- unit grouping, edges and their evidence state
 - coverage and operational state
-- bucketed activity: none, low, medium or high, from log₂ of rate
+- a bucketed rate: 0, 30, 600 or 6000 per hour, from log₂ of the real rate
 
-Workers appear as an anonymous count by activity and location (hall), with
+Every node keeps its HMAC id, and edges, coverage, state and unit grouping are
+shape either way.
+
+Workers appear as an anonymous count by activity and location (unit), with
 no names or task text. Deploy and changeover events carry no versions.
+
+The outbound work line appears as crates: each open pull request, and each
+merged one for a day, as an anonymous stable ID (`HMAC(secret, "crate:" +
+repository#number)`), its station (review, checks, merge queue, shipped) and
+a fault flag. For a public repository it also carries the pull request's
+number and title, which GitHub already shows; never a branch. factoryd places them by the
+console's rule (`publicCrates`, `projectCrates`; one shared fixture,
+`web/fixtures/production-crates.json`, holds both to it) on its own clock.
+*SHIPPED* means deployed where the repository has GitHub deployment records
+of its production environment: a merged crate ships once a successful one
+was created at or after its merge, and waits at the merge queue's end until
+then. The repository record keeps the newest such time once seen, so a failed
+read moves nothing. A repository whose last production deployment is more than
+seven days before a merge no longer deploys that way, so that merge ships: a
+repository that changes how it deploys never holds its line. Without
+deployment records, SHIPPED means merged.
+
+A `ledger` is added only for repositories GitHub serves to an anonymous
+reader: factoryd reads each repository's releases without credentials once
+an hour, and only a 200 makes it public; anything else, or no answer yet,
+is private and adds nothing. The ledger carries what those public
+repositories already show: every open pull request, every accepted issue
+not yet finished, merges in the last 7 days and a 21-day hourly clock of
+them from production and intake records, and the releases published in
+those 21 days, paged from the same anonymous read. Past the
+relay's bound the oldest listed merges, then open pull requests, give way;
+their counts stay.
 
 It never contains:
 
-- labels or paths from source
-- selectors, hostnames, routes or secrets
-- binding names
-- issue or PR text, errors or terminal output
+- anything from a private repository beyond shape and ordinal names
+- selectors (runtime attribute values), secrets or binding names
+- task text, issue text, errors or terminal output
+- worker or account names
 
-Ordinal labels are assigned in HMAC-ID order, so they do not shift as other
-nodes come and go.
+Ordinal labels are assigned in HMAC-ID order among the anonymous nodes, so they
+do not shift as other nodes come and go.
 
-The relay is not the publishing path. It forwards opaque frames, stores only
-its host record, and its node ID is the pairing identity.
-
-Instead, factoryd serves the projection to local readers only, at
+factoryd serves the projection to local readers at
 `GET http://127.0.0.1:43123/v1/public/<project id>`. It refuses any request
 carrying an `Origin`, and any whose `Host` is not the listener itself (DNS
 rebinding). Public identities are keyed by a 32-byte secret,
 `public.key` (mode 0600), which never leaves the home.
 
-Publishing is an explicit operator action, so nothing leaves the machine by
-default. The operator saves that JSON into the site repository, and the site
-renders it with the same world and renderer in read-only mode.
+### Live feed
 
-What remains visible is the shape (node and edge counts), bucketed activity
-and hall-level worker presence. That is acceptable for public repositories,
-and it is stated on the page.
+Publishing is opt-in per factory. Nothing leaves the machine until the
+operator names one project in `observe.json`:
+
+```json
+{ "public_project": "<project id>", "sources": [] }
+```
+
+factoryd then sends that project's PublicWorld bytes, exactly what
+`/v1/public` serves, over its existing relay connection as a `PUBLISH`
+record. It sends at most once a minute and only when the bytes changed.
+`generated_at` moves every five minutes, so a running factory publishes at
+least that often. On start it logs the public id it publishes under. The
+relay keeps only the latest world per factory and serves it read-only at
+`GET https://relay.darkfactory.build/public/<public id>`.
+`Last-Modified` is when the relay received it. The site polls that URL on
+`/log`, falls back to its committed snapshot, and reads a feed older than
+seven minutes as not live.
+
+The public id is `base32(SHA-256("dark-factory-relay/public\n" ‖ node public
+key)[:20])`. It has the node id's shape but cannot be turned back into it,
+and the node key never leaves the relay and the home. A reader of the site
+learns nothing it could use to dial `/host` or `/controller`.
+
+### Threat note
+
+- **Spoofing another factory's world.** A world is stored under the public
+  id derived from the key whose host token the node's Durable Object
+  verified. The relay never accepts an id from the publisher, and the
+  public object takes writes only from that node object. The Worker
+  forwards only `GET` to it. Claiming another factory's id needs its node
+  key.
+- **Oversized or abusive publishes.** A world over 128 KiB, one that is not
+  a JSON object with a numeric `generated_at`, or one sooner than 30 s after
+  the last is dropped. It costs one record on an already authenticated
+  socket and only ever replaces the sender's own single record. Storage is
+  O(1) per factory, with no history and no listing endpoint.
+- **Leaking private data.** The publisher has one source:
+  `browserBackend.PublicWorld`, the `/v1/public` handler, which marshals
+  `opgraph.Public`. Its allowlist is enforced by its output type, not by
+  redaction, and the one switch that lets a name through is the anonymous
+  visibility read: a repository is named only when GitHub answered its
+  releases to a reader without credentials, so a private repository is
+  anonymous until proven public, and a repository that turns private is
+  anonymous within the hour. The bytes go to the relay unchanged, and the
+  relay stores them verbatim and adds nothing. `Last-Modified` tells a
+  reader, to the minute, when the public world last changed, and a named
+  node's exact rate shows its traffic. Both are acceptable because the
+  repository's source, pull requests and merges are already public; they
+  would not be for a private one, which is why the switch is per repository.
+- **Cost of public reads.** Each read is one Worker request and one Durable
+  Object read. Reads are rate limited per client address (60 a minute), and
+  `Cache-Control: public, max-age=15` covers repeat polls. CORS admits only
+  `https://www.darkfactory.build`, but CORS is not access control: the
+  world is public by design. If reads ever cost real money, put
+  `caches.default` in front of the object.
+- **Stopping.** Remove `public_project` from `observe.json`. Within a minute
+  factoryd publishes an empty world, and the relay deletes the stored one.
+  Every start without the setting does the same once, so a world left by an
+  earlier run is retracted too. Stopping the relay (`--relay-origin` unset)
+  stops publishing as well. The last world then stays as "last seen" until
+  a later start retracts it.
+
+What remains visible for a private repository is the shape (node and edge
+counts), bucketed rates, unit-level worker presence and, for a live feed, when
+it last changed. For a public one the page also shows its real names and
+rates, which the source and pull request history already show.
 
 ## 14. Security and privacy
 
@@ -589,15 +1009,19 @@ and it is stated on the page.
   `observe.json`, held in daemon memory, and never served. Adapters only
   read.
 - **OTLP receiver.** Loopback only. It accepts no browser `Origin` and only
-  `application/json`, up to 1 MiB, and aggregates without retaining spans.
+  `application/json` or `application/x-protobuf`, up to 1 MiB after
+  decompression, and aggregates without retaining spans, metrics or log
+  records. Agent telemetry keeps counts and cost only.
   Attribute values are length-bounded, and only the selector keys listed in
   section 4 are kept, so arbitrary payload data never reaches the graph.
 - **Static extraction.** Reads exact-revision archives (`BuildArchive`) and
   never executes project code or external analysers. URL literals keep scheme, host and path template only, never query
   strings or credentials.
-- **Public projection.** An allowlist, never redaction. A test serialises a
+- **Public projection.** Real names only for repositories GitHub serves
+  anonymously; otherwise an allowlist, never redaction. A test serialises a
   projection built from a graph seeded with canary secrets in every field and
-  asserts that none appear.
+  asserts that none appear, and another that a runtime-only node stays
+  ordinal beside a named one.
 - **Operator frame.** Bounded by the existing 1 MiB frame. Node detail
   carries source paths and selectors (operator-visible today), never source
   text.
@@ -625,3 +1049,7 @@ The attacks cover:
 They must also answer one question: is there a materially simpler
 architecture with the same outcome? Findings and resolutions are recorded on
 the pull requests.
+
+A failed merge-queue run on a factory-reviewed branch is repaired by the
+factory itself: it pushes a fix commit carrying `Dark-Factory-Operation` to
+that branch. A human pushing to the same branch must fetch first.

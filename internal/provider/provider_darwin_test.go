@@ -18,6 +18,7 @@ import (
 	"sync"
 	"testing"
 
+	"github.com/dark-factory-build/dark-factory/internal/change"
 	"github.com/dark-factory-build/dark-factory/internal/gitauthor"
 	"github.com/dark-factory-build/dark-factory/internal/install"
 	"github.com/dark-factory-build/dark-factory/internal/kernel"
@@ -232,7 +233,7 @@ func TestBuildOrchestratorClaudeIsGivenTheMaintainer(t *testing.T) {
 		t.Fatal(err)
 	}
 	wantWorkerArgv := append([]string{"/usr/bin/true", "--permission-mode", "dontAsk", "--setting-sources", ""}, wantClaudeWorkerSessionFlag(t, workerRequest)...)
-	wantWorkerArgv = append(wantWorkerArgv, "--strict-mcp-config", "--settings", wantClaudeSettings(t, workerRequest, "factory_attempt"), "--mcp-config", wantClaudeServers(t, workerRequest, nil))
+	wantWorkerArgv = append(wantWorkerArgv, "--strict-mcp-config", "--settings", wantClaudeSettings(t, workerRequest, "factory_attempt"), "--mcp-config", wantClaudeServers(t, workerRequest, nil), "--", bootstrapPromptFor(workerRequest, "factory_attempt"))
 	if !reflect.DeepEqual(worker.Argv(), wantWorkerArgv) {
 		t.Fatalf("worker argv = %q, want %q", worker.Argv(), wantWorkerArgv)
 	}
@@ -251,7 +252,7 @@ func TestBuildOrchestratorClaudeIsGivenTheMaintainer(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := []string{"/usr/bin/true", "--permission-mode", "dontAsk", "--setting-sources", "", "--strict-mcp-config", "--settings", wantClaudeSettings(t, unconnected, "factory_attempt"), "--mcp-config", wantClaudeServers(t, unconnected, nil)}
+	want := []string{"/usr/bin/true", "--permission-mode", "dontAsk", "--setting-sources", "", "--strict-mcp-config", "--settings", wantClaudeSettings(t, unconnected, "factory_attempt"), "--mcp-config", wantClaudeServers(t, unconnected, nil), "--", bootstrapPromptFor(unconnected, "factory_attempt")}
 	if !reflect.DeepEqual(launch.Argv(), want) {
 		t.Fatalf("unconnected orchestrator argv = %q, want %q", launch.Argv(), want)
 	}
@@ -260,7 +261,7 @@ func TestBuildOrchestratorClaudeIsGivenTheMaintainer(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	want = []string{"/usr/bin/true", "--permission-mode", "dontAsk", "--setting-sources", "", "--strict-mcp-config", "--settings", wantClaudeSettings(t, overseerRequest, "factory_attempt", "maintainer"), "--mcp-config", wantClaudeServers(t, overseerRequest, map[string]any{"maintainer": map[string]any{"command": runtime.factoryctl, "args": []string{"attempt", "maintainer-mcp"}}})}
+	want = []string{"/usr/bin/true", "--permission-mode", "dontAsk", "--setting-sources", "", "--strict-mcp-config", "--settings", wantClaudeSettings(t, overseerRequest, "factory_attempt", "maintainer"), "--mcp-config", wantClaudeServers(t, overseerRequest, map[string]any{"maintainer": map[string]any{"command": runtime.factoryctl, "args": []string{"attempt", "maintainer-mcp"}}}), "--", bootstrapPromptFor(overseerRequest, "factory_attempt")}
 	if !reflect.DeepEqual(launch.Argv(), want) {
 		t.Fatalf("orchestrator argv = %q, want %q", launch.Argv(), want)
 	}
@@ -318,9 +319,9 @@ func TestBuildShellReturnsExactImmutableLaunchAndTask(t *testing.T) {
 		"DARK_FACTORY_SOCKET=" + runtime.socket,
 		"DARK_FACTORY_ATTEMPT_TOKEN_FILE=" + runtime.token,
 		"DARK_FACTORY_FACTORYCTL=" + runtime.factoryctl,
-		"HOME=" + runtime.home,
 		"TMPDIR=" + runtime.temp,
 		"PATH=" + runtime.toolPath,
+		"HOME=" + runtime.home,
 		"DEVELOPER_DIR=" + install.TrustedSystemToolchainRoot(),
 		"LANG=C", "LC_ALL=C", "TERM=xterm-256color", "SHELL=/bin/sh",
 		"GIT_AUTHOR_NAME=" + GitIdentityName, "GIT_AUTHOR_EMAIL=" + GitIdentityEmail, "GIT_COMMITTER_NAME=" + GitIdentityName, "GIT_COMMITTER_EMAIL=" + GitIdentityEmail,
@@ -418,12 +419,12 @@ func TestBuildNativeReturnsExactArgvEnvironmentAndSafeStartupTask(t *testing.T) 
 		wantArgv     []string
 	}{
 		{
-			kind: kernel.ProviderClaudeCode, model: "claude-model", effort: "max", wantDelivery: TaskDeliveryStartupTerminal,
+			kind: kernel.ProviderClaudeCode, model: "claude-model", effort: "max", wantDelivery: TaskDeliveryAttemptAPI,
 			wantArgv: []string{"/usr/bin/true", "--permission-mode", "dontAsk", "--setting-sources", "", "--model", "claude-model", "--effort", "max", "--strict-mcp-config"},
 		},
 		{
 			kind: kernel.ProviderCodex, model: "codex-model", effort: "xhigh", wantDelivery: TaskDeliveryAttemptAPI,
-			wantArgv: []string{"/usr/bin/true", "-c", `notify=["<factoryctl>", "attempt", "turn-complete"]`, "--strict-config", "--no-alt-screen", "-c", `tui.resume_cwd="current"`, "-c", "check_for_update_on_startup=false", "-c", "tool_output_token_limit=32768", "-c", "projects=<working-directory>", "--model", "codex-model", "-c", `model_reasoning_effort="xhigh"`, codexBootstrapPrompt},
+			wantArgv: []string{"/usr/bin/true", "-c", `notify=["<factoryctl>", "attempt", "turn-complete"]`, "--strict-config", "--no-alt-screen", "-c", `tui.resume_cwd="current"`, "-c", "check_for_update_on_startup=false", "-c", "tool_output_token_limit=32768", "-c", "projects=<working-directory>", "--model", "codex-model", "-c", `model_reasoning_effort="xhigh"`, bootstrapPrompt},
 		},
 	}
 	for _, test := range tests {
@@ -442,7 +443,7 @@ func TestBuildNativeReturnsExactArgvEnvironmentAndSafeStartupTask(t *testing.T) 
 			wantArgv := test.wantArgv
 			if test.kind == kernel.ProviderClaudeCode {
 				wantArgv = slices.Insert(slices.Clone(wantArgv), 5, wantClaudeWorkerSessionFlag(t, request)...)
-				wantArgv = append(wantArgv, "--settings", wantClaudeSettings(t, request, "factory_attempt"), "--mcp-config", wantClaudeServers(t, request, nil))
+				wantArgv = append(wantArgv, "--settings", wantClaudeSettings(t, request, "factory_attempt"), "--mcp-config", wantClaudeServers(t, request, nil), "--", bootstrapPrompt)
 			}
 			if test.kind == kernel.ProviderCodex {
 				wantArgv[2] = "notify=[" + tomlBasicString(runtime.factoryctl) + ", \"attempt\", \"turn-complete\"]"
@@ -451,7 +452,7 @@ func TestBuildNativeReturnsExactArgvEnvironmentAndSafeStartupTask(t *testing.T) 
 					t.Fatal(err)
 				}
 				wantArgv = slices.Replace(wantArgv, 12, 13, codexUntrustedProjectConfig(request.workingDirectory), "-c", "default_permissions="+tomlBasicString(codexPermissionName(request.runtime)), "-c", `approval_policy="never"`, "-c", permissions, "--disable", "computer_use", "--disable", "browser_use", "--disable", "plugins", "-c", "mcp_servers."+codexAttemptServerName(request.runtime)+"={command="+tomlBasicString(runtime.factoryctl)+`,args=["attempt","mcp"],env_vars=["DARK_FACTORY_SOCKET","DARK_FACTORY_ATTEMPT_TOKEN_FILE"],enabled=true,required=true,tools={factory={approval_mode="approve"}}}`)
-				wantArgv[len(wantArgv)-1] = codexBootstrapPromptFor(request.runtime)
+				wantArgv[len(wantArgv)-1] = bootstrapPromptFor(request, codexAttemptServerName(request.runtime))
 			}
 			if got := launch.Argv(); !slices.Equal(got, wantArgv) {
 				t.Fatalf("argv=%q, want %q", got, wantArgv)
@@ -499,31 +500,13 @@ func TestBuildNativeReturnsExactArgvEnvironmentAndSafeStartupTask(t *testing.T) 
 			if delivery != launch.TaskDelivery() {
 				t.Fatalf("prepared delivery=%d, want %d", delivery, launch.TaskDelivery())
 			}
-			instructions := string(payload)
-			if test.kind == kernel.ProviderCodex {
-				instructions = launch.Argv()[len(launch.Argv())-1]
-			}
 			for _, rule := range []string{"Never recursively search the user home", "command -v", "report the missing prerequisite"} {
-				if !strings.Contains(instructions, rule) {
+				if !strings.Contains(launch.Argv()[len(launch.Argv())-1], rule) {
 					t.Fatalf("native provider lacks scoped discovery rule %q", rule)
 				}
 			}
-			if test.kind == kernel.ProviderCodex {
-				if payload != nil {
-					t.Fatalf("Codex task bytes escaped attempt API delivery: %q", payload)
-				}
-			} else {
-				want := runner.ClaudeTaskLead + `"PRIVATE_TASK_SENTINEL\nline 1\n\"quoted\"\u001b café 😀\u007f\u0085"` + "\r"
-				if string(payload) != want {
-					t.Fatalf("startup payload=%q, want %q", payload, want)
-				}
-				if payload[len(payload)-1] != '\r' || bytes.IndexByte(payload[:len(payload)-1], '\r') >= 0 || bytes.IndexByte(payload, '\n') >= 0 || bytes.IndexByte(payload, 0x1b) >= 0 || bytes.IndexByte(payload, 0x7f) >= 0 {
-					t.Fatalf("startup payload contains raw terminal control: %q", payload)
-				}
-				var decoded string
-				if err := json.Unmarshal(payload[len(runner.ClaudeTaskLead):len(payload)-1], &decoded); err != nil || decoded != string(task) {
-					t.Fatalf("JSON task decoded as %q: %v", decoded, err)
-				}
+			if payload != nil {
+				t.Fatalf("task bytes escaped attempt API delivery: %q", payload)
 			}
 		})
 	}
@@ -1118,23 +1101,14 @@ func TestTaskValidationUsesDeliverySpecificBound(t *testing.T) {
 	if _, _, err := PrepareTask(kernel.ProviderShell, append(shellMaximum, 'x')); !errors.Is(err, ErrInvalid) {
 		t.Fatalf("Shell over-limit task error=%v, want ErrInvalid", err)
 	}
-	claudeMaximum := bytes.Repeat([]byte{'x'}, runner.MaxClaudePrompt-len(runner.ClaudeTaskLead)-3)
-	if delivery, _, err := PrepareTask(kernel.ProviderClaudeCode, claudeMaximum); err != nil || delivery != TaskDeliveryStartupTerminal {
-		t.Fatalf("Claude exact startup bound rejected: %v", err)
-	}
-	if _, _, err := PrepareTask(kernel.ProviderClaudeCode, append(claudeMaximum, 'x')); !errors.Is(err, ErrInvalid) {
-		t.Fatalf("Claude over-limit task error=%v, want ErrInvalid", err)
-	}
-	codexMaximum := bytes.Repeat([]byte{'x'}, runner.MaxCodexTaskBytes)
-	if delivery, payload, err := PrepareTask(kernel.ProviderCodex, codexMaximum); err != nil || delivery != TaskDeliveryAttemptAPI || payload != nil {
-		t.Fatalf("Codex maximum API task delivery=(%d, %d bytes), error=%v", delivery, len(payload), err)
-	}
-	if _, _, err := PrepareTask(kernel.ProviderCodex, append(codexMaximum, 'x')); !errors.Is(err, ErrInvalid) {
-		t.Fatalf("Codex over-limit task error=%v, want ErrInvalid", err)
-	}
-	jsonExpanding := []byte(strings.Repeat("x", runner.MaxClaudePrompt-len(runner.ClaudeTaskLead)-5) + "\u0085")
-	if _, _, err := PrepareTask(kernel.ProviderClaudeCode, jsonExpanding); !errors.Is(err, ErrInvalid) {
-		t.Fatalf("Claude expanded valid UTF-8 must exceed the encoded ceiling: %v", err)
+	for _, kind := range []kernel.Provider{kernel.ProviderClaudeCode, kernel.ProviderCodex} {
+		maximum := bytes.Repeat([]byte{'x'}, runner.MaxNativeTaskBytes)
+		if delivery, payload, err := PrepareTask(kind, maximum); err != nil || delivery != TaskDeliveryAttemptAPI || payload != nil {
+			t.Fatalf("%s maximum API task delivery=(%d, %d bytes), error=%v", kind, delivery, len(payload), err)
+		}
+		if _, _, err := PrepareTask(kind, append(maximum, 'x')); !errors.Is(err, ErrInvalid) {
+			t.Fatalf("%s over-limit task error=%v, want ErrInvalid", kind, err)
+		}
 	}
 	if _, _, err := PrepareTask(kernel.Provider(255), []byte("task")); !errors.Is(err, ErrInvalid) {
 		t.Fatalf("unknown provider error=%v, want ErrInvalid", err)
@@ -1373,7 +1347,7 @@ func TestCodexPermissionsBoundReadsAndRejectOversizedPolicy(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, rule := range []string{`":root"="deny"`, `":minimal"="read"`, tomlBasicString(request.workingDirectory) + `="write"`, tomlBasicString(request.runtime.token) + `="read"`, tomlBasicString(request.runtime.socket) + `="allow"`} {
+	for _, rule := range []string{`":root"="deny"`, `":minimal"="read"`, `"/private/tmp"="deny"`, `"/private/var/tmp"="deny"`, tomlBasicString(request.workingDirectory) + `="write"`, tomlBasicString(request.runtime.token) + `="read"`, tomlBasicString(request.runtime.socket) + `="allow"`} {
 		if !strings.Contains(policy, rule) {
 			t.Fatalf("policy omitted rule %q", rule)
 		}
@@ -1500,7 +1474,6 @@ func TestNativeOrchestratorDoesNotProjectSharedGoModuleCache(t *testing.T) {
 }
 
 // Opt-in local proof with an installed Codex CLI; no model or account access.
-// Keep fixtures outside the system temp roots permitted by :minimal.
 func TestCodexToolchainSandbox(t *testing.T) {
 	codex := os.Getenv("DARK_FACTORY_TEST_CODEX")
 	if codex == "" {
@@ -1532,6 +1505,14 @@ func TestCodexToolchainSandbox(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(software, "library"), []byte("fixture library"), 0600); err != nil {
 		t.Fatal(err)
 	}
+	shared, err := os.MkdirTemp("/private/tmp", "toolchain-proof-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.RemoveAll(shared)
+	if err := os.WriteFile(filepath.Join(shared, "sentinel"), []byte("fixture sentinel"), 0600); err != nil {
+		t.Fatal(err)
+	}
 	installation, runtime, _ := nativeFixture(t, kernel.ProviderCodex)
 	runtime.home, runtime.temp, runtime.accountHome = filepath.Join(root, "home"), filepath.Join(root, "tmp"), filepath.Join(root, "account")
 	runtime.toolchainReadRoots = software
@@ -1559,8 +1540,11 @@ func TestCodexToolchainSandbox(t *testing.T) {
  printf cache > "$HOME/cache"
  if /bin/cat "$2" >/dev/null 2>&1; then exit 31; fi
  if printf bad > "$1/write" 2>/dev/null; then exit 32; fi
+ if /bin/cat "$3/sentinel" >/dev/null 2>&1; then exit 34; fi
+ if printf bad > "$3/write" 2>/dev/null; then exit 35; fi
+ if printf bad > "/private/var/tmp/toolchain-proof-$$" 2>/dev/null; then exit 36; fi
  `
-	if out, err := run("/bin/sh", "-c", script, "proof", software, secret); err != nil {
+	if out, err := run("/bin/sh", "-c", script, "proof", software, secret, shared); err != nil {
 		t.Fatalf("sandbox isolation: %v\n%s", err, out)
 	}
 	gitDirectory := filepath.Join(root, "repository", ".git")
@@ -1641,12 +1625,22 @@ printf '#include <stdio.h>\nint main(void) { puts("sdk-ok"); return 0; }\n' > sd
 	if err != nil {
 		t.Fatal(err)
 	}
+	// The Change is a linked worktree; Codex protects the registration its
+	// gitfile names, where a commit writes index.lock and COMMIT_EDITMSG.
+	registration := filepath.Join(gitDirectory, "worktrees", filepath.Base(request.workingDirectory))
+	if err := os.MkdirAll(registration, 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(request.workingDirectory, ".git"), []byte("gitdir: "+registration+"\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
 	worktreeScript := `set -eu
+ printf lock > "$3/index.lock"
  printf ref > "$1/refs/factory-branch"
  printf object > "$1/objects/new"
  if (printf forbidden > "$2/tracked.go") 2>/dev/null; then exit 34; fi
  `
-	if out, err := run("/bin/sh", "-c", worktreeScript, "proof", gitDirectory, root); err != nil {
+	if out, err := run("/bin/sh", "-c", worktreeScript, "proof", gitDirectory, root, registration); err != nil {
 		t.Fatalf("worker Git directory grant: %v\n%s", err, out)
 	}
 	request.runtime, err = request.runtime.WithGitCommonDirectory(gitDirectory, false)
@@ -1705,13 +1699,17 @@ func TestCodexLocalCILeaseGrantExcludesGitMetadata(t *testing.T) {
 // else of the repository or the Changes parent is granted.
 func TestCodexLaunchGrantsTheRepositoryGitDirectoryByRole(t *testing.T) {
 	installation, runtime, _ := nativeFixture(t, kernel.ProviderCodex)
-	gitDirectory := "/private/project/.git"
 	for _, writable := range []bool{true, false} {
+		request := requestFor(t, kernel.ProviderCodex, installation, runtime, "", "")
+		// A fresh Change's private Git, and its registration Git names after
+		// the worktree: Codex 0.160 makes it read-only unless granted itself.
+		gitDirectory := change.GitDirectoryForChange("/private/project", request.workingDirectory)
+		registration := filepath.Join(gitDirectory, "worktrees", filepath.Base(request.workingDirectory))
 		granted, err := runtime.WithGitCommonDirectory(gitDirectory, writable)
 		if err != nil {
 			t.Fatal(err)
 		}
-		request := requestFor(t, kernel.ProviderCodex, installation, granted, "", "")
+		request.runtime = granted
 		launch, err := Build(request)
 		if err != nil {
 			t.Fatal(err)
@@ -1730,6 +1728,9 @@ func TestCodexLaunchGrantsTheRepositoryGitDirectoryByRole(t *testing.T) {
 		if !strings.Contains(policy, tomlBasicString(gitDirectory)+`="`+access+`"`) {
 			t.Fatalf("launch omitted the Git directory grant: %q", policy)
 		}
+		if strings.Contains(policy, tomlBasicString(registration)+`="write"`) != writable {
+			t.Fatalf("worktree registration write grant = %v, want %v: %q", !writable, writable, policy)
+		}
 		if strings.Contains(policy, tomlBasicString("/private/project")+`="`) || strings.Contains(policy, tomlBasicString("/private/factory/changes")+`="`) {
 			t.Fatalf("Git directory grant widened: %q", policy)
 		}
@@ -1746,10 +1747,32 @@ func TestCodexLaunchGrantsTheRepositoryGitDirectoryByRole(t *testing.T) {
 	}
 }
 
-func TestBothProviderAssignmentsUseTheirOwnCheckout(t *testing.T) {
-	for name, prompt := range map[string]string{"codex": codexBootstrapPrompt, "claude": runner.ClaudeTaskLead} {
-		if !strings.Contains(prompt, "including corrections after send-back") || strings.Contains(prompt, "attempt source") || !strings.Contains(prompt, "Never substitute another task or private Change path") || !strings.Contains(prompt, "screenshots are illustrative only and never blocking evidence") {
-			t.Fatalf("%s assignment loses its own-checkout instruction", name)
+// Claude and Codex start from one bootstrap prompt, the last argv element,
+// naming only their own attempt server; neither has a task typed into its PTY.
+func TestNativeProvidersShareTheBootstrapPrompt(t *testing.T) {
+	if !strings.Contains(bootstrapPrompt, `argv ["attempt","task"] before doing anything else`) || !strings.Contains(bootstrapPrompt, "including corrections after send-back") || strings.Contains(bootstrapPrompt, "attempt source") || !strings.Contains(bootstrapPrompt, "Never substitute another task or private Change path") || !strings.Contains(bootstrapPrompt, "screenshots are illustrative only and never blocking evidence") {
+		t.Fatal("bootstrap prompt loses its task fetch or own-checkout instruction")
+	}
+	for _, role := range []kernel.AgentRole{kernel.RoleWorker, kernel.RoleOrchestrator} {
+		prompts := map[kernel.Provider]string{}
+		for _, kind := range []kernel.Provider{kernel.ProviderClaudeCode, kernel.ProviderCodex} {
+			installation, runtime, _ := nativeFixture(t, kind)
+			request := roleRequestFor(t, kind, installation, runtime, "", "", role)
+			launch, err := Build(request)
+			if err != nil || launch.TaskDelivery() != TaskDeliveryAttemptAPI {
+				t.Fatalf("%s %s delivery=%d err=%v", kind, role, launch.TaskDelivery(), err)
+			}
+			argv := launch.Argv()
+			prompt := argv[len(argv)-1]
+			if kind == kernel.ProviderCodex {
+				prompt = strings.Replace(prompt, codexAttemptServerName(runtime)+".factory", "factory_attempt.factory", 1)
+			} else if argv[len(argv)-2] != "--" {
+				t.Fatalf("Claude prompt is not separated from variadic options: %q", argv)
+			}
+			prompts[kind] = prompt
+		}
+		if prompts[kernel.ProviderClaudeCode] != prompts[kernel.ProviderCodex] || !strings.HasPrefix(prompts[kernel.ProviderCodex], bootstrapPrompt) {
+			t.Fatalf("%s prompts differ:\nclaude=%q\ncodex=%q", role, prompts[kernel.ProviderClaudeCode], prompts[kernel.ProviderCodex])
 		}
 	}
 }
@@ -1882,5 +1905,83 @@ func TestClaudeSettingsConfineTheRunToItsGrants(t *testing.T) {
 	// A checkout's own .claude/settings.json must not be able to widen this.
 	if sources := slices.Index(launch.Argv(), "--setting-sources"); sources < 0 || launch.Argv()[sources+1] != "" {
 		t.Fatalf("launch reads user or project settings: %q", launch.Argv())
+	}
+}
+
+func TestWorkerEnvironmentExportsTracesToTheConfiguredReceiver(t *testing.T) {
+	want := []string{"OTEL_EXPORTER_OTLP_TRACES_ENDPOINT=http://127.0.0.1:43999/v1/traces", "OTEL_RESOURCE_ATTRIBUTES=deployment.environment.name=local"}
+	for _, kind := range []kernel.Provider{kernel.ProviderClaudeCode, kernel.ProviderCodex} {
+		installation, runtime, _ := nativeFixture(t, kind)
+		launch, err := Build(requestFor(t, kind, installation, runtime.WithTraceReceiver(43999, ""), "", ""))
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, entry := range want {
+			if !slices.Contains(launch.Environment(), entry) {
+				t.Fatalf("%s worker environment lacks %q: %q", kind, entry, launch.Environment())
+			}
+		}
+		if _, err := runner.PrepareCommittedExecSpec(launch.Executable(), launch.Argv(), launch.Environment(), t.TempDir()); err != nil {
+			t.Fatalf("runner refused the %s worker environment: %v", kind, err)
+		}
+		for _, other := range [][]string{
+			runtime.environmentForRole(kind, kernel.RoleWorker),
+			runtime.WithTraceReceiver(43999, "").environmentForRole(kind, kernel.RoleOrchestrator),
+		} {
+			for _, entry := range other {
+				if strings.HasPrefix(entry, "OTEL_") {
+					t.Fatalf("%s exported traces without a worker receiver: %q", kind, entry)
+				}
+			}
+		}
+		// Without a run id the agent CLI's own telemetry stays off.
+		if slices.ContainsFunc(launch.Environment(), func(entry string) bool { return strings.HasPrefix(entry, "CLAUDE_CODE_ENABLE_TELEMETRY") }) ||
+			slices.ContainsFunc(launch.Argv(), func(arg string) bool { return strings.HasPrefix(arg, "otel.") }) {
+			t.Fatalf("%s enabled agent telemetry without a run id: %q %q", kind, launch.Environment(), launch.Argv())
+		}
+	}
+}
+
+// A worker's agent CLI exports its own metrics and logs to the receiver, with
+// the run id factoryd attributes them by; prompt content stays off.
+func TestWorkerAgentTelemetryNamesItsRun(t *testing.T) {
+	const run = "0123456789abcdef0123456789abcdef"
+	resource := "OTEL_RESOURCE_ATTRIBUTES=deployment.environment.name=local,dark_factory.run.id=" + run
+	for _, test := range []struct {
+		kind kernel.Provider
+		env  []string
+		argv []string
+	}{
+		{kernel.ProviderClaudeCode, []string{resource, "CLAUDE_CODE_ENABLE_TELEMETRY=1", "OTEL_METRICS_EXPORTER=otlp", "OTEL_LOGS_EXPORTER=otlp", "OTEL_EXPORTER_OTLP_PROTOCOL=http/protobuf",
+			"OTEL_EXPORTER_OTLP_METRICS_ENDPOINT=http://127.0.0.1:43999/v1/metrics", "OTEL_EXPORTER_OTLP_LOGS_ENDPOINT=http://127.0.0.1:43999/v1/logs"}, nil},
+		{kernel.ProviderCodex, []string{resource}, []string{`otel.exporter={otlp-http={endpoint="http://127.0.0.1:43999/v1/logs",protocol="binary"}}`,
+			`otel.metrics_exporter={otlp-http={endpoint="http://127.0.0.1:43999/v1/metrics",protocol="binary"}}`, "otel.log_user_prompt=false"}},
+	} {
+		installation, runtime, _ := nativeFixture(t, test.kind)
+		launch, err := Build(requestFor(t, test.kind, installation, runtime.WithTraceReceiver(43999, run), "", ""))
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, entry := range test.env {
+			if !slices.Contains(launch.Environment(), entry) {
+				t.Fatalf("%s worker environment lacks %q: %q", test.kind, entry, launch.Environment())
+			}
+		}
+		for _, entry := range test.argv {
+			if index := slices.Index(launch.Argv(), entry); index < 1 || launch.Argv()[index-1] != "-c" {
+				t.Fatalf("%s worker argv lacks -c %q: %q", test.kind, entry, launch.Argv())
+			}
+		}
+		if test.kind == kernel.ProviderCodex && slices.ContainsFunc(launch.Environment(), func(entry string) bool { return strings.HasPrefix(entry, "CLAUDE_CODE_") }) {
+			t.Fatalf("codex worker carries Claude Code switches: %q", launch.Environment())
+		}
+		if _, err := runner.PrepareCommittedExecSpec(launch.Executable(), launch.Argv(), launch.Environment(), t.TempDir()); err != nil {
+			t.Fatalf("runner refused the %s worker telemetry: %v", test.kind, err)
+		}
+		for _, entry := range runtime.WithTraceReceiver(43999, run).environmentForRole(test.kind, kernel.RoleOrchestrator) {
+			if strings.HasPrefix(entry, "OTEL_") || strings.HasPrefix(entry, "CLAUDE_CODE_ENABLE") {
+				t.Fatalf("%s orchestrator exported telemetry: %q", test.kind, entry)
+			}
+		}
 	}
 }

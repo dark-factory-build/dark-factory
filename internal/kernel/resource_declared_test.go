@@ -7,6 +7,7 @@ import (
 )
 
 func TestDeclaredResourcesRejectHiddenIdentityAndRecoveredAbsenceAuthority(t *testing.T) {
+	t.Parallel()
 	for _, kind := range []ResourceKind{ResourceRunnerProcess, ResourceProviderProcess, ResourceProviderGroup, ResourceRuntimeRoot} {
 		t.Run(kind.String(), func(t *testing.T) {
 			store, run, _ := admittedOrchestratorRun(t)

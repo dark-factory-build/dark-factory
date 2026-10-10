@@ -216,7 +216,7 @@ test("a device with no factory explains how to pair one", async () => {
     assert.ok(manager.calls.options[0].store instanceof MemoryRemoteStore);
     assert.equal(manager.calls.options[0].origin, "https://app.darkfactory.build");
     const copy = sectionText(renderer, "dfRemote__none");
-    assert.match(copy, /PAIR A PHONE/);
+    assert.match(copy, /Pair a phone/);
     assert.match(copy, /on this phone/);
     assert.doesNotMatch(copy, /Add to Home Screen/);
     assert.equal(buttons(renderer, "dfRemote__factory").length, 0);
@@ -247,6 +247,15 @@ test("two factories switch which projects the console shows", async () => {
     assert.match(south, /Re-tile the harbour/);
     assert.equal(south.includes("North Workshop"), false);
     assert.equal(buttons(renderer, "dfRemote__factory")[1].props["aria-pressed"], true);
+  });
+});
+
+test("a factory with no pending questions hides its needs-you count", async () => {
+  const manager = fakeManager([northFactory(), southFactory({ state: { ...southState, humanRequests: new Map() } })]);
+  await withApp(props(manager), (renderer) => {
+    const counts = renderer.root.findAllByProps({ className: "dfRemote__factoryCount" });
+    assert.equal(counts.length, 1);
+    assert.match(flat(counts[0]), /needs you/);
   });
 });
 
@@ -363,7 +372,7 @@ test("read-only questions keep their suggested answers disabled", async () => {
     assert.ok(suggested !== undefined);
     assert.equal(suggested.props.disabled, true);
     assert.equal(renderer.root.findAllByProps({ className: "dfRemote__replyText" }).length, 0);
-    assert.match(sectionText(renderer, "dfRemote__detail"), /THIS CANNOT BE ANSWERED RIGHT NOW\./);
+    assert.match(sectionText(renderer, "dfRemote__detail"), /This cannot be answered right now\./);
   });
 });
 
@@ -382,8 +391,8 @@ test("an uncertain reply is named as unknown and offers no retry", async () => {
 
     assert.equal(session.calls.reply.length, 1, "an uncertain effect is never repeated");
     const detail = sectionText(renderer, "dfRemote__detail");
-    assert.match(detail, /DELIVERY UNKNOWN — CHECK THE FACTORY/);
-    assert.equal(detail.includes("NOT DELIVERED"), false);
+    assert.match(detail, /Delivery unknown — check the factory/);
+    assert.equal(detail.includes("Not delivered"), false);
     for (const control of allButtons(renderer)) {
       assert.equal(/RETRY|TRY AGAIN|SEND AGAIN/i.test(flat(control.props.children)), false);
     }
@@ -424,10 +433,10 @@ test("CANCEL RUN appears only when the detail advertises it and fires once", asy
 
 test("only a refusal reads as NOT DELIVERED; every other failure stays unknown", async () => {
   for (const [failure, copy, other] of [
-    [new SessionError("too_large"), "NOT DELIVERED", "DELIVERY UNKNOWN"],
+    [new SessionError("too_large"), "Not delivered", "Delivery unknown"],
     // session.ts throws malformed on a reply result whose revision has moved
     // on — which is exactly what a delivered answer looks like.
-    [new ProtocolError("malformed"), "DELIVERY UNKNOWN — CHECK THE FACTORY", "NOT DELIVERED"],
+    [new ProtocolError("malformed"), "Delivery unknown — check the factory", "Not delivered"],
   ]) {
     const session = fakeSession({ detail: () => detailFor(northRequest), reply: () => Promise.reject(failure) });
     const manager = fakeManager([northFactory()], new Map([[NORTH, session]]));
@@ -512,7 +521,7 @@ test("ANSWER cannot start a read while a one-shot effect is in flight", async ()
     await settle();
     assert.equal(session.calls.reply.length, 1);
     const detail = sectionText(renderer, "dfRemote__detail");
-    assert.ok(detail.includes("DELIVERY UNKNOWN — CHECK THE FACTORY"), detail);
+    assert.ok(detail.includes("Delivery unknown — check the factory"), detail);
     assert.equal(session.calls.detail.length, 2, "one re-read, once the effect answered");
   });
 });
@@ -535,8 +544,27 @@ test("a drop while a reply is in flight keeps the unknown notice", async () => {
     await settle();
 
     const detail = sectionText(renderer, "dfRemote__detail");
-    assert.ok(detail.includes("DELIVERY UNKNOWN — CHECK THE FACTORY"), detail);
-    assert.equal(detail.includes("THIS QUESTION IS NO LONGER OPEN"), false, "no snapshot observed it closing");
+    assert.ok(detail.includes("Delivery unknown — check the factory"), detail);
+    assert.equal(detail.includes("This question is no longer open"), false, "no snapshot observed it closing");
+  });
+});
+
+test("a retryable detail read says to open the question again, not that it closed", async () => {
+  let reads = 0;
+  const session = fakeSession({
+    detail: () => (++reads === 1 ? Promise.reject(new SessionError("rate_limited", true)) : detailFor(northRequest)),
+  });
+  const manager = fakeManager([northFactory()], new Map([[NORTH, session]]));
+  await withApp(props(manager), async (renderer) => {
+    await act(async () => { buttons(renderer, "dfRemote__answer")[0].props.onClick(); });
+    await settle();
+    const detail = sectionText(renderer, "dfRemote__detail");
+    assert.ok(detail.includes("Could not load this question — open it again"), detail);
+    assert.equal(detail.includes("This question is no longer open"), false);
+    await act(async () => { buttons(renderer, "dfRemote__answer")[0].props.onClick(); });
+    await settle();
+    assert.equal(session.calls.detail.length, 2);
+    assert.ok(renderer.root.findAllByProps({ className: "dfRemote__replyText" }).length > 0, "the second read opens the question");
   });
 });
 
@@ -641,7 +669,7 @@ test("an offline factory says so and offers nothing that could only fail", async
     const banner = findNode(renderer.toJSON(), "dfRemote__banner--offline");
     assert.ok(banner !== undefined);
     assert.equal(banner.props.role, "status");
-    assert.deepEqual(banner.children, ["FACTORY OFFLINE"]);
+    assert.deepEqual(banner.children, ["Factory offline"]);
 
     for (const control of buttons(renderer, "dfRemote__answer")) assert.equal(control.props.disabled, true);
     await act(async () => { buttons(renderer, "dfRemote__answer")[0].props.onClick(); });
@@ -653,7 +681,7 @@ test("an offline factory says so and offers nothing that could only fail", async
   await withApp(props(revoked), (renderer) => {
     const banner = findNode(renderer.toJSON(), "dfRemote__banner--revoked");
     assert.ok(banner !== undefined);
-    assert.deepEqual(banner.children, ["ACCESS REVOKED"]);
+    assert.deepEqual(banner.children, ["Access revoked"]);
     assert.equal(button(renderer, "dfRemote__forgetDevice").props.disabled, false, "a revoked factory can always be forgotten");
   });
 
@@ -664,7 +692,7 @@ test("an offline factory says so and offers nothing that could only fail", async
     const banner = findNode(renderer.toJSON(), "dfRemote__banner--mismatch");
     assert.ok(banner !== undefined);
     assert.equal(banner.props.role, "status");
-    assert.deepEqual(banner.children, ["FACTORY IDENTITY MISMATCH"]);
+    assert.deepEqual(banner.children, ["Factory identity mismatch"]);
     for (const control of buttons(renderer, "dfRemote__answer")) assert.equal(control.props.disabled, true);
     await act(async () => { buttons(renderer, "dfRemote__answer")[0].props.onClick(); });
     assert.equal(session.calls.detail.length, 0, "nothing is sent to a factory this device cannot identify");
@@ -677,7 +705,7 @@ test("an offline factory says so and offers nothing that could only fail", async
     const banner = findNode(renderer.toJSON(), "dfRemote__banner--error");
     assert.ok(banner !== undefined);
     assert.equal(banner.props.role, "status");
-    assert.deepEqual(banner.children, ["FACTORY REFUSED · PAIR AGAIN"]);
+    assert.deepEqual(banner.children, ["Factory refused · pair again"]);
     for (const control of buttons(renderer, "dfRemote__answer")) assert.equal(control.props.disabled, true);
     await act(async () => { buttons(renderer, "dfRemote__answer")[0].props.onClick(); });
     assert.equal(session.calls.detail.length, 0);
@@ -691,7 +719,7 @@ test("an offline factory says so and offers nothing that could only fail", async
     const banner = findNode(renderer.toJSON(), "dfRemote__banner--expired");
     assert.ok(banner !== undefined);
     assert.equal(banner.props.role, "status");
-    assert.deepEqual(banner.children, ["INVITATION EXPIRED · PAIR AGAIN"]);
+    assert.deepEqual(banner.children, ["Invitation expired · pair again"]);
     const answers = buttons(renderer, "dfRemote__answer");
     assert.ok(answers.length > 0);
     for (const control of answers) assert.equal(control.props.disabled, true);
@@ -705,7 +733,7 @@ test("a device with no network disables every control that needs one", async () 
     const banner = findNode(renderer.toJSON(), "dfRemote__banner--device");
     assert.ok(banner !== undefined);
     assert.equal(banner.props.role, "status");
-    assert.deepEqual(banner.children, ["DEVICE OFFLINE"]);
+    assert.deepEqual(banner.children, ["Device offline"]);
 
     const local = ["dfRemote__forgetDevice", "dfRemote__forgetFactory"];
     for (const control of allButtons(renderer)) {
@@ -724,20 +752,20 @@ test("an invitation in the address bar pairs once and never survives the read", 
   const members = invitationMembers({ node: NORTH });
   const appProps = props(manager, { location: { hash: invitationFragment(members) } });
   await withApp(appProps, async (renderer) => {
-    assert.match(sectionText(renderer, "dfRemote__pair"), /PAIRING FACTORY…/);
+    assert.match(sectionText(renderer, "dfRemote__pair"), /Pairing factory…/);
     await act(async () => { released(); await paired; });
     await settle();
     assert.equal(manager.calls.pair.length, 1);
     assert.equal(manager.calls.pair[0].node, NORTH);
     assert.equal(appProps.location.hash, "", "the one-shot fragment is cleared before it is used");
-    assert.equal(textOf(renderer).includes("PAIRING FACTORY…"), false, "pairing has finished");
+    assert.equal(textOf(renderer).includes("Pairing factory…"), false, "pairing has finished");
   });
 
   const spent = fakeManager([]);
   const spentProps = props(spent, { location: { hash: "#df_remote&node=not-an-invitation" } });
   await withApp(spentProps, (renderer) => {
     assert.equal(spent.calls.pair.length, 0);
-    assert.match(sectionText(renderer, "dfRemote__pair"), /THIS INVITATION HAS EXPIRED OR WAS ALREADY USED/);
+    assert.match(sectionText(renderer, "dfRemote__pair"), /This invitation has expired or was already used/);
   });
 
   const wrong = fakeManager([]);
@@ -745,7 +773,7 @@ test("an invitation in the address bar pairs once and never survives the read", 
   const wrongProps = props(wrong, { location: { hash: invitationFragment(invitationMembers({ node: NORTH })) } });
   await withApp(wrongProps, (renderer) => {
     // A daemon that is not the invited one is named, not called a refusal.
-    assert.match(sectionText(renderer, "dfRemote__pair"), /A DIFFERENT FACTORY ANSWERED FOR THIS NODE/);
+    assert.match(sectionText(renderer, "dfRemote__pair"), /A different factory answered for this node/);
   });
 });
 
@@ -757,7 +785,7 @@ test("an invitation that lands in an iOS tab is held for the Home Screen app, or
     assert.deepEqual(manager.calls.pair, []);
     const card = sectionText(renderer, "dfRemote__install");
     assert.match(card, /Add to Home Screen/);
-    assert.match(card, /COPY INVITATION/);
+    assert.match(card, /Copy invitation/);
     assert.equal(findNode(renderer.toJSON(), "dfRemote__openSafari").props.href, "x-safari-https://app.darkfactory.build/remote");
     assert.doesNotMatch(JSON.stringify(renderer.toJSON()), /challenge=|ticket=/, "a held invitation is never rendered");
     await act(async () => { button(renderer, "dfRemote__pairHere").props.onClick(); });
@@ -796,7 +824,7 @@ test("forgetting a factory or the device takes a second, inline confirmation", a
     await settle();
     assert.equal(manager.calls.forgetDevice, 1);
     assert.equal(buttons(renderer, "dfRemote__factory").length, 0);
-    assert.match(sectionText(renderer, "dfRemote__none"), /PAIR A PHONE/);
+    assert.match(sectionText(renderer, "dfRemote__none"), /Pair a phone/);
   });
 });
 
@@ -831,7 +859,7 @@ test("alerts turn on through the host's subscription and off with the device", a
   const setPush = manager.setPush;
   manager.setPush = async (value) => { if (value === undefined) order.push("setPush"); return setPush(value); };
   await withApp(props(manager, { subscribePush, unsubscribePush }), async (renderer) => {
-    assert.match(sectionText(renderer, "dfRemote__alerts"), /ALERTS.*OFF/s);
+    assert.match(sectionText(renderer, "dfRemote__alerts"), /Alerts.*Off/s);
     await act(async () => { button(renderer, "dfRemote__alertsOn").props.onClick(); });
     await settle();
     assert.match(sectionText(renderer, "dfRemote__alerts"), /ALERTS WERE REFUSED/);
@@ -866,7 +894,7 @@ test("a subscription the browser no longer lets this site use reads as OFF", asy
   globalThis.Notification = { permission: "denied" };
   try {
     await withApp(props(manager), (renderer) => {
-      assert.match(sectionText(renderer, "dfRemote__alerts"), /ALERTS.*OFF/s);
+      assert.match(sectionText(renderer, "dfRemote__alerts"), /Alerts.*Off/s);
       assert.equal(buttons(renderer, "dfRemote__alertsOn").length, 1, "the button comes back so alerts can be turned on again");
     });
     // Revoked while the app was in the background: the same mount reads OFF
@@ -880,11 +908,11 @@ test("a subscription the browser no longer lets this site use reads as OFF", asy
     };
     try {
       await withApp(props(manager), async (renderer) => {
-        assert.match(sectionText(renderer, "dfRemote__alerts"), /ALERTS.*ON/s);
+      assert.match(sectionText(renderer, "dfRemote__alerts"), /Alerts.*On/s);
         globalThis.Notification = { permission: "denied" };
         await act(async () => { listeners.get("visibilitychange")(); });
         await settle();
-        assert.match(sectionText(renderer, "dfRemote__alerts"), /ALERTS.*OFF/s);
+      assert.match(sectionText(renderer, "dfRemote__alerts"), /Alerts.*Off/s);
         assert.equal(buttons(renderer, "dfRemote__alertsOn").length, 1);
       });
       assert.equal(listeners.size, 0, "the listener leaves with the mount");

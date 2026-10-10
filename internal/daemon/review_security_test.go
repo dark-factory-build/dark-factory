@@ -67,11 +67,11 @@ func reviewerFixture(t *testing.T, reviewers ...string) (*daemonReviewBackend, m
 	fixture, project := reviewPublicFixture(t)
 	ctx := context.Background()
 	bin := t.TempDir()
-	script := "#!/bin/sh\n[ -e \"$CODEX_HOME/limited\" ] && { echo \"■ You've hit your usage limit. Try again later.\"; exit 1; }\n[ -e \"$CODEX_HOME/quoted\" ] && { echo \"the task says: You've hit your usage limit\"; exit 1; }\n[ -e \"$CODEX_HOME/hang\" ] && { sleep 600 & echo $$ > \"$CODEX_HOME/pid\"; wait; }\n[ -e \"$CODEX_HOME/say\" ] && { cat \"$CODEX_HOME/say\" >&2; echo \"tokens used: 12\" >&2; cat \"$CODEX_HOME/say\"; exit 0; }\n[ -e \"$CODEX_HOME/stamp\" ] && { for prompt; do :; done; echo \"$prompt\"; echo \"VERDICT: ALLOW\"; exit 0; }\necho \"read changed.go\"\necho \"VERDICT: ALLOW\"\n"
+	script := "#!/bin/sh\n[ -e \"$CODEX_HOME/limited\" ] && { echo \"■ You've hit your usage limit. Try again later.\"; exit 1; }\n[ -e \"$CODEX_HOME/quoted\" ] && { echo \"the task says: You've hit your usage limit\"; exit 1; }\n[ -e \"$CODEX_HOME/hang\" ] && { sleep 600 & echo $$ > \"$CODEX_HOME/pid\"; wait; }\n[ -e \"$CODEX_HOME/say\" ] && { cat \"$CODEX_HOME/say\" >&2; echo \"tokens used: 12\" >&2; cat \"$CODEX_HOME/say\"; exit 0; }\n[ -e \"$CODEX_HOME/argv\" ] && printf '%s\\0' \"$@\" > \"$CODEX_HOME/argv\"\n[ -e \"$CODEX_HOME/stamp\" ] && { for prompt; do :; done; echo \"$prompt\"; echo \"VERDICT: ALLOW\"; exit 0; }\necho \"read changed.go\"\necho \"VERDICT: ALLOW\"\n"
 	if err := os.WriteFile(filepath.Join(bin, "codex"), []byte(script), 0o700); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(bin, "claude"), []byte("#!/bin/sh\n[ -e \"$HOME/.claude/limited\" ] && { echo \"■ You've hit your usage limit\"; exit 1; }\necho \"home=$HOME config=${CLAUDE_CONFIG_DIR-unset} read changed.go\"\necho \"VERDICT: ALLOW\"\n"), 0o700); err != nil {
+	if err := os.WriteFile(filepath.Join(bin, "claude"), []byte("#!/bin/sh\n[ -e \"$HOME/.claude/limited\" ] && { echo \"■ You've hit your usage limit\"; exit 1; }\necho \"home=$HOME config=${CLAUDE_CONFIG_DIR-unset} updater=${DISABLE_AUTOUPDATER-unset} read changed.go\"\necho \"VERDICT: ALLOW\"\n"), 0o700); err != nil {
 		t.Fatal(err)
 	}
 	// The fakes are only on the tool path, as under launchd.
@@ -257,18 +257,9 @@ func TestDefaultDirectoryClaudeLoginReviewsThroughItsHome(t *testing.T) {
 	checkout, request := reviewCheckout(t)
 	request.Provider = "claude"
 	verdict, err := backend.Review(context.Background(), checkout, request)
-	want := "home=" + filepath.Dir(homes["claude"]) + " config=unset"
+	want := "home=" + filepath.Dir(homes["claude"]) + " config=unset updater=1"
 	if err != nil || !strings.Contains(verdict.Body, want) {
 		t.Fatalf("verdict=%+v err=%v, want %q", verdict, err, want)
-	}
-}
-
-func TestClaudeLoginNamesOnlyANonDefaultDirectory(t *testing.T) {
-	if got := claudeLogin("/accounts/work/.claude"); got != "HOME=/accounts/work" {
-		t.Fatalf("default login = %q", got)
-	}
-	if got := claudeLogin("/accounts/work/.claude-second"); got != "CLAUDE_CONFIG_DIR=/accounts/work/.claude-second" {
-		t.Fatalf("sibling login = %q", got)
 	}
 }
 
@@ -286,5 +277,36 @@ func TestReviewLimitNeedsTheCodexMarkerAndACodexReviewer(t *testing.T) {
 		if _, err := backend.Review(context.Background(), t.TempDir(), request); err == nil || errors.Is(err, errProviderLimited) {
 			t.Fatalf("%s failure err=%v, want an ordinary failure", request.Provider, err)
 		}
+	}
+}
+
+// The Codex reviewer's local commands may read the checkout and the objects it
+// borrows, and nothing else the operator owns: a deny-root permission profile, never --sandbox, which
+// would override it and reads the whole disk.
+func TestCodexReviewerReadsOnlyItsCheckout(t *testing.T) {
+	backend, homes := reviewerFixture(t, "argv")
+	if err := os.WriteFile(filepath.Join(homes["argv"], "argv"), nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	// Like ReviewCheckout, the checkout borrows the registered repository's
+	// objects through alternates, which git in the checkout must read.
+	registered, request := reviewCheckout(t)
+	checkout := filepath.Join(t.TempDir(), "repo")
+	if output, err := exec.Command("git", "clone", "-q", "--shared", registered, checkout).CombinedOutput(); err != nil {
+		t.Fatalf("clone: %v %s", err, output)
+	}
+	if _, err := backend.Review(context.Background(), checkout, request); err != nil {
+		t.Fatal(err)
+	}
+	raw, err := os.ReadFile(filepath.Join(homes["argv"], "argv"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	argv := strings.Split(strings.TrimSuffix(string(raw), "\x00"), "\x00")
+	t.Logf("reviewer argv: %q", argv)
+	joined := strings.Join(argv, "\n")
+	profile := "\n" + `permissions.dark-factory-review={filesystem={":root"="deny",":minimal"="read","/private/tmp"="deny","/private/var/tmp"="deny",` + strconv.Quote(checkout) + `="read",`
+	if strings.Contains(joined, "--sandbox") || strings.Contains(joined, "sandbox_mode") || strings.Contains(joined, `"write"`) || !strings.Contains(joined, "\ndefault_permissions=\"dark-factory-review\"\n") || !strings.Contains(joined, profile) || !strings.Contains(joined, strconv.Quote(filepath.Join(registered, ".git", "objects"))+`="read"`) || !strings.Contains(joined, "},network={enabled=false}}\n") {
+		t.Fatalf("reviewer argv = %q, want the deny-root read-only profile and no --sandbox", argv)
 	}
 }

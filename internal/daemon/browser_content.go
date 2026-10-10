@@ -23,6 +23,7 @@ import (
 type browserContentInput struct {
 	api.ContentInput
 	OpenOnly              bool                   `json:"open_only"`
+	DocumentsOnly         bool                   `json:"documents_only"`
 	Query                 string                 `json:"query"`
 	Branch                string                 `json:"branch"`
 	Entity                string                 `json:"entity"`
@@ -30,11 +31,8 @@ type browserContentInput struct {
 	Document              kernel.OutcomeDocument `json:"document"`
 	Objective             string                 `json:"objective"`
 	Criteria              string                 `json:"criteria"`
-	ContentID             string                 `json:"content_id"`
 	TaskID                string                 `json:"task_id"`
 	Revision              uint64                 `json:"revision"`
-	ContentRevision       uint64                 `json:"content_revision"`
-	TaskWorkRevision      uint64                 `json:"task_work_revision"`
 	Offset                uint64                 `json:"offset"`
 	Limit                 uint64                 `json:"limit"`
 	TestedSource          string                 `json:"tested_source"`
@@ -64,7 +62,7 @@ func (backend *browserBackend) ProjectContent(ctx context.Context, raw [browserp
 	if err != nil && !factoryOnly {
 		return browserprotocol.ProjectContentResult{}, browser.ErrInvalidRequest
 	}
-	read := request.Operation == "search" || request.Operation == "accesses" || request.Operation == "list" || request.Operation == "read" || request.Operation == "body" || request.Operation == "attachments" || request.Operation == "outcome_list" || request.Operation == "outcome_read" || request.Operation == "mission_tasks" || request.Operation == "production" || request.Operation == "task_read"
+	read := request.Operation == "search" || request.Operation == "accesses" || request.Operation == "activity" || request.Operation == "list" || request.Operation == "read" || request.Operation == "body" || request.Operation == "outcome_list" || request.Operation == "outcome_read" || request.Operation == "mission_tasks" || request.Operation == "production" || request.Operation == "task_read"
 	_, release, client, err := backend.authorize(ctx, raw, kernel.BrowserCapabilityPrivateHumanRequestDetail)
 	if err != nil {
 		return browserprotocol.ProjectContentResult{}, err
@@ -82,10 +80,9 @@ func (backend *browserBackend) ProjectContent(ctx context.Context, raw [browserp
 	}
 	result := browserprotocol.ProjectContentResult{Operation: request.Operation}
 	var output any
-	if input.ExpectedAgentRevision > (1<<53)-1 || input.Revision > (1<<53)-1 || input.ExpectedRevision > (1<<53)-1 || input.ContentRevision > (1<<53)-1 || input.TaskWorkRevision > (1<<53)-1 || input.Offset > (1<<53)-1 || input.Limit > (1<<53)-1 {
+	if input.ExpectedAgentRevision > (1<<53)-1 || input.Revision > (1<<53)-1 || input.ExpectedRevision > (1<<53)-1 || input.Offset > (1<<53)-1 || input.Limit > (1<<53)-1 {
 		return result, browser.ErrInvalidRequest
 	}
-	contentRevision := input.ContentRevision
 	at, err := backend.timestamp()
 	if err != nil {
 		return result, err
@@ -106,7 +103,7 @@ func (backend *browserBackend) ProjectContent(ctx context.Context, raw [browserp
 		}
 	}
 
-	if (request.Operation == "mission_tasks" || request.Operation == "production") && (input.Limit == 0 || input.Limit > 8) {
+	if (request.Operation == "mission_tasks" || request.Operation == "production" || request.Operation == "activity") && (input.Limit == 0 || input.Limit > 8) {
 		return result, browser.ErrInvalidRequest
 	}
 	switch request.Operation {
@@ -117,7 +114,7 @@ func (backend *browserBackend) ProjectContent(ctx context.Context, raw [browserp
 		}
 		task, found, e := backend.store.Task(ctx, id)
 		if e != nil {
-			return result, mapBrowserError(e)
+			return result, e
 		}
 		if !found || task.ProjectID != project {
 			return result, browser.ErrInvalidRequest
@@ -127,9 +124,13 @@ func (backend *browserBackend) ProjectContent(ctx context.Context, raw [browserp
 		backend.owner.refreshProductionDetached(project)
 		page := kernel.ProductionPage{Records: []kernel.ProductionRecord{}}
 		if !factoryOnly {
-			observed, e := backend.store.Production(ctx, project, int(input.Offset), int(input.Limit))
+			at, e := backend.owner.timestamp()
 			if e != nil {
-				return result, mapBrowserError(e)
+				return result, e
+			}
+			observed, e := backend.store.Production(ctx, project, int(input.Offset), int(input.Limit), at)
+			if e != nil {
+				return result, e
 			}
 			page = observed
 			backend.observeProductionSources(ctx, project, page.Records)
@@ -138,7 +139,12 @@ func (backend *browserBackend) ProjectContent(ctx context.Context, raw [browserp
 			kernel.ProductionPage
 			Runtime api.BuildIdentity    `json:"runtime"`
 			Release api.PublishedRelease `json:"release,omitzero"`
-		}{page, currentDaemonBuild(), latestPublishedRelease()}
+		}{page, currentDaemonBuild(), latestPublishedRelease(backend.owner)}
+	case "activity":
+		output, err = backend.owner.contentActivity(ctx, project, int(input.Offset), int(input.Limit))
+		if err != nil {
+			return result, err
+		}
 	case "accesses":
 		id, e := browserContentIDValue(input.ID)
 		rev, re := browserContentRevision(input.Revision)
@@ -147,7 +153,7 @@ func (backend *browserBackend) ProjectContent(ctx context.Context, raw [browserp
 		}
 		page, e := backend.store.ListContentRevisionAccesses(ctx, project, id, rev, int(input.Offset), int(input.Limit))
 		if e != nil {
-			return result, mapBrowserError(e)
+			return result, e
 		}
 		items := make([]map[string]any, 0, len(page.Items))
 		for _, item := range page.Items {
@@ -157,11 +163,11 @@ func (backend *browserBackend) ProjectContent(ctx context.Context, raw [browserp
 	case "search":
 		repository, e := backend.owner.knowledgeRepository(ctx, project, input.RepositoryID)
 		if e != nil {
-			return result, mapBrowserError(e)
+			return result, e
 		}
-		page, e := backend.store.SearchKnowledge(ctx, project, repository, kernel.KnowledgeQuery{OpenOnly: input.OpenOnly, Kind: kernel.ContentKind(input.Kind), Query: input.Query, Branch: input.Branch, Environment: input.Environment, Entity: input.Entity, Thread: input.Thread, Offset: int(input.Offset), Limit: int(input.Limit)})
+		page, e := backend.store.SearchKnowledge(ctx, project, repository, kernel.KnowledgeQuery{OpenOnly: input.OpenOnly, Documents: input.DocumentsOnly, Kind: kernel.ContentKind(input.Kind), Query: input.Query, Branch: input.Branch, Environment: input.Environment, Entity: input.Entity, Thread: input.Thread, Offset: int(input.Offset), Limit: int(input.Limit)})
 		if e != nil {
-			return result, mapBrowserError(e)
+			return result, e
 		}
 		out := api.ContentList{Items: []api.Content{}, NextOffset: uint64(page.NextOffset)}
 		for _, item := range page.Items {
@@ -171,7 +177,7 @@ func (backend *browserBackend) ProjectContent(ctx context.Context, raw [browserp
 	case "list":
 		page, e := backend.store.ListContent(ctx, project, kernel.ContentKind(input.Kind), int(input.Offset), int(input.Limit))
 		if e != nil {
-			return result, mapBrowserError(e)
+			return result, e
 		}
 		out := api.ContentList{Items: []api.Content{}, NextOffset: uint64(page.NextOffset)}
 		for _, item := range page.Items {
@@ -185,7 +191,7 @@ func (backend *browserBackend) ProjectContent(ctx context.Context, raw [browserp
 		}
 		item, e := backend.store.Content(ctx, id, int64(input.Revision))
 		if e != nil {
-			return result, mapBrowserError(e)
+			return result, e
 		}
 		if item.ProjectID != project {
 			return result, browser.ErrUnauthorized
@@ -199,18 +205,18 @@ func (backend *browserBackend) ProjectContent(ctx context.Context, raw [browserp
 		}
 		item, e := backend.store.Content(ctx, id, rev.Int64())
 		if e != nil {
-			return result, mapBrowserError(e)
+			return result, e
 		}
 		if item.ProjectID != project {
 			return result, browser.ErrUnauthorized
 		}
 		item, sourceBody, e := backend.owner.contentBodySource(ctx, item)
 		if e != nil {
-			return result, mapBrowserError(e)
+			return result, e
 		}
 		page, e := pageContentBody(item, sourceBody, int(input.Offset), int(input.Limit))
 		if e != nil {
-			return result, mapBrowserError(e)
+			return result, e
 		}
 		output = api.ContentBody{ID: page.ID.String(), Revision: uint64(page.Revision.Int64()), Offset: uint64(page.Offset), Body: page.Body, NextOffset: uint64(page.NextOffset), Complete: page.Complete}
 	case "create", "revise":
@@ -233,7 +239,7 @@ func (backend *browserBackend) ProjectContent(ctx context.Context, raw [browserp
 			}
 		}
 		if e = backend.owner.validateKnowledgeWrite(ctx, true, kernel.AttemptDigest{}, spec, expected); e != nil {
-			return result, mapBrowserError(e)
+			return result, e
 		}
 		var item kernel.ContentRevision
 		if request.Operation == "create" {
@@ -243,11 +249,11 @@ func (backend *browserBackend) ProjectContent(ctx context.Context, raw [browserp
 				}
 				spec.RepositoryDevice, spec.RepositoryInode = existing.RepositoryDevice, existing.RepositoryInode
 			} else if existingErr != kernel.ErrNotFound {
-				return result, mapBrowserError(existingErr)
+				return result, existingErr
 			}
 			spec, e = backend.owner.writeContentSource(ctx, spec, 1)
 			if e != nil {
-				return result, mapBrowserError(e)
+				return result, e
 			}
 			item, e = backend.store.CreateContent(ctx, spec, at)
 		} else {
@@ -257,7 +263,7 @@ func (backend *browserBackend) ProjectContent(ctx context.Context, raw [browserp
 			}
 			current, ce := backend.store.Content(ctx, id, rev.Int64())
 			if ce != nil {
-				return result, mapBrowserError(ce)
+				return result, ce
 			}
 			if current.ProjectID != project {
 				return result, browser.ErrUnauthorized
@@ -267,12 +273,12 @@ func (backend *browserBackend) ProjectContent(ctx context.Context, raw [browserp
 			}
 			spec, e = backend.owner.writeContentSource(ctx, spec, input.ExpectedRevision+1)
 			if e != nil {
-				return result, mapBrowserError(e)
+				return result, e
 			}
 			item, e = backend.store.ReviseContent(ctx, rev, spec, at)
 		}
 		if e != nil {
-			return result, mapBrowserError(e)
+			return result, e
 		}
 		output = backend.owner.knowledgeDTO(ctx, item)
 	case "deprecate":
@@ -283,7 +289,7 @@ func (backend *browserBackend) ProjectContent(ctx context.Context, raw [browserp
 		}
 		current, ce := backend.store.Content(ctx, id, rev.Int64())
 		if ce != nil {
-			return result, mapBrowserError(ce)
+			return result, ce
 		}
 		if current.ProjectID != project {
 			return result, browser.ErrUnauthorized
@@ -293,63 +299,9 @@ func (backend *browserBackend) ProjectContent(ctx context.Context, raw [browserp
 		}
 		item, e := backend.store.DeprecateContent(ctx, id, project, rev, fmt.Sprintf("browser:%s", client.ID.String()), at)
 		if e != nil {
-			return result, mapBrowserError(e)
+			return result, e
 		}
 		output = backend.owner.knowledgeDTO(ctx, item)
-	case "attach":
-		task, e := decodeID(input.TaskID, kernel.TaskIDFromBytes)
-		cid, ce := browserContentIDValue(input.ContentID)
-		rev, re := browserContentRevision(contentRevision)
-		if e != nil || ce != nil || re != nil {
-			return result, browser.ErrStale
-		}
-		current, found, e := backend.store.Task(ctx, task)
-		if e != nil {
-			return result, mapBrowserError(e)
-		}
-		if !found {
-			return result, browser.ErrNotFound
-		}
-		if current.ProjectID != project {
-			return result, browser.ErrUnauthorized
-		}
-		content, e := backend.store.Content(ctx, cid, rev.Int64())
-		if e != nil {
-			return result, mapBrowserError(e)
-		}
-		if content.ProjectID != project {
-			return result, browser.ErrUnauthorized
-		}
-		if e = backend.store.AttachContentToTask(ctx, task, project, cid, rev, at); e != nil {
-			return result, mapBrowserError(e)
-		}
-		output = map[string]any{"task_id": task.String(), "project_id": project.String(), "content_id": cid.String(), "content_revision": rev.Int64()}
-	case "attachments":
-		task, e := decodeID(input.TaskID, kernel.TaskIDFromBytes)
-		work, re := browserContentRevision(input.TaskWorkRevision)
-		if e != nil || re != nil {
-			return result, browser.ErrStale
-		}
-		current, found, e := backend.store.Task(ctx, task)
-		if e != nil {
-			return result, mapBrowserError(e)
-		}
-		if !found {
-			return result, browser.ErrNotFound
-		}
-		if current.ProjectID != project {
-			return result, browser.ErrUnauthorized
-		}
-		refs, e := backend.store.TaskContentReferences(ctx, project, task, work)
-		if e != nil {
-			return result, mapBrowserError(e)
-		}
-		out := api.ContentAttachments{Items: []api.ContentAttachment{}}
-		for _, item := range refs {
-			out.Items = append(out.Items, attachmentDTO(item))
-		}
-		output = out
-
 	case "outcome_list":
 		list := backend.store.ListOutcomes
 		if input.Kind == "mission" {
@@ -357,7 +309,7 @@ func (backend *browserBackend) ProjectContent(ctx context.Context, raw [browserp
 		}
 		page, e := list(ctx, project, int(input.Offset), int(input.Limit))
 		if e != nil {
-			return result, mapBrowserError(e)
+			return result, e
 		}
 		if input.Kind == "mission" {
 			items := make([]map[string]any, 0, len(page.Items))
@@ -385,7 +337,7 @@ func (backend *browserBackend) ProjectContent(ctx context.Context, raw [browserp
 		}
 		created, ce := backend.store.CreateMissionForBrowser(ctx, client.ID, kernel.MissionCreate{ID: id, ProjectID: project, OwnerAgentID: owner, ExpectedAgentRevision: revision, Objective: input.Objective, Criteria: input.Criteria}, at)
 		if ce != nil {
-			return result, mapBrowserError(ce)
+			return result, ce
 		}
 		out := outcomeDTO(created.Mission)
 		out.Objective, out.Criteria = "", ""
@@ -398,7 +350,7 @@ func (backend *browserBackend) ProjectContent(ctx context.Context, raw [browserp
 		}
 		items, next, e := backend.store.ListMissionTasks(ctx, project, id, int(input.Offset), int(input.Limit))
 		if e != nil {
-			return result, mapBrowserError(e)
+			return result, e
 		}
 		tasks := make([]map[string]any, 0, len(items))
 		for _, item := range items {
@@ -417,7 +369,7 @@ func (backend *browserBackend) ProjectContent(ctx context.Context, raw [browserp
 			item, e = backend.store.WriteOutcomeForBrowser(ctx, client.ID, kernel.NewOutcome{ID: id, ProjectID: project, Document: input.Document}, int64(input.ExpectedRevision), at)
 		}
 		if e != nil {
-			return result, mapBrowserError(e)
+			return result, e
 		}
 		out := outcomeDTO(item)
 		// The full document already includes these potentially large strings.
@@ -435,6 +387,42 @@ func (backend *browserBackend) ProjectContent(ctx context.Context, raw [browserp
 		return browserprotocol.ProjectContentResult{}, browser.ErrTooLarge
 	}
 	return result, err
+}
+
+// contentActivity reports recorded knowledge operations for floor cues and the
+// Board's activity list. Authors are authority-derived; an agent revision names
+// its run as "run:ID agent:ID role:ROLE".
+func (daemon *Daemon) contentActivity(ctx context.Context, project kernel.ProjectID, offset, limit int) (map[string]any, error) {
+	page, err := daemon.store.ListContentActivity(ctx, project, offset, limit)
+	if err != nil {
+		return nil, err
+	}
+	items := make([]map[string]any, 0, len(page.Items))
+	for _, item := range page.Items {
+		content := item.Content
+		operation := map[string]string{"supplied": "delivered", "read": "read"}[item.Operation]
+		agent, task, run := "", "", ""
+		if operation == "" {
+			operation = "revised"
+			if content.Deprecated {
+				operation = "retired"
+			} else if content.Revision.Int64() == 1 {
+				operation = "posted"
+			}
+			for _, field := range strings.Fields(content.Author) {
+				if value, ok := strings.CutPrefix(field, "agent:"); ok {
+					agent = value
+				} else if value, ok := strings.CutPrefix(field, "run:"); ok {
+					run = value
+				}
+			}
+		} else {
+			agent, task, run = item.AgentID.String(), item.TaskID.String(), item.RunID.String()
+		}
+		metadata, _ := kernel.ParseKnowledgeMetadata(content.SourceReferences)
+		items = append(items, map[string]any{"operation": operation, "content_id": content.ID.String(), "content_revision": content.Revision.Int64(), "kind": string(content.Kind), "title": knowledgeTextPrefix(content.Title, 160), "author": knowledgeTextPrefix(content.Author, 160), "agent_id": agent, "task_id": task, "run_id": run, "thread_id": metadata.ThreadID, "at_ms": item.At.Int64()})
+	}
+	return map[string]any{"items": items, "next_offset": page.NextOffset}, nil
 }
 
 func validBrowserContentWrite(input browserContentInput) bool {

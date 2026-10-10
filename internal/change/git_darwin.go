@@ -150,9 +150,9 @@ func selectGitWithTrust(ctx context.Context, gitExecutable, repositoryRoot, revi
 	}, nil
 }
 
-// refreshTrackingRevision runs for a fresh Change before its commit is pinned,
-// and best effort before a retained Change's run so a correction can see the
-// current base (FetchBase). HEAD means the origin's default branch, never the
+// refreshTrackingRevision runs for a fresh Change before its commit is pinned.
+// Retained Changes refresh their current base in factoryd before the worker
+// runs (FetchBase). HEAD means the origin's default branch, never the
 // registered checkout's own HEAD; only a checkout without an origin follows
 // its local HEAD and upstream. Explicit local revisions never refresh source.
 func refreshTrackingRevision(ctx context.Context, spec gitCommandSpec, revision string, verify func() error) (string, error) {
@@ -191,7 +191,7 @@ func refreshTrackingRevision(ctx context.Context, spec gitCommandSpec, revision 
 			}
 			remote, branch = "origin", target
 		} else {
-			remote, branch, revision, err = localUpstream(run)
+			remote, branch, revision, err = localUpstream(run, "HEAD")
 			if err != nil {
 				return "", err
 			}
@@ -250,19 +250,23 @@ func factoryBaseRef(remote, branch string) string {
 	return "refs/factory/base/" + hex.EncodeToString(digest[:])
 }
 
-// localUpstream follows a checkout without an origin: its branch's configured
-// upstream, or the local branch or detached HEAD itself.
-func localUpstream(run func(...string) ([]byte, error)) (remote, branch, revision string, err error) {
+// localUpstream follows target when it names a local branch: that branch's
+// configured upstream, or the branch itself. Any other target (detached HEAD,
+// a remote-tracking ref, an object ID) is returned by its full name.
+func localUpstream(run func(...string) ([]byte, error), target string) (remote, branch, revision string, err error) {
 	// Empty upstream means a deliberately local project, including detached
 	// HEAD. This does not fall back when an actual configured fetch fails.
-	head, err := run("rev-parse", "--symbolic-full-name", "HEAD")
+	head, err := run("rev-parse", "--verify", "--quiet", "--symbolic-full-name", "--end-of-options", target)
 	if err != nil {
 		return "", "", "", err
 	}
-	if strings.TrimSpace(string(head)) == "HEAD" {
-		return "", "", "HEAD", nil
-	}
 	revision = strings.TrimSpace(string(head))
+	if !strings.HasPrefix(revision, "refs/heads/") {
+		if revision == "" {
+			revision = target
+		}
+		return "", "", revision, nil
+	}
 	output, err := run("for-each-ref", "--count=1", "--format=%(upstream) %(upstream:remotename) %(upstream:remoteref)", revision)
 	if err != nil {
 		return "", "", "", err
@@ -1327,14 +1331,28 @@ func FetchBase(ctx context.Context, selection Selection, path string) error {
 	}
 	defer authority.close()
 	admin := GitDirectoryForChange(selection.repositoryRoot, path)
-	if err := validatePrivateGitAdmin(admin); err != nil {
-		return err
+	gitArgs := []string{"-c", "core.hooksPath=/dev/null", "-c", "protocol.file.allow=always"}
+	if err := validatePrivateGitAdmin(admin); err == nil {
+		gitArgs = append(gitArgs, "--git-dir", admin)
+	} else {
+		// Adopted Changes retain Git's canonical linked-worktree
+		// administration rather than receiving a deterministic private bare
+		// repository. Fetch through the worktree so its existing Git admin is
+		// preserved while the worker still gets the tracked base ref.
+		if _, inspectErr := authority.inspectWorktree(ctx, path); inspectErr != nil {
+			return err
+		}
+		gitArgs = append(gitArgs, "-C", path)
 	}
-	_, err = authority.succeed(ctx, maxGitSelectionOutput, "-c", "core.hooksPath=/dev/null", "-c", "protocol.file.allow=always", "--git-dir", admin, "fetch", "--quiet", "--no-tags", "--no-write-fetch-head", "--no-auto-maintenance", "--no-recurse-submodules", selection.repositoryRoot, selection.base.Hex()+":refs/remotes/origin/main")
+	gitArgs = append(gitArgs, "fetch", "--quiet", "--no-tags", "--no-write-fetch-head", "--no-auto-maintenance", "--no-recurse-submodules", selection.repositoryRoot, selection.base.Hex()+":refs/remotes/origin/main")
+	_, err = authority.succeed(ctx, maxGitSelectionOutput, gitArgs...)
 	if err != nil {
 		return newGitError(gitFailureProcess)
 	}
-	return validatePrivateGitAdmin(admin)
+	if _, privateErr := os.Stat(filepath.Join(admin, "config")); privateErr == nil {
+		return validatePrivateGitAdmin(admin)
+	}
+	return nil
 }
 
 // InspectWorktree verifies that path is a linked worktree of the repository
@@ -1352,7 +1370,11 @@ func inspectWorktree(ctx context.Context, gitExecutable, repositoryRoot string, 
 		return WorktreeFacts{}, err
 	}
 	defer authority.close()
-	return authority.inspectWorktree(ctx, path)
+	facts, err := authority.inspectWorktree(ctx, path)
+	if invalid := (*ValidationError)(nil); errors.As(err, &invalid) && verifyGitAuthority(authority.repositoryRoot, authority.repository, authority.gitExecutable, authority.gitIdentity) == nil {
+		invalid.Worktree = true
+	}
+	return facts, err
 }
 
 // DescendsFrom reports whether the worktree's head descends from base: the

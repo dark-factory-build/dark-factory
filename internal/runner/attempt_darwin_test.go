@@ -173,6 +173,25 @@ func newWorkerConfigFixture(t *testing.T) (*WorkerControl, *os.File) {
 	return worker, peer
 }
 
+// A provider release slower than the control read deadline made the worker
+// exit 70 and the daemon's release write fail with a broken pipe (#1082).
+func TestWorkerAwaitsSlowReleaseWithoutDeadline(t *testing.T) {
+	shortenWait(t, &attemptControlTimeout)
+	worker, peer := newWorkerConfigFixture(t)
+	worker.state = workerPopulationReported
+	delay := 2 * attemptControlTimeout
+	written := make(chan error, 1)
+	time.AfterFunc(delay, func() {
+		written <- writeFrame(peer, attemptFrame{Version: 1, Kind: "release", Stage: StageProvider}, maxFrameBytes)
+	})
+	if err := worker.AwaitProvider(); err != nil {
+		t.Fatalf("release after %s = %v", delay, err)
+	}
+	if err := <-written; err != nil {
+		t.Fatal(err)
+	}
+}
+
 func writeRawWorkerConfigFrame(t *testing.T, peer *os.File, body []byte) {
 	t.Helper()
 	var header [4]byte
@@ -182,77 +201,40 @@ func writeRawWorkerConfigFrame(t *testing.T, peer *os.File, body []byte) {
 	}
 }
 
-func TestAttemptConfigureFreezesAndRejectsStartupInput(t *testing.T) {
-	root := t.TempDir()
-	wrapper, err := PrepareExecSpec(ExecSpec{
-		Target: "/bin/sh", Args: []string{"-c", "exit 0"},
-		Env: []string{"PATH=/usr/bin:/bin", "LANG=C"}, Cwd: root,
-	})
+func TestAttemptRunnerKillsDetachedRunProcesses(t *testing.T) {
+	f := newAttemptFixture(t, "detached", "")
+	inner := f.activateOuter()
+	f.advanceToProvider()
+	if err := f.controller.Release(StageProvider); err != nil {
+		t.Fatal(err)
+	}
+	if event, err := f.controller.Next(4 * time.Second); err != nil || event.Kind != AttemptTerminalFrame || event.Frame == nil || event.Frame.Kind != TerminalReady {
+		t.Fatalf("terminal ready=%+v err=%v output=%q", event, err, f.output())
+	}
+	descendantPath := filepath.Join(f.root, "descendant.pid")
+	waitFile(t, descendantPath)
+	body, err := os.ReadFile(descendantPath)
 	if err != nil {
 		t.Fatal(err)
 	}
-	base := AttemptSpec{
-		AttemptID: "startup-input", Wrapper: wrapper,
-		MarkerName: InnerActivationMarkerName, ResultName: AttemptResultSpoolName,
-		ResultProof: testResultProof(),
-	}
-
-	startup := []byte("exact startup\n")
-	controller, peer, err := NewAttemptController()
+	pid, err := strconv.Atoi(strings.TrimSpace(string(body)))
 	if err != nil {
 		t.Fatal(err)
 	}
+	detached, err := readIdentity(pid)
 	t.Cleanup(func() {
-		_ = controller.Close()
-		_ = peer.Close()
+		if got, err := readIdentity(pid); err == nil && got == detached {
+			_ = unix.Kill(pid, unix.SIGKILL)
+		}
 	})
-	spec := base
-	spec.StartupInput = startup
-	spec.startupSubmitRetryInterval = 37 * time.Millisecond
-	if err := controller.Configure(spec); err != nil {
+	if sid, sidErr := unix.Getsid(pid); err != nil || sidErr != nil || detached.PGID == inner.PGID || sid == inner.PID {
+		t.Fatalf("grandchild did not detach: %+v sid=%d err=%v/%v inner=%+v", detached, sid, err, sidErr, inner)
+	}
+	if err := os.WriteFile(filepath.Join(f.root, "finish"), nil, 0o600); err != nil {
 		t.Fatal(err)
 	}
-	startup[0] = 'X'
-	var frozen attemptConfig
-	if err := readFrame(peer, &frozen, maxConfigBytes); err != nil {
-		t.Fatal(err)
-	}
-	if got, want := string(frozen.StartupInput), "exact startup\n"; got != want {
-		t.Fatalf("frozen startup input=%q want=%q", got, want)
-	}
-	if frozen.StartupSubmitRetryInterval != spec.startupSubmitRetryInterval {
-		t.Fatalf("frozen startup retry interval=%s want=%s", frozen.StartupSubmitRetryInterval, spec.startupSubmitRetryInterval)
-	}
-	maximum := frozen
-	maximum.StartupInput = bytes.Repeat([]byte{'x'}, MaxProviderTaskBytes)
-	if err := validateAttemptConfig(maximum); err != nil {
-		t.Fatalf("maximum startup input rejected: %v", err)
-	}
-
-	for name, input := range map[string][]byte{
-		"oversized":     bytes.Repeat([]byte{'x'}, MaxProviderTaskBytes+1),
-		"invalid UTF-8": {0xff},
-		"NUL":           {'x', 0},
-	} {
-		t.Run(name, func(t *testing.T) {
-			controller, peer, err := NewAttemptController()
-			if err != nil {
-				t.Fatal(err)
-			}
-			defer controller.Close()
-			defer peer.Close()
-			spec := base
-			spec.StartupInput = input
-			if err := controller.Configure(spec); !errors.Is(err, ErrState) {
-				t.Fatalf("invalid startup input error=%v want ErrState", err)
-			}
-			recovered := frozen
-			recovered.StartupInput = input
-			if err := validateAttemptConfig(recovered); !errors.Is(err, ErrIdentity) {
-				t.Fatalf("invalid recovered startup input error=%v want ErrIdentity", err)
-			}
-		})
-	}
+	f.finishAndAck()
+	waitExactAbsence(t, detached)
 }
 
 func shellWitness(value, path string) string {
@@ -332,41 +314,7 @@ func runAttemptWorkerHelper(args []string) error {
 	var provider ExecSpec
 	var providerTask []byte
 	switch mode {
-	case "native-input", "native-raw", "native-chatty", "native-drop-submit", "native-delayed-submit", "native-continuous-submit", "native-exit":
-		// native-raw greets with more than the terminal's output buffer and
-		// only then takes the terminal out of canonical mode, as an
-		// interactive CLI does while it starts; native-chatty then keeps
-		// printing for one second while it waits for its line; native-exit
-		// dies at once.
-		greeting := ""
-		switch mode {
-		case "native-raw":
-			greeting = "head -c 2048 /dev/zero | tr '\\0' x; sleep 0.3; stty -icanon || exit 96; "
-		case "native-chatty":
-			greeting = fmt.Sprintf("stty -icanon || exit 96; (i=0; while [ $i -lt 10 ]; do sleep 0.1; printf .; i=$((i+1)); done; : > %q) & ", filepath.Join(root, "chatter.done"))
-		case "native-drop-submit":
-			greeting = "stty -echo || exit 96; "
-		case "native-delayed-submit":
-			greeting = "stty -echo || exit 96; "
-		case "native-continuous-submit":
-			greeting = "stty -echo || exit 96; "
-		case "native-exit":
-			greeting = "exit 3; "
-		}
-		startupWitness := shellWitness("\"$startup\"", filepath.Join(root, "provider.startup"))
-		interactiveWitness := shellWitness("\"$interactive\"", filepath.Join(root, "provider.stdin"))
-		script := fmt.Sprintf("test ! -e /dev/fd/11 || exit 97; %sIFS= read -r startup || exit 98; %s || exit 99; ", greeting, startupWitness)
-		if mode == "native-drop-submit" {
-			script += fmt.Sprintf("IFS= read -r retry || exit 102; : > %q; printf 'work-started\\n'; IFS= read -r interactive || exit 100; %s || exit 101; while test ! -f %q; do sleep 0.01; done", filepath.Join(root, "provider.started"), interactiveWitness, filepath.Join(root, "finish"))
-		} else if mode == "native-delayed-submit" {
-			script += "sleep 0.8; printf 'delayed-banner\\n'; while :; do sleep 1; done"
-		} else if mode == "native-continuous-submit" {
-			script += fmt.Sprintf("while test ! -f %q; do printf 'stream'; sleep 0.02; done", filepath.Join(root, "finish"))
-		} else {
-			script += fmt.Sprintf("IFS= read -r interactive || exit 100; %s || exit 101; while test ! -f %q; do sleep 0.01; done", interactiveWitness, filepath.Join(root, "finish"))
-		}
-		provider = ExecSpec{Target: "/bin/sh", Args: []string{"-c", script}, Env: []string{"PATH=/usr/bin:/bin", "LANG=C"}, Cwd: providerCwd}
-	case "shell", "shell-input", "term", "leader", "tail", "reply", "reply-submit", "reply-submit-exit", "loud-adoption", "handoff-worker-eof":
+	case "shell", "shell-input", "term", "leader", "detached", "tail", "reply", "reply-submit", "reply-submit-exit", "loud-adoption", "handoff-worker-eof":
 		providerWitness := shellWitness("$$", filepath.Join(root, "provider.pid"))
 		script := fmt.Sprintf("test -z \"${HOME+x}\" || exit 90; test -z \"${DARK_FACTORY_ATTEMPT_TOKEN+x}\" || exit 91; for n in 3 4 5 6 7 8 9; do test ! -e /dev/fd/$n || exit 92; done; test -f /dev/fd/10 || exit 93; test ! -s /dev/fd/10 || exit 94; test -f /dev/fd/11 || exit 97; IFS= read -r task < /dev/fd/11; test \"$task\" = one-startup || exit 98; cat /dev/fd/10/change-worker.config >/dev/null 2>&1 && exit 95; cd /dev/fd/10 >/dev/null 2>&1 && exit 96; %s; printf 'pre-output\\n'; while test ! -f %q; do sleep 0.01; done; printf 'post-output\\n'; printf x >> %q; while test ! -f %q; do sleep 0.01; done", providerWitness, filepath.Join(root, "continue"), filepath.Join(root, "provider.effect"), filepath.Join(root, "finish"))
 		if mode == "shell-input" {
@@ -377,6 +325,15 @@ func runAttemptWorkerHelper(args []string) error {
 		}
 		if mode == "leader" {
 			script = fmt.Sprintf("sleep 30 & %s; %s; while test ! -f %q; do sleep 0.01; done; exit 0", shellWitness("$!", filepath.Join(root, "descendant.pid")), providerWitness, filepath.Join(root, "leader.release"))
+		}
+		if mode == "detached" {
+			// A backgrounded server that leaves the provider's session and
+			// group, and is reparented to launchd once the provider exits (#1403).
+			executable, err := os.Executable()
+			if err != nil {
+				return err
+			}
+			script = fmt.Sprintf("%q --detached-helper %q </dev/null >/dev/null 2>&1 & %s; while test ! -f %q; do sleep 0.01; done", executable, filepath.Join(root, "descendant.pid"), providerWitness, filepath.Join(root, "finish"))
 		}
 		if mode == "tail" {
 			script = "printf 'tail-output\\n'; exit 0"
@@ -398,6 +355,9 @@ func runAttemptWorkerHelper(args []string) error {
 			providerTask = []byte("one-startup\n")
 		}
 		provider = ExecSpec{Target: "/bin/sh", Args: []string{"-c", script}, Env: []string{"PATH=/usr/bin:/bin", "LANG=C"}, Cwd: providerCwd}
+		if mode == "detached" {
+			provider.Env = append(provider.Env, "TMPDIR="+providerCwd)
+		}
 	case "binary", "seam", "lifetime", "lease-seam", "proof-census", "cwd", "cwd-seam", "cwd-unrelated", "cwd-file", "cwd-closed", "cwd-reused", "cwd-mode", "cwd-inherited", "cwd-inherited-11":
 		if len(args) != 3 {
 			return errors.New("attempt worker: missing binary target")
@@ -516,16 +476,13 @@ func runAttemptWorkerHelper(args []string) error {
 			return err
 		}
 	}
-	var task *os.File
-	if mode != "native-input" && mode != "native-raw" && mode != "native-chatty" && mode != "native-drop-submit" && mode != "native-delayed-submit" && mode != "native-continuous-submit" && mode != "native-exit" {
-		if len(providerTask) == 0 {
-			providerTask = []byte("test-provider-task\n")
-		}
-		task, err = createUnlinkedProviderTask(root, providerTask)
-		if err != nil {
-			cwd.Close()
-			return err
-		}
+	if len(providerTask) == 0 {
+		providerTask = []byte("test-provider-task\n")
+	}
+	task, err := createUnlinkedProviderTask(root, providerTask)
+	if err != nil {
+		cwd.Close()
+		return err
 	}
 	return control.ExecProvider(prepared, cwd, task)
 }
@@ -876,334 +833,6 @@ func TestAttemptRunnerOrdersOuterWrapperAndShellProvider(t *testing.T) {
 	}
 }
 
-// A startup prompt ending in CR reaches the provider as its text first and
-// the CR later, as a keystroke of its own once the prompt is quiet: the
-// provider's line completes no earlier than the floor after ready, and
-// interactive input still follows in order.
-func TestAttemptRunnerSubmitsStartupCarriageReturnAfterThePromptIsQuiet(t *testing.T) {
-	f := newAttemptFixture(t, "native-input", "")
-	f.spec.StartupInput = []byte("native-startup\r")
-	inner := f.activateOuter()
-	f.advanceToProvider()
-	if err := f.controller.Release(StageProvider); err != nil {
-		t.Fatal(err)
-	}
-	if ready := f.nextTerminal(TerminalReady, 0); ready.Kind != TerminalReady {
-		t.Fatalf("terminal ready=%+v", ready)
-	}
-	readyAt := time.Now()
-	startup := filepath.Join(f.root, "provider.startup")
-	waitFile(t, startup)
-	if body, err := os.ReadFile(startup); err != nil || string(body) != "native-startup" {
-		t.Fatalf("provider.startup=%q err=%v", body, err)
-	}
-	if elapsed := time.Since(readyAt); elapsed < startupEnterFloor-50*time.Millisecond {
-		t.Fatalf("startup line completed %v after ready, before the %v floor", elapsed, startupEnterFloor)
-	}
-	if err := f.controller.SendTerminalCommand(TerminalCommand{Kind: TerminalGenerationInstall, Correlation: 1, Generation: 1}); err != nil {
-		t.Fatal(err)
-	}
-	if result := f.nextTerminal(TerminalGenerationResult, 1); result.Status != TerminalResultOK {
-		t.Fatalf("generation install=%+v", result)
-	}
-	interactive := []byte("interactive-after-ready\n")
-	if err := f.controller.SendTerminalCommand(TerminalCommand{Kind: TerminalInput, Correlation: 2, Generation: 1, Sequence: 1, Payload: interactive}); err != nil {
-		t.Fatal(err)
-	}
-	if result := f.nextTerminal(TerminalInputResult, 2); result.Status != TerminalResultOK {
-		t.Fatalf("terminal input=%+v", result)
-	}
-	stdin := filepath.Join(f.root, "provider.stdin")
-	waitFile(t, stdin)
-	if body, err := os.ReadFile(stdin); err != nil || string(body) != "interactive-after-ready" {
-		t.Fatalf("provider.stdin=%q err=%v", body, err)
-	}
-	if err := os.WriteFile(filepath.Join(f.root, "finish"), nil, 0o600); err != nil {
-		t.Fatal(err)
-	}
-	record := f.finishAndAck()
-	if record.Terminal.Process != inner || record.Terminal.Exit.Code != 0 {
-		t.Fatalf("terminal=%+v", record.Terminal)
-	}
-}
-
-// A prompt longer than the line discipline keeps is typed only once the
-// provider has left canonical mode, and a provider that greets with more
-// than the terminal's output buffer is drained meanwhile so it gets there:
-// the whole prompt arrives, and ready comes before the ceiling.
-func TestAttemptRunnerTypesTheStartupPromptOnlyOnceTheProviderIsRaw(t *testing.T) {
-	f := newAttemptFixture(t, "native-raw", "")
-	prompt := strings.Repeat("p", 3000)
-	f.spec.StartupInput = []byte(prompt + "\n")
-	inner := f.activateOuter()
-	f.advanceToProvider()
-	released := time.Now()
-	if err := f.controller.Release(StageProvider); err != nil {
-		t.Fatal(err)
-	}
-	if ready := f.nextTerminal(TerminalReady, 0); ready.Kind != TerminalReady {
-		t.Fatalf("terminal ready=%+v", ready)
-	}
-	if elapsed := time.Since(released); elapsed >= startupRawCeiling {
-		t.Fatalf("ready %v after release: the raw-mode gate ran to its %v ceiling", elapsed, startupRawCeiling)
-	}
-	startup := filepath.Join(f.root, "provider.startup")
-	waitFile(t, startup)
-	if body, err := os.ReadFile(startup); err != nil || string(body) != prompt {
-		t.Fatalf("provider.startup has %d bytes, err=%v, want the %d-byte prompt", len(body), err, len(prompt))
-	}
-	if err := f.controller.SendTerminalCommand(TerminalCommand{Kind: TerminalGenerationInstall, Correlation: 1, Generation: 1}); err != nil {
-		t.Fatal(err)
-	}
-	if result := f.nextTerminal(TerminalGenerationResult, 1); result.Status != TerminalResultOK {
-		t.Fatalf("generation install=%+v", result)
-	}
-	if err := f.controller.SendTerminalCommand(TerminalCommand{Kind: TerminalInput, Correlation: 2, Generation: 1, Sequence: 1, Payload: []byte("interactive-after-ready\n")}); err != nil {
-		t.Fatal(err)
-	}
-	if result := f.nextTerminal(TerminalInputResult, 2); result.Status != TerminalResultOK {
-		t.Fatalf("terminal input=%+v", result)
-	}
-	if err := os.WriteFile(filepath.Join(f.root, "finish"), nil, 0o600); err != nil {
-		t.Fatal(err)
-	}
-	record := f.finishAndAck()
-	if record.Terminal.Process != inner || record.Terminal.Exit.Code != 0 {
-		t.Fatalf("terminal=%+v", record.Terminal)
-	}
-}
-
-// The submitting CR waits for the provider's output to go quiet: a provider
-// that keeps printing for one second after the prompt is typed gets its
-// line completed after that, well before the five-second ceiling.
-func TestAttemptRunnerSubmitsTheStartupPromptOnlyOnceTheProviderIsQuiet(t *testing.T) {
-	f := newAttemptFixture(t, "native-chatty", "")
-	f.spec.StartupInput = []byte("native-startup\r")
-	inner := f.activateOuter()
-	f.advanceToProvider()
-	if err := f.controller.Release(StageProvider); err != nil {
-		t.Fatal(err)
-	}
-	if ready := f.nextTerminal(TerminalReady, 0); ready.Kind != TerminalReady {
-		t.Fatalf("terminal ready=%+v", ready)
-	}
-	readyAt := time.Now()
-	startup := filepath.Join(f.root, "provider.startup")
-	waitFile(t, startup)
-	elapsed := time.Since(readyAt)
-	if body, err := os.ReadFile(startup); err != nil || string(body) != "native-startup" {
-		t.Fatalf("provider.startup=%q err=%v", body, err)
-	}
-	// The CR follows the quiet spell after the provider's last output,
-	// measured from the witness the chatter writes as it finishes (ready
-	// arrives after the chatter starts, so time since ready undercounts),
-	// and never waits for the ceiling. One second of chatter leaves about
-	// three times the nominal duration before the ceiling: on 22 Sep 2026
-	// a loaded host stretched two seconds of chatter past the ceiling and
-	// failed every pre-review gate.
-	chatterDone, err := os.Stat(filepath.Join(f.root, "chatter.done"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	submitted, err := os.Stat(startup)
-	if err != nil {
-		t.Fatal(err)
-	}
-	quiet := submitted.ModTime().Sub(chatterDone.ModTime())
-	if quiet < startupEnterQuiet-startupEnterTick || elapsed >= startupEnterCeiling {
-		t.Fatalf("startup line completed %v after the chatter's last output and %v after ready, want at least the %v quiet spell (less one %v tick of skew) and before the %v ceiling", quiet, elapsed, startupEnterQuiet, startupEnterTick, startupEnterCeiling)
-	}
-	if err := os.WriteFile(filepath.Join(f.root, "finish"), nil, 0o600); err != nil {
-		t.Fatal(err)
-	}
-	if err := f.controller.SendTerminalCommand(TerminalCommand{Kind: TerminalGenerationInstall, Correlation: 1, Generation: 1}); err != nil {
-		t.Fatal(err)
-	}
-	if result := f.nextTerminal(TerminalGenerationResult, 1); result.Status != TerminalResultOK {
-		t.Fatalf("generation install=%+v", result)
-	}
-	if err := f.controller.SendTerminalCommand(TerminalCommand{Kind: TerminalInput, Correlation: 2, Generation: 1, Sequence: 1, Payload: []byte("interactive-after-ready\n")}); err != nil {
-		t.Fatal(err)
-	}
-	if result := f.nextTerminal(TerminalInputResult, 2); result.Status != TerminalResultOK {
-		t.Fatalf("terminal input=%+v", result)
-	}
-	record := f.finishAndAck()
-	if record.Terminal.Process != inner || record.Terminal.Exit.Code != 0 {
-		t.Fatalf("terminal=%+v", record.Terminal)
-	}
-}
-
-// The provider deliberately consumes the first submit without starting work.
-// The second CR is accepted by the same PTY submission path and its output is
-// the evidence that the bounded recovery reached the provider.
-func TestAttemptRunnerResendsDroppedStartupCarriageReturn(t *testing.T) {
-	f := newAttemptFixture(t, "native-drop-submit", "")
-	f.spec.startupSubmitRetryInterval = 10 * time.Millisecond
-	f.spec.StartupInput = []byte("native-startup\r")
-	inner := f.activateOuter()
-	f.advanceToProvider()
-	if err := f.controller.Release(StageProvider); err != nil {
-		t.Fatal(err)
-	}
-	if ready := f.nextTerminal(TerminalReady, 0); ready.Kind != TerminalReady {
-		t.Fatalf("terminal ready=%+v", ready)
-	}
-	waitFile(t, filepath.Join(f.root, "provider.started"))
-	if err := f.controller.SendTerminalCommand(TerminalCommand{Kind: TerminalStartupEvidence}); err != nil {
-		t.Fatal(err)
-	}
-	if err := f.controller.SendTerminalCommand(TerminalCommand{Kind: TerminalGenerationInstall, Correlation: 1, Generation: 1}); err != nil {
-		t.Fatal(err)
-	}
-	if result := f.nextTerminal(TerminalGenerationResult, 1); result.Status != TerminalResultOK {
-		t.Fatalf("generation install=%+v", result)
-	}
-	if err := f.controller.SendTerminalCommand(TerminalCommand{Kind: TerminalInput, Correlation: 2, Generation: 1, Sequence: 1, Payload: []byte("interactive-after-ready\n")}); err != nil {
-		t.Fatal(err)
-	}
-	if result := f.nextTerminal(TerminalInputResult, 2); result.Status != TerminalResultOK {
-		t.Fatalf("terminal input=%+v", result)
-	}
-	waitFile(t, filepath.Join(f.root, "provider.stdin"))
-	if err := os.WriteFile(filepath.Join(f.root, "finish"), nil, 0o600); err != nil {
-		t.Fatal(err)
-	}
-	record := f.finishAndAck()
-	if record.Terminal.Process != inner || record.Terminal.Exit.Code != 0 {
-		t.Fatalf("terminal=%+v", record.Terminal)
-	}
-}
-
-// A provider's first model turn can outlast the carriage-return retries.
-// Evidence that arrives after them, inside the verification ceiling, keeps
-// the run alive.
-func TestAttemptRunnerKeepsAProviderWhoseStartupEvidenceIsSlow(t *testing.T) {
-	f := newAttemptFixture(t, "native-drop-submit", "")
-	f.spec.startupSubmitRetryInterval = 10 * time.Millisecond
-	f.spec.StartupInput = []byte("native-startup\r")
-	inner := f.activateOuter()
-	f.advanceToProvider()
-	if err := f.controller.Release(StageProvider); err != nil {
-		t.Fatal(err)
-	}
-	if ready := f.nextTerminal(TerminalReady, 0); ready.Kind != TerminalReady {
-		t.Fatalf("terminal ready=%+v", ready)
-	}
-	waitFile(t, filepath.Join(f.root, "provider.started"))
-	time.Sleep(300 * time.Millisecond) // past the three retries, inside 120x10ms
-	if err := f.controller.SendTerminalCommand(TerminalCommand{Kind: TerminalStartupEvidence}); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(f.root, "finish"), nil, 0o600); err != nil {
-		t.Fatal(err)
-	}
-	record := f.finishAndAck()
-	if record.Terminal.Process != inner || record.Terminal.Exit.Code != 0 {
-		t.Fatalf("terminal=%+v", record.Terminal)
-	}
-}
-
-// A delayed banner is not evidence that the startup task was consumed. The
-// runner exhausts its bounded retries and surfaces the stable diagnostic
-// instead of leaving the provider running indefinitely.
-func TestAttemptRunnerRejectsDelayedUnrelatedStartupOutput(t *testing.T) {
-	f := newAttemptFixture(t, "native-delayed-submit", "")
-	f.spec.startupSubmitRetryInterval = 10 * time.Millisecond
-	f.spec.StartupInput = []byte("native-startup\r")
-	inner := f.activateOuter()
-	f.advanceToProvider()
-	if err := f.controller.Release(StageProvider); err != nil {
-		t.Fatal(err)
-	}
-	if ready := f.nextTerminal(TerminalReady, 0); ready.Kind != TerminalReady {
-		t.Fatalf("terminal ready=%+v", ready)
-	}
-	if record := f.finishAndAck(false); record.Terminal.Process != inner {
-		t.Fatalf("terminal=%+v", record.Terminal)
-	}
-	if output := f.output(); !strings.Contains(output, ErrStartupUnverified.Error()) {
-		t.Fatalf("runner output=%q, want %q", output, ErrStartupUnverified)
-	}
-}
-
-// Continuous terminal output is not itself the startup proof. Once the
-// authenticated startup-evidence command arrives, the same live provider may
-// stream without being killed by the bounded submit watchdog.
-func TestAttemptRunnerKeepsAHealthyContinuouslyStreamingProvider(t *testing.T) {
-	f := newAttemptFixture(t, "native-continuous-submit", "")
-	f.spec.StartupInput = []byte("native-startup\r")
-	inner := f.activateOuter()
-	f.advanceToProvider()
-	if err := f.controller.Release(StageProvider); err != nil {
-		t.Fatal(err)
-	}
-	if ready := f.nextTerminal(TerminalReady, 0); ready.Kind != TerminalReady {
-		t.Fatalf("terminal ready=%+v", ready)
-	}
-	if err := f.controller.SendTerminalCommand(TerminalCommand{Kind: TerminalStartupEvidence}); err != nil {
-		t.Fatal(err)
-	}
-	if err := f.controller.SendTerminalCommand(TerminalCommand{Kind: TerminalAttach, Correlation: 1, Sequence: 0}); err != nil {
-		t.Fatal(err)
-	}
-	if attached := f.nextTerminal(TerminalAttached, 1); attached.Status != TerminalResultOK {
-		t.Fatalf("terminal attach=%+v", attached)
-	}
-	if err := f.controller.SendTerminalCommand(TerminalCommand{Kind: TerminalCredit, Credit: 256}); err != nil {
-		t.Fatal(err)
-	}
-	if output := f.nextTerminal(TerminalOutput, 0); len(output.Payload) == 0 {
-		t.Fatalf("continuous output=%+v", output)
-	}
-	if err := os.WriteFile(filepath.Join(f.root, "finish"), nil, 0o600); err != nil {
-		t.Fatal(err)
-	}
-	record := f.finishAndAck()
-	if record.Terminal.Process != inner || record.Terminal.Exit.Code != 0 {
-		t.Fatalf("terminal=%+v", record.Terminal)
-	}
-}
-
-// A continuously readable PTY cannot starve the startup watchdog. Without
-// authenticated evidence, output alone is unrelated to task submission and
-// the bounded retry budget must still terminate the provider.
-func TestAttemptRunnerExhaustsStartupRetriesDuringContinuousOutput(t *testing.T) {
-	f := newAttemptFixture(t, "native-continuous-submit", "")
-	f.spec.startupSubmitRetryInterval = 10 * time.Millisecond
-	f.spec.StartupInput = []byte("native-startup\r")
-	inner := f.activateOuter()
-	f.advanceToProvider()
-	if err := f.controller.Release(StageProvider); err != nil {
-		t.Fatal(err)
-	}
-	if ready := f.nextTerminal(TerminalReady, 0); ready.Kind != TerminalReady {
-		t.Fatalf("terminal ready=%+v", ready)
-	}
-	if record := f.finishAndAck(false); record.Terminal.Process != inner {
-		t.Fatalf("terminal=%+v", record.Terminal)
-	}
-	if output := f.output(); !strings.Contains(output, ErrStartupUnverified.Error()) {
-		t.Fatalf("runner output=%q, want %q", output, ErrStartupUnverified)
-	}
-}
-
-// A provider that dies while the runner waits for its terminal is reported
-// as the exit it was, not as a prompt that could not be typed.
-func TestAttemptRunnerReportsAProviderThatDiesBeforeItsPrompt(t *testing.T) {
-	f := newAttemptFixture(t, "native-exit", "")
-	f.spec.StartupInput = []byte("native-startup\r")
-	inner := f.activateOuter()
-	f.advanceToProvider()
-	if err := f.controller.Release(StageProvider); err != nil {
-		t.Fatal(err)
-	}
-	record := f.finishAndAck()
-	if record.Terminal.Process != inner || record.Terminal.Exit.Code != 3 {
-		t.Fatalf("terminal=%+v", record.Terminal)
-	}
-}
-
 // The daemon writes the attempt config before the runner exists to read it,
 // so a control socket must absorb a whole config with nothing at the peer.
 func TestControlSocketPairAbsorbsAConfigWithoutAReader(t *testing.T) {
@@ -1220,49 +849,6 @@ func TestControlSocketPairAbsorbsAConfigWithoutAReader(t *testing.T) {
 			t.Fatalf("wrote %d of %d bytes with no reader: %v", written, len(payload), err)
 		}
 		written += n
-	}
-}
-
-func TestAttemptRunnerInjectsNativeStartupOnceBeforeInteractiveInput(t *testing.T) {
-	f := newAttemptFixture(t, "native-input", "")
-	f.spec.StartupInput = []byte("native-startup\n")
-	inner := f.activateOuter()
-	f.advanceToProvider()
-	if err := f.controller.Release(StageProvider); err != nil {
-		t.Fatal(err)
-	}
-	if ready := f.nextTerminal(TerminalReady, 0); ready.Kind != TerminalReady {
-		t.Fatalf("terminal ready=%+v", ready)
-	}
-	if err := f.controller.SendTerminalCommand(TerminalCommand{Kind: TerminalGenerationInstall, Correlation: 1, Generation: 1}); err != nil {
-		t.Fatal(err)
-	}
-	if result := f.nextTerminal(TerminalGenerationResult, 1); result.Status != TerminalResultOK {
-		t.Fatalf("generation install=%+v", result)
-	}
-	interactive := []byte("interactive-after-ready\n")
-	if err := f.controller.SendTerminalCommand(TerminalCommand{Kind: TerminalInput, Correlation: 2, Generation: 1, Sequence: 1, Payload: interactive}); err != nil {
-		t.Fatal(err)
-	}
-	if result := f.nextTerminal(TerminalInputResult, 2); result.Status != TerminalResultOK || result.Count != uint32(len(interactive)) {
-		t.Fatalf("terminal input=%+v", result)
-	}
-	for path, want := range map[string]string{
-		"provider.startup": "native-startup",
-		"provider.stdin":   "interactive-after-ready",
-	} {
-		path := filepath.Join(f.root, path)
-		waitFile(t, path)
-		if body, err := os.ReadFile(path); err != nil || string(body) != want {
-			t.Fatalf("%s=%q err=%v want=%q", filepath.Base(path), body, err, want)
-		}
-	}
-	if err := os.WriteFile(filepath.Join(f.root, "finish"), nil, 0o600); err != nil {
-		t.Fatal(err)
-	}
-	record := f.finishAndAck()
-	if record.Terminal.Process != inner || record.Terminal.Exit.Code != 0 || record.Terminal.Exit.Signal != 0 {
-		t.Fatalf("terminal=%+v", record.Terminal)
 	}
 }
 
@@ -1455,7 +1041,7 @@ func TestAttemptRunnerHumanReplyDefersCodexSubmit(t *testing.T) {
 	// A combined text-and-CR write would acknowledge immediately. The runner
 	// must instead keep this one terminal effect pending until its calibrated
 	// separate submit keystroke.
-	beforeSubmit := time.Now().Add(startupEnterFloor / 2)
+	beforeSubmit := time.Now().Add(submitFloor / 2)
 	for time.Now().Before(beforeSubmit) {
 		event, err := f.controller.Next(time.Until(beforeSubmit))
 		if err != nil {

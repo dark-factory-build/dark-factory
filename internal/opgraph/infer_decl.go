@@ -21,6 +21,8 @@ func (run *inference) declarations(repository Repository, names []string) {
 		at := Location{Repository: repository.ID, Path: name}
 		here := owner{repo: repository.ID, file: name}
 		switch {
+		case workflowFile(name):
+			run.workflow(repository.ID, repository.Name, body, at)
 		case strings.HasPrefix(base, "wrangler."):
 			run.wrangler(repository.ID, dir, base, body, at)
 		case strings.HasPrefix(base, "docker-compose") || strings.HasPrefix(base, "compose."):
@@ -52,7 +54,7 @@ func (run *inference) declarations(repository Repository, names []string) {
 			}
 			if json.Unmarshal(body, &vercel) == nil {
 				for _, cron := range vercel.Crons {
-					run.find(finding{owner: here, kind: Ingress, key: "cron:" + cron.Path, label: "cron " + cron.Schedule, trigger: "timer", edge: Handles,
+					run.find(finding{owner: here, kind: Ingress, key: "cron:" + cron.Path, label: "cron " + cron.Schedule, trigger: TriggerTimer, edge: Handles,
 						selectors: map[string]string{"http.route": cron.Path}, evidence: static("vercel", "crons", Declared), at: at})
 				}
 			}
@@ -72,7 +74,7 @@ func (run *inference) declarations(repository Repository, names []string) {
 				binary = binary || other == path.Join(dir, "src/main.rs")
 			}
 			if binary && cargo.Package.Name != "" {
-				run.addUnit(unit{repo: repository.ID, root: dir, key: "cargo:" + cargo.Package.Name, label: cargo.Package.Name, runtime: "process",
+				run.addUnit(unit{repo: repository.ID, root: dir, key: "cargo:" + cargo.Package.Name, label: cargo.Package.Name, runtime: RuntimeProcess,
 					names: []string{cargo.Package.Name}, evidence: static("cargo", "binary target", Declared), at: at})
 			}
 			run.manifest(keys(cargo.Dependencies), here, at, "Cargo.toml")
@@ -82,7 +84,7 @@ func (run *inference) declarations(repository Repository, names []string) {
 			if dir == "." {
 				label = repository.Name
 			}
-			run.addUnit(unit{repo: repository.ID, root: dir, key: framework + ":" + dir, label: label, runtime: "process", role: "web",
+			run.addUnit(unit{repo: repository.ID, root: dir, key: framework + ":" + dir, label: label, runtime: RuntimeProcess, role: "web",
 				names: []string{label}, evidence: static(framework, base, Declared), at: at})
 		case base == "requirements.txt":
 			var packages []string
@@ -138,7 +140,7 @@ func (run *inference) manifest(packages []string, found owner, at Location, deta
 	sort.Strings(packages)
 	for _, name := range packages {
 		if entry := knownClient(name, manifestClients); entry != nil {
-			run.client(*entry, found, at, detail+" "+name)
+			run.client(*entry, found, at, "manifest", detail+" "+name)
 		}
 	}
 }
@@ -226,7 +228,7 @@ func (run *inference) wrangler(repo, dir, base string, body []byte, at Location)
 		return
 	}
 	declared := static("wrangler", base, Declared)
-	worker := unit{repo: repo, root: dir, key: "wrangler:" + config.Name, label: config.Name, runtime: "worker", deployed: true, role: "web",
+	worker := unit{repo: repo, root: dir, key: "wrangler:" + config.Name, label: config.Name, runtime: RuntimeWorker, deployed: true, role: "web",
 		names: []string{config.Name}, evidence: declared, at: at}
 	routes := config.Routes
 	if config.Route != nil {
@@ -246,12 +248,12 @@ func (run *inference) wrangler(repo, dir, base string, body []byte, at Location)
 		}
 		host := strings.SplitN(pattern, "/", 2)[0]
 		worker.hosts = append(worker.hosts, host)
-		run.find(finding{owner: here, kind: Ingress, key: "route:" + pattern, label: pattern, trigger: "request", edge: Handles,
+		run.find(finding{owner: here, kind: Ingress, key: "route:" + pattern, label: pattern, trigger: TriggerRequest, edge: Handles,
 			selectors: map[string]string{"server.address": strings.TrimSuffix(host, "*")}, evidence: declared, at: at})
 	}
 	run.addUnit(worker)
 	for _, cron := range config.Triggers.Crons {
-		run.find(finding{owner: here, kind: Ingress, key: "cron:" + cron, label: "cron " + cron, trigger: "timer", edge: Handles, evidence: declared, at: at})
+		run.find(finding{owner: here, kind: Ingress, key: "cron:" + cron, label: "cron " + cron, trigger: TriggerTimer, edge: Handles, evidence: declared, at: at})
 	}
 	store := func(key, label, system string) {
 		run.find(finding{owner: here, kind: Store, key: key, label: label, edge: Uses,
@@ -345,14 +347,14 @@ func (run *inference) compose(repo, dir string, body []byte, at Location) {
 		for _, dependency := range dependsOn {
 			dependents[dependency] = append(dependents[dependency], key)
 		}
-		run.addUnit(unit{repo: repo, root: path.Join(dir, context), key: key, label: name, runtime: "process", deployed: true,
+		run.addUnit(unit{repo: repo, root: path.Join(dir, context), key: key, label: name, runtime: RuntimeProcess, deployed: true,
 			role: role(name, len(service.Ports) > 0), names: []string{name}, evidence: declared, at: at})
 		for _, port := range service.Ports {
 			text := strings.Split(strings.TrimSpace(toString(port)), "/")[0]
 			parts := strings.Split(text, ":")
 			container := parts[len(parts)-1]
 			run.find(finding{owner: owner{units: []string{key}}, kind: Ingress, key: "listen:tcp:" + container, label: "tcp listener :" + container,
-				trigger: "request", edge: Handles, selectors: map[string]string{"network.transport": "tcp", "server.port": container}, evidence: declared, at: at})
+				trigger: TriggerRequest, edge: Handles, selectors: map[string]string{"network.transport": "tcp", "server.port": container}, evidence: declared, at: at})
 		}
 	}
 	for _, name := range names {
@@ -371,7 +373,7 @@ func (run *inference) compose(repo, dir string, body []byte, at Location) {
 			}
 			entry := client(infrastructure.image, infrastructure.kind, infrastructure.system)
 			entry.shared = true
-			run.client(entry, owner{units: users}, at, "compose service "+name)
+			run.client(entry, owner{units: users}, at, "manifest", "compose service "+name)
 			break
 		}
 	}
@@ -396,6 +398,7 @@ var serverFrameworks = []string{"express", "fastify", "koa", "hono", "@hono/node
 func (run *inference) packageJSON(repo, dir string, body []byte, at Location, names []string) {
 	var manifest struct {
 		Name                 string            `json:"name"`
+		Main                 string            `json:"main"`
 		Bin                  any               `json:"bin"`
 		Scripts              map[string]string `json:"scripts"`
 		Dependencies         map[string]string `json:"dependencies"`
@@ -427,15 +430,15 @@ func (run *inference) packageJSON(repo, dir string, body []byte, at Location, na
 		// The wrangler declaration is the unit; its package supplies dependencies.
 		run.unitDeps = append(run.unitDeps, unitDeps{repo: repo, root: dir, deps: deps})
 	case deps["next"]:
-		server := unit{repo: repo, root: dir, key: "next:" + label + ":server", label: label, runtime: "server", deployed: true, role: "web",
+		server := unit{repo: repo, root: dir, key: "next:" + label + ":server", label: label, runtime: RuntimeServer, deployed: true, role: "web",
 			names: []string{label}, deps: deps, evidence: static("nextjs", "next dependency", Declared), at: at}
 		browser := server
-		browser.key, browser.label, browser.runtime, browser.role = "next:"+label+":browser", label+" (browser)", "browser", ""
+		browser.key, browser.label, browser.runtime, browser.role = "next:"+label+":browser", label+" (browser)", RuntimeBrowser, ""
 		browser.names = []string{label + "-browser"}
 		run.addUnit(server)
 		run.addUnit(browser)
 	case manifest.Bin != nil:
-		run.addUnit(unit{repo: repo, root: dir, key: "node:" + label, label: label, runtime: "cli", names: []string{label}, deps: deps, evidence: declared, at: at})
+		run.addUnit(unit{repo: repo, root: dir, key: "node:" + label, label: label, runtime: RuntimeCLI, names: []string{label}, deps: deps, evidence: declared, at: at})
 	default:
 		framework := ""
 		for _, candidate := range serverFrameworks {
@@ -445,12 +448,35 @@ func (run *inference) packageJSON(repo, dir string, body []byte, at Location, na
 		}
 		switch {
 		case framework != "":
-			run.addUnit(unit{repo: repo, root: dir, key: "node:" + label, label: label, runtime: "process", role: "web",
+			run.addUnit(unit{repo: repo, root: dir, key: "node:" + label, label: label, runtime: RuntimeProcess, role: "web",
 				names: []string{label}, deps: deps, evidence: static("package.json", framework+" dependency", Inferred), at: at})
 		case manifest.Scripts["start"] != "":
 			// A package that starts as a process is one, framework or not (a queue worker).
-			run.addUnit(unit{repo: repo, root: dir, key: "node:" + label, label: label, runtime: "process", role: role(label, false),
+			run.addUnit(unit{repo: repo, root: dir, key: "node:" + label, label: label, runtime: RuntimeProcess, role: role(label, false),
 				names: []string{label}, deps: deps, evidence: static("package.json", "start script", Inferred), at: at})
+		}
+	}
+	// A process's entry files bound what of its package it runs.
+	var entries []string
+	switch bin := manifest.Bin.(type) {
+	case string:
+		entries = append(entries, bin)
+	case map[string]any:
+		for _, name := range keys(bin) {
+			entries = append(entries, toString(bin[name]))
+		}
+	}
+	if start := strings.Fields(manifest.Scripts["start"]); len(start) > 1 && contains([]string{"node", "tsx", "ts-node", "bun"}, start[0]) {
+		entries = append(entries, start[len(start)-1])
+	}
+	if manifest.Main != "" {
+		entries = append(entries, manifest.Main)
+	}
+	for _, held := range run.units {
+		if held.repo == repo && held.key == "node:"+label {
+			for _, entry := range entries {
+				held.entries = append(held.entries, path.Join(dir, entry))
+			}
 		}
 	}
 	run.manifest(keys(deps), owner{repo: repo, file: at.Path}, at, "package.json")

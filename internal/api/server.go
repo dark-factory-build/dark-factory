@@ -52,6 +52,7 @@ const (
 	CallSendBackTask
 	CallTaskRead
 	CallWebStatus
+	CallWebPair
 	CallWebListClients
 	CallWebRevokeClient
 	CallRemoteStatus
@@ -815,7 +816,7 @@ func decodeCall(domain byte, bearer credential, encoded []byte) (Call, RemoteErr
 		if err := decodeExact(request.Params, &call.githubConnection); err != nil || !ValidGitHubConnectionInput(call.githubConnection) {
 			return Call{}, RemoteInvalidRequest
 		}
-	case CallHealth, CallSnapshot, CallAttemptTask, CallWebStatus, CallRemoteStatus, CallHumanRequests:
+	case CallHealth, CallSnapshot, CallAttemptTask, CallWebStatus, CallWebPair, CallRemoteStatus, CallHumanRequests:
 		if err := decodeExact(request.Params, &struct{}{}); err != nil {
 			return Call{}, RemoteInvalidRequest
 		}
@@ -1145,6 +1146,8 @@ func methodKind(method string) (CallKind, byte) {
 		return CallTaskRead, operatorDomain
 	case "web_status":
 		return CallWebStatus, operatorDomain
+	case "web_pair":
+		return CallWebPair, operatorDomain
 	case "web_list_clients":
 		return CallWebListClients, operatorDomain
 	case "web_revoke_client":
@@ -1337,7 +1340,7 @@ func replyMatches(kind CallKind, reply replyKind) bool {
 		return reply == replyWebClients
 	case CallWebRevokeClient:
 		return reply == replyWebRevoke
-	case CallMaintainer, CallGitHubConnection, CallIntake, CallRelease:
+	case CallMaintainer, CallGitHubConnection, CallIntake, CallRelease, CallWebPair:
 		return reply == replyContent
 	case CallRemoteStatus:
 		return reply == replyRemoteStatus

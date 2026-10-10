@@ -15,17 +15,21 @@ import (
 	"time"
 )
 
+func init() { noticesPath = "../../THIRD_PARTY_NOTICES" }
+
 var releaseAssetNames = []string{
 	"dark-factory-v1.2.3-aarch64-apple-darwin.tar.gz", "dark-factory-v1.2.3-x86_64-apple-darwin.tar.gz",
 	"SHA256SUMS", "dark-factory.rb",
 }
 
 func TestPackageReleaseIsDeterministicAndConsistent(t *testing.T) {
+	t.Parallel()
 	root := t.TempDir()
 	arm, intel := filepath.Join(root, "arm"), filepath.Join(root, "intel")
 	for _, component := range []string{"factoryd", "factory-runner", "factoryctl"} {
-		buildFixture(t, arm, component, component, "1.2.3", fixtureSource, "darwin/arm64", "")
-		buildFixture(t, intel, component, component, "1.2.3", fixtureSource, "darwin/amd64", "")
+		// Intel first: the other parallel tests build arm meanwhile.
+		buildFixture(t, intel, component, "darwin/amd64")
+		buildFixture(t, arm, component, "darwin/arm64")
 	}
 	// Unrelated residue in an input directory is never an archive member.
 	if err := os.WriteFile(filepath.Join(arm, "factory-tui"), []byte("obsolete\n"), 0o644); err != nil {
@@ -80,19 +84,22 @@ func TestPackageReleaseIsDeterministicAndConsistent(t *testing.T) {
 }
 
 func TestPackageReleaseRefusesBadInputWithoutPartialOutput(t *testing.T) {
+	t.Parallel()
 	root := t.TempDir()
 	arm, intel := filepath.Join(root, "arm"), filepath.Join(root, "intel")
 	for _, component := range []string{"factoryd", "factory-runner", "factoryctl"} {
-		buildFixture(t, arm, component, component, "1.2.3", fixtureSource, "darwin/arm64", "")
+		buildFixture(t, arm, component, "darwin/arm64")
 	}
 	// A wrong embedded release identity is rejected.
-	buildFixture(t, intel, "factoryd", "factoryd", "1.2.4", fixtureSource, "darwin/amd64", "")
+	intelFactoryd, intelIdentity := buildFixture(t, intel, "factoryd", "darwin/amd64")
+	wrongVersion, _ := Expected("1.2.4", fixtureSource, "darwin/amd64")
+	relinkFixture(t, intelFactoryd, intelIdentity.Receipt(), wrongVersion.Receipt())
 	output := filepath.Join(root, "out")
 	if err := PackageRelease(packageArguments(output, "aarch64-apple-darwin", arm, "x86_64-apple-darwin", intel)); err == nil || !strings.Contains(err.Error(), "linked receipt") {
 		t.Fatalf("identity mismatch = %v", err)
 	}
 	// A missing binary in the second target also leaves nothing behind.
-	buildFixture(t, intel, "factoryd", "factoryd", "1.2.3", fixtureSource, "darwin/amd64", "")
+	buildFixture(t, intel, "factoryd", "darwin/amd64")
 	if err := PackageRelease(packageArguments(output, "aarch64-apple-darwin", arm, "x86_64-apple-darwin", intel)); err == nil {
 		t.Fatal("incomplete target was packaged")
 	}
@@ -164,16 +171,23 @@ func assertArchive(t *testing.T, content []byte, inputs string) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if header.Mode != 0o755 || header.Uid != 0 || header.Gid != 0 || header.Uname != "root" || header.Gname != "wheel" ||
+		mode := int64(0o755)
+		if header.Name == "THIRD_PARTY_NOTICES" {
+			mode = 0o644
+		}
+		if header.Mode != mode || header.Uid != 0 || header.Gid != 0 || header.Uname != "root" || header.Gname != "wheel" ||
 			!header.ModTime.Equal(time.Date(2000, 1, 1, 0, 0, 0, 0, time.UTC)) || header.Typeflag != tar.TypeReg {
 			t.Fatalf("archive member metadata is not normalized: %+v", header)
+		}
+		if header.Name == "THIRD_PARTY_NOTICES" {
+			inputs = "../.."
 		}
 		if !bytes.Equal(member, readFile(t, filepath.Join(inputs, header.Name))) {
 			t.Fatalf("%s is not the verified input binary", header.Name)
 		}
 		names = append(names, header.Name)
 	}
-	if fmt.Sprint(names) != "[factoryd factory-runner factoryctl]" {
+	if fmt.Sprint(names) != "[factoryd factory-runner factoryctl THIRD_PARTY_NOTICES]" {
 		t.Fatalf("archive members = %v", names)
 	}
 }

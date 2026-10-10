@@ -1017,7 +1017,7 @@ func TestBrowserHumanReplyDoesNotReconcileUnknownBeforeEffect(t *testing.T) {
 	result, err := fixture.adapter.backend.ReplyHumanRequest(ctx, fixture.principal, browserprotocol.HumanRequestReply{
 		RequestID: request.ID.String(), ExpectedRevision: decimalRevision(request.Revision), Reply: "reply",
 	})
-	if result != (browserprotocol.HumanRequestReplyResult{}) || !errors.Is(err, browser.ErrRateLimited) {
+	if result != (browserprotocol.HumanRequestReplyResult{}) || !errors.Is(mapBrowserError(err), browser.ErrRateLimited) {
 		t.Fatalf("cancelled reply = %+v, %v", result, err)
 	}
 	expectNoTerminalEffectWire(t, fixture.peer)
@@ -1345,7 +1345,7 @@ func TestReleaseAfterCancelIsStaleNotInternal(t *testing.T) {
 	if _, err := fixture.adapter.daemon.terminalLeaseRelease(context.Background(), fixture.principal, fixture.run.ID, fixture.session.ID, lease.Generation, fixture.run.Revision, fixture.session.Revision); !errors.Is(err, ErrTerminalEffectRejected) || !errors.Is(err, kernel.ErrRevisionConflict) {
 		t.Fatalf("release after cancel = %v, want a rejection carrying a revision conflict", err)
 	}
-	if _, err := fixture.adapter.backend.ReleaseTerminalLease(context.Background(), fixture.principal, release); !errors.Is(err, browser.ErrStale) {
+	if _, err := fixture.adapter.backend.ReleaseTerminalLease(context.Background(), fixture.principal, release); !errors.Is(mapBrowserError(err), browser.ErrStale) {
 		t.Fatalf("release after cancel at the browser boundary = %v", err)
 	}
 }

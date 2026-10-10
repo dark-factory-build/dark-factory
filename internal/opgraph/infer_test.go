@@ -30,8 +30,15 @@ func loop() { for range time.NewTicker(time.Second).C {} }
 func unused() { exec.Command("never-called") }
 `),
 			"cmd/tool/main.go": []byte(`package main
-import "example.com/core/internal/api"
-func main() { api.Call() }
+import ("example.com/core/internal/api"; "example.com/core/internal/broker")
+func main() { api.Call(); client := broker.New(); client.Send(nil) }
+`),
+			"internal/broker/broker.go": []byte(`package broker
+import "net/http"
+const Origin = "https://broker.payments.io"
+type Client struct{ origin, docs string }
+func New() *Client { return &Client{origin: Origin, docs: "https://docs.unread.io"} }
+func (c *Client) Send(ctx context.Context) { http.NewRequestWithContext(ctx, "POST", c.origin+"/v1/send", nil) }
 `),
 			"internal/api/api.go": []byte(`package api
 import ("net/http"; _ "github.com/jackc/pgx/v5")
@@ -84,7 +91,7 @@ func TestX() { http.Get("https://test-only.io/") }
 
 func infer(t *testing.T) (Graph, map[string]Node, map[string][]Node) {
 	t.Helper()
-	graph, err := Infer("system", fixture())
+	graph, err := Infer("system", fixture(), nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -137,13 +144,14 @@ func TestInferGo(t *testing.T) {
 		{"server", "runs", "loop"},
 		{"server", "calls", "api.payments.io"},
 		{"tool", "calls", "api.payments.io"},
+		{"tool", "calls", "broker.payments.io"}, // a URL constant stored in a field a request reads
 		{"server", "uses", "postgresql"},
 	} {
 		if !edge(graph, byID, want[0], want[1], want[2]) {
 			t.Errorf("missing edge %v", want)
 		}
 	}
-	for _, absent := range []string{"never-called", "test-only.io", "/only-if-called"} {
+	for _, absent := range []string{"never-called", "test-only.io", "/only-if-called", "docs.unread.io"} {
 		if len(byLabel[absent]) != 0 {
 			t.Errorf("%q came from code no binary calls", absent)
 		}
@@ -197,7 +205,8 @@ func TestInferDeclarations(t *testing.T) {
 	if status := one(t, byLabel, "GET /status"); status.Unit != rails.ID {
 		t.Error("rails route not owned by its rack unit")
 	}
-	one(t, byLabel, "/orders")
+	one(t, byLabel, "GET /orders/:id")
+	one(t, byLabel, "PATCH /orders/:id")
 	if !edge(graph, byID, "rails", "uses", "sidekiq") {
 		t.Error("sidekiq queue missing")
 	}
@@ -250,7 +259,7 @@ func TestIdentityIsStable(t *testing.T) {
 		repositories[left], repositories[right] = repositories[right], repositories[left]
 	}
 	repositories[0].Files["unrelated.py"] = []byte("x = 1")
-	second, err := Infer("system", repositories)
+	second, err := Infer("system", repositories, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -298,7 +307,7 @@ func TestInferenceSettlesOnOneAnswer(t *testing.T) {
 	}
 	var first []Edge
 	for attempt := 0; attempt < 30; attempt++ {
-		graph, err := Infer("s", repositories)
+		graph, err := Infer("s", repositories, nil)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -321,5 +330,118 @@ func TestInferenceSettlesOnOneAnswer(t *testing.T) {
 		} else if !reflect.DeepEqual(first, graph.Edges) {
 			t.Fatal("inference changed between identical runs")
 		}
+	}
+}
+
+func TestCIJoinsUnitsAndNamesItsRepository(t *testing.T) {
+	graph, err := Infer("s", []Repository{
+		{ID: "r-core", Name: "org/core", Files: map[string][]byte{
+			"go.mod":                  []byte("module example.com/core\n"),
+			"cmd/gate/main.go":        []byte("package main\nfunc main() {}\n"),
+			".github/workflows/a.yml": []byte("on: pull_request\njobs:\n  gate:\n    steps:\n      - run: go run ./cmd/gate\n"),
+		}},
+		{ID: "r-site", Name: "org/site", Files: map[string][]byte{
+			"wrangler.toml":           []byte("name = \"api\"\n"),
+			".github/workflows/b.yml": []byte("on: push\njobs:\n  t:\n    steps:\n      - run: echo\n"),
+		}},
+	}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	byID := map[string]Node{}
+	labels := map[string]bool{}
+	for _, node := range graph.Nodes {
+		byID[node.ID] = node
+		labels[node.Label] = true
+	}
+	if !labels["GitHub Actions \u00b7 core"] || !labels["GitHub Actions \u00b7 site"] {
+		t.Fatalf("CI units are not named after their repository: %v", labels)
+	}
+	for _, edge := range graph.Edges {
+		if byID[edge.From].Kind == Job && edge.Kind == Calls && strings.Contains(byID[edge.To].Label, "gate") {
+			return
+		}
+	}
+	t.Fatal("the job running ./cmd/gate has no edge to the gate unit")
+}
+
+// A host the platform reports a unit serves (a Worker's custom domain) is
+// that unit's: a call to it, read from code or seen at runtime, reaches the
+// unit instead of an outside party.
+func TestPlatformHostReachesItsUnit(t *testing.T) {
+	repositories := []Repository{
+		{ID: "w", Name: "w", Files: map[string][]byte{"wrangler.toml": []byte("name = \"gate\"\n")}},
+		{ID: "c", Name: "c", Files: map[string][]byte{
+			"go.mod":        []byte("module example.com/c\n"),
+			"cmd/c/main.go": []byte("package main\nimport \"net/http\"\nfunc main() { http.Get(\"https://gate.darkfactory.build/x\") }\n"),
+		}},
+	}
+	outside := func(graph Graph) bool {
+		for _, node := range graph.Nodes {
+			if node.Kind == External && node.Label == "gate.darkfactory.build" {
+				return true
+			}
+		}
+		return false
+	}
+	before, err := Infer("s", repositories, nil)
+	if err != nil || !outside(before) {
+		t.Fatalf("without the platform host the call is outside: %v", err)
+	}
+	graph, err := Infer("s", repositories, map[string][]string{"gate": {"gate.darkfactory.build"}})
+	if err != nil || outside(graph) {
+		t.Fatalf("the platform host is still an outside party: %v", err)
+	}
+	ingress := ""
+	for _, node := range graph.Nodes {
+		if node.Kind == Ingress && node.Selectors["server.address"] == "gate.darkfactory.build" {
+			ingress = node.ID
+		}
+	}
+	found := false
+	for _, edge := range graph.Edges {
+		found = found || edge.To == ingress && edge.Kind == Calls
+	}
+	if ingress == "" || !found {
+		t.Fatalf("the call does not reach the unit's host: %+v", graph.Edges)
+	}
+	live := Overlay("s", graph, []Observation{{Source: "otlp", Kind: "client", Start: 0, End: 1, Count: 1,
+		Attributes: map[string]string{"service.name": "c"}, Peer: map[string]string{"server.address": "gate.darkfactory.build"}}}, nil, nil, 1, 60_000)
+	seen := false
+	for key, status := range live.Edges {
+		seen = seen || key[1] == ingress && status.Observation == Observed
+	}
+	if outside(live.Graph) || !seen {
+		t.Fatal("a runtime call to the platform host did not reach the unit")
+	}
+}
+
+// Units in two repositories can share a key (each Procfile's web); a
+// platform host belongs only to the one answering to the name.
+func TestPlatformHostStaysInItsRepository(t *testing.T) {
+	app := func(name string) map[string][]byte {
+		return map[string][]byte{
+			"Procfile":     []byte("web: node index.js\n"),
+			"package.json": []byte(`{"name":"` + name + `","dependencies":{"express":"4"}}`),
+			"index.js":     []byte("const app = require('express')()\napp.get('/x', h)\napp.listen(3000)\n"),
+		}
+	}
+	graph, err := Infer("s", []Repository{{ID: "ra", Name: "ra", Files: app("app-a")}, {ID: "rb", Name: "rb", Files: app("app-b")}},
+		map[string][]string{"app-a": {"a.darkfactory.build"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	byID := map[string]Node{}
+	for _, node := range graph.Nodes {
+		byID[node.ID] = node
+	}
+	var owners []string
+	for _, node := range graph.Nodes {
+		if node.Kind == Ingress && node.Selectors["server.address"] == "a.darkfactory.build" {
+			owners = append(owners, byID[node.Unit].Modules[0].Repository)
+		}
+	}
+	if strings.Join(owners, ",") != "ra" {
+		t.Fatalf("host owned by %v, want ra alone", owners)
 	}
 }

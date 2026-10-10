@@ -23,29 +23,28 @@ WebSocket with exact Host/Origin checks and proof-of-possession client keys; it
 is not a webhook or generic connector listener. Exposing either local surface
 beyond the machine is unsupported.
 
-The same loopback listener serves one first-party page, `/pair`, whose form
-post mints a browser pairing challenge on the strength of the request's Fetch
-Metadata alone (a top-level document navigation, and a same-origin post). Those
-headers say which browser context sent a request; they do not authenticate the
-sender as a browser. Any local process that can connect to 127.0.0.1:43123 can
-send them, obtain a challenge, and, by presenting the console origin, pair a
-client with the full web grant. The loopback listener is therefore a
-same-machine trust boundary, not a per-user one: a separate OS user isolates
-files, credentials and the operator socket, but not pairing. This was accepted
-on 5 September 2026 in exchange for pairing without a terminal. The control is
-revocation, through `factoryctl web list-clients` and `web revoke` or the
-console; a boot holds at most 32 live challenges, each expiring after five
-minutes, so a hostile local process can delay pairing but cannot hold a grant
-it did not pair. A bare 503 from the page means the mint failed — the
-live-challenge cap, the transport, or the store — and `factoryctl web status`
-reports the transport state and the live challenge count. A remote
-invitation is minted only by a client holding the full loopback grant, whose
-terminal_input bit a remote grant never carries, so a paired phone can never
-invite another phone. Such a console does consume the same cap, so the daemon
-bounds it to four invitations per five minutes: even a console looping the
-request holds at most four of the 32 slots, and the local `/pair` page can
-always still mint one. Revoking any client invalidates every live pairing
-challenge, so a link minted before the revocation cannot pair after it.
+Only the operator mints a loopback browser pairing. The mint is the
+operator-domain `web_pair` call on the private socket, authenticated by
+`operator.token`: `factoryctl service install` makes it once for a fresh
+install, and `factoryctl web pair` makes it on demand. Either hands the one-shot
+link straight to the default browser and never prints it. The loopback listener
+mints nothing, whatever Fetch Metadata, Origin, Referer or Host a request
+carries, because a sandboxed worker can reach loopback TCP (Codex and Claude
+worker sandboxes both allow network) while it cannot read `operator.token`.
+Restricted workers therefore cannot pair a browser. An unrestricted program
+running as the operator's user can already read `operator.token` and is the
+operator for every purpose; that is the same-user boundary, not a pairing one.
+The control after the fact is revocation, through `factoryctl web list-clients`
+and `web revoke` or the console; a boot holds at most 32 live challenges, each
+expiring after five minutes. `factoryctl web status` reports the transport state
+and the live challenge count. A remote invitation is minted only by a client
+holding the full loopback grant, whose terminal_input bit a remote grant never
+carries, so a paired phone can never invite another phone. Such a console does
+consume the same cap, so the daemon bounds it to four invitations per five
+minutes: even a console looping the request holds at most four of the 32 slots,
+and `factoryctl web pair` can always still mint one. Revoking any client
+invalidates every live pairing challenge, so a link minted before the revocation
+cannot pair after it.
 
 ### Hosted-origin compromise response
 
@@ -54,8 +53,8 @@ capability granted to a paired browser client. Stop trusting the hosted page,
 revoke every paired browser client through the owner-authenticated local API,
 and prove that no browser connection remains. A compromised console holding the
 full loopback grant can mint remote invitations, but no more than four per five
-minutes, so it can neither exhaust the challenge cap nor deny the local `/pair`
-page; a compromised remote client could not have minted one at all. Revocation
+minutes, so it can neither exhaust the challenge cap nor deny `factoryctl web
+pair`; a compromised remote client could not have minted one at all. Revocation
 also invalidates every live pairing challenge, so an invitation minted before it
 cannot pair afterwards. If revocation
 cannot prove connection cleanup, quiesce the browser runtime or stop the

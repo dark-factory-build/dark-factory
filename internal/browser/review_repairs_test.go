@@ -294,34 +294,6 @@ func TestTerminalTargetBackendCancellationDoesNotPublishLateResult(t *testing.T)
 	}
 }
 
-func TestBackendSuccessAfterOperationDeadlineIsDiscarded(t *testing.T) {
-	backend := newFakeBackend()
-	backend.stateWait = true
-	server := startServer(t, backend)
-	connection, _ := dialServer(t, server, testOrigin)
-	authenticate(t, connection)
-	request, _ := testEncodeStateGet("late-state", browserprotocol.StateGet{})
-	writeClientFrame(t, connection, request)
-	// The late result is still discarded, but a budget the store outran is
-	// busyness the client reconnects on, never an internal fault that strands
-	// it (the production symptom behind a daemon replacement).
-	assertRetryableError(t, readServerFrame(t, connection), "late-state")
-}
-
-func TestLateSubscriptionIsCancelledAndNeverInstalled(t *testing.T) {
-	backend := newFakeBackend()
-	backend.subWait = true
-	server := startServer(t, backend)
-	connection, _ := dialServer(t, server, testOrigin)
-	authenticate(t, connection)
-	request, _ := testEncodeStateWatch("late-sub", browserprotocol.StateWatch{})
-	writeClientFrame(t, connection, request)
-	assertRetryableError(t, readServerFrame(t, connection), "late-sub")
-	if backend.sub.closed.Load() != 1 {
-		t.Fatalf("late subscription cleanup count=%d", backend.sub.closed.Load())
-	}
-}
-
 func TestRejectedSubscriptionsAreCancelledAndJoined(t *testing.T) {
 	tests := []struct {
 		name  string

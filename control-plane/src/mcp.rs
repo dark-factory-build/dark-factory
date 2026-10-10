@@ -10,8 +10,8 @@ use crate::{
     BrokerState,
     access::AccessAuthority,
     github_app::{
-        AppAuthority, CreateIssue, CreatePullRequest, EnqueuePullRequest, ListIssues,
-        ListPullRequests, ObserveFile, ObserveIssue, ObservePullRequestChecks,
+        AppAuthority, CreateIssue, CreatePullRequest, EnqueuePullRequest, ListDeployments,
+        ListIssues, ListPullRequests, ObserveFile, ObserveIssue, ObservePullRequestChecks,
         ObservePullRequestMerge, ObserveRef, ObserveRepository, ObserveTree, OperationError,
         PublishCommit, SubmitPullRequestReview, UpdatePullRequestBody, canonical_operation_id,
     },
@@ -127,26 +127,6 @@ pub(crate) async fn connection_dispatch(
             Ok(journal) => journal,
             Err(_) => return error_response(StatusCode::UNAUTHORIZED, "unauthorized"),
         };
-        // Bind every referenced operation UUID before any GitHub read, exactly
-        // as the mutation/reconciliation paths already do.
-        if let Some(arguments) = request
-            .pointer("/params/arguments")
-            .and_then(Value::as_object)
-        {
-            for (key, value) in arguments {
-                if key.ends_with("_operation_id") && !value.is_null() {
-                    let Some(id) = value.as_str() else {
-                        return error_response(StatusCode::UNAUTHORIZED, "unauthorized");
-                    };
-                    let mut id = id.to_owned();
-                    if canonical_operation_id(&mut id).is_err()
-                        || !matches!(scoped.journal.observe_operation(&id).await, Ok(Some(_)))
-                    {
-                        return error_response(StatusCode::UNAUTHORIZED, "unauthorized");
-                    }
-                }
-            }
-        }
     } else if request.get("method").and_then(Value::as_str) == Some("tools/call") {
         return error_response(StatusCode::UNAUTHORIZED, "unauthorized");
     }
@@ -497,7 +477,7 @@ fn tools() -> Value {
     }, {
         "name": "submit_pull_request_review",
         "title": "Submit an exact-head pull request review",
-        "description": "Record an adversarial-review verdict against one pull request head commit. ALLOW satisfies the required `review` check; REQUEST_CHANGES blocks it, and a block at a head remains until a new head or an independent exact-head ALLOW explicitly corrects that prior App review operation; COMMENT decides nothing. All three are this App's own words and none is a GitHub review state: the App authors the pull requests it reviews and GitHub refuses a self-review either way, so every verdict is submitted as a GitHub COMMENT and the verdict itself rides in a line the App writes. That is the line the `review` check reads, which is why `body` carries the reviewer's findings and must not contain one. Replays require the same operation UUID and request.",
+        "description": "Record an adversarial-review verdict against one pull request head commit. ALLOW satisfies the required `review` check; REQUEST_CHANGES blocks it, and a block at a head remains until a new head; COMMENT decides nothing. All three are this App's own words and none is a GitHub review state: the App authors the pull requests it reviews and GitHub refuses a self-review either way, so every verdict is submitted as a GitHub COMMENT and the verdict itself rides in a line the App writes. That is the line the `review` check reads, which is why `body` carries the reviewer's findings and must not contain one. Replays require the same operation UUID and request.",
         "inputSchema": {
             "type": "object",
             "properties": {
@@ -506,8 +486,7 @@ fn tools() -> Value {
                 "pull_number": {"type": "integer", "minimum": 1},
                 "head_sha": {"type": "string", "pattern": "^[0-9a-f]{40}$"},
                 "event": {"type": "string", "enum": ["ALLOW", "COMMENT", "REQUEST_CHANGES"]},
-                "body": {"type": "string", "minLength": 1, "maxLength": 16000},
-                "corrects_review_operation_id": {"type": ["string", "null"], "pattern": "^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$"}
+                "body": {"type": "string", "minLength": 1, "maxLength": 16000}
             },
             "required": ["repository", "operation_id", "pull_number", "head_sha", "event", "body"],
             "additionalProperties": false
@@ -528,7 +507,7 @@ fn tools() -> Value {
     }, {
         "name": "observe_pull_request_checks",
         "title": "Observe exact-head pull request checks",
-        "description": "Return the complete bounded set of GitHub check runs for one exact pull request head commit.",
+        "description": "Return the complete bounded set of GitHub check runs for one exact pull request head commit, each marked whether its base branch's rules require it.",
         "inputSchema": {
             "type": "object",
             "properties": {
@@ -552,9 +531,10 @@ fn tools() -> Value {
                             "name": {"type": "string"},
                             "status": {"type": "string"},
                             "conclusion": {"type": ["string", "null"]},
-                            "url": {"type": "string"}
+                            "url": {"type": "string"},
+                            "required": {"type": "boolean"}
                         },
-                        "required": ["name", "status", "conclusion", "url"],
+                        "required": ["name", "status", "conclusion", "url", "required"],
                         "additionalProperties": false
                     }
                 }
@@ -564,20 +544,59 @@ fn tools() -> Value {
         },
         "annotations": {"readOnlyHint": true, "destructiveHint": false, "openWorldHint": true}
     }, {
-        "name": "observe_pull_request_merge",
-        "title": "Observe an exact-head merge outcome",
-        "description": "Bind to the completed App enqueue attempt and return whether that exact pull request head is still in its default-branch merge queue, merged after the attempt, or no longer queued. NOT_QUEUED on an open pull request carries the newest completed merge-group run that built the head, when one is readable.",
+        "name": "list_deployments",
+        "title": "List deployments",
+        "description": "Return the newest GitHub Deployments, newest first, each with its newest status's state and time (pending when it has none) and the host its environment URL names. No URLs, payloads or creators.",
         "inputSchema": {
             "type": "object",
             "properties": {
                 "repository": {"type": "string", "pattern": "^[A-Za-z0-9-]{1,39}/[A-Za-z0-9._-]{1,100}$"},
-                "enqueue_operation_id": {"type": "string", "pattern": "^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$"},
+                "per_page": {"type": "integer", "minimum": 1, "maximum": 30}
+            },
+            "required": ["repository", "per_page"],
+            "additionalProperties": false
+        },
+        "outputSchema": {
+            "type": "object",
+            "properties": {
+                "deployments": {
+                    "type": "array",
+                    "maxItems": 30,
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "id": {"type": "integer", "minimum": 1},
+                            "environment": {"type": "string"},
+                            "production_environment": {"type": "boolean"},
+                            "sha": {"type": "string", "pattern": "^[0-9a-f]{40}$"},
+                            "ref": {"type": "string"},
+                            "created_at": {"type": "string"},
+                            "state": {"type": "string", "enum": ["error", "failure", "inactive", "in_progress", "queued", "pending", "success"]},
+                            "updated_at": {"type": "string"},
+                            "environment_host": {"type": ["string", "null"]}
+                        },
+                        "required": ["id", "environment", "production_environment", "sha", "ref", "created_at", "state", "updated_at", "environment_host"],
+                        "additionalProperties": false
+                    }
+                }
+            },
+            "required": ["deployments"],
+            "additionalProperties": false
+        },
+        "annotations": {"readOnlyHint": true, "destructiveHint": false, "openWorldHint": true}
+    }, {
+        "name": "observe_pull_request_merge",
+        "title": "Observe an exact-head merge outcome",
+        "description": "Return whether that exact pull request head is in its default-branch merge queue, merged, or not queued. NOT_QUEUED on an open pull request carries the newest completed merge-group run that built the head, when one is readable.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "repository": {"type": "string", "pattern": "^[A-Za-z0-9-]{1,39}/[A-Za-z0-9._-]{1,100}$"},
                 "pull_number": {"type": "integer", "minimum": 1},
                 "head_sha": {"type": "string", "pattern": "^[0-9a-f]{40}$"},
-                "base": {"type": "string", "minLength": 1, "maxLength": 240},
-                "reviewed_body_digest": {"type": "string", "pattern": "^sha256:[0-9a-fA-F]{64}$"}
+                "base": {"type": "string", "minLength": 1, "maxLength": 240}
             },
-            "required": ["repository", "enqueue_operation_id", "pull_number", "head_sha", "base"],
+            "required": ["repository", "pull_number", "head_sha", "base"],
             "additionalProperties": false
         },
         "outputSchema": {
@@ -587,8 +606,7 @@ fn tools() -> Value {
                 "head_sha": {"type": "string"},
                 "base": {"type": "string"},
                 "pull_state": {"type": "string", "enum": ["open", "closed"]},
-                "state": {"type": "string", "enum": ["ACTIVE_QUEUE", "MERGED_AFTER_ENQUEUE_ATTEMPT", "NOT_QUEUED"]},
-                "entry_id": {"type": "string"},
+                "state": {"type": "string", "enum": ["ACTIVE_QUEUE", "MERGED", "NOT_QUEUED"]},
                 "queue_state": {"type": ["string", "null"]},
                 "merge_commit_sha": {"type": ["string", "null"]},
                 "merge_group": {
@@ -612,7 +630,7 @@ fn tools() -> Value {
                     "additionalProperties": false
                 }
             },
-            "required": ["pull_number", "head_sha", "base", "pull_state", "state", "entry_id", "queue_state", "merge_commit_sha", "merge_group"],
+            "required": ["pull_number", "head_sha", "base", "pull_state", "state", "queue_state", "merge_commit_sha", "merge_group"],
             "additionalProperties": false
         },
         "annotations": {"readOnlyHint": true, "destructiveHint": false, "openWorldHint": true}
@@ -662,18 +680,17 @@ fn tools() -> Value {
     }, {
         "name": "enqueue_pull_request",
         "title": "Add a pull request to its base branch's merge queue at an exact head",
-        "description": "Enqueue one pull request only while its head is still the stated commit and its base is still the stated branch. This operation requires that base's merge queue; it never falls back to direct merge. GitHub tests the entry against the queue's latest base and merges it. A refusal names its typed reason, and the same operation UUID stays retryable. Replays require the same operation UUID and request.",
+        "description": "Enqueue one pull request only while its head is still the stated commit and its base is still the stated branch. This operation requires that base's merge queue; it never falls back to direct merge. GitHub tests the entry against the queue's latest base and merges it. It is idempotent: a head already queued is success, and a refusal names its typed reason.",
         "inputSchema": {
             "type": "object",
             "properties": {
                 "repository": {"type": "string", "pattern": "^[A-Za-z0-9-]{1,39}/[A-Za-z0-9._-]{1,100}$"},
-                "operation_id": {"type": "string", "pattern": "^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$"},
                 "pull_number": {"type": "integer", "minimum": 1},
                 "head_sha": {"type": "string", "pattern": "^[0-9a-f]{40}$"},
                 "base": {"type": "string", "minLength": 1, "maxLength": 255},
                 "reviewed_body_digest": {"type": "string", "pattern": "^sha256:[0-9a-fA-F]{64}$"}
             },
-            "required": ["repository", "operation_id", "pull_number", "head_sha", "base", "reviewed_body_digest"],
+            "required": ["repository", "pull_number", "head_sha", "base", "reviewed_body_digest"],
             "additionalProperties": false
         },
         "outputSchema": {
@@ -891,10 +908,8 @@ async fn call_tool(id: Value, request: &Map<String, Value>, mcp: &McpState) -> R
             let Ok(arguments) = serde_json::from_value::<EnqueuePullRequest>(arguments) else {
                 return json_rpc_error(id, -32602, "Invalid params");
             };
-            match mcp.app.enqueue_pull_request(&mcp.journal, arguments).await {
-                Ok(result) => {
-                    serialized_tool_result(id, &result, "Pull request is durably queued.")
-                }
+            match mcp.app.enqueue_pull_request(arguments).await {
+                Ok(result) => serialized_tool_result(id, &result, "Pull request is queued."),
                 Err(error) => operation_error(id, error),
             }
         }
@@ -910,15 +925,20 @@ async fn call_tool(id: Value, request: &Map<String, Value>, mcp: &McpState) -> R
                 Err(error) => operation_error(id, error),
             }
         }
+        Some("list_deployments") => {
+            let Ok(arguments) = serde_json::from_value::<ListDeployments>(arguments) else {
+                return json_rpc_error(id, -32602, "Invalid params");
+            };
+            match mcp.app.list_deployments(arguments).await {
+                Ok(result) => serialized_tool_result(id, &result, "Deployments were observed."),
+                Err(error) => operation_error(id, error),
+            }
+        }
         Some("observe_pull_request_merge") => {
             let Ok(arguments) = serde_json::from_value::<ObservePullRequestMerge>(arguments) else {
                 return json_rpc_error(id, -32602, "Invalid params");
             };
-            match mcp
-                .app
-                .observe_pull_request_merge(&mcp.journal, arguments)
-                .await
-            {
+            match mcp.app.observe_pull_request_merge(arguments).await {
                 Ok(result) => {
                     serialized_tool_result(id, &result, "Exact-head merge state was observed.")
                 }

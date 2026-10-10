@@ -3,6 +3,7 @@ package relayhost
 import (
 	"bytes"
 	"context"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -25,7 +26,8 @@ type fakeLoopback struct {
 	server *httptest.Server
 	origin string
 
-	opened chan *loopbackSession
+	opened  chan *loopbackSession
+	exports chan loopbackExport
 
 	mu       sync.Mutex
 	rejected int
@@ -46,6 +48,11 @@ type loopbackSession struct {
 	observedHost string
 }
 
+type loopbackExport struct {
+	header http.Header
+	body   []byte
+}
+
 type loopbackFrame struct {
 	kind    websocket.MessageType
 	payload []byte
@@ -53,7 +60,7 @@ type loopbackFrame struct {
 
 func newFakeLoopback(t *testing.T) *fakeLoopback {
 	t.Helper()
-	loopback := &fakeLoopback{origin: loopbackOrigin, opened: make(chan *loopbackSession, 64)}
+	loopback := &fakeLoopback{origin: loopbackOrigin, opened: make(chan *loopbackSession, 64), exports: make(chan loopbackExport, 8)}
 	loopback.server = httptest.NewServer(http.HandlerFunc(loopback.handle))
 	t.Cleanup(loopback.server.Close)
 	return loopback
@@ -68,6 +75,12 @@ func (loopback *fakeLoopback) address() string {
 }
 
 func (loopback *fakeLoopback) handle(writer http.ResponseWriter, request *http.Request) {
+	// The OTLP receiver beside the browser endpoint, for relayed exports.
+	if request.URL.Path == "/v1/traces" && request.Method == http.MethodPost {
+		body, _ := io.ReadAll(request.Body)
+		loopback.exports <- loopbackExport{header: request.Header.Clone(), body: body}
+		return
+	}
 	loopback.mu.Lock()
 	loopback.arrived++
 	gate := loopback.gate

@@ -5,6 +5,7 @@ export const BROWSER_PROTOCOL_NAME = "dark-factory/browser" as const;
 /** The fixed third byte of every binary terminal frame, beside the "DF" magic. */
 export const TERMINAL_FRAME_VERSION = 1 as const;
 export const MAX_TASK_ATTACHMENTS = 8;
+export const MAX_TASK_CONTENT = 8;
 export const MAX_TASK_ATTACHMENT_BYTES = 8 * 1024 * 1024;
 export const TASK_ATTACHMENT_CHUNK_BYTES = 24 * 1024;
 export const MAX_CONTROL_BYTES = 64 * 1024;
@@ -12,6 +13,9 @@ export const MAX_TERMINAL_PAYLOAD = 8 * 1024;
 export const TERMINAL_HEADER_BYTES = 40;
 export const MAX_JSON_DEPTH = 16;
 export const MAX_ARRAY_ITEMS = 32;
+/** The daemon admits 1,024 request ids per connection per minute, of any kind
+ * (browser maxRequests); more outstanding at once could never all be answered. */
+export const MAX_OUTSTANDING_REQUESTS = 1024;
 export const MAX_OBJECT_MEMBERS = 32;
 /** Only bounded server observations may exceed MAX_CONTROL_BYTES. */
 export const MAX_SNAPSHOT_BYTES = 1024 * 1024;
@@ -92,6 +96,7 @@ export const CONTROL_MANIFEST = [
   { type: "GITHUB_CONNECTION", direction: "client" }, { type: "GITHUB_CONNECTION_RESULT", direction: "server" },
   { type: "REMOTE_INVITE", direction: "client" }, { type: "REMOTE_INVITE_RESULT", direction: "server" },
   { type: "PUSH_SUBSCRIBE", direction: "client" }, { type: "PUSH_SUBSCRIBE_RESULT", direction: "server" },
+  { type: "TELEMETRY_INGEST", direction: "client" }, { type: "TELEMETRY_INGEST_RESULT", direction: "server" },
   { type: "ERROR", direction: "both" },
   { type: "AGENT_CONTROL", direction: "client" }, { type: "AGENT_CONTROL_RESULT", direction: "server" },
   { type: "TASK_HISTORY_GET", direction: "client" }, { type: "TASK_HISTORY", direction: "server" },

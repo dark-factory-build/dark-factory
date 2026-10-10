@@ -13,7 +13,8 @@ One Durable Object exists per **factory node** (one `factoryd` home). It holds
 one current host socket and many controller sockets, and forwards opaque frames
 between them. Projects, state, HumanRequests, terminals, and commands stay
 entirely inside `factoryd`; the relay stores none of them, logs none of them,
-and queues nothing while a peer is away.
+and queues nothing while a peer is away. The one exception is the public world
+a factory opts into publishing (below).
 
 ## Identities
 
@@ -90,6 +91,7 @@ message := record+
 | `0x03 BINARY` | both | id | one application binary frame, verbatim |
 | `0x04 CLOSE` | both | id | JSON `{"code":<int>,"reason":"<text>"}`; may be empty |
 | `0x05 REVOKE` | host → relay | 0 | JSON `{"controller":"<base64url>"}` |
+| `0x06 PUBLISH` | host → relay | 0 | the factory's PublicWorld JSON, or empty to retract it |
 
 A controller socket carries application frames only: the relay wraps each
 inbound frame into one `TEXT` or `BINARY` record for the host and unwraps host
@@ -129,17 +131,33 @@ optional and omitted at their defaults, `wss://relay.darkfactory.build` and
 `127.0.0.1:43123`; `ticket` is a `pair` ticket and `challenge` is the daemon's
 own pairing challenge, which is what actually authorizes the pairing.
 
+## Public world
+
+`GET /public/<public id>` serves the latest world a factory published. The
+public id is lowercase base32 of the first 20 bytes of
+`SHA-256("dark-factory-relay/public\n" ‖ node public key)`, so it cannot be
+turned back into the node id. Only the node object that verified that key
+can write it. A `PUBLISH` larger than 128 KiB, one that is not a JSON object
+with a numeric `generated_at`, or one within 30 s of the last is dropped
+without ending the host. The world lives in a second object named
+`public:<public id>`, as one record `world` (`body`, `at`). Responses carry
+`Access-Control-Allow-Origin: <SITE_ORIGIN>`,
+`Cache-Control: public, max-age=15`, and `Last-Modified` (when the world
+arrived). The `PUBLIC_READS` rate limit allows 60 reads a minute per client
+address. Any method but `GET` gets 405. There is no listing and no history.
+
 ## Storage and logging
 
-The object persists exactly one record: `host` (`key`, `generation`,
-`sequence`). There is no ticket list and no deny list, so storage is O(1) per
+A node object persists exactly one record: `host` (`key`, `generation`,
+`sequence`). A `public:` object persists at most one: `world`. There is no ticket list and no deny list, so storage is O(1) per
 factory and cannot grow with traffic. Nothing else is written, and no
 application frame, token, or payload is ever logged.
 
 ## Deployment
 
 `wrangler.jsonc` names the Worker `dark-factory-relay`, binds `FACTORY_RELAY`
-to the `FactoryRelay` class, sets the single variable `PWA_ORIGIN`, and routes
+to the `FactoryRelay` class, sets the variables `PWA_ORIGIN` and `SITE_ORIGIN`, binds the
+`PUBLIC_READS` rate limit, and routes
 the custom domain `relay.darkfactory.build`. There are no secrets. `scripts/local-ci.sh` installs dependencies, type-checks,
 proves a dry-run deploy, and runs the integration tests against a real
 `wrangler dev --local` process.

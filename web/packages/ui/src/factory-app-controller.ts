@@ -1,5 +1,6 @@
 import {
   type BrowserClientsView,
+  type IdleWakeOn,
   MAX_TERMINAL_PAYLOAD,
   CAPABILITIES,
   MAX_TASK_INSTRUCTION_BYTES,
@@ -13,6 +14,7 @@ import {
   type ProjectContentOutput,
   type BrowserSession,
   type BrowserSessionOptions,
+  type TelemetryIngest,
   type AgentItem,
   type SpriteAppearance,
   type ProjectItem,
@@ -27,6 +29,7 @@ import {
   type RepositoryView,
   type IntakeView,
   type StateView,
+  type TaskContentPin,
   type TaskItem,
   type TaskListView,
   type TerminalReset,
@@ -129,6 +132,8 @@ export type FactoryAppSnapshot = Readonly<{
   terminal?: FactoryTerminalView;
   /** Regenerable structure per project, empty until the daemon serves it. */
   graphs?: ReadonlyMap<string, OperationalGraphView>;
+  /** The error code of each project's last refused graph read, until one is served. */
+  graphErrors?: ReadonlyMap<string, string>;
   /** Repository directories each running agent's live run is changing. */
   runPaths?: ReadonlyMap<string, RunPathSample>;
   /** Most recent observed paths remain an annotation after that run ends. */
@@ -165,7 +170,7 @@ type HumanSession = Pick<BrowserSession, "getHumanRequestDetail" | "replyHumanRe
 type TerminalSession = Pick<BrowserSession, "resolveAgentTerminal" | "openTerminal" | "close">;
 type AgentTaskSession = Pick<BrowserSession, "enqueueAgentTaskWithFiles" | "enqueueAgentTask" | "controlAgent" | "getTaskHistory" | "getTaskDetail" | "resolveAgentTerminal">;
 type ConsoleSession = Pick<BrowserSession, "updateAgent" | "setProjectLimits" | "createProject" | "getRepositories" | "mutateRepository" | "intake" | "updateTask" | "getOperationalGraph" | "getOperationalNode" | "getRunPaths" | "getTaskList" | "discoverAccounts" | "linkAccount" | "updateAccount" | "listBrowserClients" | "revokeBrowserClient" | "githubConnection" | "clientId">;
-type RemoteInviteSession = Pick<BrowserSession, "inviteRemote" | "capabilities">;
+type RemoteInviteSession = Pick<BrowserSession, "inviteRemote" | "telemetryIngest" | "capabilities">;
 type ControlledClient = Pick<BrowserClient, "connect" | "close"> & { readonly session?: HumanSession & TerminalSession & AgentTaskSession & ConsoleSession & RemoteInviteSession & Partial<Pick<BrowserSession, "projectContent" | "attachmentRetention" | "setDispatch">> };
 type ClientFactory = (options: BrowserSessionOptions) => ControlledClient;
 
@@ -261,6 +266,7 @@ export class FactoryAppController {
   #pendingTerminalInput = new Uint8Array(0);
   #pendingTerminalResize: { rows: number; cols: number } | undefined;
   #graphs: ReadonlyMap<string, OperationalGraphView> = new Map();
+  #graphErrors: ReadonlyMap<string, string> = new Map();
   #graphPending = new Set<string>();
   #runPaths: ReadonlyMap<string, RunPathSample> = new Map();
   #lastRunPaths: ReadonlyMap<string, RunPathSample> = new Map();
@@ -417,16 +423,20 @@ export class FactoryAppController {
           if (!this.#current(generation)) return;
           const first = !this.#graphs.has(projectId);
           this.#graphs = new Map(this.#graphs).set(projectId, graph);
+          this.#graphErrors = new Map([...this.#graphErrors].filter(([id]) => id !== projectId));
           this.#publish();
-          // A project served for the first time has halls its running agents can stand in:
+          // A project served for the first time has machines its running agents can stand at:
           // ask now, or as soon as the round in flight is answered. A refresh waits for the tick.
           if (!first || this.#runPathsTimer === undefined) return;
           if (this.#runPathsPending) this.#runPathsDue = true;
           else this.#pollRunPaths();
         },
         // A refused answer keeps the structure last served for that project
-        // rather than emptying its block of rooms for one cycle.
-        () => { this.#graphPending.delete(projectId); },
+        // rather than emptying its block of rooms for one cycle, and says why.
+        (error: unknown) => {
+          this.#graphPending.delete(projectId);
+          if (this.#current(generation)) { this.#graphErrors = new Map(this.#graphErrors).set(projectId, finiteError(error).code); this.#publish(); }
+        },
       );
     }
   }
@@ -514,7 +524,7 @@ export class FactoryAppController {
    * the controls the caller changed are sent; an omitted one is left alone,
    * and an empty change is not a write at all.
    */
-  async updateAgentConfig(config: { model?: string; reasoningEffort?: string; accountId?: string; paused?: boolean; archived?: boolean; idlePolicy?: "wait" | "standing_instruction"; idleAfterSeconds?: number; idleInstruction?: string; idleRunBudget?: number }): Promise<void> {
+  async updateAgentConfig(config: { model?: string; reasoningEffort?: string; accountId?: string; paused?: boolean; archived?: boolean; idlePolicy?: "wait" | "standing_instruction"; idleAfterSeconds?: number; idleInstruction?: string; idleRunBudget?: number; idleWakeOn?: IdleWakeOn }): Promise<void> {
     const selected = this.#selectedAgent;
     const session = this.#client?.session;
     if (this.#closed || this.#status !== "ready" || selected === undefined || session === undefined || this.#edit?.pending === true) return;
@@ -620,7 +630,7 @@ export class FactoryAppController {
   }
 
   /** Queue work from the Tasks panel: for one agent, or for any eligible worker in its project. */
-  async addTask(agent: Pick<AgentItem, "id" | "revision">, instruction: string, mode: "queue" | "any", files: readonly File[] = []): Promise<boolean> {
+  async addTask(agent: Pick<AgentItem, "id" | "revision">, instruction: string, mode: "queue" | "any", files: readonly File[] = [], content: readonly TaskContentPin[] = []): Promise<boolean> {
     const session = this.#client?.session;
     if (this.#closed || this.#status !== "ready" || session === undefined || this.#edit?.pending === true) return false;
     const generation = this.#generation;
@@ -628,7 +638,7 @@ export class FactoryAppController {
     this.#edit = edit;
     this.#publish();
     try {
-      const request = { agentId: agent.id, expectedAgentRevision: agent.revision, instruction: instruction.trim(), mode };
+      const request = { agentId: agent.id, expectedAgentRevision: agent.revision, instruction: instruction.trim(), mode, content: content.map(({ content_id, revision }) => ({ content_id, revision })) };
       if (files.length === 0) await session.enqueueAgentTask(request);
       else await session.enqueueAgentTaskWithFiles(request, files);
       if (!this.#current(generation) || this.#edit !== edit) return false;
@@ -851,6 +861,8 @@ export class FactoryAppController {
   /** The mint is never retried: a failure is reported and the operator asks again. */
   inviteRemote(): Promise<void> { return this.#settings.inviteRemote(); }
 
+  telemetryIngest(action: Parameters<BrowserSession["telemetryIngest"]>[0]): Promise<TelemetryIngest> { return this.#settings.telemetryIngest(action); }
+
   dismissRemoteInvite(): void {
     if (!this.#closed) this.#settings.dismissRemoteInvite();
   }
@@ -994,9 +1006,10 @@ export class FactoryAppController {
         }
       }
     }
-    // A graph belongs to a project; a project that is gone has no halls.
-    if ([...this.#graphs.keys()].some((projectId) => !state.projects.has(projectId))) {
+    // A graph belongs to a project; a project that is gone has no machines and no refusal.
+    if ([...this.#graphs.keys(), ...this.#graphErrors.keys()].some((projectId) => !state.projects.has(projectId))) {
       this.#graphs = new Map([...this.#graphs].filter(([projectId]) => state.projects.has(projectId)));
+      this.#graphErrors = new Map([...this.#graphErrors].filter(([projectId]) => state.projects.has(projectId)));
     }
     const selectedAgent = this.#selectedAgent;
     const replacementAgentID = this.#terminalReplacement?.agentId;
@@ -1451,6 +1464,7 @@ export class FactoryAppController {
       state: this.#state,
       error: this.#error,
       graphs: this.#graphs,
+      graphErrors: this.#graphErrors,
       runPaths: this.#runPaths,
       lastRunPaths: this.#lastRunPaths,
       edit: this.#edit,
@@ -1537,14 +1551,15 @@ function finiteError(error: unknown): SessionError | ProtocolError {
 
 function sampleFor(taskId: string, taskRevision: bigint, projectId: string, answer: RunPathsView): RunPathSample | undefined {
   if (typeof answer.runId !== "string" || answer.runId === "") return undefined;
-  return Object.freeze({ taskId, taskRevision, projectId, runId: answer.runId, paths: Object.freeze([...answer.paths]) });
+  return Object.freeze({ taskId, taskRevision, projectId, runId: answer.runId, paths: Object.freeze([...answer.paths]), ...(answer.telemetry === undefined ? {} : { telemetry: answer.telemetry }) });
 }
 
 function sameSamples(left: ReadonlyMap<string, RunPathSample>, right: ReadonlyMap<string, RunPathSample>): boolean {
   return left.size === right.size && [...left].every(([agentId, sample]) => {
     const candidate = right.get(agentId);
     return candidate !== undefined && candidate.taskId === sample.taskId && candidate.taskRevision === sample.taskRevision && candidate.projectId === sample.projectId && candidate.runId === sample.runId
-      && candidate.paths.length === sample.paths.length && candidate.paths.every((path, index) => path === sample.paths[index]);
+      && candidate.paths.length === sample.paths.length && candidate.paths.every((path, index) => path === sample.paths[index])
+      && JSON.stringify(candidate.telemetry) === JSON.stringify(sample.telemetry);
   });
 }
 

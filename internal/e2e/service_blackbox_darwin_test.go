@@ -20,7 +20,6 @@ import (
 	"github.com/dark-factory-build/dark-factory/internal/api"
 	"github.com/dark-factory-build/dark-factory/internal/buildinfo"
 	"github.com/dark-factory-build/dark-factory/internal/install"
-	"github.com/dark-factory-build/dark-factory/internal/kernel"
 )
 
 // TestBlackBoxServiceLifecycle proves the managed launchd installation with
@@ -61,12 +60,12 @@ func TestBlackBoxServiceLifecycle(t *testing.T) {
 	if state.State != "running" || state.PID <= 1 {
 		t.Fatalf("install state = %+v (%s)", state, output)
 	}
-	// A fresh install names the pair page and reports whether it opened it,
-	// inside the JSON: the whole result is one parseable document. runFactoryctl
-	// gives the child no PATH, so `open` is not findable and no browser can be
-	// launched — which is also what keeps this test from throwing a window onto
-	// the operator's screen.
-	if state.BrowserOpened {
+	// A fresh install mints one pairing link over the operator API and reports
+	// whether it opened it, inside the JSON, which never carries the link.
+	// runFactoryctl gives the child no PATH, so `open` is not findable and no
+	// browser can be launched — which is also what keeps this test from
+	// throwing a window onto the operator's screen.
+	if state.BrowserOpened || strings.Contains(output, "df_pair") {
 		t.Fatalf("install pairing report = %+v (%s)", state, output)
 	}
 	stderr, err := os.Lstat(filepath.Join(install.ServiceDirectoryPath(fixture.home), "factoryd.stderr.log"))
@@ -82,10 +81,12 @@ func TestBlackBoxServiceLifecycle(t *testing.T) {
 	if err != nil || !web.Ready || web.Address == "127.0.0.1:43123" {
 		t.Fatalf("disposable browser status = %+v, %v", web, err)
 	}
-	pairAddress := "http://" + web.Address + "/pair"
+	if web.ActiveChallenges != 1 {
+		t.Fatalf("install minted %d pairing challenges, want 1", web.ActiveChallenges)
+	}
 	connection, err := net.DialTimeout("tcp", web.Address, time.Second)
 	if err != nil {
-		t.Fatalf("disposable pair listener %q: %v", pairAddress, err)
+		t.Fatalf("disposable browser listener %q: %v", web.Address, err)
 	}
 	_ = connection.Close()
 
@@ -161,28 +162,37 @@ func TestBlackBoxServiceLifecycle(t *testing.T) {
 	second := fixture.operatorID(t, fixture.runFactoryctl(t, 0, "task", "add", "--project", project, "--agent", agent, "--title", "Managed restart run", "--body", happyPathBody))
 	fixture.awaitTaskStatus(t, client, second, "succeeded", 60*time.Second)
 
-	// A release swaps in release binaries; the SIGTERMed daemon exits 75 and
-	// launchd starts them on trial, and they promote once up and verified.
+	// A release stages release binaries; the SIGTERMed daemon runs them as a
+	// supervised trial, promotes them once they answer and stop cleanly, and
+	// exits for launchd to start them.
 	released := buildReleaseBinaries(t, strings.Repeat("1", 40))
-	if err := install.ServiceUpgrade(context.Background(), fixture.home, released.directory, released.identity, kernel.SchemaVersion); err != nil {
+	if err := install.ServiceUpgrade(context.Background(), fixture.home, released.directory, released.identity); err != nil {
 		t.Fatal(err)
 	}
 	restartService(t, fixture, serviceArgs, syscall.SIGTERM)
 	awaitServiceBuild(t, fixture, released.identity.Source())
 	awaitUpgradeSettled(t, fixture.home)
-	// A trial build that dies before promotion is rolled back on its next
-	// boot, and the previous build serves again.
+	// #1390: a staged build that refuses its arguments, or hangs and outlives
+	// its supervisor, never becomes what launchd runs.
 	trial := buildReleaseBinaries(t, strings.Repeat("2", 40))
-	if err := install.ServiceUpgrade(context.Background(), fixture.home, trial.directory, trial.identity, kernel.SchemaVersion); err != nil {
-		t.Fatal(err)
-	}
-	restartService(t, fixture, serviceArgs, syscall.SIGTERM)
-	awaitServiceBuild(t, fixture, trial.identity.Source())
-	restartService(t, fixture, serviceArgs, syscall.SIGKILL)
-	awaitServiceBuild(t, fixture, released.identity.Source())
-	awaitUpgradeSettled(t, fixture.home)
-	if state = serviceState(t, fixture.runFactoryctl(t, 0, serviceArgs("status")...)); state.State != "running" {
-		t.Fatalf("rolled back status = %+v", state)
+	staged := filepath.Join(install.ServiceDirectoryPath(fixture.home), "bin", "previous", "factoryd")
+	for _, bad := range []string{"exit 64", "exec /bin/sleep 600"} {
+		if err := install.ServiceUpgrade(context.Background(), fixture.home, trial.directory, trial.identity); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(staged, []byte("#!/bin/sh\n"+bad+"\n"), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if bad == "exit 64" {
+			restartService(t, fixture, serviceArgs, syscall.SIGTERM)
+		} else {
+			killSupervisorMidTrial(t, fixture, serviceArgs)
+		}
+		awaitServiceBuild(t, fixture, released.identity.Source())
+		awaitUpgradeSettled(t, fixture.home)
+		if state = serviceState(t, fixture.runFactoryctl(t, 0, serviceArgs("status")...)); state.State != "running" {
+			t.Fatalf("%s: status = %+v", bad, state)
+		}
 	}
 
 	// Uninstall removes the job and every artifact; absence is provable.
@@ -265,6 +275,32 @@ func restartService(t *testing.T, fixture *blackBoxFixture, serviceArgs func(str
 	}
 }
 
+// killSupervisorMidTrial SIGTERMs the daemon, waits for its trial child,
+// then SIGKILLs the daemon. launchd starts the old build again, whose boot
+// must stop the orphaned child.
+func killSupervisorMidTrial(t *testing.T, fixture *blackBoxFixture, serviceArgs func(string) []string) {
+	t.Helper()
+	before := serviceState(t, fixture.runFactoryctl(t, 0, serviceArgs("status")...))
+	if err := syscall.Kill(before.PID, syscall.SIGTERM); err != nil {
+		t.Fatal(err)
+	}
+	var child []byte
+	for deadline := time.Now().Add(60 * time.Second); len(child) == 0; time.Sleep(100 * time.Millisecond) {
+		child, _ = exec.Command("/usr/bin/pgrep", "-P", fmt.Sprint(before.PID), "-f", "sleep 600").Output()
+		if time.Now().After(deadline) {
+			t.Fatal("the daemon never started its trial child")
+		}
+	}
+	if err := syscall.Kill(before.PID, syscall.SIGKILL); err != nil {
+		t.Fatal(err)
+	}
+	for deadline := time.Now().Add(60 * time.Second); exec.Command("/bin/kill", "-0", strings.TrimSpace(string(child))).Run() == nil; time.Sleep(100 * time.Millisecond) {
+		if time.Now().After(deadline) {
+			t.Fatalf("trial child %s outlived its supervisor", child)
+		}
+	}
+}
+
 func awaitServiceBuild(t *testing.T, fixture *blackBoxFixture, source string) {
 	t.Helper()
 	for deadline := time.Now().Add(60 * time.Second); ; time.Sleep(250 * time.Millisecond) {
@@ -282,8 +318,8 @@ func awaitServiceBuild(t *testing.T, fixture *blackBoxFixture, source string) {
 	}
 }
 
-// awaitUpgradeSettled waits for promotion (60s after the trial build is up)
-// or for the old build to record a rollback: either removes the marker.
+// awaitUpgradeSettled waits for the boot after a trial to record it: either
+// way that boot removes the marker.
 func awaitUpgradeSettled(t *testing.T, home string) {
 	t.Helper()
 	for deadline := time.Now().Add(120 * time.Second); ; time.Sleep(time.Second) {
@@ -309,7 +345,6 @@ func serviceStartupOutput(path string) func() string {
 type serviceStateOutput struct {
 	State         string `json:"state"`
 	PID           int    `json:"pid"`
-	PairPage      string `json:"pair_page"`
 	BrowserOpened bool   `json:"browser_opened"`
 }
 

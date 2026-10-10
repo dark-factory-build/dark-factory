@@ -4,6 +4,18 @@ Dark Factory separates model policy from durable work authority. This file
 describes the current Go runtime's attempt kernel, daemon-owned Change model,
 and fail-closed process boundary. It is a contract, not a component catalogue.
 
+## Ownership map
+
+| Concern | Owner |
+| --- | --- |
+| Durable state: SQLite schema, migrations, admission and lifecycle transitions | `internal/kernel` |
+| Daemon effects: dispatch, supervision, review, publication, recovery | `internal/daemon`, `cmd/factoryd` |
+| Change worktrees and Git source | `internal/change`, `internal/changeworker` |
+| Provider launching: launch facts, sandbox grants, PTY process groups | `internal/provider`, `internal/runner`, `cmd/factory-runner` |
+| Client contracts: local socket API, browser transport, CLI | `internal/api`, `internal/browser`, `internal/browserprotocol`, `cmd/factoryctl`, `web/packages/client` |
+| Projection: operational graph, public world, graph to plant | `internal/opgraph`, `internal/daemon/public_world.go`, `web/packages/ui/src/console-view.ts`, `web/packages/ui/src/public-floor.ts` |
+| Rendering: floor layout, scene, console | `web/packages/ui/src/factory-scene`, `web/packages/ui/src` |
+
 ## Durable model
 
 `RunId` is the attempt identity. A task can be queued without a run; a run
@@ -99,6 +111,16 @@ the overseer. Its durable sequence cursor advances with enqueue; events arriving
 while it is busy stay pending. Cursor lag behind the retained journal wakes a
 conservative inspection. No model runs merely to poll an idle project.
 
+A specialist is a worker with a standing instruction. The same wake tick gives
+it one carrier task at a time (priority -100) when `specialistSchedule` says it
+is due: at once, then its cadence after each review, doubled per quiet review
+up to 8x, or a quarter cadence after one when its `idle_wake_on` classes
+(`failures`, `merges`) saw an event. Its carrier never claims shared work,
+waits while it would take the last free worker slot or exceed the project's
+`specialist_runs`, and has the overseer's 30-minute backstop. It may read the
+overseer status and observe its project's worker terminals; archiving it stops
+its live review and cancels its queued carriers in one transaction.
+
 ## Browser state
 
 The browser reads one bounded, transactionally pinned active-state snapshot
@@ -139,9 +161,9 @@ not count against this active-state limit.
 The wire contract is unversioned and tolerates additive change. There is no
 envelope generation, no versioned loopback path, no version in the pairing and
 auth transcript domains, and no protocol identity in the published artifacts;
-the loopback path is `/browser`, and `/pair` beside it is the one HTML page
-the daemon serves: a script-free confirm page whose form mints a pairing
-challenge and redirects to the hosted console. A control frame carrying a
+the loopback path is `/browser`, and the listener serves no HTML: a loopback
+pairing challenge is minted only by the operator-domain `web_pair` call, which
+hands its link to the default browser. A control frame carrying a
 member this build does not know is served, so the hosted console and the
 daemon tolerate additive members in either installation order. New message
 types still require daemon support; deploy that support before a console
@@ -195,7 +217,7 @@ non-active origins expose no reply or cancellation authority; corrupt active
 relationships fail closed rather than resembling unavailability.
 `administration` is the operator's own bit: discovering and linking this
 machine's provider logins and choosing which one an agent runs as. A pairing
-minted on loopback carries it; a relay pairing does not.
+minted by the operator's `web_pair` carries it; a relay pairing does not.
 
 A reply contains only request ID, expected request revision, and bounded text.
 The Store derives the originating run and commits a unique delivery receipt
@@ -282,11 +304,10 @@ provider cannot select a source path or lifecycle result.
 
 Shell receives bounded task bytes through a sealed descriptor. Claude Code and
 Codex resolve their named CLI through the daemon's fixed tool path to one exact
-direct executable commitment. Claude receives its task text once through the PTY
-before the terminal is exposed, and the keystroke that submits it just after. Codex receives only a fixed non-secret startup
-instruction in argv, then reads its exact task through the running attempt's
-authenticated local API; task text never enters its argv, environment, or
-Change-worker configuration. Native tools use the operator's existing account:
+direct executable commitment. Both receive only the same fixed non-secret
+startup instruction in argv, then read their exact task through the running
+attempt's authenticated local API; task text never enters their argv,
+environment, PTY, or Change-worker configuration. Native tools use the operator's existing account:
 Claude uses the account `HOME`, while Codex uses its explicit configuration root
 with a private runtime `HOME`. Both keep a private `TMPDIR`. [The provider
 contract](docs/providers.md) owns the exact argv, environment, and task-delivery

@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"sync/atomic"
@@ -91,7 +92,7 @@ func TestPublishedReleaseIsValidatedCachedAndNeverBlocksTheConsole(t *testing.T)
 		bodies <- body
 		// The refresh cannot retake the lock before this call returns, so a
 		// console request is answered from the cache it had, never from GitHub.
-		if served := latestPublishedRelease(); served != cached {
+		if served := latestPublishedRelease(nil); served != cached {
 			t.Fatalf("a console request waited for GitHub: %+v", served)
 		}
 	}
@@ -105,7 +106,7 @@ func TestPublishedReleaseIsValidatedCachedAndNeverBlocksTheConsole(t *testing.T)
 	// rate-limited or offline host never reaches out more often than a healthy one.
 	open(`not json`)
 	refused := settle()
-	if value := latestPublishedRelease(); value != (api.PublishedRelease{}) {
+	if value := latestPublishedRelease(nil); value != (api.PublishedRelease{}) {
 		t.Fatalf("a refused read invented a release: %+v", value)
 	}
 	if refused.Before(time.Now().Add(releaseInterval - time.Minute)) {
@@ -114,7 +115,7 @@ func TestPublishedReleaseIsValidatedCachedAndNeverBlocksTheConsole(t *testing.T)
 
 	open(`{"tag_name":"v0.4.3"}`)
 	served := settle()
-	if value := latestPublishedRelease(); value.Version != "v0.4.3" {
+	if value := latestPublishedRelease(nil); value.Version != "v0.4.3" {
 		t.Fatalf("the cached release never arrived: %+v", value)
 	}
 	if served.Before(time.Now().Add(releaseInterval - time.Minute)) {
@@ -155,9 +156,9 @@ func releaseFixture(t *testing.T) (*dispatchFixture, func(), chan string) {
 		value, _ := buildinfo.Expected("1.2.3", sha, "darwin/arm64")
 		return value, nil
 	}
-	releaseUpgrade = func(_ context.Context, upgradeHome, _ string, identity buildinfo.Identity, userVersion int) error {
-		if _, err := os.Stat(install.UpgradeBackupPath(upgradeHome)); err != nil || userVersion != kernel.SchemaVersion {
-			t.Errorf("upgrade without a backup: %v, user_version %d", err, userVersion)
+	releaseUpgrade = func(_ context.Context, upgradeHome, _ string, identity buildinfo.Identity) error {
+		if _, err := os.Stat(install.UpgradeBackupPath(upgradeHome)); err != nil {
+			t.Errorf("upgrade without a backup: %v", err)
 		}
 		events <- "upgrade " + identity.Source()
 		return nil
@@ -240,7 +241,7 @@ func TestReleaseDrainTimeoutReleasesTheHoldAndNeverWritesDispatch(t *testing.T) 
 func TestReleaseRecordsAFailedUpgradeAndNeverRestarts(t *testing.T) {
 	fixture, settle, events := releaseFixture(t)
 	settle()
-	releaseUpgrade = func(context.Context, string, string, buildinfo.Identity, int) error {
+	releaseUpgrade = func(context.Context, string, string, buildinfo.Identity) error {
 		events <- "upgrade"
 		return errors.New("receipt")
 	}
@@ -249,11 +250,15 @@ func TestReleaseRecordsAFailedUpgradeAndNeverRestarts(t *testing.T) {
 		t.Fatal(err)
 	}
 	delivery := awaitRelease(t, fixture.daemon, sha, func(value kernel.ProductionDelivery) bool { return value.State == "failed" })
-	if delivery.Phase != "swap" || delivery.Reason != "upgrade: receipt" || fixture.daemon.releaseHold.Load() {
+	if delivery.Phase != "stage" || delivery.Reason != "upgrade: receipt" || fixture.daemon.releaseHold.Load() {
 		t.Fatalf("failed upgrade = %+v, hold %t", delivery, fixture.daemon.releaseHold.Load())
 	}
 	if <-events != "build /self-repository" || <-events != "upgrade" || len(events) != 0 {
 		t.Fatal("a failed upgrade went on to restart")
+	}
+	// A backup never outlives its release.
+	if _, err := os.Lstat(install.UpgradeBackupPath(fixture.daemon.home)); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("a failed release left its backup: %v", err)
 	}
 }
 
@@ -295,7 +300,7 @@ func TestTickReleasesEachNewBaseTipOnce(t *testing.T) {
 		t.Fatal("a released tip was released again")
 	}
 
-	releaseUpgrade = func(context.Context, string, string, buildinfo.Identity, int) error { return errors.New("receipt") }
+	releaseUpgrade = func(context.Context, string, string, buildinfo.Identity) error { return errors.New("receipt") }
 	tick(failed)
 	awaitRelease(t, fixture.daemon, failed, func(value kernel.ProductionDelivery) bool { return value.State == "failed" })
 	<-events
@@ -372,5 +377,37 @@ func TestSchedulerAdmitsNothingWhileAReleaseHoldsAdmission(t *testing.T) {
 	cancel()
 	if err := waitSchedulerDone(t, done); err != nil {
 		t.Fatal(err)
+	}
+}
+
+// #1390: reading an older commit's release once started it and downgraded
+// the factory. A release must descend from the running build.
+func TestReleaseRefusesACommitOlderThanTheRunningBuild(t *testing.T) {
+	tree := t.TempDir()
+	git := func(args ...string) string {
+		output, err := exec.Command(change.TrustedGitExecutable, append([]string{"-C", tree, "-c", "user.name=test", "-c", "user.email=test@example.invalid"}, args...)...).Output()
+		if err != nil {
+			t.Fatalf("git %v: %v", args, err)
+		}
+		return strings.TrimSpace(string(output))
+	}
+	git("init", "--quiet")
+	git("commit", "--quiet", "--allow-empty", "-m", "older")
+	older := git("rev-parse", "HEAD")
+	git("commit", "--quiet", "--allow-empty", "-m", "running")
+	running := git("rev-parse", "HEAD")
+	ctx := context.Background()
+	if err := releaseDescends(ctx, "ROOT", tree, running, older); !errors.Is(err, kernel.ErrConflict) {
+		t.Fatalf("older release = %v", err)
+	}
+	// A running build the checkout lacks names the fix, not a downgrade.
+	if err := releaseDescends(ctx, "ROOT", tree, strings.Repeat("1", 40), running); err == nil || !strings.Contains(err.Error(), "git -C ROOT fetch --unshallow origin") {
+		t.Fatalf("missing running build = %v", err)
+	}
+	git("commit", "--quiet", "--allow-empty", "-m", "newer")
+	for _, sha := range []string{running, git("rev-parse", "HEAD")} {
+		if err := releaseDescends(ctx, "ROOT", tree, running, sha); err != nil {
+			t.Fatalf("release %s = %v", sha, err)
+		}
 	}
 }

@@ -104,10 +104,6 @@ func (attempt *liveAttempt) loop(ctx context.Context) error {
 			}
 			continue
 		}
-		if err := attempt.deliverStartupEvidence(); err != nil {
-			return err
-		}
-
 		if stop, err := attempt.processLifecycle(ctx); err != nil {
 			return err
 		} else if stop {
@@ -293,7 +289,7 @@ func (attempt *liveAttempt) processLifecycle(ctx context.Context) (bool, error) 
 		// The same durable edge as the provider's own `attempt fail`, under the
 		// same gate; the finalizing check below then terminates the provider.
 		// An outcome that won first leaves the run unauthorized for this one.
-		proposal, err := kernel.NewFailureProposal(kernel.FailureProviderExit, attempt.usageLimit)
+		proposal, err := kernel.NewFailureProposal(attempt.usageCode, attempt.usageLimit)
 		at, timeErr := attempt.daemon.timestamp()
 		if err = errors.Join(err, timeErr); err == nil {
 			storeCtx, cancel := context.WithTimeout(context.Background(), liveAttemptStoreTimeout)
@@ -835,7 +831,7 @@ const codexUsageLimit = "■ You've hit your usage limit"
 
 // codexModelCapacity is Codex's warning cell for a model at capacity, after
 // which it idles the same way. It is transient, so its task is queued again
-// (kernel.ProviderCapacityRunDetail).
+// (kernel.FailureTransient).
 const codexModelCapacity = "⚠ Selected model is at capacity"
 
 // usageScanCarry bounds the raw tail carried across frames: room for a marker
@@ -865,12 +861,12 @@ func (attempt *liveAttempt) scanUsageLimit(start, end uint64, payload []byte) {
 	text := terminalTextProjection(attempt.usageScan, false, len(attempt.usageScan))
 	if index := strings.Index(text, codexUsageLimit); index >= 0 {
 		report := text[index+len("■ "):]
-		attempt.usageLimit = "provider usage limit (retry after its reset or select another account): " + terminalTextProjection([]byte(report[:min(len(report), 1024)]), false, 1024)
+		attempt.usageLimit, attempt.usageCode = "provider usage limit (retry after its reset or select another account): "+terminalTextProjection([]byte(report[:min(len(report), 1024)]), false, 1024), kernel.FailureProviderExit
 		attempt.usageScan = nil
 		return
 	}
 	if strings.Contains(text, codexModelCapacity) {
-		attempt.usageLimit, attempt.usageScan = kernel.ProviderCapacityRunDetail, nil
+		attempt.usageLimit, attempt.usageCode, attempt.usageScan = kernel.ProviderCapacityRunDetail, kernel.FailureTransient, nil
 		return
 	}
 	cut := max(0, len(attempt.usageScan)-usageScanCarry)

@@ -32,8 +32,8 @@ const keyOf = productionKey;
 const sourceStatus = ({ source }: ProductionContraption) => source.kind === "unavailable" ? "Source details unavailable" : source.stale ? "Source details out of date" : source.omitted > 0 ? "Source details incomplete" : "";
 export const asTask = (v: Record<string, unknown>, project: string): TaskItem => ({ id: text(v.task_id) || text(v.id), project_id: text(v.project_id) || project, assigned_agent_id: text(v.assigned_agent_id), title: text(v.title) || "Untitled task", status: text(v.status) as TaskItem["status"] || "blocked", blocked_reason: text(v.blocked_reason) || undefined, priority: Number(v.priority) || 0, revision: BigInt(text(v.revision) || "0"), updated_at_ms: text(v.updated_at_ms) ? BigInt(text(v.updated_at_ms)) : undefined });
 
-export function ProductionPanel({ items, selected, onSelect, state, call, connected = true, error, overflow = 0, active = true, onMission, onAgent, onOpenTask }: {
-  items: readonly ProductionContraption[]; selected?: string; onSelect: (key: string) => void; state?: StateView; call?: ProjectContentCall; connected?: boolean; error?: string; overflow?: number; active?: boolean; onMission?: (projectId: string, missionId: string) => void; onAgent?: (agent: AgentItem) => void; onOpenTask?: (task: TaskItem) => void;
+export function ProductionPanel({ items, selected, onSelect, state, call, connected = true, error, active = true, onMission, onAgent, onOpenTask }: {
+  items: readonly ProductionContraption[]; selected?: string; onSelect: (key: string) => void; state?: StateView; call?: ProjectContentCall; connected?: boolean; error?: string; active?: boolean; onMission?: (projectId: string, missionId: string) => void; onAgent?: (agent: AgentItem) => void; onOpenTask?: (task: TaskItem) => void;
 }) {
   const [selectedTaskId, setSelectedTaskId] = useState<string>(), [loadedTasks, setLoadedTasks] = useState<Record<string, TaskItem>>({}), [taskError, setTaskError] = useState("");
   const epoch = useRef(0), selectedTaskRef = useRef<string | undefined>(undefined);
@@ -52,7 +52,7 @@ export function ProductionPanel({ items, selected, onSelect, state, call, connec
   };
   const project = item && state?.projects.get(item.projectId), owner = item?.tasks.map((id) => taskFor(item, id)).find(Boolean)?.assigned_agent_id, ownerAgent = owner ? state?.agents.get(owner) : undefined;
   return <section className="dfConsoleSidebar__panel dfProduction" aria-label="Production inspection">
-    {!connected || error || overflow > 0 ? <details className="dfProduction__notice"><summary>{!connected ? "Last observed state" : error ? "Observation needs attention" : "Partial observation"}</summary>{!connected ? <p>Disconnected. This is the last observed state.</p> : null}{error ? <p role="alert">{error}</p> : null}{overflow > 0 ? <p>{overflow} more records are available.</p> : null}</details> : null}
+    {!connected || error ? <details className="dfProduction__notice"><summary>{!connected ? "Last observed state" : "Observation needs attention"}</summary>{!connected ? <p>Disconnected. This is the last observed state.</p> : null}{error ? <p role="alert">{error}</p> : null}</details> : null}
     {item ? <article className="dfProduction__detail" aria-label={`Production details for ${title(item)}`}>
       <IconButton icon="chevron-left" className="dfConsoleBack" onClick={back}>Back to Work</IconButton><h3>{title(item)}</h3><p className="dfProduction__stages">{productionStages(item).map((stage) => <Status stage={stage} key={stage} />)}</p><p>{item.nextAction}</p>
       {sourceStatus(item) ? <p role="status">{sourceStatus(item)}</p> : null}

@@ -94,6 +94,11 @@ func NewClient() *Client {
 	return &Client{origin: Origin, http: &http.Client{Timeout: 30 * time.Second, Transport: &http.Transport{Proxy: nil}, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}}
 }
 
+// Instrument wraps the HTTP client before the host is shared.
+func (host *Host) Instrument(wrap func(*http.Client) *http.Client) {
+	host.client.http = wrap(host.client.http)
+}
+
 func (client *Client) Connect(ctx context.Context) (Credential, Authorization, error) {
 	var result struct {
 		Authorization

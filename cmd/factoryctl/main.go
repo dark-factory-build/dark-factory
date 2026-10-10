@@ -37,13 +37,10 @@ const (
 	exitFailure                     = 1
 	maxHomeArgumentBytes            = 4096
 
-	// pairListenAddress is factoryd's fixed loopback listener and pairPageURL
-	// the first-party pair page it serves there. A successful install opens
-	// that page, so pairing a browser never needs a terminal. launchd returns
-	// from bootstrap before factoryd listens, hence the bounded wait.
-	pairListenAddress  = "127.0.0.1:43123"
-	pairPageURL        = "http://" + pairListenAddress + "/pair"
-	pairListenPatience = 10 * time.Second
+	// pairPatience bounds how long a fresh install waits for factoryd to mint
+	// its first pairing link: launchd returns from bootstrap before factoryd
+	// serves the local API and the browser transport.
+	pairPatience = 10 * time.Second
 
 	usage = `usage:
 	factoryctl review --project ID --repository OWNER/REPO --pull N --head SHA --base SHA --base-ref REF [--provider codex|claude] | --retry-operation UUID
@@ -97,10 +94,10 @@ const (
   factoryctl project repository base --id ID --revision REVISION --base REF
   factoryctl project repository default|enable|disable|remove --id ID --revision REVISION
   factoryctl project repository fetch|github --id ID
-  factoryctl project limits --project ID --revision REVISION --run-budget N --max-run-seconds N [--token-budget N]
+  factoryctl project limits --project ID --revision REVISION --run-budget N --max-run-seconds N [--token-budget N] [--specialist-runs N] [--specialist-open-proposals N]
   factoryctl agent create --project ID --name TEXT --provider shell|claude_code|codex --tool-budget N [--role worker|orchestrator] [--model TEXT] [--reasoning-effort low|medium|high|xhigh|max|ultra] [--account ID]
   factoryctl agent idle-policy --agent ID --revision REVISION --policy wait
-  factoryctl agent idle-policy --agent ID --revision REVISION --policy standing_instruction --after-seconds N --instruction TEXT [--run-budget N]
+  factoryctl agent idle-policy --agent ID --revision REVISION --policy standing_instruction --after-seconds N --instruction TEXT [--run-budget N] [--wake-on failures|merges|failures,merges]
   factoryctl agent pause|resume|archive|restore --agent ID --revision REVISION
   factoryctl worker stop --operation-id ID --task ID --task-revision REVISION --run ID --run-revision REVISION
   factoryctl worker replace --operation-id ID --task ID --task-revision REVISION --run ID --run-revision REVISION --successor-task ID --successor-incarnation ID --instruction TEXT
@@ -124,14 +121,16 @@ const (
   factoryctl storage compact
     Requires dispatch off and no nonterminal runs.
   factoryctl backup create PATH | verify PATH
-  factoryctl release SHA [--wait]
-    Installs merged commit SHA into this factory's service, with rollback.
-    --wait exits 0 verified, 1 failed or rolled back, 75 refused with no effect.
+  factoryctl release SHA [--start] [--wait]
+    Reads the release of merged commit SHA; --start installs it into this
+    factory's service, with rollback, if it descends from the running build.
+    --wait exits 0 verified, 1 failed its trial, 75 refused with no effect.
   factoryctl task read --task ID --revision REVISION [--offset N]
   factoryctl dispatch on|off [--revision REVISION]
   factoryctl capacity --workers N --revision REVISION
     Worker slots only; the separate overseer lane remains available.
   factoryctl web status
+  factoryctl web pair
   factoryctl web list-clients [--after CLIENT_ID]
   factoryctl web revoke CLIENT_ID --revision REVISION
 	factoryctl content create [--id ID] --project ID --kind KIND --title TEXT [--description TEXT] [--body TEXT|--body-file PATH|--commit OID --path PATH] [--source-references TEXT]
@@ -179,6 +178,7 @@ const (
 	commandOperatorTerminalObserve
 	commandAttemptSource
 	commandWebStatus
+	commandWebPair
 	commandWebListClients
 	commandWebRevoke
 	commandRemoteStatus
@@ -272,6 +272,9 @@ type attemptCommand struct {
 	maxBytes            uint32
 	maxRunSeconds       uint32
 	tokenBudget         *uint64
+	specialistRuns      *uint32
+	openProposals       *uint32
+	wakeOn              string
 	priority            int64
 	prioritySet         bool
 	offset              uint64
@@ -355,6 +358,7 @@ func runWithOpener(ctx context.Context, args []string, getenv func(string) strin
 type serviceInspector func(context.Context, string) (install.ServiceStatus, error)
 
 func runWithDependencies(ctx context.Context, args []string, getenv func(string) string, stdout, stderr io.Writer, opener browserOpener, inspect serviceInspector) int {
+	getenv = defaultOperatorHome(getenv)
 	if len(args) > 0 && args[0] == "review" {
 		return runReview(ctx, args[1:], getenv, stdout, stderr)
 	}
@@ -394,8 +398,8 @@ func runWithDependencies(ctx context.Context, args []string, getenv func(string)
 	if command.kind == commandServiceStatus || command.kind == commandServiceInstall || command.kind == commandServiceStart || command.kind == commandServiceStop || command.kind == commandServiceUninstall {
 		return runService(ctx, command, stdout, stderr, inspect, opener)
 	}
-	if command.kind == commandWebStatus || command.kind == commandWebListClients || command.kind == commandWebRevoke {
-		return runWeb(ctx, command, getenv, stdout, stderr)
+	if command.kind == commandWebStatus || command.kind == commandWebPair || command.kind == commandWebListClients || command.kind == commandWebRevoke {
+		return runWeb(ctx, command, getenv, stdout, stderr, opener)
 	}
 	if command.kind == commandRemoteStatus {
 		return runRemote(ctx, getenv, stdout, stderr)
@@ -1147,8 +1151,7 @@ func serviceConfigFor(command attemptCommand) install.ServiceConfig {
 
 type serviceInstallOutput struct {
 	install.ServiceStatus
-	PairPage      string `json:"pair_page,omitempty"`
-	BrowserOpened bool   `json:"browser_opened"`
+	BrowserOpened bool `json:"browser_opened"`
 }
 
 func runService(ctx context.Context, command attemptCommand, stdout, stderr io.Writer, inspect serviceInspector, opener browserOpener) int {
@@ -1218,11 +1221,12 @@ func runService(ctx context.Context, command attemptCommand, stdout, stderr io.W
 		_, _ = io.WriteString(stderr, "factoryctl: the service projection is ambiguous\n")
 		return exitFailure
 	}
-	if command.kind == commandServiceInstall && pairPageOpens(existing, status.State) {
+	if command.kind == commandServiceInstall && installStartedService(existing, status.State) {
 		// The one command whose result is more than the projection. Every word
 		// of it goes in the JSON on stdout: this output is parsed, and a stray
-		// stderr line would be merged into it by any caller reading both.
-		return writeJSON(stdout, serviceInstallOutput{ServiceStatus: status, PairPage: pairPageURL, BrowserOpened: openPairPage(ctx, pairListenAddress, pairPageURL, opener)})
+		// stderr line would be merged into it by any caller reading both. The
+		// pairing link itself never appears in it.
+		return writeJSON(stdout, serviceInstallOutput{ServiceStatus: status, BrowserOpened: openPairedBrowser(ctx, command.home, opener)})
 	}
 	return writeJSON(stdout, status)
 }
@@ -1237,31 +1241,57 @@ func inspectService(ctx context.Context, command attemptCommand, config install.
 	return install.InspectServiceWithConfig(ctx, command.home, config)
 }
 
-// pairPageOpens is true only for an install that actually started the service.
-func pairPageOpens(existing, resulting install.ServiceState) bool {
+// installStartedService is true only for an install that actually started the service.
+func installStartedService(existing, resulting install.ServiceState) bool {
 	return resulting == install.ServiceRunning && existing != install.ServiceInstalled && existing != install.ServiceRunning
 }
 
-// openPairPage waits, bounded, for factoryd to accept on its loopback listener
-// and then opens the pair page exactly once, reporting whether it did. A
-// listener that never appears or an opener that fails is not an install
-// failure: the caller names the page in its own output and exits 0.
-func openPairPage(ctx context.Context, address, page string, opener browserOpener) bool {
-	return opener != nil && listenerAccepts(ctx, address) && opener(ctx, page) == nil
+// openPairedBrowser waits, bounded, for the freshly started factoryd to mint
+// a pairing link over the operator API with the home's own operator token, and
+// opens it exactly once, reporting whether it did. A factory that never becomes
+// ready or an opener that fails is not an install failure: the operator runs
+// factoryctl web pair later.
+func openPairedBrowser(ctx context.Context, home string, opener browserOpener) bool {
+	ctx, cancel := context.WithTimeout(ctx, pairPatience)
+	defer cancel()
+	for opener != nil {
+		if client, err := api.NewOperatorClient(install.LocalAPISocketPath(home), install.OperatorTokenPath(home)); err == nil {
+			if link, err := client.WebPair(ctx); err == nil {
+				return opener(ctx, link) == nil
+			}
+		}
+		select {
+		case <-ctx.Done():
+			return false
+		case <-time.After(100 * time.Millisecond):
+		}
+	}
+	return false
 }
 
-func listenerAccepts(ctx context.Context, address string) bool {
-	deadline := time.Now().Add(pairListenPatience)
-	for {
-		connection, err := net.DialTimeout("tcp", address, time.Second)
-		if err == nil {
-			_ = connection.Close()
-			return true
+// defaultOperatorHome answers the operator socket and token with the installed
+// home's paths when neither is set and nothing marks an attempt: a worker must
+// never be handed operator.token. One set and one unset stays an error.
+func defaultOperatorHome(getenv func(string) string) func(string) string {
+	return func(name string) string {
+		value := getenv(name)
+		if value != "" || name != "DARK_FACTORY_SOCKET" && name != "DARK_FACTORY_OPERATOR_TOKEN_FILE" {
+			return value
 		}
-		if ctx.Err() != nil || !time.Now().Before(deadline) {
-			return false
+		for _, other := range []string{"DARK_FACTORY_SOCKET", "DARK_FACTORY_OPERATOR_TOKEN_FILE", "DARK_FACTORY_ATTEMPT_TOKEN_FILE", "DARK_FACTORY_TASK_ATTACHMENTS", "DARK_FACTORY_FACTORYCTL"} {
+			if getenv(other) != "" {
+				return ""
+			}
 		}
-		time.Sleep(100 * time.Millisecond)
+		home := getenv("HOME")
+		if !filepath.IsAbs(home) {
+			return ""
+		}
+		home = filepath.Join(home, install.DefaultHomeName)
+		if name == "DARK_FACTORY_SOCKET" {
+			return install.LocalAPISocketPath(home)
+		}
+		return install.OperatorTokenPath(home)
 	}
 }
 
@@ -1322,6 +1352,8 @@ func parseWeb(args []string) (attemptCommand, bool, bool) {
 	switch args[1] {
 	case "status":
 		command.kind = commandWebStatus
+	case "pair":
+		command.kind = commandWebPair
 	case "list-clients":
 		command.kind = commandWebListClients
 		stringFlag("--after", &command.after)
@@ -1560,11 +1592,11 @@ func parseOperator(args []string) (attemptCommand, bool, bool) {
 	case "project create":
 		command.kind, names = commandProjectCreate, []string{"--name", "--root"}
 	case "project limits":
-		command.kind, names = commandProjectLimits, []string{"--project", "--revision", "--run-budget", "--token-budget", "--max-run-seconds"}
+		command.kind, names = commandProjectLimits, []string{"--project", "--revision", "--run-budget", "--token-budget", "--max-run-seconds", "--specialist-runs", "--specialist-open-proposals"}
 	case "agent create":
 		command.kind, names = commandAgentCreate, []string{"--project", "--name", "--role", "--provider", "--model", "--reasoning-effort", "--account", "--tool-budget"}
 	case "agent idle-policy":
-		command.kind, names = commandAgentIdlePolicy, []string{"--agent", "--revision", "--policy", "--after-seconds", "--instruction", "--run-budget"}
+		command.kind, names = commandAgentIdlePolicy, []string{"--agent", "--revision", "--policy", "--after-seconds", "--instruction", "--run-budget", "--wake-on"}
 	case "agent select-account":
 		command.kind, names = commandAgentSelectAccount, []string{"--agent", "--account", "--revision"}
 	case "agent select-model":
@@ -1603,6 +1635,12 @@ func parseOperator(args []string) (attemptCommand, bool, bool) {
 			command.toolBudget = count
 		case name == "--token-budget" && command.kind == commandProjectLimits && isCount:
 			command.tokenBudget = &count
+		case name == "--specialist-runs" && command.kind == commandProjectLimits && isCount && count <= kernel.MaxSpecialistRuns:
+			command.specialistRuns = &[]uint32{uint32(count)}[0]
+		case name == "--specialist-open-proposals" && command.kind == commandProjectLimits && isCount && count <= kernel.MaxSpecialistOpenProposals:
+			command.openProposals = &[]uint32{uint32(count)}[0]
+		case name == "--wake-on" && command.kind == commandAgentIdlePolicy:
+			command.wakeOn = value
 		case name == "--max-run-seconds" && command.kind == commandProjectLimits && isCount && count <= 86400:
 			command.maxRunSeconds = uint32(count)
 		case name == "--agent" && (command.kind == commandTaskAdd || command.kind == commandAgentIdlePolicy || command.kind == commandAgentSelectAccount || command.kind == commandAgentSelectModel || command.kind == commandAgentPaths) && (validHumanRequestKey(value) || command.kind == commandTaskAdd && value == "any"):
@@ -1675,7 +1713,7 @@ func parseOperator(args []string) (attemptCommand, bool, bool) {
 			return attemptCommand{}, false, false
 		}
 	case commandAgentIdlePolicy:
-		if command.agent == "" || command.expectedRevision == 0 || command.provider == "" || (command.provider == "wait" && (command.maxRunSeconds != 0 || command.text != "" || command.toolBudget != 0)) || (command.provider == "standing_instruction" && (command.maxRunSeconds == 0 || command.text == "")) {
+		if command.agent == "" || command.expectedRevision == 0 || command.provider == "" || (command.provider == "wait" && (command.maxRunSeconds != 0 || command.text != "" || command.toolBudget != 0 || command.wakeOn != "")) || (command.provider == "standing_instruction" && (command.maxRunSeconds == 0 || command.text == "")) {
 			return attemptCommand{}, false, false
 		}
 	case commandAgentSelectAccount:
@@ -2290,7 +2328,7 @@ func runOperator(ctx context.Context, command attemptCommand, getenv func(string
 			Revision uint64 `json:"revision"`
 		}{ID: id, Head: result.Head, Revision: result.Revision})
 	case commandProjectLimits:
-		result, callErr := client.SetProjectLimits(callContext, api.ProjectLimitsInput{ProjectID: command.project, ExpectedRevision: command.expectedRevision, RunBudget: command.toolBudget, MaxRunSeconds: command.maxRunSeconds, TokenBudget: command.tokenBudget})
+		result, callErr := client.SetProjectLimits(callContext, api.ProjectLimitsInput{ProjectID: command.project, ExpectedRevision: command.expectedRevision, RunBudget: command.toolBudget, MaxRunSeconds: command.maxRunSeconds, TokenBudget: command.tokenBudget, SpecialistRuns: command.specialistRuns, SpecialistOpenProposals: command.openProposals})
 		if callErr != nil {
 			return writeWebFailure(stderr, "project limits", callErr)
 		}
@@ -2352,7 +2390,7 @@ func runOperator(ctx context.Context, command attemptCommand, getenv func(string
 			Revision uint64 `json:"revision"`
 		}{ID: id, Head: result.Head, Revision: result.Revision})
 	case commandAgentIdlePolicy:
-		result, callErr := client.SetAgentIdlePolicy(callContext, api.AgentIdlePolicyInput{AgentID: command.agent, ExpectedRevision: command.expectedRevision, Policy: command.provider, AfterSeconds: command.maxRunSeconds, Instruction: command.text, RunBudget: command.toolBudget})
+		result, callErr := client.SetAgentIdlePolicy(callContext, api.AgentIdlePolicyInput{AgentID: command.agent, ExpectedRevision: command.expectedRevision, Policy: command.provider, AfterSeconds: command.maxRunSeconds, Instruction: command.text, RunBudget: command.toolBudget, WakeOn: command.wakeOn})
 		if callErr != nil {
 			return writeWebFailure(stderr, "agent idle-policy", callErr)
 		}
@@ -2570,7 +2608,7 @@ func runOverseer(ctx context.Context, command attemptCommand, getenv func(string
 	return writeJSON(stdout, result)
 }
 
-func runWeb(ctx context.Context, command attemptCommand, getenv func(string) string, stdout, stderr io.Writer) int {
+func runWeb(ctx context.Context, command attemptCommand, getenv func(string) string, stdout, stderr io.Writer, opener browserOpener) int {
 	socket := getenv("DARK_FACTORY_SOCKET")
 	if socket == "" {
 		_, _ = io.WriteString(stderr, "factoryctl: web client configuration is invalid\n")
@@ -2606,6 +2644,19 @@ func runWeb(ctx context.Context, command attemptCommand, getenv func(string) str
 			return writeWebFailure(stderr, "web status", callErr)
 		}
 		return writeJSON(stdout, result)
+	case commandWebPair:
+		// The link is a credential: it goes only to the browser, never to
+		// stdout, stderr or an error message.
+		link, callErr := client.WebPair(callContext)
+		if callErr != nil {
+			return writeWebFailure(stderr, "web pair", callErr)
+		}
+		if opener == nil || opener(callContext, link) != nil {
+			_, _ = io.WriteString(stderr, "factoryctl: web pair could not open a browser; run it again from a desktop session\n")
+			return exitFailure
+		}
+		_, _ = io.WriteString(stdout, "opened a pairing link in the default browser; it expires in 5 minutes\n")
+		return 0
 	case commandWebListClients:
 		result, callErr := client.WebListClients(callContext, command.after)
 		if callErr != nil {

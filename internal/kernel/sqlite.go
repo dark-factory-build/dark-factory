@@ -448,11 +448,13 @@ func (store *Store) beginUncheckedWrite(ctx context.Context) (*writeTx, error) {
 		return nil, err
 	}
 	tx := &writeTx{store: store, connection: connection, writerAdmitted: true}
+	// BEGIN writes nothing, so its failure is never an unknown outcome. A
+	// cancelled one is the cancellation, whichever sqlite code reports it.
 	if _, err := connection.ExecContext(ctx, "BEGIN IMMEDIATE"); err != nil {
 		if cancellation := ctx.Err(); cancellation != nil {
 			tx.discard()
 			tx.Close()
-			return nil, &OutcomeUnknownError{cause: errors.Join(cancellation, fmt.Errorf("begin immediate: %w", err))}
+			return nil, fmt.Errorf("begin immediate: %w (%v)", cancellation, err)
 		}
 		if errors.Is(err, sqlite3.BUSY) || errors.Is(err, sqlite3.LOCKED) {
 			tx.Close()
@@ -460,7 +462,7 @@ func (store *Store) beginUncheckedWrite(ctx context.Context) (*writeTx, error) {
 		}
 		tx.discard()
 		tx.Close()
-		return nil, &OutcomeUnknownError{cause: fmt.Errorf("begin immediate: %w", err)}
+		return nil, fmt.Errorf("begin immediate: %w", err)
 	}
 	tx.active = true
 	return tx, nil

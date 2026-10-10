@@ -13,6 +13,7 @@ import (
 )
 
 func TestProductionPersistsFinalizedConstructionPublicationAndRebase(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	proposal, err := NewSuccessProposal("published")
 	if err != nil {
@@ -43,7 +44,7 @@ func TestProductionPersistsFinalizedConstructionPublicationAndRebase(t *testing.
 		t.Fatal(err)
 	}
 	change.HeadCommit = &moved
-	page, err := store.Production(ctx, terminal.ProjectID, 0, 8)
+	page, err := store.Production(ctx, terminal.ProjectID, 0, 8, UnixMillis{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -62,7 +63,7 @@ func TestProductionPersistsFinalizedConstructionPublicationAndRebase(t *testing.
 	if err := store.RecordProductionObservation(ctx, terminal.ProjectID, observation, mustTime(t, 80)); err != nil {
 		t.Fatal(err)
 	}
-	page, err = store.Production(ctx, terminal.ProjectID, 0, 8)
+	page, err = store.Production(ctx, terminal.ProjectID, 0, 8, UnixMillis{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -77,7 +78,7 @@ func TestProductionPersistsFinalizedConstructionPublicationAndRebase(t *testing.
 	if err := store.RecordPublication(ctx, terminal.ProjectID, terminal.TaskID, "example/factory", pr, mustTime(t, 81)); err != nil {
 		t.Fatal(err)
 	}
-	page, err = store.Production(ctx, terminal.ProjectID, 0, 8)
+	page, err = store.Production(ctx, terminal.ProjectID, 0, 8, UnixMillis{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -101,7 +102,7 @@ func TestProductionPersistsFinalizedConstructionPublicationAndRebase(t *testing.
 	if err := store.RecordProductionObservation(ctx, terminal.ProjectID, observation, mustTime(t, 82)); err != nil {
 		t.Fatal(err)
 	}
-	page, err = store.Production(ctx, terminal.ProjectID, 0, 8)
+	page, err = store.Production(ctx, terminal.ProjectID, 0, 8, UnixMillis{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -120,7 +121,7 @@ func TestProductionPersistsFinalizedConstructionPublicationAndRebase(t *testing.
 	if err := store.RecordPublication(ctx, terminal.ProjectID, terminal.TaskID, "example/factory", second, mustTime(t, 83)); err != nil {
 		t.Fatal(err)
 	}
-	page, err = store.Production(ctx, terminal.ProjectID, 0, 8)
+	page, err = store.Production(ctx, terminal.ProjectID, 0, 8, UnixMillis{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -131,6 +132,7 @@ func TestProductionPersistsFinalizedConstructionPublicationAndRebase(t *testing.
 }
 
 func TestPublishedReviewChangesAreSentBackToOriginExactlyOnce(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	proposal, err := NewSuccessProposal("published")
 	if err != nil {
@@ -170,6 +172,7 @@ func TestPublishedReviewChangesAreSentBackToOriginExactlyOnce(t *testing.T) {
 // overseer's row is the newer one, and the sent-back branch is no longer
 // publishable.
 func TestPublishedReviewSendBackReachesTheWorkerNotThePublisher(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	proposal, err := NewSuccessProposal("published")
 	if err != nil {
@@ -227,6 +230,7 @@ func TestPublishedReviewSendBackReachesTheWorkerNotThePublisher(t *testing.T) {
 // unpublished, and none once it is published. A worker takes no standing
 // instruction at all.
 func TestOverseerWakeRule(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	proposal, err := NewSuccessProposal("published")
 	if err != nil {
@@ -254,13 +258,6 @@ func TestOverseerWakeRule(t *testing.T) {
 		t.Fatal(err)
 	}
 	policy, after, instruction := IdleStandingInstruction, uint32(1), "Publish completed Changes."
-	worker, _, err := store.Agent(ctx, terminal.AgentID)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, err := store.UpdateAgent(ctx, worker.ID, worker.Revision, AgentPatch{IdlePolicy: &policy, IdleAfterSeconds: &after, IdleInstruction: &instruction}, mustTime(t, 80)); !errors.Is(err, ErrInvalidValue) {
-		t.Fatalf("worker standing instruction err=%v", err)
-	}
 	overseer, err := store.CreateAgent(ctx, NewAgent{ID: agentID(t, 191), ProjectID: terminal.ProjectID, Name: "overseer", Role: RoleOrchestrator, Provider: ProviderCodex, ToolBudgetLimit: 8}, mustTime(t, 80))
 	if err != nil {
 		t.Fatal(err)
@@ -285,11 +282,8 @@ func TestOverseerWakeRule(t *testing.T) {
 	if again := wake(at + 2*rewake); len(again) != 0 {
 		t.Fatalf("second carrier while one is queued = %+v", again)
 	}
-	carrier := first[0]
 	for round := range 4 {
-		if _, err := store.UpdateTask(ctx, carrier.ID, carrier.Revision, TaskPatch{Cancel: true}, mustTime(t, at+1)); err != nil {
-			t.Fatal(err)
-		}
+		settleCarrier(t, store, at+1, byte(31+21*round), "ran")
 		if early := wake(at + rewake - 1); len(early) != 0 {
 			t.Fatalf("round %d re-woke early = %+v", round, early)
 		}
@@ -303,7 +297,7 @@ func TestOverseerWakeRule(t *testing.T) {
 		if len(next) != 1 {
 			t.Fatalf("re-wake %d = %+v", round+1, next)
 		}
-		carrier, at = next[0], at+rewake
+		at += rewake
 	}
 	// Publication clears it.
 	pr := ProductionPullRequest{Number: 7, Title: "Ship", URL: "https://github.com/example/factory/pull/7", Head: hex.EncodeToString(head.Bytes()), Branch: "factory/" + change.ID.String()[:12], Base: "main", State: "open", Review: ProductionReview{Head: hex.EncodeToString(head.Bytes()), State: "unknown"}}
@@ -316,6 +310,7 @@ func TestOverseerWakeRule(t *testing.T) {
 }
 
 func TestProductionPublicationUsesOwnedChangeForTransformedHead(t *testing.T) {
+	t.Parallel()
 	for _, historical := range []bool{false, true} {
 		t.Run(fmt.Sprint("historical=", historical), func(t *testing.T) {
 			ctx := context.Background()
@@ -349,7 +344,7 @@ func TestProductionPublicationUsesOwnedChangeForTransformedHead(t *testing.T) {
 			if err := store.RecordProductionObservation(ctx, terminal.ProjectID, ProductionObservation{Repository: "example/factory", ObservedAt: 79, PullRequests: []ProductionPullRequest{pr}}, mustTime(t, 79)); err != nil {
 				t.Fatal(err)
 			}
-			page, err := store.Production(ctx, terminal.ProjectID, 0, 8)
+			page, err := store.Production(ctx, terminal.ProjectID, 0, 8, UnixMillis{})
 			if err != nil || productionRecord(t, page, "pull_request", "7").VisualID == "change:"+change.ID.String() {
 				t.Fatalf("unacknowledged transformed observation = %+v, err=%v", page, err)
 			}
@@ -364,7 +359,7 @@ func TestProductionPublicationUsesOwnedChangeForTransformedHead(t *testing.T) {
 			} else if err := store.RecordPublication(ctx, terminal.ProjectID, publisher.ID, "example/factory", pr, mustTime(t, 80)); err != nil {
 				t.Fatal(err)
 			}
-			page, err = store.Production(ctx, terminal.ProjectID, 0, 8)
+			page, err = store.Production(ctx, terminal.ProjectID, 0, 8, UnixMillis{})
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -396,7 +391,7 @@ func TestProductionPublicationUsesOwnedChangeForTransformedHead(t *testing.T) {
 			if err := store.RecordPublication(ctx, terminal.ProjectID, unrelatedTask.ID, "example/factory", unrelated, mustTime(t, 81)); err != nil {
 				t.Fatal(err)
 			}
-			page, err = store.Production(ctx, terminal.ProjectID, 0, 8)
+			page, err = store.Production(ctx, terminal.ProjectID, 0, 8, UnixMillis{})
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -438,7 +433,7 @@ func TestProductionPublicationUsesOwnedChangeForTransformedHead(t *testing.T) {
 			if err := store.RecordPublication(ctx, terminal.ProjectID, publisher.ID, "example/factory", ambiguous, mustTime(t, 83)); err != nil {
 				t.Fatal(err)
 			}
-			page, err = store.Production(ctx, terminal.ProjectID, 0, 8)
+			page, err = store.Production(ctx, terminal.ProjectID, 0, 8, UnixMillis{})
 			if err != nil || productionRecord(t, page, "pull_request", "9").VisualID != "example/factory#9" {
 				t.Fatalf("ambiguous publication = %+v, %v", page, err)
 			}
@@ -452,6 +447,7 @@ func TestProductionPublicationUsesOwnedChangeForTransformedHead(t *testing.T) {
 }
 
 func TestProductionObservationUsesVerifiedHeadRepositoryForTransformedHead(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	proposal, err := NewSuccessProposal("published")
 	if err != nil {
@@ -483,7 +479,7 @@ func TestProductionObservationUsesVerifiedHeadRepositoryForTransformedHead(t *te
 		if err := store.RecordProductionObservation(ctx, terminal.ProjectID, ProductionObservation{Repository: "example/factory", ObservedAt: 79, PullRequests: []ProductionPullRequest{pr}}, mustTime(t, 79)); err != nil {
 			t.Fatal(err)
 		}
-		page, err := store.Production(ctx, terminal.ProjectID, 0, 8)
+		page, err := store.Production(ctx, terminal.ProjectID, 0, 8, UnixMillis{})
 		if err != nil || containsString(productionRecord(t, page, "pull_request", "7").Tasks, terminal.TaskID.String()) {
 			t.Fatalf("unverified task repository linked producer: %+v, %v", page, err)
 		}
@@ -494,7 +490,7 @@ func TestProductionObservationUsesVerifiedHeadRepositoryForTransformedHead(t *te
 	if err := store.RecordProductionObservation(ctx, terminal.ProjectID, ProductionObservation{Repository: "example/factory", ObservedAt: 80, PullRequests: []ProductionPullRequest{pr}}, mustTime(t, 80)); err != nil {
 		t.Fatal(err)
 	}
-	page, err := store.Production(ctx, terminal.ProjectID, 0, 8)
+	page, err := store.Production(ctx, terminal.ProjectID, 0, 8, UnixMillis{})
 	item := productionRecord(t, page, "pull_request", "7")
 	if err != nil || item == nil || item.VisualID != "change:"+change.ID.String() || !containsString(item.Tasks, terminal.TaskID.String()) || productionRecord(t, page, "construction", "") != nil {
 		t.Fatalf("verified transformed observation = %+v, err=%v", page, err)
@@ -507,7 +503,7 @@ func TestProductionObservationUsesVerifiedHeadRepositoryForTransformedHead(t *te
 		if err := store.RecordProductionObservation(ctx, terminal.ProjectID, ProductionObservation{Repository: "example/factory", ObservedAt: 81, PullRequests: []ProductionPullRequest{fork}}, mustTime(t, 81)); err != nil {
 			t.Fatal(err)
 		}
-		page, err = store.Production(ctx, terminal.ProjectID, 0, 8)
+		page, err = store.Production(ctx, terminal.ProjectID, 0, 8, UnixMillis{})
 		item := productionRecord(t, page, "pull_request", "8")
 		if err != nil || item == nil || item.VisualID != "example/factory#8" {
 			t.Fatalf("unverified head repository %q associated Change: %+v, err=%v", headRepository, item, err)
@@ -520,6 +516,7 @@ func TestProductionObservationUsesVerifiedHeadRepositoryForTransformedHead(t *te
 }
 
 func TestProductionSurvivesReopen(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	store, path := newTestStore(t)
 	project, err := store.CreateProject(ctx, NewProject{ID: projectID(t, 250), Name: "production", Root: "/production"}, mustTime(t, 2))
@@ -542,7 +539,7 @@ func TestProductionSurvivesReopen(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer store.Close()
-	page, err := store.Production(ctx, project.ID, 0, 8)
+	page, err := store.Production(ctx, project.ID, 0, 8, UnixMillis{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -576,6 +573,7 @@ func containsString(values []string, want string) bool {
 // publish failure is recorded at its revision; that failure is never in
 // flight, so nothing retries it.
 func TestPublishableIntakeChangeIsFactorydsUntilPublishedOrFailed(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	proposal, err := NewSuccessProposal("done")
 	if err != nil {
@@ -624,7 +622,7 @@ func TestPublishableIntakeChangeIsFactorydsUntilPublishedOrFailed(t *testing.T) 
 	branch := "factory/" + change.ID.String()[:12]
 	candidates := func() []PublishableChange {
 		t.Helper()
-		found, err := store.PublishableChanges(ctx)
+		found, err := store.PublishableChanges(ctx, mustTime(t, 70))
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -703,12 +701,36 @@ func TestPublishableIntakeChangeIsFactorydsUntilPublishedOrFailed(t *testing.T) 
 	if len(candidates()) != 1 || !closed() {
 		t.Fatal("an overseer-owned intake task counted as a second worker task")
 	}
-	failure := map[string]any{"id": PublishFailureID(change.ID, found[0].Revision), "state": "publish_failed", "handled": true, "escalation": "factoryd cannot publish", "request": map[string]any{}}
+	failure := map[string]any{"id": PublishFailureID(change.ID, found[0].Revision), "state": "publish_failed", "retryable": true, "handled": true, "escalation": "factoryd cannot publish", "request": map[string]any{}}
 	if err := store.RecordReviewOperation(ctx, worker.ProjectID, "example/factory", PublishFailureID(change.ID, found[0].Revision), failure, mustTime(t, 70)); err != nil {
 		t.Fatal(err)
 	}
 	if len(candidates()) != 0 {
-		t.Fatal("a recorded publish failure is retried")
+		t.Fatal("a recorded publish failure is retried inside its window")
+	}
+	// A refusal fixed outside factoryd heals itself: past the window the
+	// revision is retried.
+	if found, err := store.PublishableChanges(ctx, mustTime(t, 70+PublishRetryAfter.Milliseconds())); err != nil || len(found) != 1 {
+		t.Fatalf("a publish failure past its window is not retried: %+v %v", found, err)
+	}
+	// A pre-upgrade publish failure has no retryable field; preserve its
+	// recoverable retry behavior while the old record ages out.
+	legacyFailure := map[string]any{"id": PublishFailureID(change.ID, found[0].Revision), "state": "publish_failed", "handled": true, "request": map[string]any{}}
+	if err := store.RecordReviewOperation(ctx, worker.ProjectID, "example/factory", PublishFailureID(change.ID, found[0].Revision), legacyFailure, mustTime(t, 80)); err != nil {
+		t.Fatal(err)
+	}
+	if found, err := store.PublishableChanges(ctx, mustTime(t, 80)); err != nil || len(found) != 0 {
+		t.Fatalf("a legacy publish failure retried inside its window: %+v %v", found, err)
+	}
+	if found, err := store.PublishableChanges(ctx, mustTime(t, 80+PublishRetryAfter.Milliseconds())); err != nil || len(found) != 1 {
+		t.Fatalf("a legacy publish failure was not retried past its window: %+v %v", found, err)
+	}
+	// A change-caused refusal is terminal even after the retry window.
+	if err := store.RecordReviewOperation(ctx, worker.ProjectID, "example/factory", PublishFailureID(change.ID, found[0].Revision), map[string]any{"id": PublishFailureID(change.ID, found[0].Revision), "state": "publish_failed", "retryable": false, "handled": true, "request": map[string]any{}}, mustTime(t, 90)); err != nil {
+		t.Fatal(err)
+	}
+	if found, err := store.PublishableChanges(ctx, mustTime(t, 90+PublishRetryAfter.Milliseconds())); err != nil || len(found) != 0 {
+		t.Fatalf("a permanent publish failure was retried: %+v %v", found, err)
 	}
 	if pending, err := store.InFlightReviewOperations(ctx); err != nil || len(pending) != 0 {
 		t.Fatalf("publish failure in flight: %+v %v", pending, err)
