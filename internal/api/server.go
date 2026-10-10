@@ -51,6 +51,7 @@ const (
 	CallSendBack
 	CallSendBackTask
 	CallTaskRead
+	CallProjectContent
 	CallWebStatus
 	CallWebPair
 	CallWebListClients
@@ -130,6 +131,7 @@ type Call struct {
 	peerExpectedHead   uint64
 	sendBack           SendBackInput
 	taskRead           TaskReadInput
+	projectContent     ProjectContentInput
 	overseerTask       OverseerTaskCreateInput
 	overseerSnapshot   OverseerSnapshotInput
 	overseerTaskEdit   OverseerTaskUpdateInput
@@ -323,6 +325,9 @@ func (call Call) SendBackInput() (SendBackInput, bool) {
 func (call Call) TaskReadInput() (TaskReadInput, bool) {
 	return call.taskRead, call.kind == CallTaskRead
 }
+func (call Call) ProjectContentInput() (ProjectContentInput, bool) {
+	return call.projectContent, call.kind == CallProjectContent
+}
 
 func (call Call) WebClientRevocationInput() (WebClientRevocationInput, bool) {
 	return call.webClient, call.kind == CallWebRevokeClient
@@ -488,6 +493,11 @@ func NewAttemptSourceReply(source RetainedChangeHandoff) (Reply, error) {
 func NewTaskTextReply(value TaskText) (Reply, error) {
 	if !validID(value.TaskID) || value.Revision == 0 || !validText(value.Instruction, 0, 8192) || !validText(value.Feedback, 0, 8192) || value.Outcome != nil && !validText(*value.Outcome, 0, 8192) || value.NextOffset != nil && *value.NextOffset == 0 {
 		return Reply{}, ErrInvalidInput
+	}
+	for _, question := range value.PeerQuestions {
+		if !validPeerQuestion(question) {
+			return Reply{}, ErrInvalidInput
+		}
 	}
 	return Reply{kind: replyTaskText, taskText: value}, nil
 }
@@ -872,6 +882,10 @@ func decodeCall(domain byte, bearer credential, encoded []byte) (Call, RemoteErr
 		if err := decodeExact(request.Params, &call.taskRead); err != nil || !validID(call.taskRead.TaskID) || call.taskRead.ExpectedRevision == 0 || call.taskRead.Offset > uint64(^uint64(0)>>1) {
 			return Call{}, RemoteInvalidRequest
 		}
+	case CallProjectContent:
+		if err := decodeExact(request.Params, &call.projectContent); err != nil || !validProjectContentInput(call.projectContent) {
+			return Call{}, RemoteInvalidRequest
+		}
 	case CallCompactStorage:
 		if err := decodeExact(request.Params, &struct{}{}); err != nil {
 			return Call{}, RemoteInvalidRequest
@@ -1144,6 +1158,8 @@ func methodKind(method string) (CallKind, byte) {
 		return CallSendBackTask, operatorDomain
 	case "task_read":
 		return CallTaskRead, operatorDomain
+	case "project_content":
+		return CallProjectContent, operatorDomain
 	case "web_status":
 		return CallWebStatus, operatorDomain
 	case "web_pair":
@@ -1320,6 +1336,8 @@ func replyMatches(kind CallKind, reply replyKind) bool {
 		return reply == replyWorkerOperation
 	case CallTaskRead:
 		return reply == replyTaskText
+	case CallProjectContent:
+		return reply == replyContent
 	case CallTerminalObserve:
 		return reply == replyTerminalObservation
 	case CallOperatorTerminalObserve:

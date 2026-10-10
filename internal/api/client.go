@@ -380,6 +380,20 @@ func (client *OperatorClient) ReadTask(ctx context.Context, input TaskReadInput)
 	return result, nil
 }
 
+func (client *OperatorClient) ProjectContent(ctx context.Context, input ProjectContentInput) (json.RawMessage, error) {
+	if !validProjectContentInput(input) {
+		return nil, ErrInvalidInput
+	}
+	var result json.RawMessage
+	if err := client.client.call(ctx, "project_content", input, &result); err != nil {
+		return nil, err
+	}
+	if len(result) == 0 || !json.Valid(result) {
+		return nil, ErrProtocol
+	}
+	return result, nil
+}
+
 func (client *OperatorClient) EnqueueTask(ctx context.Context, input EnqueueTaskInput) (MutationResult, error) {
 	if !validID(input.ID) || !validID(input.ProjectID) || !validOptionalID(input.RepositoryID) || !validOptionalID(input.AssignedAgentID) || !validID(input.IncarnationID) || !validText(input.Title, 1, 1024) || !validText(input.Body, 0, 131072) || input.Priority < -1_000_000 || input.Priority > 1_000_000 {
 		return MutationResult{}, ErrInvalidInput

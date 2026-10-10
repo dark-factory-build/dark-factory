@@ -126,6 +126,9 @@ const (
     factory's service, with rollback, if it descends from the running build.
     --wait exits 0 verified, 1 failed its trial, 75 refused with no effect.
   factoryctl task read --task ID --revision REVISION [--offset N]
+  factoryctl production --project ID [--offset N --limit N]
+  factoryctl task history --task ID
+  factoryctl task list --agent ID [--cursor UPDATED_AT_MS:TASK_ID]
   factoryctl dispatch on|off [--revision REVISION]
   factoryctl capacity --workers N --revision REVISION
     Worker slots only; the separate overseer lane remains available.
@@ -204,6 +207,9 @@ const (
 	commandTaskAdd
 	commandTaskSendBack
 	commandTaskRead
+	commandProduction
+	commandTaskHistory
+	commandTaskList
 	commandDispatch
 	commandCapacity
 	commandStatus
@@ -278,6 +284,8 @@ type attemptCommand struct {
 	priority            int64
 	prioritySet         bool
 	offset              uint64
+	limit               uint64
+	cursor              string
 	head                uint64
 	textOffset          uint64
 	terminalText        bool
@@ -404,7 +412,7 @@ func runWithDependencies(ctx context.Context, args []string, getenv func(string)
 	if command.kind == commandRemoteStatus {
 		return runRemote(ctx, getenv, stdout, stderr)
 	}
-	if command.kind == commandAgentPaths || command.kind == commandOperatorTerminalObserve || command.kind == commandWorkerOperation || command.kind == commandProjectCreate || command.kind == commandProjectRepository || command.kind == commandIntake || command.kind == commandProjectLimits || command.kind == commandAgentCreate || command.kind == commandAgentIdlePolicy || command.kind == commandAccountsDiscover || command.kind == commandAccountsList || command.kind == commandAccountLink || command.kind == commandAgentSelectAccount || command.kind == commandAgentSelectModel || command.kind == commandTaskAdd || command.kind == commandTaskSendBack || command.kind == commandTaskRead || command.kind == commandDispatch || command.kind == commandCapacity || command.kind == commandStatus || command.kind == commandCompactStorage || command.kind == commandBackupCreate || command.kind == commandBackupVerify || command.kind == commandHumanList || command.kind == commandHumanReply {
+	if command.kind == commandAgentPaths || command.kind == commandOperatorTerminalObserve || command.kind == commandWorkerOperation || command.kind == commandProjectCreate || command.kind == commandProjectRepository || command.kind == commandIntake || command.kind == commandProjectLimits || command.kind == commandAgentCreate || command.kind == commandAgentIdlePolicy || command.kind == commandAccountsDiscover || command.kind == commandAccountsList || command.kind == commandAccountLink || command.kind == commandAgentSelectAccount || command.kind == commandAgentSelectModel || command.kind == commandTaskAdd || command.kind == commandTaskSendBack || command.kind == commandTaskRead || command.kind == commandProduction || command.kind == commandTaskHistory || command.kind == commandTaskList || command.kind == commandDispatch || command.kind == commandCapacity || command.kind == commandStatus || command.kind == commandCompactStorage || command.kind == commandBackupCreate || command.kind == commandBackupVerify || command.kind == commandHumanList || command.kind == commandHumanReply {
 		return runOperator(ctx, command, getenv, stdout, stderr)
 	}
 	if command.kind >= commandContentCreate && command.kind <= commandContentAttachments && len(args) > 0 && args[0] == "content" {
@@ -1367,6 +1375,29 @@ func parseWeb(args []string) (attemptCommand, bool, bool) {
 }
 
 func parseOperator(args []string) (attemptCommand, bool, bool) {
+	if len(args) >= 1 && args[0] == "production" {
+		values, ok := pairedFlagValues(args[1:], false, "--project", "--offset", "--limit")
+		if !ok || !validHumanRequestKey(values["--project"]) {
+			return attemptCommand{}, false, false
+		}
+		offset, offsetOK := parseRevision(values["--offset"])
+		limit, limitOK := parseRevision(values["--limit"])
+		if values["--offset"] == "" {
+			offset, offsetOK = 0, true
+		}
+		if values["--limit"] == "" {
+			limit, limitOK = 8, true
+		}
+		return attemptCommand{kind: commandProduction, project: values["--project"], offset: offset, limit: limit}, false, offsetOK && limitOK && limit > 0 && limit <= 8
+	}
+	if len(args) >= 2 && args[0] == "task" && args[1] == "history" {
+		values, ok := pairedFlagValues(args[2:], false, "--task")
+		return attemptCommand{kind: commandTaskHistory, id: values["--task"]}, false, ok && validHumanRequestKey(values["--task"])
+	}
+	if len(args) >= 2 && args[0] == "task" && args[1] == "list" {
+		values, ok := pairedFlagValues(args[2:], false, "--agent", "--cursor")
+		return attemptCommand{kind: commandTaskList, agent: values["--agent"], cursor: values["--cursor"]}, false, ok && validHumanRequestKey(values["--agent"]) && (values["--cursor"] == "" || validOperatorText(values["--cursor"], 1, 256))
+	}
 	if len(args) >= 2 && args[0] == "intake" {
 		input := api.IntakeInput{Action: strings.ReplaceAll(args[1], "-", "_")}
 		if input.Action == "config" {
@@ -2422,6 +2453,49 @@ func runOperator(ctx context.Context, command attemptCommand, getenv func(string
 			return writeWebFailure(stderr, "task read", callErr)
 		}
 		return writeJSON(stdout, result)
+	case commandProduction:
+		input, _ := json.Marshal(struct {
+			ProjectID string `json:"project_id"`
+			Offset    uint64 `json:"offset"`
+			Limit     uint64 `json:"limit"`
+		}{command.project, command.offset, command.limit})
+		result, callErr := client.ProjectContent(callContext, api.ProjectContentInput{Operation: "production", Input: input})
+		if callErr != nil {
+			return writeWebFailure(stderr, "production", callErr)
+		}
+		return writeJSON(stdout, json.RawMessage(result))
+	case commandTaskHistory:
+		input, _ := json.Marshal(struct {
+			TaskID string `json:"task_id"`
+		}{command.id})
+		result, callErr := client.ProjectContent(callContext, api.ProjectContentInput{Operation: "task_history", Input: input})
+		if callErr != nil {
+			return writeWebFailure(stderr, "task history", callErr)
+		}
+		return writeJSON(stdout, json.RawMessage(result))
+	case commandTaskList:
+		input := struct {
+			AgentID           string `json:"agent_id"`
+			BeforeUpdatedAtMS *int64 `json:"before_updated_at_ms,omitempty"`
+			BeforeTaskID      string `json:"before_task_id,omitempty"`
+		}{AgentID: command.agent}
+		if command.cursor != "" {
+			parts := strings.Split(command.cursor, ":")
+			if len(parts) != 2 {
+				return writeWebFailure(stderr, "task list", api.ErrInvalidInput)
+			}
+			at, err := strconv.ParseInt(parts[0], 10, 64)
+			if err != nil || !validHumanRequestKey(parts[1]) {
+				return writeWebFailure(stderr, "task list", api.ErrInvalidInput)
+			}
+			input.BeforeUpdatedAtMS, input.BeforeTaskID = &at, parts[1]
+		}
+		raw, _ := json.Marshal(input)
+		result, callErr := client.ProjectContent(callContext, api.ProjectContentInput{Operation: "task_list", Input: raw})
+		if callErr != nil {
+			return writeWebFailure(stderr, "task list", callErr)
+		}
+		return writeJSON(stdout, json.RawMessage(result))
 	case commandOverseerTaskUpdate:
 		input := api.OverseerTaskUpdateInput{TaskID: command.id, ExpectedRevision: command.expectedRevision, Cancel: command.cancel, Retry: command.retry, RemoveAttachments: command.removeAttachments}
 		if command.title != "" {

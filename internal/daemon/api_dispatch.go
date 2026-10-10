@@ -336,6 +336,8 @@ func (daemon *Daemon) dispatch(ctx context.Context, call api.Call) api.Reply {
 		return daemon.enqueueTask(ctx, call)
 	case api.CallTaskRead:
 		return daemon.taskRead(ctx, call)
+	case api.CallProjectContent:
+		return daemon.projectContent(ctx, call)
 	case api.CallOperatorWorkerOperation:
 		return daemon.workerOperation(ctx, call)
 	case api.CallSetDispatch:
@@ -608,7 +610,15 @@ func (daemon *Daemon) taskRead(ctx context.Context, call api.Call) api.Reply {
 	if err != nil {
 		return newErrorReply(remoteErrorCode(err))
 	}
-	result := api.TaskText{Attachments: attachments, TaskID: task.ID.String(), Revision: uint64(task.Revision.Int64()), Instruction: instruction, Feedback: feedback}
+	questions, _, _, err := daemon.store.PeerQuestionsForTask(ctx, task.ID, 0, 0)
+	if err != nil {
+		return newErrorReply(remoteErrorCode(err))
+	}
+	peerQuestions := make([]api.PeerQuestion, 0, len(questions))
+	for _, question := range questions {
+		peerQuestions = append(peerQuestions, api.PeerQuestion{ID: question.ID.String(), SourceTaskID: question.SourceTaskID.String(), TargetTaskID: question.TargetTaskID.String(), Question: question.Question, Answer: question.Answer, RecipientDeliveryState: question.RecipientDeliveryState.String(), AnswerDeliveryState: question.AnswerDeliveryState.String(), Revision: uint64(question.Revision.Int64())})
+	}
+	result := api.TaskText{Attachments: attachments, TaskID: task.ID.String(), Revision: uint64(task.Revision.Int64()), Instruction: instruction, Feedback: feedback, PeerQuestions: peerQuestions}
 	if outcomeText != "" {
 		result.Outcome = &outcome
 	}
