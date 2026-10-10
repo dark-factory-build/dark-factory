@@ -102,7 +102,8 @@ github.com/dark-factory-build/dark-factory/internal/review
 github.com/dark-factory-build/dark-factory/internal/runner'
 process_sensitive_packages="$process_sensitive_packages
 github.com/dark-factory-build/dark-factory/cmd/factoryd
-github.com/dark-factory-build/dark-factory/cmd/factory-runner"
+github.com/dark-factory-build/dark-factory/cmd/factory-runner
+github.com/dark-factory-build/dark-factory/scripts/notices"
 is_process_sensitive() {
     printf '%s\n' "$process_sensitive_packages" | /usr/bin/grep -qxF "$1"
 }
