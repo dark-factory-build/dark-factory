@@ -68,6 +68,16 @@ type Daemon struct {
 	publicRepoMu        sync.Mutex
 	publicRepos         map[string]*publicRepository
 	productionRefreshAt map[kernel.ProjectID]time.Time
+	// What factoryd knows of its health only in memory, for the overseer's
+	// wake (overseerHealth): each held condition, and the streak of logged
+	// Maintainer faults.
+	healthMu         sync.Mutex
+	heldHealth       map[string]kernel.OverseerHealth
+	maintainerFaults struct {
+		first, last time.Time
+		count       int
+		fault       string
+	}
 	// The scheduler's merge-pipeline pass (tickMergePipeline): the next pass
 	// time, read only by the scheduler loop, and whether a pass is running.
 	pipelineAt   atomic.Int64 // unix nanoseconds of the next merge-stage pass

@@ -6,13 +6,16 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"maps"
 	"path"
+	"slices"
 	"strings"
 	"time"
 
 	"github.com/dark-factory-build/dark-factory/internal/kernel"
+	"github.com/dark-factory-build/dark-factory/internal/maintainer"
 	"github.com/dark-factory-build/dark-factory/internal/opgraph"
 	"github.com/dark-factory-build/dark-factory/internal/review"
 )
@@ -59,6 +62,7 @@ func (daemon *Daemon) refreshProduction(ctx context.Context, project kernel.Proj
 			observation, err = pullRequestObservation(ctx, daemon.github.MCP, identity.PublicationRepository, githubID, known, settled)
 		}
 		if err != nil {
+			daemon.noteMaintainerFault(err)
 			LogFactoryd(daemon.log, "factoryd: refresh %s: %v\n", identity.PublicationRepository, err)
 			continue
 		}
@@ -149,6 +153,72 @@ func (daemon *Daemon) githubQuotaLow() bool {
 	}
 	quota, ok := daemon.github.Quota()
 	return ok && quota.Low(daemon.now())
+}
+
+// holdHealth holds the condition key (or, with no detail, drops it), keeping
+// when it began while it stays held.
+func (daemon *Daemon) holdHealth(key string, project kernel.ProjectID, detail string) {
+	daemon.healthMu.Lock()
+	defer daemon.healthMu.Unlock()
+	held, ok := daemon.heldHealth[key]
+	if detail == "" {
+		delete(daemon.heldHealth, key)
+		return
+	}
+	if !ok {
+		since, err := kernel.NewUnixMillis(daemon.now().UnixMilli())
+		if err != nil {
+			return
+		}
+		held = kernel.OverseerHealth{Key: key, Since: since}
+	}
+	if daemon.heldHealth == nil {
+		daemon.heldHealth = map[string]kernel.OverseerHealth{}
+	}
+	held.Project, held.Detail = project, detail
+	daemon.heldHealth[key] = held
+}
+
+// noteMaintainerFault counts a logged Maintainer failure: an unavailable
+// Maintainer (its 503s) or an answer outside its contract. Faults closer
+// than two merge-stage passes apart are one streak.
+func (daemon *Daemon) noteMaintainerFault(err error) {
+	if !errors.Is(err, maintainer.ErrUnavailable) && !strings.Contains(err.Error(), "Maintainer returned an invalid") {
+		return
+	}
+	now := daemon.now()
+	daemon.healthMu.Lock()
+	defer daemon.healthMu.Unlock()
+	faults := &daemon.maintainerFaults
+	if now.Sub(faults.last) > 2*productionRefreshInterval {
+		faults.first, faults.count = now, 0
+	}
+	faults.last, faults.fault = now, err.Error()
+	faults.count++
+}
+
+// overseerHealth is every condition factoryd holds only in memory that the
+// overseer must see: the owner's GitHub quota under a tenth (500 of 5,000), a
+// failing intake sync (held by pollIntakeSource), and a streak of three or
+// more Maintainer faults.
+func (daemon *Daemon) overseerHealth() []kernel.OverseerHealth {
+	quota := ""
+	if daemon.githubQuotaLow() {
+		value, _ := daemon.github.Quota()
+		quota = fmt.Sprintf("GitHub quota %d/%d remaining (Maintainer x-ratelimit-remaining) until %s; GitHub polling waits", value.Remaining, value.Limit, time.Unix(value.Reset, 0).UTC().Format(time.RFC3339))
+	}
+	daemon.holdHealth("github-quota", kernel.ProjectID{}, quota)
+	now := daemon.now()
+	daemon.healthMu.Lock()
+	defer daemon.healthMu.Unlock()
+	health := slices.Collect(maps.Values(daemon.heldHealth))
+	if faults := daemon.maintainerFaults; faults.count >= 3 && now.Sub(faults.last) <= 2*productionRefreshInterval {
+		if since, err := kernel.NewUnixMillis(faults.first.UnixMilli()); err == nil {
+			health = append(health, kernel.OverseerHealth{Key: "maintainer", Since: since,
+				Detail: fmt.Sprintf("%d Maintainer faults in factoryd.stderr.log, last at %s: %s", faults.count, faults.last.UTC().Format(time.RFC3339), faults.fault)})
+		}
+	}
+	return health
 }
 
 func (daemon *Daemon) productionRefreshAllowed(project kernel.ProjectID, now time.Time) bool {

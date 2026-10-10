@@ -202,6 +202,7 @@ func (daemon *Daemon) advanceReviewOperations(ctx context.Context, startup bool)
 		if err == nil {
 			advanced++
 		} else {
+			daemon.noteMaintainerFault(err)
 			LogFactoryd(daemon.log, "factoryd: review %s %s: %v\n", operation.ID, op.State, err)
 		}
 	}

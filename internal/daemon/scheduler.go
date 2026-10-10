@@ -179,7 +179,7 @@ func (daemon *Daemon) RunScheduler(ctx context.Context, spec SupervisorSpec) err
 				if err := daemon.enforceRunLiveness(ownedCtx, spec); err != nil {
 					fail(err)
 				} else if at, err := daemon.timestamp(); err == nil && dispatchEnabled() {
-					_, _ = daemon.store.EnqueueOverseerWakeups(ownedCtx, at)
+					_, _ = daemon.store.EnqueueOverseerWakeups(ownedCtx, at, daemon.overseerHealth()...)
 					if _, promoteErr := daemon.store.PromoteQueuedContinuations(ownedCtx, at); promoteErr != nil {
 						fail(promoteErr)
 					}

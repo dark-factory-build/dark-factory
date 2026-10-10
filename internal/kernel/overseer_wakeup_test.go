@@ -392,7 +392,7 @@ func TestOverseerNeverStartedWakeLeavesItemDue(t *testing.T) {
 			t.Fatal(err)
 		}
 		var wakes int
-		if err := read.connection.QueryRowContext(ctx, overseerItems+`SELECT wakes FROM counted WHERE item_key = '[reviewer:op7]' AND ?6 + ?7 + ?8 >= 0`, overseerItemArgs(agent, 2+overseerWakeSettle.Milliseconds())...).Scan(&wakes); err != nil {
+		if err := read.connection.QueryRowContext(ctx, overseerItems+`SELECT wakes FROM counted WHERE item_key = '[reviewer:op7]' AND ?6 + ?7 + ?8 >= 0`, overseerItemArgs(agent, 2+overseerWakeSettle.Milliseconds(), nil)...).Scan(&wakes); err != nil {
 			t.Fatal(err)
 		}
 		read.Close()
@@ -639,4 +639,39 @@ func stalledCard(t *testing.T) (*Store, Agent, Task, OperatorHumanRequest, int64
 		t.Fatalf("stalled card projection = %+v, %v, %v", projection, found, err)
 	}
 	return store, worker, last, requests[0], at, next
+}
+
+// A health condition factoryd holds only in memory wakes the overseer of its
+// project (or of every project) once settled, with when it began; it re-wakes
+// like an escalation, stalls into the operator's card, and the card closes
+// once factoryd stops holding it.
+func TestOverseerHealthWake(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	store, _, _ := wakeFixture(t)
+	health := []OverseerHealth{{Key: "github-quota", Detail: "GitHub quota 12/5000", Since: mustTime(t, 1000)},
+		{Project: projectID(t, 9), Key: "intake:x", Detail: "another project's intake", Since: mustTime(t, 1000)}}
+	at, seed := 1000+overseerWakeSettle.Milliseconds(), byte(10)
+	if tasks, err := store.EnqueueOverseerWakeups(ctx, mustTime(t, at-1), health...); err != nil || len(tasks) != 0 {
+		t.Fatalf("unsettled wake = %+v, %v", tasks, err)
+	}
+	for wake := 0; wake <= 3; wake++ {
+		tasks, err := store.EnqueueOverseerWakeups(ctx, mustTime(t, at), health...)
+		if err != nil || len(tasks) != 1 || !strings.Contains(tasks[0].Body, "\nHealth since 1970-01-01T00:00:01Z: GitHub quota 12/5000 [health:github-quota]") || strings.Contains(tasks[0].Body, "another project") {
+			t.Fatalf("wake %d = %+v, %v", wake, tasks, err)
+		}
+		seed += 21
+		settleCarrier(t, store, at+1, seed, "ran")
+		at += OverseerRewakeAfter.Milliseconds()
+	}
+	if tasks, err := store.EnqueueOverseerWakeups(ctx, mustTime(t, at), health...); err != nil || len(tasks) != 0 {
+		t.Fatalf("stalled condition woke again = %+v, %v", tasks, err)
+	}
+	if requests, err := store.OperatorHumanRequests(ctx); err != nil || len(requests) != 1 || !strings.Contains(requests[0].QuestionText, "GitHub quota 12/5000 [health:github-quota]") {
+		t.Fatalf("stalled card = %+v, %v", requests, err)
+	}
+	wakeBodies(t, store, at+1)
+	if requests, err := store.OperatorHumanRequests(ctx); err != nil || len(requests) != 0 {
+		t.Fatalf("cleared condition kept its card = %+v, %v", requests, err)
+	}
 }
