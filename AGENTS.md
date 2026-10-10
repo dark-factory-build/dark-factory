@@ -81,6 +81,8 @@ Bug fix = root cause, not symptom: a report names a symptom. Grep every caller o
 
 Rules:
 
+- Issues and Library lessons state observed evidence and a live acceptance signal, and mark inferred causes as hypotheses.
+
 - No abstractions that weren't explicitly requested.
 - No new dependency if it can be avoided.
 - No boilerplate nobody asked for.
