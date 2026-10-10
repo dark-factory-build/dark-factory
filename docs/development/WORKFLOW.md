@@ -269,7 +269,7 @@ cache for subsequent merge-queue refs. The default manual runner remains
 `dark-factory-mac`; its Go patch version may differ. Queue caches alone do not
 establish reuse across different queue refs.
 
-Process-sensitive checks take one blocking `lockf` lock from the common Git
+Process-sensitive checks take one blocking `lockf` (Linux: `flock`) lock from the common Git
 directory, so linked worktrees cannot stack process-heavy Go runs. A contender
 waits; the kernel releases the lock when its holder exits. The routine
 `go-check.sh` remains outside that lease.
