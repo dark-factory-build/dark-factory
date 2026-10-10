@@ -216,11 +216,12 @@ TASK_ID --revision REVISION --retry`, or send a completed model result back with
 note, so send-back refuses them).
 
 When factoryd cannot publish a finished Change, it records the failure and
-escalates it to the project's overseer once. A Maintainer refusal, conflict or
-unavailability, or a repository disabled for new work, is retried for the same
-Change revision about hourly, so a cause fixed outside factoryd heals itself.
-Any other rejection, such as invalid input caused by the Change, is final for
-that Change revision: send the task back so a corrected revision can publish.
+escalates it to the project's overseer once. A Maintainer rejection, or a
+repository disabled for new work, is retried for the same Change revision
+about hourly, so a cause fixed outside factoryd heals itself. Invalid input, a
+commit tree GitHub cannot return whole, or a local failure caused by the
+Change is final for that Change revision: send the task back so a corrected
+revision can publish.
 
 ## Try a task without a model
 

@@ -666,16 +666,20 @@ func (b *daemonReviewBackend) Observe(ctx context.Context, operationID string) (
 }
 
 func (b *daemonReviewBackend) Enqueue(ctx context.Context, operation review.Operation) error {
-	return enqueueRefused(b.call(ctx, "enqueue_pull_request", map[string]any{"repository": b.repository, "pull_number": operation.Request.PullNumber, "head_sha": operation.Request.Head, "base": operation.Request.BaseRef, "reviewed_body_digest": reviewedBodyDigest(operation)}))
+	return b.call(ctx, "enqueue_pull_request", map[string]any{"repository": b.repository, "pull_number": operation.Request.PullNumber, "head_sha": operation.Request.Head, "base": operation.Request.BaseRef, "reviewed_body_digest": reviewedBodyDigest(operation)})
 }
 
-// enqueueRefused reports the broker's typed refusal "refused: ...
-// UNPROCESSABLE" as review.ErrRefused. One also RATE_LIMITED may pass later.
-func enqueueRefused(err error) error {
-	if why := fmt.Sprint(err); strings.Contains(why, "rejected operation: refused:") && strings.Contains(why, "UNPROCESSABLE") && !strings.Contains(why, "RATE_LIMITED") {
-		return fmt.Errorf("%w (%v)", review.ErrRefused, err)
-	}
-	return err
+// maintainerRejection is the broker's "code: reason" (mcp.rs tool_error).
+type maintainerRejection string
+
+func (r maintainerRejection) Error() string {
+	return "review: Maintainer rejected operation: " + string(r)
+}
+
+// Is: only invalid input or a tree GitHub cannot return whole is permanent.
+// Any other refusal, UNPROCESSABLE included, can come to hold (#1531).
+func (r maintainerRejection) Is(target error) bool {
+	return target == review.ErrPermanent && (strings.HasPrefix(string(r), "invalid_input:") || strings.Contains(string(r), "too large for GitHub to return whole"))
 }
 
 func reviewedBodyDigest(operation review.Operation) string {
@@ -799,9 +803,9 @@ func reviewResponseStructuredContent(request maintainerRequest, response json.Ra
 		// The broker's reason is what an operator needs to act on.
 		reason := ""
 		if len(value.Result.Content) > 0 {
-			reason = ": " + strings.ToValidUTF8(value.Result.Content[0].Text[:min(len(value.Result.Content[0].Text), 300)], "")
+			reason = strings.ToValidUTF8(value.Result.Content[0].Text[:min(len(value.Result.Content[0].Text), 300)], "")
 		}
-		return nil, errors.New("review: Maintainer rejected operation" + reason)
+		return nil, maintainerRejection(reason)
 	}
 	return value.Result.StructuredContent, nil
 }

@@ -303,22 +303,21 @@ func TestIndeterminateEnqueueIsSettledByTheNextObservation(t *testing.T) {
 	}
 }
 
-// A refusal the same request cannot change (#1510: UNPROCESSABLE, a required
-// check that never ran) fails the head at once, not retryable, so it is
-// escalated once and never enqueued again.
-func TestRefusedEnqueueIsTerminalForTheHead(t *testing.T) {
+// A failure the same request meets again (ErrPermanent) fails the head at
+// once, not retryable, so it is escalated once and never enqueued again.
+func TestPermanentEnqueueFailureIsTerminalForTheHead(t *testing.T) {
 	store := &memoryStore{}
-	backend := &fakeBackend{enqueueErr: fmt.Errorf("%w (rejected before execution as UNPROCESSABLE)", ErrRefused)}
+	backend := &fakeBackend{enqueueErr: fmt.Errorf("invalid_input: %w", ErrPermanent)}
 	c := Coordinator{Store: store, Backend: backend, Now: func() time.Time { return time.Unix(20, 0) }}
 	op, err := c.Advance(context.Background(), Operation{ID: "op", Request: reviewRequest(), State: "enqueued", Verdict: "allow", Submitted: true})
-	if !errors.Is(err, ErrRefused) || op.State != "failed" || op.Retryable || !strings.Contains(op.Detail, "UNPROCESSABLE") || store.values[len(store.values)-1].State != "failed" {
+	if !errors.Is(err, ErrPermanent) || op.State != "failed" || op.Retryable || !strings.Contains(op.Detail, "invalid_input") || store.values[len(store.values)-1].State != "failed" {
 		t.Fatalf("operation=%+v err=%v", op, err)
 	}
 	if _, err := c.Advance(context.Background(), op); err == nil {
 		t.Fatal("a failed head was advanced again")
 	}
 	if _, err := c.ReserveRetry(context.Background(), op); err == nil {
-		t.Fatal("a refused head was retried")
+		t.Fatal("a permanently refused head was retried")
 	}
 }
 

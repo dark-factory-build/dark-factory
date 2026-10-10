@@ -19,7 +19,7 @@ import (
 type publicReviewBackend struct {
 	killed, submitAmbiguous, requestChanges bool
 	queued                                  bool
-	enqueueRefusal                          string // the broker's refusal class, if any
+	enqueueRefusal                          string // the broker's tool error text, if any
 	reviews, submits, enqueues              int
 	enqueuedBase, enqueuedSHA, enqueuedBody string
 	journal                                 map[string]string
@@ -58,7 +58,7 @@ func (b *publicReviewBackend) Enqueue(_ context.Context, operation review.Operat
 	b.enqueues++
 	b.enqueuedBase, b.enqueuedSHA, b.enqueuedBody = operation.Request.BaseRef, operation.Request.Base, operation.Request.Body
 	if b.enqueueRefusal != "" {
-		return enqueueRefused(errors.New("review: Maintainer rejected operation: refused: The request was refused: rejected before execution as " + b.enqueueRefusal + "."))
+		return maintainerRejection(b.enqueueRefusal)
 	}
 	b.queued = true
 	return nil
@@ -552,17 +552,17 @@ func TestMergeQueueEjectionWithNoHeadFailureRequeuesOnceThenSendsBack(t *testing
 	}
 }
 
-// An enqueue the App refused as UNPROCESSABLE (#1510: no CI run, so the
-// required check can never exist) is terminal for the head: never enqueued
+// An enqueue the Maintainer refuses permanently (invalid input: the same
+// request meets the same answer) fails the head at once: never enqueued
 // again, and escalated once as an item due to the project's overseer.
 func TestRefusedEnqueueBecomesAnOverseerItem(t *testing.T) {
 	fixture, project, _, settle := publishedTask(t)
 	settle()
 	customerMode(t, fixture)
 	ctx := context.Background()
-	backend := &publicReviewBackend{enqueueRefusal: "UNPROCESSABLE"}
+	backend := &publicReviewBackend{enqueueRefusal: "invalid_input: Operation input is invalid."}
 	fixture.daemon.reviewBackend = func(string, uint64) review.Backend { return backend }
-	if _, err := reviewNow(ctx, fixture.daemon, project, publishedReviewRequest()); !errors.Is(err, review.ErrRefused) {
+	if _, err := reviewNow(ctx, fixture.daemon, project, publishedReviewRequest()); !errors.Is(err, review.ErrPermanent) {
 		t.Fatalf("a refused enqueue reported %v", err)
 	}
 	now, offset := fixture.daemon.now, time.Duration(0)
@@ -574,7 +574,7 @@ func TestRefusedEnqueueBecomesAnOverseerItem(t *testing.T) {
 		}
 	}
 	op := lastDurableReview(t, fixture.store, project)
-	if op.State != "failed" || !op.Handled || op.Retryable || backend.enqueues != 1 || backend.reviews != 1 || !strings.Contains(op.Escalation, "refuses this exact head") || !strings.Contains(op.Escalation, "UNPROCESSABLE") {
+	if op.State != "failed" || !op.Handled || op.Retryable || backend.enqueues != 1 || backend.reviews != 1 || !strings.Contains(op.Escalation, "its review failed: review: Maintainer rejected operation: invalid_input") {
 		t.Fatalf("refused enqueue operation = %+v enqueues=%d reviews=%d", op, backend.enqueues, backend.reviews)
 	}
 	overseer, err := fixture.store.CreateAgent(ctx, kernel.NewAgent{ID: mustAgentID(t, testID(234)), ProjectID: project, Name: "overseer", Role: kernel.RoleOrchestrator, Provider: kernel.ProviderCodex, ToolBudgetLimit: 2}, mustKernelTime(t, 1001))
@@ -768,18 +768,19 @@ func TestStuckSubmitEscalatesOnceAndKeepsResuming(t *testing.T) {
 	}
 }
 
-// An enqueue GitHub refuses in a way a later attempt may pass (RATE_LIMITED,
-// unlike UNPROCESSABLE, #1510) with every required check passed is resent
-// each tick without escalating; it is queued when GitHub accepts it, and ends
-// when its pull request closes.
+// #1531: GitHub refused an enqueue as UNPROCESSABLE until the owner's
+// CODEOWNERS approval arrived. Such a refusal names a precondition that can
+// come to hold, so it is resent each tick, escalated once when it has
+// persisted for FailuresBeforeEscalation passes, and the same operation is
+// queued when GitHub accepts it, then ends when its pull request closes.
 func TestRefusedEnqueueResendsEachTickAndEndsFromThePull(t *testing.T) {
 	fixture, project, _, settle := publishedTask(t)
 	settle()
 	customerMode(t, fixture)
 	ctx := context.Background()
-	backend := &publicReviewBackend{enqueueRefusal: "RATE_LIMITED"}
+	backend := &publicReviewBackend{enqueueRefusal: "refused: The request was refused: rejected before execution as UNPROCESSABLE."}
 	fixture.daemon.reviewBackend = func(string, uint64) review.Backend { return backend }
-	if _, err := reviewNow(ctx, fixture.daemon, project, publishedReviewRequest()); err == nil || backend.enqueues != 1 {
+	if _, err := reviewNow(ctx, fixture.daemon, project, publishedReviewRequest()); err == nil || errors.Is(err, review.ErrPermanent) || backend.enqueues != 1 {
 		t.Fatalf("refused enqueue err=%v enqueues=%d", err, backend.enqueues)
 	}
 	tick := func() review.Operation {
@@ -788,15 +789,23 @@ func TestRefusedEnqueueResendsEachTickAndEndsFromThePull(t *testing.T) {
 		}
 		return lastDurableReview(t, fixture.store, project)
 	}
-	if op := tick(); op.State != "enqueued" || op.Escalation != "" || op.Failures != 2 || backend.enqueues != 2 {
-		t.Fatalf("refused again: %+v (enqueues %d)", op, backend.enqueues)
+	escalation := ""
+	for pass := 2; pass <= review.FailuresBeforeEscalation+2; pass++ {
+		op := tick()
+		if op.State != "enqueued" || op.Failures != pass || backend.enqueues != pass || (op.Escalation != "") != (pass >= review.FailuresBeforeEscalation) || (escalation != "" && op.Escalation != escalation) {
+			t.Fatalf("pass %d refused again: %+v (enqueues %d)", pass, op, backend.enqueues)
+		}
+		escalation = op.Escalation
+	}
+	if !strings.Contains(escalation, "UNPROCESSABLE") {
+		t.Fatalf("escalation = %q", escalation)
 	}
 	backend.enqueueRefusal = ""
-	if op := tick(); op.State != "enqueued" || op.Failures != 0 || op.Enqueues != 1 || backend.enqueues != 3 {
+	if op := tick(); op.State != "enqueued" || op.Failures != 0 || op.Escalation != "" || op.Enqueues != 1 || backend.enqueues != review.FailuresBeforeEscalation+3 || backend.reviews != 1 {
 		t.Fatalf("accepted: %+v (enqueues %d)", op, backend.enqueues)
 	}
 	backend.pull = &review.Pull{Head: publishedReviewRequest().Head, State: "closed"}
-	if op := tick(); op.State != "closed" || backend.enqueues != 3 {
+	if op := tick(); op.State != "closed" || backend.enqueues != review.FailuresBeforeEscalation+3 {
 		t.Fatalf("closed pull: %+v (enqueues %d)", op, backend.enqueues)
 	}
 }

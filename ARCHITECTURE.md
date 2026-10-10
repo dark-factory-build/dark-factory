@@ -93,6 +93,17 @@ unsupported before a provider runs.
 7. No admitted attempt means no provider process or outcome request, and no
    writable source lease. A retry creates a new run and bearer; it never revives
    an old process or credential.
+8. A long-running operation stops only on a failure the same request meets
+   again, and that is escalated once; anything else is retried, and escalated
+   once if it outlasts its bound (#1558). Publication retries hourly and
+   escalates on its first failure. A merge-stage pass (observe, enqueue)
+   retries every 5 minutes and escalates after 30. Run settlement retries a
+   repository, Git or I/O fault and refuses a worktree that fails its own
+   validation; a release drain waits 10 minutes, then fails naming the run. An
+   attempt call waits out a 30-second daemon restart before its run sees the
+   failure. Permanent means invalid input, a tree GitHub cannot return whole,
+   or a Change worktree that does not verify; a refusal whose precondition can
+   come to hold (an approval, a check, a permission) is not.
 
 ## Browser authority
 

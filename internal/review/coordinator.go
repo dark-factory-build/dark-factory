@@ -128,10 +128,10 @@ func (g *GroupRun) note(head string) string {
 	return note
 }
 
-// ErrRefused marks an enqueue GitHub refused as UNPROCESSABLE: a head the
-// queue will not take, such as one whose required check never ran. The same
-// request at the same head gets the same answer, so it is not repeated.
-var ErrRefused = errors.New("the merge queue refuses this exact head, so factoryd will not enqueue it again; a new head is reviewed afresh")
+// ErrPermanent marks a failure the same request meets again, such as input
+// the Maintainer finds invalid. Anything else, a refusal whose precondition
+// can come to hold included, is retried.
+var ErrPermanent = errors.New("the same request fails the same way, so factoryd will not repeat it; a new head is reviewed afresh")
 
 // FailuresBeforeEscalation is how many consecutive merge-stage passes may
 // fail before the overseer is told: 30 minutes at the 5-minute merge tick.
@@ -241,7 +241,7 @@ func (c Coordinator) finishSubmitted(ctx context.Context, op Operation) (Operati
 // Advance moves an allowed exact head one step toward merge, deciding from
 // one observation of its pull request. It sends the head back to its author
 // when it conflicts, a check on it fails, or the queue removes it again after
-// the one re-queue, and fails it when the queue refuses it (ErrRefused); it
+// the one re-queue, and fails it on a permanent failure (ErrPermanent); it
 // never decides from a write's journal.
 // A wrong enqueue cannot merge unreviewed code: the merge group's gate still
 // requires an ALLOW at the exact head.
@@ -274,10 +274,7 @@ func (c Coordinator) Advance(ctx context.Context, op Operation) (Operation, erro
 		// Queued, removed, re-queued once and removed again.
 		op.State, op.RoutePending, op.Detail = "ejected", true, pull.Group.note(head)
 	default:
-		if err := c.Backend.Enqueue(ctx, op); errors.Is(err, ErrRefused) {
-			// Terminal for this head: failed, it is escalated once and never re-enqueued.
-			return c.fail(ctx, op, err, false)
-		} else if err != nil {
+		if err := c.Backend.Enqueue(ctx, op); err != nil {
 			op.Failures, op.Escalation = failures, escalation
 			return c.failedPass(ctx, op, err)
 		}
@@ -293,8 +290,12 @@ func (c Coordinator) Advance(ctx context.Context, op Operation) (Operation, erro
 // failedPass records a pass that could not observe the pull request or
 // enqueue its head. A transient failure, or a merge landing between the read
 // and the write, settles on a later pass; one that persists for
-// FailuresBeforeEscalation consecutive passes is escalated once.
+// FailuresBeforeEscalation consecutive passes is escalated once. A permanent
+// one fails the head at once: escalated once and never repeated.
 func (c Coordinator) failedPass(ctx context.Context, op Operation, cause error) (Operation, error) {
+	if errors.Is(cause, ErrPermanent) {
+		return c.fail(ctx, op, cause, false)
+	}
 	if op.Failures++; op.Failures == FailuresBeforeEscalation {
 		op.Escalate(fmt.Sprintf("its merge stage failed %d passes in a row: %v", op.Failures, cause))
 	}
