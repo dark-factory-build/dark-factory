@@ -31,9 +31,10 @@ const (
 // request, a pull request factoryd escalated while it stays open at the
 // escalated head, the newest self-release while it failed); a succeeded worker
 // task needs one look. A failed release is keyed by its cause (its phase and
-// its reason up to the first colon) and dated by the first consecutive failure
-// with that cause, so a retry failing the same way is the same item: it wakes
-// once, never re-wakes, and so becomes one NEEDS YOU card. An accepted intake
+// its reason up to the first colon) and dated just after the newest release
+// record in any other state or cause, which a retry of the same commit cannot
+// overwrite, so a retry failing the same way is the same item: it wakes once,
+// never re-wakes, and so becomes one NEEDS YOU card. An accepted intake
 // task that succeeded with a diff needs none: factoryd publishes it, and the
 // Change item covers a publication that never happens. While factoryd records
 // that Change revision's publication refused, the item is that refusal, at the
@@ -97,7 +98,7 @@ item AS (
 	WHERE e.project_id = ?1 AND e.kind = 'reviewer' AND COALESCE(json_extract(e.document, '$.escalation'), '') <> ''
 	  AND COALESCE(json_extract(e.document, '$.route_pending'), 0) = 0 AND json_extract(p.document, '$.state') = 'open'
 	  AND lower(json_extract(p.document, '$.head')) = lower(json_extract(e.document, '$.request.Head'))
-	UNION ALL SELECT NULL, (SELECT MIN(f.at) FROM release AS f WHERE f.at > COALESCE((SELECT MAX(o.at) FROM release AS o WHERE o.failure IS NOT d.failure), 0)), 0,
+	UNION ALL SELECT NULL, COALESCE((SELECT MAX(o.at) FROM release AS o WHERE o.failure IS NOT d.failure), 0) + 1, 0,
 	  printf('Escalated: factoryd %s failed in phase %s: %s', d.identity, d.phase, d.reason), '[release:' || substr(d.failure, 1, 80) || ']'
 	FROM (SELECT * FROM release ORDER BY at DESC LIMIT 1) AS d WHERE d.failure IS NOT NULL
 	UNION ALL SELECT NULL, c.created_at_ms, 3, 'Proposal ' || lower(hex(c.id)) || ' from ' || COALESCE((SELECT name FROM agents WHERE id = ` + authorAgentSQL + `), 'the operator') || ': '

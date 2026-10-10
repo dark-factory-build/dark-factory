@@ -210,8 +210,9 @@ func TestOverseerFailedReleaseEscalatesOncePerCause(t *testing.T) {
 		t.Fatalf("wake = %q", bodies)
 	}
 	settleCarrier(t, store, at+1, 31, "ran")
-	// The retries fail the same way behind other runs: no wake, one card.
-	for round, sha := range []byte{'b', 'c'} {
+	// The retries, including a manual one of the same commit, which overwrites
+	// its record, fail the same way behind other runs: no wake, one card.
+	for round, sha := range []byte{'a', 'b', 'c'} {
 		at += rewake
 		release(sha, "running", "build", "", at)
 		release(sha, "failed", "drain", fmt.Sprintf("drain_timeout: run %d is admitted", round+2), at+1)
