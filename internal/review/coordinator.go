@@ -263,9 +263,6 @@ func (c Coordinator) Advance(ctx context.Context, op Operation) (Operation, erro
 	}
 	observation := pullObservation(pull)
 	if op.Refused {
-		if op.OwnerApproval && observation == op.RefusedObservation {
-			return op, nil
-		}
 		op.Refused, op.RefusedObservation, op.OwnerApproval = false, "", false
 	}
 	// A pass that observes a changed pull resets the failure count and any escalation.

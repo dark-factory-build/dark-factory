@@ -327,8 +327,9 @@ func TestOwnerApprovalRefusalEscalatesOnce(t *testing.T) {
 	if !errors.Is(err, ErrOwnerApproval) || !op.Refused || !op.OwnerApproval || backend.enqueues != 0 || !strings.Contains(op.Escalation, "#7") || !strings.Contains(op.Escalation, ".github/workflows/ci.yml") {
 		t.Fatalf("owner approval refusal = %+v err=%v enqueues=%d", op, err, backend.enqueues)
 	}
-	if next, err := c.Advance(context.Background(), op); err != nil || backend.enqueues != 0 || next.Escalation != op.Escalation {
-		t.Fatalf("owner approval refusal retried: %+v err=%v enqueues=%d", next, err, backend.enqueues)
+	backend.enqueueErr = nil
+	if next, err := c.Advance(context.Background(), op); err != nil || backend.enqueues != 1 || next.Refused || next.OwnerApproval || next.Enqueues != 1 {
+		t.Fatalf("owner approval did not recover: %+v err=%v enqueues=%d", next, err, backend.enqueues)
 	}
 }
 
