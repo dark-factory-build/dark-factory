@@ -351,8 +351,8 @@ func (attempt *liveAttempt) stalled(now time.Time) bool {
 	return stalledRunLiveness(now, attempt.startedAt, attempt.lastTerminalOutputAt, attempt.lastAttemptAPICallAt, stalledRunLivenessThreshold)
 }
 
-// neverStarted reports whether this attempt has made no attempt call and, unless
-// its provider must call first, produced no terminal output.
+// neverStarted reports whether this attempt has made neither authenticated
+// attempt activity nor terminal output.
 func (attempt *liveAttempt) neverStarted() bool {
 	attempt.livenessMu.Lock()
 	defer attempt.livenessMu.Unlock()
@@ -360,7 +360,7 @@ func (attempt *liveAttempt) neverStarted() bool {
 }
 
 func (attempt *liveAttempt) neverStartedLocked() bool {
-	return !attempt.adopted && attempt.terminalOutputBytes == 0
+	return !attempt.adopted && attempt.lastAttemptAPICallAt.IsZero() && attempt.terminalOutputBytes == 0
 }
 
 func (attempt *liveAttempt) markStarted(at time.Time) {

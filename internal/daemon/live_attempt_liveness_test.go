@@ -133,6 +133,32 @@ func TestRunLivenessKeepsAttemptThatHasTerminalOutput(t *testing.T) {
 	}
 }
 
+func TestRunLivenessKeepsAttemptThatHasAPIActivity(t *testing.T) {
+	fixture := newDispatchFixture(t)
+	active := prepareActiveAttempt(t, fixture, 212)
+	ctx := context.Background()
+	session, found, err := fixture.store.TerminalSessionForRun(ctx, active.run.ID)
+	if err != nil || !found {
+		t.Fatalf("terminal session: found=%v err=%v", found, err)
+	}
+	started := time.UnixMilli(10_000)
+	attempt := newLiveAttempt(fixture.daemon, active.run.ID, session.ID, nil)
+	attempt.markStarted(started)
+	attempt.markAttemptAPICall(started.Add(firstOutputBudget - time.Second))
+	if err := fixture.daemon.registerLiveAttempt(attempt); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { fixture.daemon.unregisterLiveAttempt(active.run.ID, attempt) })
+	fixture.daemon.livenessClock = func() time.Time { return started.Add(firstOutputBudget) }
+	if err := fixture.daemon.enforceRunLiveness(ctx, SupervisorSpec{}); err != nil {
+		t.Fatal(err)
+	}
+	run, _, _ := fixture.store.Run(ctx, active.run.ID)
+	if run.Phase != kernel.RunRunning {
+		t.Fatalf("attempt API activity kept run alive = %+v", run)
+	}
+}
+
 // Concurrent attempt API calls can record their timestamps out of order. An
 // older one must not move liveness backwards and report a false stall.
 func TestLivenessTimestampsNeverMoveBackwards(t *testing.T) {
