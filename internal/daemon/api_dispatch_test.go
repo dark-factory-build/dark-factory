@@ -596,7 +596,7 @@ func TestDaemonDispatchesSendBackThroughBothDomains(t *testing.T) {
 	}
 	waitDispatch(t, done)
 	done = fixture.serve(t)
-	if _, err := operator.EnqueueTask(ctx, api.EnqueueTaskInput{ID: claudeTask, ProjectID: active.run.ProjectID.String(), AssignedAgentID: claude, IncarnationID: testID(63), Title: "typed", Body: strings.Repeat("x", runner.MaxProviderTaskBytes-1024)}); err != nil {
+	if _, err := operator.EnqueueTask(ctx, api.EnqueueTaskInput{ID: claudeTask, ProjectID: active.run.ProjectID.String(), AssignedAgentID: claude, IncarnationID: testID(63), Title: "typed", Body: strings.Repeat("x", runner.MaxProviderTaskBytes-100)}); err != nil {
 		t.Fatal(err)
 	}
 	waitDispatch(t, done)
