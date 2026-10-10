@@ -32,14 +32,23 @@ test("fixture server advertises only after binding and has a bounded lifecycle",
 
 function spawnPreview() {
   const child = spawn(process.execPath, [preview, "fixture"]);
-  let stdoutValue = "";
-  let stderrValue = "";
-  child.stdout.on("data", (chunk) => { stdoutValue += chunk; });
-  child.stderr.on("data", (chunk) => { stderrValue += chunk; });
+  const stdout = captureOutput(child.stdout, child, "stdout");
+  const stderr = captureOutput(child.stderr, child, "stderr");
   return {
-    stdout: new Promise((resolve) => child.stdout.once("data", () => resolve(stdoutValue))),
-    stderr: new Promise((resolve) => child.stderr.once("data", () => resolve(stderrValue))),
-    get stdoutValue() { return stdoutValue; },
+    stdout: stdout.promise,
+    stderr: stderr.promise,
+    get stdoutValue() { return stdout.value; },
     kill: (signal) => child.kill(signal),
   };
+}
+
+function captureOutput(stream, child, label) {
+  let value = "";
+  const promise = new Promise((resolve, reject) => {
+    const fail = () => reject(new Error(`${label} closed before producing output`));
+    child.once("error", fail);
+    stream.once("close", fail);
+    stream.on("data", (chunk) => { value += chunk; resolve(value); });
+  });
+  return { promise, get value() { return value; } };
 }
