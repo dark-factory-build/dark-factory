@@ -212,6 +212,9 @@ type RuntimePaths struct {
 	// environment still has no Git credential helper, SSH or prompt.
 	gitCommonDir         string
 	gitCommonDirWritable bool
+	// projectGitDirs are the project's other repositories' Git directories,
+	// read by an orchestrator publishing a Change made in one of them.
+	projectGitDirs []string
 	// traceReceiverPort is factoryd's loopback OTLP listener; zero exports
 	// nothing. telemetryRunID names the run in the agent CLI's own telemetry
 	// resource; empty leaves that telemetry off.
@@ -231,12 +234,15 @@ func (runtime RuntimePaths) WithLocalCILeaseDirectory(path string) (RuntimePaths
 
 // WithGitCommonDirectory grants the project repository's Git directory to
 // local commands: writable for a worker committing on its Change branch,
-// read-only for an orchestrator reading a settled Change's commits.
-func (runtime RuntimePaths) WithGitCommonDirectory(path string, writable bool) (RuntimePaths, error) {
-	if !validAbsolute(path, maxPathBytes) || filepath.Base(path) != ".git" || path == runtime.home || path == runtime.temp {
-		return RuntimePaths{}, ErrInvalid
+// read-only for an orchestrator reading a settled Change's commits. The
+// project's other repositories' Git directories are granted read-only.
+func (runtime RuntimePaths) WithGitCommonDirectory(path string, writable bool, project ...string) (RuntimePaths, error) {
+	for _, dir := range append([]string{path}, project...) {
+		if !validAbsolute(dir, maxPathBytes) || filepath.Base(dir) != ".git" || dir == runtime.home || dir == runtime.temp {
+			return RuntimePaths{}, ErrInvalid
+		}
 	}
-	runtime.gitCommonDir, runtime.gitCommonDirWritable = path, writable
+	runtime.gitCommonDir, runtime.gitCommonDirWritable, runtime.projectGitDirs = path, writable, slices.Clone(project)
 	return runtime, nil
 }
 
@@ -810,6 +816,9 @@ func sandboxGrants(request Request) []grant {
 			// the worktree) so its index, HEAD and logs stay writable for commits.
 			grants = append(grants, grant{filepath.Join(request.runtime.gitCommonDir, "worktrees", filepath.Base(request.workingDirectory)), true})
 		}
+	}
+	for _, path := range request.runtime.projectGitDirs {
+		grants = append(grants, grant{path, false})
 	}
 	return grants
 }
