@@ -29,10 +29,15 @@ const (
 // overseer acts on it (a blocked or failed worker task, an unanswered worker
 // question, finished work not yet published or corrected behind its open pull
 // request, a pull request factoryd escalated while it stays open at the
-// escalated head); a succeeded worker task needs one look. An accepted intake
-// task that succeeded with a diff (or whose published Change was since
-// reclaimed) needs none: factoryd publishes it, and the
-// Change item covers a publication that never happens. While factoryd records
+// escalated head, the newest self-release while it failed or retries a
+// failure); a succeeded worker task needs one look. A failed release is
+// keyed by its cause and dated by when it first failed so, which factoryd
+// carries over every release that fails the same way, a same-commit retry
+// included (RecordDelivery): it wakes once, never re-wakes, and so becomes
+// one NEEDS YOU card. An accepted intake task that succeeded with a diff (or
+// whose published Change was since reclaimed) needs none: factoryd publishes
+// it, and the Change item covers a publication that never happens. While
+// factoryd records
 // that Change revision's publication refused, the item is that refusal, at the
 // Change's version however often the hourly retry repeats it. An intake task the
 // overseer could retry (an automatic end) is an item too; an operator's cancel
@@ -91,6 +96,12 @@ item AS (
 	WHERE e.project_id = ?1 AND e.kind = 'reviewer' AND COALESCE(json_extract(e.document, '$.escalation'), '') <> ''
 	  AND COALESCE(json_extract(e.document, '$.route_pending'), 0) = 0 AND json_extract(p.document, '$.state') = 'open'
 	  AND lower(json_extract(p.document, '$.head')) = lower(json_extract(e.document, '$.request.Head'))
+	UNION ALL SELECT NULL, COALESCE(json_extract(d.document, '$.failed_at'), d.observed_at_ms), 0, CASE json_extract(d.document, '$.state')
+	  WHEN 'failed' THEN printf('Escalated: factoryd %s failed in phase %s: %s', d.identity, json_extract(d.document, '$.phase'), replace(json_extract(d.document, '$.reason'), char(10), ' '))
+	  ELSE printf('Escalated: factoryd %s is %s after a release failed in phase %s', d.identity, json_extract(d.document, '$.state'), replace(json_extract(d.document, '$.cause'), char(10), ' ')) END,
+	  '[release:' || lower(hex(json_extract(d.document, '$.cause'))) || ']'
+	FROM (SELECT * FROM production_records WHERE project_id = ?1 AND kind = 'delivery' AND identity LIKE 'release:%' ORDER BY observed_at_ms DESC LIMIT 1) AS d
+	WHERE json_extract(d.document, '$.state') <> 'verified' AND COALESCE(json_extract(d.document, '$.cause'), '') <> ''
 	UNION ALL SELECT NULL, c.created_at_ms, 3, 'Proposal ' || lower(hex(c.id)) || ' from ' || COALESCE((SELECT name FROM agents WHERE id = ` + authorAgentSQL + `), 'the operator') || ': '
 		|| replace(substr(c.title, 1, 100), char(10), ' ') || ` + proposalNotesSQL + `, '[proposal:' || lower(hex(c.id)) || ']'
 	FROM project_content_revisions AS c WHERE c.project_id = ?1 AND ` + openProposalSQL + `),

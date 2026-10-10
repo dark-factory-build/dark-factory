@@ -134,8 +134,8 @@ instruction configured, factoryd keeps one wake task at the head of your
 queue while any item needs you: a finished (except an intake task with a diff,
 which factoryd publishes), blocked or failed worker task, an
 unanswered worker question, unpublished or corrected work, or a pull request
-factoryd escalated. An item you leave unhandled is woken again at most three
-times (a publish failure never), 30 minutes apart, until it changes; only wakes that named it (or
+factoryd escalated, or the failed self-release. An item you leave unhandled is woken again at most three
+times (a publish failure or failed release never), 30 minutes apart, until it changes; only wakes that named it (or
 named no item at all) and actually started count. Half an hour after its last wake, factoryd raises a
 NEEDS YOU card naming what is still unresolved. Only a human answers it, so
 your status never lists it: the operator's reply (console or `factoryctl human
