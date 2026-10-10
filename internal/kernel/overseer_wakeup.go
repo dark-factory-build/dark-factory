@@ -608,8 +608,5 @@ func overseerWakeInstruction(provider Provider, instruction, counts string, line
 
 func wakeBodyFits(provider Provider, body string) bool {
 	limit := runner.MaxProviderTaskBytes
-	if provider != ProviderShell {
-		limit = runner.MaxNativeTaskBytes
-	}
 	return byteLen(body) <= limit
 }

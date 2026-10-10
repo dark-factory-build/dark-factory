@@ -147,6 +147,12 @@ func runProvider(ctx context.Context) (resultErr error) {
 			return err
 		}
 	}
+	if config.Provider != kernel.ProviderShell {
+		if err := os.WriteFile(filepath.Join(runtimePaths.home, "factory-task"), config.ProviderTask, 0o600); err != nil {
+			_ = cwd.Close()
+			return err
+		}
+	}
 	launch, err := provider.Build(request)
 	if err != nil {
 		_ = cwd.Close()
@@ -196,19 +202,12 @@ func runProvider(ctx context.Context) (resultErr error) {
 			resultErr = errors.Join(resultErr, task.Close())
 		}
 	}()
-	// Retain the descriptor-bound runtime authority until exec. Its members are
-	// CLOEXEC, so a successful provider image receives none of them; a failed
-	// exec returns through the ordinary defer and closes them. Shell's task is
-	// unlinked and read-only; the attempt runner separately owns Claude startup,
-	// while Codex receives no task-bearing descriptor.
+	// Retain descriptor-bound authority until exec; its members are CLOEXEC.
 	if err := authority.verify(ctx); err != nil {
 		_ = cwd.Close()
 		return fmt.Errorf("runtime authority verification: %w", err)
 	}
-	// The one effect outside the runtime, so it is the last thing this
-	// process does before handing over to exec. The runner's own pre-exec
-	// checks can still refuse; a record left for a Change that never ran
-	// names a directory only the daemon makes, and costs nothing else.
+	// Trust the Claude project immediately before handing over to exec.
 	if config.Provider == kernel.ProviderClaudeCode {
 		if err := provider.TrustClaudeDirectory(runtimePaths, publishedPath); err != nil {
 			_ = cwd.Close()
