@@ -6,8 +6,6 @@ import (
 	"reflect"
 	"strings"
 	"testing"
-
-	"github.com/dark-factory-build/dark-factory/internal/runner"
 )
 
 // Pausing an agent through the console must actually stop dispatch: the
@@ -410,7 +408,7 @@ func TestIdlePolicyWriteUsesProviderDeliveryBound(t *testing.T) {
 	defer store.Close()
 	ctx := context.Background()
 	policy, after, budget := IdleStandingInstruction, uint32(60), uint32(3)
-	over := strings.Repeat("x", runner.MaxNativeTaskBytes+1)
+	over := strings.Repeat("x", maxIdleInstruction+1)
 	if _, err := store.UpdateAgent(ctx, worker.ID, worker.Revision, AgentPatch{IdlePolicy: &policy, IdleAfterSeconds: &after, IdleInstruction: &over, IdleRunBudget: &budget}, mustTime(t, 6)); !errors.Is(err, ErrInvalidValue) {
 		t.Fatalf("oversized Codex instruction = %v", err)
 	}
@@ -418,7 +416,7 @@ func TestIdlePolicyWriteUsesProviderDeliveryBound(t *testing.T) {
 	if err != nil || !found || unchanged.Revision != worker.Revision || unchanged.Idle != worker.Idle {
 		t.Fatalf("oversized edit changed stored rule = %+v, found=%v, err=%v", unchanged, found, err)
 	}
-	boundary := strings.Repeat("x", runner.MaxNativeTaskBytes)
+	boundary := strings.Repeat("x", maxIdleInstruction)
 	updated, err := store.UpdateAgent(ctx, worker.ID, worker.Revision, AgentPatch{IdlePolicy: &policy, IdleAfterSeconds: &after, IdleInstruction: &boundary, IdleRunBudget: &budget}, mustTime(t, 7))
 	if err != nil || updated.Idle.Instruction != boundary {
 		t.Fatalf("Codex boundary instruction = %+v, %v", updated.Idle, err)

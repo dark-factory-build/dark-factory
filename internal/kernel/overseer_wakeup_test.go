@@ -331,7 +331,7 @@ func TestOverseerWakeSummarisesTasks(t *testing.T) {
 func TestOverseerWakeInstructionFallsBackToFull(t *testing.T) {
 	t.Parallel()
 	line := "- " + strings.Repeat("x", 200)
-	lines := make([]string, 50) // > 8 KiB with Codex
+	lines := make([]string, MaxContinuationTaskBytes/len(line)+1)
 	for index := range lines {
 		lines[index] = line
 	}

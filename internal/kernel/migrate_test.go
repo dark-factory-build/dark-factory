@@ -179,19 +179,19 @@ func snapshotRows(t *testing.T, ctx context.Context, connection *sql.Conn) map[s
 func TestSchemaDigestsArePinned(t *testing.T) {
 	t.Parallel()
 	sum := sha256.Sum256([]byte(strings.Join(schemaStatements, "\n")))
-	if got := hex.EncodeToString(sum[:]); got != "97d786b424ca0c3097e97738821298f75b60f3a29c49629fdc47de5dba623268" {
+	if got := hex.EncodeToString(sum[:]); got != "0c6127471419ccacc641fe9fd99e6499cca04953c16bf8ee01063303c913f455" {
 		t.Errorf("current schema digest = %s", got)
 	}
 	sum = sha256.Sum256([]byte(strings.Join(legacySchemaStatements(v39UserVersion), "\n")))
-	if got := hex.EncodeToString(sum[:]); got != "3a54481cb3246bb70309c06135c4b61d5efc739bcf5c38b6432aa4b698f5f25b" {
+	if got := hex.EncodeToString(sum[:]); got != "e87322562dd366beb90686dfccaef1b774a7efb16484c73d7dbbd4e7c450c96f" {
 		t.Errorf("v39 schema digest = %s", got)
 	}
 	sum = sha256.Sum256([]byte(strings.Join(legacySchemaStatements(v38UserVersion), "\n")))
-	if got := hex.EncodeToString(sum[:]); got != "29c9a3043f03be927336f6331f7c7ce24bcab875fb4607fc55003b688739fc2e" {
+	if got := hex.EncodeToString(sum[:]); got != "806d5de1881f58485c464952a474afa3ebd7dfa8add9dc6c5f895fd6d46c6577" {
 		t.Errorf("v38 schema digest = %s", got)
 	}
 	sum = sha256.Sum256([]byte(strings.Join(legacySchemaStatements(v37UserVersion), "\n")))
-	if got := hex.EncodeToString(sum[:]); got != "819c191d4e411ad35a2f7cf19db739d0492d0f8cf1c9c5fe0bd50a5197b5bb6c" {
+	if got := hex.EncodeToString(sum[:]); got != "db3b7cd9be9a606d71aead0fed528f04a8264e8502f175acebe1e50863312367" {
 		t.Errorf("v37 schema digest = %s", got)
 	}
 }

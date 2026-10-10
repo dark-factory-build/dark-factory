@@ -11,8 +11,6 @@ import (
 	"slices"
 	"strings"
 	"time"
-
-	"github.com/dark-factory-build/dark-factory/internal/runner"
 )
 
 // An overseer's wake carrier is its standing instruction at the head of its
@@ -607,6 +605,6 @@ func overseerWakeInstruction(provider Provider, instruction, counts string, line
 }
 
 func wakeBodyFits(provider Provider, body string) bool {
-	limit := runner.MaxProviderTaskBytes
+	limit := MaxContinuationTaskBytes
 	return byteLen(body) <= limit
 }
