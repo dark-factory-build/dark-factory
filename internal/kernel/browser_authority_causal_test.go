@@ -582,13 +582,6 @@ func TestBrowserConcurrentRedemptionAndDuplicateFingerprintConsumes(t *testing.T
 	if !consumed.Valid {
 		t.Fatal("duplicate fingerprint did not consume challenge")
 	}
-	var duplicates int
-	if err := store.readers.QueryRow(`SELECT COUNT(*) FROM browser_security_events WHERE kind = 'duplicate_fingerprint' AND client_id = ?`, clientID.Bytes()).Scan(&duplicates); err != nil {
-		t.Fatal(err)
-	}
-	if duplicates != 1 {
-		t.Fatalf("duplicate fingerprint events = %d", duplicates)
-	}
 }
 
 func TestBrowserKeyValidationAndClientIDCollisionRollback(t *testing.T) {
@@ -643,109 +636,7 @@ func mustECDSAPoint(t *testing.T, publicKey []byte) (*big.Int, *big.Int) {
 	return x, y
 }
 
-func TestBrowserSecurityEventsArePrivateBoundedAndGapSafe(t *testing.T) {
-	t.Parallel()
-	ctx := context.Background()
-	store, _ := newBrowserStore(t)
-	defer store.Close()
-	digest := mintBrowserChallenge(t, store, 80, browserTestBoot(t, 80), 10, 100, BrowserCapabilityObserve)
-	secret := []byte("browser raw challenge private sentinel")
-	key := browserKey(t)
-	if _, err := store.RedeemBrowserPairingChallenge(ctx, digest, browserTestBoot(t, 80), "https://app.example", browserTestID(t, 80), key, mustTime(t, 11)); err != nil {
-		t.Fatal(err)
-	}
-	var rawDigestMatches, secretEvents int
-	if err := store.readers.QueryRow(`SELECT COUNT(*) FROM browser_pairing_challenges WHERE secret_digest = ?`, secret).Scan(&rawDigestMatches); err != nil {
-		t.Fatal(err)
-	}
-	if err := store.readers.QueryRow(`SELECT COUNT(*) FROM browser_security_events WHERE kind NOT IN ('challenge_minted', 'challenge_abandoned', 'client_paired', 'duplicate_fingerprint', 'client_revoked')`).Scan(&secretEvents); err != nil {
-		t.Fatal(err)
-	}
-	if rawDigestMatches != 0 || secretEvents != 0 {
-		t.Fatalf("private event payload leaked: raw=%d invalid=%d", rawDigestMatches, secretEvents)
-	}
-	var eventKeyMatches int
-	if err := store.readers.QueryRow(`SELECT COUNT(*) FROM browser_security_events WHERE client_id = ?`, key).Scan(&eventKeyMatches); err != nil {
-		t.Fatal(err)
-	}
-	if eventKeyMatches != 0 {
-		t.Fatal("browser security events stored public key bytes")
-	}
-
-	connection, err := store.writer.Conn(ctx)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, err := connection.ExecContext(ctx, `DELETE FROM browser_security_events`); err != nil {
-		connection.Close()
-		t.Fatal(err)
-	}
-	for index := 0; index < EventRetentionLimit+1; index++ {
-		if _, err := connection.ExecContext(ctx, `INSERT INTO browser_security_events(kind, client_id, occurred_at_ms) VALUES('challenge_minted', NULL, ?)`, int64(index+1)); err != nil {
-			connection.Close()
-			t.Fatal(err)
-		}
-	}
-	if err := insertBrowserSecurityEvent(ctx, connection, BrowserSecurityChallengeMinted, nil, mustTime(t, 5000)); err != nil {
-		connection.Close()
-		t.Fatal(err)
-	}
-	if err := connection.Close(); err != nil {
-		t.Fatal(err)
-	}
-	if got := browserTableCount(t, store, "browser_security_events"); got != EventRetentionLimit {
-		t.Fatalf("security event retention = %d, want %d", got, EventRetentionLimit)
-	}
-	var minimum, maximum int64
-	if err := store.readers.QueryRow(`SELECT MIN(sequence), MAX(sequence) FROM browser_security_events`).Scan(&minimum, &maximum); err != nil {
-		t.Fatal(err)
-	}
-	if minimum != 5 || maximum != int64(EventRetentionLimit+4) {
-		t.Fatalf("gap-safe retained sequence = %d..%d", minimum, maximum)
-	}
-}
-
-func TestBrowserPairingSecurityEventFailureAndSequenceOverflowRollBack(t *testing.T) {
-	t.Parallel()
-	ctx := context.Background()
-	store, _ := newBrowserStore(t)
-	defer store.Close()
-	if _, err := store.writer.Exec(`CREATE TRIGGER suppress_browser_security_insert BEFORE INSERT ON browser_security_events BEGIN SELECT RAISE(IGNORE); END`); err != nil {
-		t.Fatal(err)
-	}
-	beforeChallenges := browserTableCount(t, store, "browser_pairing_challenges")
-	beforeEvents := browserTableCount(t, store, "browser_security_events")
-	if _, err := store.CreateBrowserPairingChallenge(ctx, HashBrowserChallenge([]byte("suppressed event")), browserTestBoot(t, 81), "https://app.example", BrowserCapabilityObserve, mustTime(t, 10), mustTime(t, 20)); !errors.Is(err, ErrRevisionConflict) {
-		t.Fatalf("suppressed security event error = %v", err)
-	}
-	if browserTableCount(t, store, "browser_pairing_challenges") != beforeChallenges || browserTableCount(t, store, "browser_security_events") != beforeEvents {
-		t.Fatal("suppressed event left pairing transaction footprint")
-	}
-	if _, err := store.writer.Exec(`DROP TRIGGER suppress_browser_security_insert`); err != nil {
-		t.Fatal(err)
-	}
-	mintBrowserChallenge(t, store, 81, browserTestBoot(t, 81), 10, 20, BrowserCapabilityObserve)
-
-	if _, err := store.writer.Exec(`UPDATE sqlite_sequence SET seq = ? WHERE name = 'browser_security_events'`, int64(^uint64(0)>>1)); err != nil {
-		t.Fatal(err)
-	}
-	var sequenceBefore int64
-	if err := store.readers.QueryRow(`SELECT seq FROM sqlite_sequence WHERE name = 'browser_security_events'`).Scan(&sequenceBefore); err != nil {
-		t.Fatal(err)
-	}
-	if sequenceBefore != int64(^uint64(0)>>1) {
-		t.Fatalf("sequence before overflow = %d", sequenceBefore)
-	}
-	beforeChallenges = browserTableCount(t, store, "browser_pairing_challenges")
-	if _, err := store.CreateBrowserPairingChallenge(ctx, HashBrowserChallenge([]byte("overflow event")), browserTestBoot(t, 82), "https://app.example", BrowserCapabilityObserve, mustTime(t, 20), mustTime(t, 30)); err == nil {
-		t.Fatal("security sequence overflow succeeded")
-	}
-	if browserTableCount(t, store, "browser_pairing_challenges") != beforeChallenges {
-		t.Fatal("security sequence overflow left challenge")
-	}
-}
-
-func TestBrowserRevokeExpectedRevisionAndNoDuplicateEvent(t *testing.T) {
+func TestBrowserRevokeExpectedRevision(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
 	store, _ := newBrowserStore(t)
@@ -774,13 +665,6 @@ func TestBrowserRevokeExpectedRevisionAndNoDuplicateEvent(t *testing.T) {
 	if _, err := store.RevokeBrowserClient(ctx, id, client.Revision, mustTime(t, 13)); !errors.Is(err, ErrRevisionConflict) {
 		t.Fatalf("old-revision replay error = %v", err)
 	}
-	var events int
-	if err := store.readers.QueryRow(`SELECT COUNT(*) FROM browser_security_events WHERE kind = 'client_revoked' AND client_id = ?`, id.Bytes()).Scan(&events); err != nil {
-		t.Fatal(err)
-	}
-	if events != 1 {
-		t.Fatalf("client revoked events = %d", events)
-	}
 }
 
 func TestBrowserAuthorityRawCorruptionFailsClosed(t *testing.T) {
@@ -789,26 +673,6 @@ func TestBrowserAuthorityRawCorruptionFailsClosed(t *testing.T) {
 		name   string
 		mutate func(*testing.T, *Store)
 	}{
-		{
-			name: "event challenge kind requires null client",
-			mutate: func(t *testing.T, store *Store) {
-				boot := browserTestBoot(t, 100)
-				digest := mintBrowserChallenge(t, store, 100, boot, 10, 100, BrowserCapabilityObserve)
-				id := browserTestID(t, 100)
-				pairBrowserClient(t, store, digest, boot, id, browserKey(t), 11)
-				corruptSQL(t, store, `UPDATE browser_security_events SET kind = 'client_paired', client_id = NULL WHERE sequence = (SELECT MIN(sequence) FROM browser_security_events)`)
-			},
-		},
-		{
-			name: "event client kind requires nonnull client",
-			mutate: func(t *testing.T, store *Store) {
-				boot := browserTestBoot(t, 101)
-				digest := mintBrowserChallenge(t, store, 101, boot, 10, 100, BrowserCapabilityObserve)
-				id := browserTestID(t, 101)
-				pairBrowserClient(t, store, digest, boot, id, browserKey(t), 11)
-				corruptSQL(t, store, `UPDATE browser_security_events SET client_id = NULL WHERE kind = 'client_paired'`)
-			},
-		},
 		{
 			name: "unknown client mask",
 			mutate: func(t *testing.T, store *Store) {
@@ -1443,13 +1307,6 @@ func TestRevokeBrowserClientAtomicallyClearsMultipleLeases(t *testing.T) {
 	}
 	if afterFactory.Head != beforeFactory.Head || afterFactory.Revision != beforeFactory.Revision {
 		t.Fatalf("revocation emitted lifecycle invalidation: before=%+v after=%+v", beforeFactory, afterFactory)
-	}
-	var events int
-	if err := store.readers.QueryRow(`SELECT COUNT(*) FROM browser_security_events WHERE kind = 'client_revoked' AND client_id = ?`, client.ID.Bytes()).Scan(&events); err != nil {
-		t.Fatal(err)
-	}
-	if events != 1 {
-		t.Fatalf("revocation event count = %d", events)
 	}
 	if _, err := store.AcquireTerminalLease(ctx, firstRun.ID, firstSession.ID, client.ID, firstRun.Revision, firstSession.Revision, mustTime(t, 33)); !errors.Is(err, ErrUnauthorized) {
 		t.Fatalf("revoked client reacquire error = %v", err)

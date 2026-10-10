@@ -585,7 +585,6 @@ func TestOpenFreshRollbackRequiresExactChronology(t *testing.T) {
 		"revision":               `UPDATE factory SET revision = 2`,
 		"head":                   `UPDATE factory SET next_invalidation_sequence = 2`,
 		"floor":                  `UPDATE factory SET next_invalidation_sequence = 2, invalidation_floor = 2`,
-		"retained sequence row":  `INSERT INTO sqlite_sequence(name, seq) VALUES('browser_security_events', 1)`,
 		"internal analyze state": `ANALYZE`,
 		"free pages":             `CREATE TABLE discarded(value BLOB); INSERT INTO discarded VALUES(zeroblob(32768)); DROP TABLE discarded`,
 	} {

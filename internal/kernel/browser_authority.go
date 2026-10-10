@@ -86,16 +86,6 @@ type BrowserClientCounts struct {
 	ActiveChallenges uint64
 }
 
-type BrowserSecurityEventKind string
-
-const (
-	BrowserSecurityChallengeMinted      BrowserSecurityEventKind = "challenge_minted"
-	BrowserSecurityChallengeAbandoned   BrowserSecurityEventKind = "challenge_abandoned"
-	BrowserSecurityClientPaired         BrowserSecurityEventKind = "client_paired"
-	BrowserSecurityDuplicateFingerprint BrowserSecurityEventKind = "duplicate_fingerprint"
-	BrowserSecurityClientRevoked        BrowserSecurityEventKind = "client_revoked"
-)
-
 func HashBrowserChallenge(raw []byte) BrowserChallengeDigest {
 	return BrowserChallengeDigestFromHash(sha256.Sum256(raw))
 }
@@ -168,9 +158,6 @@ func (store *Store) CreateBrowserPairingChallenge(ctx context.Context, digest Br
 	}
 	inserted, err := tx.connection.ExecContext(ctx, `INSERT INTO browser_pairing_challenges(secret_digest, boot_id, intended_origin, capability_mask, created_at_ms, expires_at_ms) VALUES(?, ?, ?, ?, ?, ?)`, digest.Bytes(), bootID.Bytes(), origin, int64(capabilities), created.Int64(), expires.Int64())
 	if err := requireOneRow(inserted, err); err != nil {
-		return BrowserPairingChallenge{}, tx.Rollback(err)
-	}
-	if err := insertBrowserSecurityEvent(ctx, tx.connection, BrowserSecurityChallengeMinted, nil, created); err != nil {
 		return BrowserPairingChallenge{}, tx.Rollback(err)
 	}
 	challenge, found, err := browserChallengeByDigest(ctx, tx.connection, digest)
@@ -262,12 +249,8 @@ func (store *Store) RedeemBrowserPairingChallenge(ctx context.Context, digest Br
 	var existingRaw []byte
 	err = tx.connection.QueryRowContext(ctx, `SELECT id FROM browser_clients WHERE fingerprint = ?`, fingerprint[:]).Scan(&existingRaw)
 	if err == nil {
-		existing, parseErr := BrowserClientIDFromBytes(existingRaw)
-		if parseErr != nil {
+		if _, parseErr := BrowserClientIDFromBytes(existingRaw); parseErr != nil {
 			return BrowserClient{}, tx.Rollback(ErrCorruptState)
-		}
-		if err := insertBrowserSecurityEvent(ctx, tx.connection, BrowserSecurityDuplicateFingerprint, &existing, at); err != nil {
-			return BrowserClient{}, tx.Rollback(err)
 		}
 		if err := tx.Commit(ctx); err != nil {
 			return BrowserClient{}, err
@@ -279,9 +262,6 @@ func (store *Store) RedeemBrowserPairingChallenge(ctx context.Context, digest Br
 	}
 	inserted, err := tx.connection.ExecContext(ctx, `INSERT INTO browser_clients(id, public_key, fingerprint, capability_mask, revision, created_at_ms, updated_at_ms) VALUES(?, ?, ?, ?, 1, ?, ?)`, clientID.Bytes(), publicKey, fingerprint[:], int64(challenge.CapabilityMask), at.Int64(), at.Int64())
 	if err := requireOneRow(inserted, err); err != nil {
-		return BrowserClient{}, tx.Rollback(err)
-	}
-	if err := insertBrowserSecurityEvent(ctx, tx.connection, BrowserSecurityClientPaired, &clientID, at); err != nil {
 		return BrowserClient{}, tx.Rollback(err)
 	}
 	client, found, err := browserClientByID(ctx, tx.connection, clientID)
@@ -455,46 +435,6 @@ func (store *Store) BrowserClientCounts(ctx context.Context, bootID BootID, at U
 	}
 	result.Active -= result.Revoked
 	return result, nil
-}
-
-func insertBrowserSecurityEvent(ctx context.Context, c *sql.Conn, kind BrowserSecurityEventKind, clientID *BrowserClientID, at UnixMillis) error {
-	if !validBrowserSecurityKind(kind) || isBrowserChallengeEvent(kind) != (clientID == nil) {
-		return fmt.Errorf("%w: invalid browser security event", ErrInvalidValue)
-	}
-	inserted, err := c.ExecContext(ctx, `INSERT INTO browser_security_events(kind, client_id, occurred_at_ms) VALUES(?, ?, ?)`, string(kind), nullableBrowserClient(clientID), at.Int64())
-	if err := requireOneRow(inserted, err); err != nil {
-		return err
-	}
-	_, err = c.ExecContext(ctx, `DELETE FROM browser_security_events WHERE sequence < COALESCE((SELECT sequence FROM browser_security_events ORDER BY sequence DESC LIMIT 1 OFFSET 4095), 0)`)
-	if err != nil {
-		return err
-	}
-	var count int64
-	if err := c.QueryRowContext(ctx, `SELECT COUNT(*) FROM browser_security_events`).Scan(&count); err != nil {
-		return err
-	}
-	if count > EventRetentionLimit {
-		return fmt.Errorf("%w: browser security event retention exceeded", ErrCorruptState)
-	}
-	return nil
-}
-func nullableBrowserClient(id *BrowserClientID) any {
-	if id == nil {
-		return nil
-	}
-	return id.Bytes()
-}
-func validBrowserSecurityKind(kind BrowserSecurityEventKind) bool {
-	switch kind {
-	case BrowserSecurityChallengeMinted, BrowserSecurityChallengeAbandoned, BrowserSecurityClientPaired, BrowserSecurityDuplicateFingerprint, BrowserSecurityClientRevoked:
-		return true
-	default:
-		return false
-	}
-}
-
-func isBrowserChallengeEvent(kind BrowserSecurityEventKind) bool {
-	return kind == BrowserSecurityChallengeMinted || kind == BrowserSecurityChallengeAbandoned
 }
 
 type TerminalLease struct {
@@ -847,9 +787,6 @@ func (store *Store) RevokeBrowserClient(ctx context.Context, id BrowserClientID,
 		if err := requireOneRow(updated, err); err != nil {
 			return BrowserClient{}, tx.Rollback(err)
 		}
-	}
-	if err := insertBrowserSecurityEvent(ctx, tx.connection, BrowserSecurityClientRevoked, &id, at); err != nil {
-		return BrowserClient{}, tx.Rollback(err)
 	}
 	client, _, err = browserClientByID(ctx, tx.connection, id)
 	if err != nil {
