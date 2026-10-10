@@ -2,6 +2,7 @@ package daemon
 
 import (
 	"context"
+	"errors"
 	"time"
 
 	"github.com/dark-factory-build/dark-factory/internal/api"
@@ -58,6 +59,11 @@ func (daemon *Daemon) RepositoryReadiness(ctx context.Context, id kernel.Reposit
 	}
 	expected := change.RepositorySourceIdentity{Root: root, Git: git, OriginDigest: source.OriginDigest, PublicationRepository: source.PublicationRepository}
 	if _, err := change.SelectRegisteredGit(bounded, change.TrustedGitExecutable, repository.Root, repository.BaseRef, expected); err != nil {
+		// A validation reason is closed and path-safe; Git's own stderr never
+		// leaves selection.
+		if invalid := (*change.ValidationError)(nil); errors.As(err, &invalid) {
+			result.ReadinessMessage = "Fetch check failed: " + invalid.Reason + ". " + result.ReadinessMessage
+		}
 		return result, nil
 	}
 	result.FetchState, result.ReadinessMessage = "ready", "The configured source is available through this checkout's Git setup."
