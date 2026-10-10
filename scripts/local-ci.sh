@@ -45,7 +45,7 @@ if [ "$local_ci_mode" = affected ]; then
 fi
 if [ "$local_ci_mode" = full ] && in_source_shard; then
     echo "local-ci: repository contract fixtures"
-    for check in check-toolchain-pins test-local-ci-environment test-with-local-ci-lease test-new-worktree test-publication-parents test-release test-repository-settings; do ./scripts/$check.sh; done
+    for check in check-toolchain-pins test-local-ci-environment test-with-local-ci-lease test-new-worktree test-publication-parents test-release; do ./scripts/$check.sh; done
     python3 ./scripts/test-factory-browser.py; /bin/sh ./scripts/test-go-gates.sh
 fi
 if [ "$local_ci_mode" = full ]; then

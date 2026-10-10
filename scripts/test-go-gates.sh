@@ -508,7 +508,6 @@ run_local_mode() {
 }
 run_local_mode --warm
 : >"$local_fixture/lease-calls"
-local_output=$(CDPATH= cd -- "$local_fixture" && DARK_FACTORY_LOCAL_CI_LEASE_HELD=1 \
 for selected_mode in --full --affected; do
     : >"$local_fixture/lease-calls"
     local_output=$(CDPATH= cd -- "$local_fixture" && DARK_FACTORY_LOCAL_CI_LEASE_HELD=0 \
