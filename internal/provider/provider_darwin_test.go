@@ -1699,17 +1699,23 @@ func TestCodexLocalCILeaseGrantExcludesGitMetadata(t *testing.T) {
 }
 
 // The one shared thing a Change worktree needs is the repository's Git
-// directory: a worker writes it, an orchestrator reads it, and nothing
-// else of the repository or the Changes parent is granted.
+// directory: a worker writes it, an orchestrator reads it and each other
+// project repository's, and nothing else of the repository or the Changes
+// parent is granted.
 func TestCodexLaunchGrantsTheRepositoryGitDirectoryByRole(t *testing.T) {
 	installation, runtime, _ := nativeFixture(t, kernel.ProviderCodex)
+	site := "/private/site/.git"
 	for _, writable := range []bool{true, false} {
 		request := requestFor(t, kernel.ProviderCodex, installation, runtime, "", "")
 		// A fresh Change's private Git, and its registration Git names after
 		// the worktree: Codex 0.160 makes it read-only unless granted itself.
 		gitDirectory := change.GitDirectoryForChange("/private/project", request.workingDirectory)
 		registration := filepath.Join(gitDirectory, "worktrees", filepath.Base(request.workingDirectory))
-		granted, err := runtime.WithGitCommonDirectory(gitDirectory, writable)
+		var project []string
+		if !writable {
+			project = []string{site}
+		}
+		granted, err := runtime.WithGitCommonDirectory(gitDirectory, writable, project...)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -1735,6 +1741,17 @@ func TestCodexLaunchGrantsTheRepositoryGitDirectoryByRole(t *testing.T) {
 		if strings.Contains(policy, tomlBasicString(registration)+`="write"`) != writable {
 			t.Fatalf("worktree registration write grant = %v, want %v: %q", !writable, writable, policy)
 		}
+		if strings.Contains(policy, tomlBasicString(site)+`="read"`) == writable || strings.Contains(policy, tomlBasicString(site)+`="write"`) {
+			t.Fatalf("other project repository grant wrong for writable=%v: %q", writable, policy)
+		}
+		// Claude renders the same grants.
+		settings, err := claudeSettings(request, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if strings.Contains(settings, `"Read(/`+site+`/**)"`) == writable || strings.Contains(settings, `"Edit(/`+site+`/**)"`) {
+			t.Fatalf("Claude other project repository grant wrong for writable=%v: %s", writable, settings)
+		}
 		if strings.Contains(policy, tomlBasicString("/private/project")+`="`) || strings.Contains(policy, tomlBasicString("/private/factory/changes")+`="`) {
 			t.Fatalf("Git directory grant widened: %q", policy)
 		}
@@ -1747,6 +1764,9 @@ func TestCodexLaunchGrantsTheRepositoryGitDirectoryByRole(t *testing.T) {
 	for _, bad := range []string{"relative", "/private/project", "/private/project/.git/", runtime.home} {
 		if _, err := runtime.WithGitCommonDirectory(bad, true); !errors.Is(err, ErrInvalid) {
 			t.Fatalf("Git directory %q = %v, want ErrInvalid", bad, err)
+		}
+		if _, err := runtime.WithGitCommonDirectory(site, false, bad); !errors.Is(err, ErrInvalid) {
+			t.Fatalf("project Git directory %q = %v, want ErrInvalid", bad, err)
 		}
 	}
 }
