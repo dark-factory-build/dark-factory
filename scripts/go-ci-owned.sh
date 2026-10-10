@@ -34,20 +34,6 @@ runs() {
 script_dir=$(CDPATH= cd -- "$(/usr/bin/dirname "$0")" && pwd -P)
 repository_root=$(CDPATH= cd -- "$script_dir/.." && pwd -P)
 CDPATH= cd -- "$repository_root"
-. "$script_dir/local-ci-environment.sh"
-. "$script_dir/go-gate-environment.sh"
-
-go_gate_supervisor_pid=
-go_gate_signal() {
-    signal=$1
-    trap - EXIT HUP INT TERM
-    go_gate_join_supervisor
-    exit $((128 + signal))
-}
-trap 'go_gate_signal 1' HUP
-trap 'go_gate_signal 2' INT
-trap 'go_gate_signal 15' TERM
-
 export GOTOOLCHAIN=local
 go=${DF_CI_GO-}
 [ -n "$go" ] || {
@@ -110,17 +96,17 @@ is_process_sensitive() {
 
 if [ -z "$cacheable_only" ] && runs source "$module/internal/change"; then
     echo "go-ci: Git boundary resource census"
-    go_gate_stage 1200 "$go" test -short -timeout=20m -count=1 ./internal/change
+    "$go" test -short -timeout=20m -count=1 ./internal/change
 fi
 
 if [ -z "$cacheable_only" ] && runs source "$module/internal/changeworker"; then
     echo "go-ci: Change worker process tests"
-    go_gate_stage 1200 "$go" test -short -timeout=20m -count=1 ./internal/changeworker
+    "$go" test -short -timeout=20m -count=1 ./internal/changeworker
 fi
 
 if [ -z "$cacheable_only" ] && runs daemon "$module/internal/daemon"; then
     echo "go-ci: daemon process tests"
-    go_gate_stage 1200 "$go" test -short -timeout=20m -count=1 ./internal/daemon
+    "$go" test -short -timeout=20m -count=1 ./internal/daemon
 fi
 
 if [ -z "$cacheable_only" ] || [ "$cacheable_only" = 1 ]; then
@@ -144,7 +130,7 @@ done
 if [ -z "$cacheable_only" ] && [ -n "$process_args" ]; then
     echo "go-ci: process-sensitive Go tests"
     # shellcheck disable=SC2086
-    go_gate_stage 1200 "$go" test -short -timeout=20m -count=1 $process_args
+    "$go" test -short -timeout=20m -count=1 $process_args
 fi
 if [ -n "$cacheable_args" ]; then
     echo "go-ci: cacheable Go tests"
@@ -155,6 +141,6 @@ fi
 
 if [ -z "$cacheable_only" ] && runs source "$module/internal/e2e"; then
     echo "go-ci: browser, daemon and runner E2E"
-    go_gate_stage 1500 "$script_dir/go-e2e.sh" all ${client_built:+"$client_built"}
+    "$script_dir/go-e2e.sh" all ${client_built:+"$client_built"}
 fi
 echo "go-ci: PASS"
