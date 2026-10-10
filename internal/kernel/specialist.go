@@ -399,3 +399,34 @@ func validateSpecialistRecord(ctx context.Context, c *sql.Conn, spec NewContent,
 	}
 	return nil
 }
+
+// attachSpecialistRecordTx delivers a contribution, amendment or review that
+// names an active task of the project by attaching it to that task's current
+// work revision, so its next run is supplied the record. A proposal is never
+// attached (attaching is accepting). A task that is terminal, or already at the
+// reference cap, is skipped: the record stands without the attachment.
+func attachSpecialistRecordTx(ctx context.Context, tx *writeTx, spec NewContent, at UnixMillis) error {
+	m, err := ParseKnowledgeMetadata(spec.SourceReferences)
+	if err != nil || spec.Kind != ContentObservation || m.TaskID == "" || m.RecordType != "contribution" && m.RecordType != "amendment" && m.RecordType != "review" {
+		return nil
+	}
+	raw, err := knowledgeID(m.TaskID)
+	if err != nil {
+		return nil
+	}
+	task, err := TaskIDFromBytes(raw)
+	if err != nil {
+		return nil
+	}
+	var work int64
+	if err := tx.connection.QueryRowContext(ctx, `SELECT work_revision FROM tasks WHERE id = ? AND project_id = ? AND status IN ('queued', 'running', 'blocked')`, raw, spec.ProjectID.Bytes()).Scan(&work); err != nil {
+		if err == sql.ErrNoRows {
+			return nil
+		}
+		return err
+	}
+	if err := attachContentTx(ctx, tx, task, spec.ProjectID, work, spec.ID, Revision{value: 1}, at, true); err != nil && !errors.Is(err, ErrConflict) && !errors.Is(err, ErrInvalidValue) {
+		return err
+	}
+	return nil
+}

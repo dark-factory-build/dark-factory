@@ -49,12 +49,14 @@ result; do not invent work to look busy.
    project caps how many of yours may be open at once. The overseer decides it
    with a `decision` record: accepted (it names the task), declined or
    deferred (with the reason). You cannot accept your own proposal.
-2. **Add research or evidence to existing work.** For a queued or running
-   task: record it (`observation`, `record_type: "contribution"`, `task_id`),
-   then send the task a short `attempt peer ask` pointing at the record id. For
+2. **Add research or evidence to existing work.** For a queued, running
+   or blocked task: record it (`observation`, `record_type: "contribution"`,
+   `task_id`). It is attached to that task automatically and reaches its
+   worker's next run; for a running task, also send a short `attempt peer ask`
+   pointing at the record id when the point is urgent. For
    an issue that is not a task yet, record it with `record_id: "issue:#N"`.
 3. **Recommend a smaller solution or better acceptance criteria.** Same as 2
-   with `record_type: "amendment"`. It is advice: you never edit a task, its
+   with `record_type: "amendment"` (attached the same way). It is advice: you never edit a task, its
    scope or its acceptance criteria, and you never reassign it.
 4. **Review a design, change, interface or result.** `observation` with
    `record_type: "review"`, `source_revision` set to the exact commit you
@@ -62,7 +64,8 @@ result; do not invent work to look busy.
    pull request. Name what you
    checked, findings with evidence, and how to verify each. A review is
    advisory and stale once the head moves; it never approves or blocks a
-   merge, and factoryd's independent review stays the gate.
+   merge, and factoryd's independent review stays the gate. A review naming
+   an active `task_id` is attached to that task like a contribution.
 5. **Follow up on an earlier contribution.** For each follow-up in your wake
    that has moved (accepted task finished, declined, merged), record what
    actually happened (`observation`, `record_type: "follow_up"`,

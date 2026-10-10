@@ -142,7 +142,7 @@ func (daemon *Daemon) knowledgeContext(ctx context.Context, run kernel.Run, task
 	if err != nil {
 		return nil, err
 	}
-	references, err := daemon.store.TaskContentReferences(ctx, run.ProjectID, run.TaskID, run.AdmittedTaskWorkRevision)
+	references, err := daemon.store.TaskContentReferencesCarried(ctx, run.ProjectID, run.TaskID, run.AdmittedTaskWorkRevision)
 	if err != nil {
 		return nil, err
 	}
@@ -347,18 +347,19 @@ func renderKnowledgeAttachments(kind kernel.Provider, refs []kernel.TaskContentR
 	text := "\n" + prefix + "Explicit document revisions (references, not assumed applicable):"
 	accesses := make([]kernel.ContentAccess, 0, len(refs))
 	for _, ref := range refs {
-		text += " " + fmt.Sprintf("%s@%d", ref.ContentID, ref.ContentRevision.Int64())
+		item := " " + fmt.Sprintf("%s@%d", ref.ContentID, ref.ContentRevision.Int64())
+		if len(text)+len(item)+1 > knowledgeAttachmentBytes {
+			break // refs are newest first; the oldest are dropped
+		}
+		text += item
 		accesses = append(accesses, kernel.ContentAccess{ContentID: ref.ContentID, ContentRevision: ref.ContentRevision, Kind: "supplied"})
 	}
 	text += "\n"
-	if len(text) > knowledgeAttachmentBytes {
-		return nil, nil, kernel.ErrInvalidValue
-	}
 	return []byte(text), accesses, nil
 }
 
 func (daemon *Daemon) knowledgeAttachmentManifest(ctx context.Context, run kernel.Run) ([]byte, []kernel.ContentAccess, error) {
-	refs, err := daemon.store.TaskContentReferences(ctx, run.ProjectID, run.TaskID, run.AdmittedTaskWorkRevision)
+	refs, err := daemon.store.TaskContentReferencesCarried(ctx, run.ProjectID, run.TaskID, run.AdmittedTaskWorkRevision)
 	if err != nil {
 		return nil, nil, err
 	}

@@ -568,3 +568,37 @@ func TestBoardActivityReportsTwoAgentsRecordedOperations(t *testing.T) {
 		t.Fatalf("conclusion activity: %v", activity)
 	}
 }
+
+// A record attached at work revision 1 still reaches the run of a task that
+// was sent back to revision 2.
+func TestKnowledgeAttachmentCarriesToCorrectedRun(t *testing.T) {
+	f := newDispatchFixture(t)
+	ctx := context.Background()
+	var lesson kernel.ContentRevision
+	active := prepareActiveAttemptInProjectWithProvider(t, f, 61, testID(61), "worker", "codex", func() {
+		project, _ := decodeID(testID(61), kernel.ProjectIDFromBytes)
+		lesson = seedContextKnowledge(t, f, project, 180, kernel.ContentLesson, kernel.KnowledgeMetadata{Status: "current", Evidence: []string{"review: finding"}}, "Carry me to the correction.")
+		operator, err := api.NewOperatorClient(f.socket, f.operator)
+		if err != nil {
+			t.Fatal(err)
+		}
+		done := f.serve(t)
+		if _, err = operator.EnqueueTask(ctx, api.EnqueueTaskInput{ID: testID(63), ProjectID: testID(61), AssignedAgentID: testID(62), IncarnationID: testID(64), Title: "fresh task", Body: "Check durable transitions", Priority: 1}); err != nil {
+			t.Fatal(err)
+		}
+		waitDispatch(t, done)
+		task, _ := decodeID(testID(63), kernel.TaskIDFromBytes)
+		if err = f.store.AttachContentToTask(ctx, task, project, lesson.ID, lesson.Revision, mustKernelTime(t, 1000)); err != nil {
+			t.Fatal(err)
+		}
+	})
+	run := active.run
+	if run.AdmittedTaskWorkRevision.Int64() != 1 {
+		t.Fatalf("admitted at work revision %d", run.AdmittedTaskWorkRevision.Int64())
+	}
+	run.AdmittedTaskWorkRevision, _ = kernel.NewRevision(2) // the sent-back run
+	manifest, accesses, err := f.daemon.knowledgeAttachmentManifest(ctx, run)
+	if err != nil || len(accesses) != 1 || !strings.Contains(string(manifest), lesson.ID.String()) {
+		t.Fatalf("corrected run manifest = %q, %v, %v", manifest, accesses, err)
+	}
+}

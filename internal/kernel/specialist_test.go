@@ -545,3 +545,66 @@ func TestArchiveStopsSpecialist(t *testing.T) {
 		t.Fatalf("shared task = %+v", task)
 	}
 }
+
+// A contribution, amendment or review naming an active task of the project is
+// attached to it; a proposal, a terminal task and another project's task are
+// not.
+func TestSpecialistRecordAttachesToActiveTask(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	store, run, _ := runningWorkerRun(t)
+	defer store.Close()
+	enqueue := func(seed byte) Task {
+		task, err := store.EnqueueTask(ctx, NewTask{ID: taskID(t, seed), ProjectID: run.ProjectID, IncarnationID: incarnationID(t, seed+1), Title: "work"}, mustTime(t, 40))
+		if err != nil {
+			t.Fatal(err)
+		}
+		return task
+	}
+	attached := func(task Task) int {
+		refs, err := store.TaskContentReferences(ctx, task.ProjectID, task.ID, task.WorkRevision)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return len(refs)
+	}
+	create := func(seed byte, metadata KnowledgeMetadata) error {
+		metadata.Status, metadata.SourceRevision = "tentative", strings.Repeat("ab", 20)
+		_, err := store.CreateContentForAttempt(ctx, run.CredentialDigest, knowledgeSpec(t, run.ProjectID, seed, ContentObservation, metadata), mustTime(t, 50))
+		return err
+	}
+	queued := enqueue(120)
+	for i, kind := range []string{"contribution", "amendment", "review"} {
+		if err := create(byte(130+i), KnowledgeMetadata{RecordType: kind, TaskID: queued.ID.String()}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if got := attached(queued); got != 3 {
+		t.Fatalf("queued task references = %d, want 3", got)
+	}
+	if err := create(140, KnowledgeMetadata{RecordType: "contribution", TaskID: run.TaskID.String()}); err != nil || attached(Task{ID: run.TaskID, ProjectID: run.ProjectID, WorkRevision: mustRevision(t, run.AdmittedTaskWorkRevision.Int64())}) != 1 {
+		t.Fatalf("running task attach: %v", err)
+	}
+	proposal := enqueue(122)
+	if err := create(141, KnowledgeMetadata{RecordType: "proposal"}); err != nil || attached(proposal) != 0 {
+		t.Fatalf("proposal attached: %v", err)
+	}
+	terminal := enqueue(124)
+	if _, err := store.writer.ExecContext(ctx, `UPDATE tasks SET status = 'cancelled', completed_at_ms = 42, updated_at_ms = 42 WHERE id = ?`, terminal.ID.Bytes()); err != nil {
+		t.Fatal(err)
+	}
+	if err := create(142, KnowledgeMetadata{RecordType: "contribution", TaskID: terminal.ID.String()}); err != nil || attached(terminal) != 0 {
+		t.Fatalf("terminal task attached: %v", err)
+	}
+	other, err := store.CreateProject(ctx, NewProject{ID: projectID(t, 150), Name: "other", Root: "/other-attach"}, mustTime(t, 4))
+	if err != nil {
+		t.Fatal(err)
+	}
+	foreign, err := store.EnqueueTask(ctx, NewTask{ID: taskID(t, 151), ProjectID: other.ID, IncarnationID: incarnationID(t, 152), Title: "foreign"}, mustTime(t, 5))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := create(143, KnowledgeMetadata{RecordType: "contribution", TaskID: foreign.ID.String()}); !errors.Is(err, ErrInvalidValue) || attached(foreign) != 0 {
+		t.Fatalf("other project's task: %v", err)
+	}
+}
