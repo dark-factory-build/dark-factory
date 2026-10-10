@@ -35,15 +35,16 @@ func (s *memoryStore) CreateRetry(_ context.Context, failed, retry Operation) er
 }
 
 type fakeBackend struct {
-	reviews    int
-	killed     bool
-	submitErr  error
-	event      string
-	submitted  bool
-	enqueues   int
-	enqueueErr error
-	observeErr error
-	pull       *Pull
+	reviews         int
+	killed          bool
+	submitErr       error
+	event           string
+	submitted       bool
+	enqueues        int
+	enqueueAttempts int
+	enqueueErr      error
+	observeErr      error
+	pull            *Pull
 }
 
 func (b *fakeBackend) CloneReadOnly(context.Context, Request) (string, func(), error) {
@@ -65,6 +66,7 @@ func (b *fakeBackend) Submit(context.Context, Operation, Verdict) error {
 	return b.submitErr
 }
 func (b *fakeBackend) Enqueue(context.Context, Operation) error {
+	b.enqueueAttempts++
 	if b.enqueueErr == nil {
 		b.enqueues++
 	}
@@ -330,6 +332,33 @@ func TestConflictingPullIsSentBackOnceInsteadOfLooping(t *testing.T) {
 	}
 }
 
+func TestRefusedDirtyPullIsSentBackWithoutEscalation(t *testing.T) {
+	store := &memoryStore{}
+	backend := &fakeBackend{pull: &Pull{Head: reviewRequest().Head, State: "open", MergeStateStatus: "DIRTY"}, enqueueErr: fmt.Errorf("%w (rejected before execution as UNPROCESSABLE)", ErrRefused)}
+	c := Coordinator{Store: store, Backend: backend, Now: func() time.Time { return time.Unix(20, 0) }}
+	op, err := c.Advance(context.Background(), Operation{ID: "op", Request: reviewRequest(), State: "enqueued", Verdict: "allow", Submitted: true})
+	if err != nil || op.State != "ejected" || !op.RoutePending || op.Escalation != "" || backend.enqueueAttempts != 0 || len(store.values) != 1 {
+		t.Fatalf("dirty refusal = %+v err=%v enqueues=%d writes=%d", op, err, backend.enqueues, len(store.values))
+	}
+}
+
+func TestRefusedCleanPullStopsAfterRetryLimit(t *testing.T) {
+	store := &memoryStore{}
+	backend := &fakeBackend{pull: &Pull{Head: reviewRequest().Head, State: "open", MergeStateStatus: "CLEAN"}, enqueueErr: fmt.Errorf("%w (rejected before execution as UNPROCESSABLE)", ErrRefused)}
+	c := Coordinator{Store: store, Backend: backend, Now: func() time.Time { return time.Unix(20, 0) }}
+	op := Operation{ID: "op", Request: reviewRequest(), State: "enqueued", Verdict: "allow", Submitted: true}
+	for range RefusedRetryLimit + 1 {
+		var err error
+		op, err = c.Advance(context.Background(), op)
+		if !errors.Is(err, ErrRefused) || op.State != "enqueued" {
+			t.Fatalf("refused pass = %+v err=%v", op, err)
+		}
+	}
+	if backend.enqueueAttempts != RefusedRetryLimit || op.RefusedAttempts != RefusedRetryLimit {
+		t.Fatalf("retry cap = %+v attempts=%d", op, backend.enqueueAttempts)
+	}
+}
+
 // An enqueue whose outcome is unknown leaves nothing sticky behind: the next
 // pass reads the pull request again and goes on from what it shows.
 func TestIndeterminateEnqueueIsSettledByTheNextObservation(t *testing.T) {
@@ -370,7 +399,7 @@ func TestRefusedEnqueueRetriesWithoutHeadObservationChange(t *testing.T) {
 
 func TestOwnerApprovalRefusalEscalatesOnce(t *testing.T) {
 	store := &memoryStore{}
-	backend := &fakeBackend{pull: &Pull{Head: reviewRequest().Head, State: "open"}, enqueueErr: fmt.Errorf("%w (required approval is missing for .github/workflows/ci.yml)", ErrOwnerApproval)}
+	backend := &fakeBackend{pull: &Pull{Head: reviewRequest().Head, State: "open", MergeStateStatus: "BLOCKED"}, enqueueErr: fmt.Errorf("%w (required approval is missing for .github/workflows/ci.yml)", ErrOwnerApproval)}
 	c := Coordinator{Store: store, Backend: backend, Now: func() time.Time { return time.Unix(20, 0) }}
 	op, err := c.Advance(context.Background(), Operation{ID: "op", Request: reviewRequest(), State: "enqueued", Verdict: "allow", Submitted: true})
 	if !errors.Is(err, ErrOwnerApproval) || !op.Refused || !op.OwnerApproval || backend.enqueues != 0 || !strings.Contains(op.Escalation, "#7") || !strings.Contains(op.Escalation, ".github/workflows/ci.yml") {
