@@ -16,8 +16,8 @@ type Host struct {
 	home       *install.OperationalHome
 	client     *Client
 	connection connectionRecord
-	// delegations is the last connected status' list; nil until read, and
-	// after any change that may alter it.
+	// delegations is the last delegation observed connected; nil until
+	// observed and after anything that may change it.
 	delegations []Delegation
 }
 type connectionRecord struct {

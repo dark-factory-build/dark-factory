@@ -1,13 +1,15 @@
 #!/bin/sh
 set -eu
 
-usage="usage: scripts/go-ci-owned.sh [--client-built] [daemon|packages|source|--affected BASE]"
+usage="usage: scripts/go-ci-owned.sh [--client-built] [--cacheable|daemon|packages|source|--affected BASE]"
 client_built=
 shard=
 affected_base=
+cacheable_only=
 while [ "$#" -gt 0 ]; do
     case "$1" in
         --client-built) client_built=$1 ;;
+        --cacheable) cacheable_only=1 ;;
         daemon|packages|source) shard=$1 ;;
         --affected) [ "$#" -ge 2 ] || { echo "$usage" >&2; exit 2; }; shard=affected; affected_base=$2; shift ;;
         *) echo "$usage" >&2; exit 2 ;;
@@ -54,8 +56,8 @@ go=${DF_CI_GO-}
 }
 module=
 affected_packages=
+module=$("$go" list -m)
 if [ "$shard" = affected ]; then
-    module=$("$go" list -m)
     changed=$(git diff --name-only "$affected_base" HEAD --)
     if printf '%s\n' "$changed" | /usr/bin/grep -qxE 'go\.(mod|sum)'; then
         affected_packages=$("$go" list ./...)
@@ -81,48 +83,77 @@ if [ "$shard" = affected ]; then
     fi
     echo "go-ci: affected packages:" $affected_packages
 fi
-# These three packages own process boundaries that have demonstrated cross-
-# package scheduling sensitivity. Keep each causal stage uncached and isolated;
-# every other package is discovered below so a new package cannot silently skip
-# tests. The five ordinary packages and internal/e2e have their own gates.
-if runs source "$module/internal/change"; then
+# Tests in these packages cross a process boundary (or deliberately inspect
+# one), so Go's result cache cannot see all of their inputs. Keep them uncached.
+# The remaining packages are cacheable and are deliberately discovered below so
+# a new package cannot silently skip tests.
+process_sensitive_packages='
+github.com/dark-factory-build/dark-factory/internal/api
+github.com/dark-factory-build/dark-factory/internal/buildinfo
+github.com/dark-factory-build/dark-factory/internal/change
+github.com/dark-factory-build/dark-factory/internal/changeworker
+github.com/dark-factory-build/dark-factory/internal/daemon
+github.com/dark-factory-build/dark-factory/internal/e2e
+github.com/dark-factory-build/dark-factory/internal/install
+github.com/dark-factory-build/dark-factory/internal/kernel
+github.com/dark-factory-build/dark-factory/internal/opgraph
+github.com/dark-factory-build/dark-factory/internal/provider
+github.com/dark-factory-build/dark-factory/internal/review
+github.com/dark-factory-build/dark-factory/internal/runner'
+process_sensitive_packages="$process_sensitive_packages
+github.com/dark-factory-build/dark-factory/cmd/factoryd
+github.com/dark-factory-build/dark-factory/cmd/factory-runner
+github.com/dark-factory-build/dark-factory/scripts/notices"
+is_process_sensitive() {
+    printf '%s\n' "$process_sensitive_packages" | /usr/bin/grep -qxF "$1"
+}
+
+if [ -z "$cacheable_only" ] && runs source "$module/internal/change"; then
     echo "go-ci: Git boundary resource census"
     go_gate_stage 1200 "$go" test -short -timeout=20m -count=1 ./internal/change
 fi
 
-if runs source "$module/internal/changeworker"; then
+if [ -z "$cacheable_only" ] && runs source "$module/internal/changeworker"; then
     echo "go-ci: Change worker process tests"
     go_gate_stage 1200 "$go" test -short -timeout=20m -count=1 ./internal/changeworker
 fi
 
-if runs daemon "$module/internal/daemon"; then
+if [ -z "$cacheable_only" ] && runs daemon "$module/internal/daemon"; then
     echo "go-ci: daemon process tests"
     go_gate_stage 1200 "$go" test -short -timeout=20m -count=1 ./internal/daemon
 fi
 
-if in_shard packages || [ "$shard" = affected ]; then
-echo "go-ci: process-sensitive Go tests"
-set --
+if [ -z "$cacheable_only" ] || [ "$cacheable_only" = 1 ]; then
+process_args=
+cacheable_args=
 packages=$("$go" list ./...)
 for package in $packages; do
-    case "$package" in
-        github.com/dark-factory-build/dark-factory/internal/browserprotocol|\
-        github.com/dark-factory-build/dark-factory/internal/provider|\
-        github.com/dark-factory-build/dark-factory/internal/opgraph|\
-        github.com/dark-factory-build/dark-factory/internal/change|\
-        github.com/dark-factory-build/dark-factory/internal/changeworker|\
-        github.com/dark-factory-build/dark-factory/internal/daemon|\
-        github.com/dark-factory-build/dark-factory/internal/e2e)
-            ;;
-        *) if runs packages "$package"; then set -- "$@" "$package"; fi ;;
-    esac
+    if [ "$package" = "$module/internal/change" ] ||
+        [ "$package" = "$module/internal/changeworker" ] ||
+        [ "$package" = "$module/internal/daemon" ] ||
+        [ "$package" = "$module/internal/e2e" ]; then
+        continue
+    fi
+    if ! runs packages "$package"; then continue; fi
+    if is_process_sensitive "$package"; then
+        process_args="$process_args $package"
+    else
+        cacheable_args="$cacheable_args $package"
+    fi
 done
-if [ "$#" -gt 0 ]; then
-    go_gate_stage 1200 "$go" test -short -timeout=20m -count=1 "$@"
+if [ -z "$cacheable_only" ] && [ -n "$process_args" ]; then
+    echo "go-ci: process-sensitive Go tests"
+    # shellcheck disable=SC2086
+    go_gate_stage 1200 "$go" test -short -timeout=20m -count=1 $process_args
+fi
+if [ -n "$cacheable_args" ]; then
+    echo "go-ci: cacheable Go tests"
+    # shellcheck disable=SC2086
+    "$go" test -short -timeout=20m $cacheable_args
 fi
 fi
 
-if runs source "$module/internal/e2e"; then
+if [ -z "$cacheable_only" ] && runs source "$module/internal/e2e"; then
     echo "go-ci: browser, daemon and runner E2E"
     go_gate_stage 1500 "$script_dir/go-e2e.sh" all ${client_built:+"$client_built"}
 fi

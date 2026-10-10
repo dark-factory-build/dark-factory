@@ -2,10 +2,12 @@ package kernel
 
 import (
 	"context"
+	"crypto/rand"
 	"database/sql"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strconv"
 	"strings"
 )
 
@@ -29,7 +31,65 @@ func (store *Store) SendBackPublishedReview(ctx context.Context, project Project
 	var taskBytes, document string
 	if err := tx.connection.QueryRowContext(ctx, `SELECT p.task_id, r.document FROM publication_tasks p JOIN production_records r ON r.project_id = p.project_id AND r.repository = p.repository AND r.kind = 'pull_request' AND r.identity = CAST(p.pull_number AS TEXT) WHERE p.project_id = ? AND p.repository = ? AND p.pull_number = ? ORDER BY p.change_id IS NOT NULL DESC, p.created_at_ms DESC LIMIT 1`, project.Bytes(), repository, pull).Scan(&taskBytes, &document); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
-			return Task{}, tx.Rollback(ErrNotFound)
+			// A host-created pull request has no publication_tasks row. Reuse
+			// this repair path so a blocking verdict or queue ejection creates
+			// exactly one shared worker task for the observed head.
+			if err := tx.connection.QueryRowContext(ctx, `SELECT document FROM production_records WHERE project_id = ? AND repository = ? AND kind = 'pull_request' AND identity = ?`, project.Bytes(), repository, strconv.FormatUint(pull, 10)).Scan(&document); err != nil {
+				if errors.Is(err, sql.ErrNoRows) {
+					return Task{}, tx.Rollback(ErrNotFound)
+				}
+				return Task{}, tx.Rollback(err)
+			}
+			var observed ProductionPullRequest
+			if json.Unmarshal([]byte(document), &observed) != nil {
+				return Task{}, tx.Rollback(ErrConflict)
+			}
+			if !strings.EqualFold(observed.Head, head) {
+				return Task{}, tx.Rollback(ErrSuperseded)
+			}
+			if observed.HeadRepository != "" && !strings.EqualFold(observed.HeadRepository, repository) {
+				return Task{}, tx.Rollback(ErrNotFound)
+			}
+			var repositoryBytes []byte
+			if err := tx.connection.QueryRowContext(ctx, `SELECT r.id FROM project_repositories r JOIN repository_source_identities i ON i.repository_id = r.id WHERE r.project_id = ? AND lower(i.publication_repository) = ? LIMIT 1`, project.Bytes(), repository).Scan(&repositoryBytes); err != nil {
+				if errors.Is(err, sql.ErrNoRows) {
+					return Task{}, tx.Rollback(ErrNotFound)
+				}
+				return Task{}, tx.Rollback(err)
+			}
+			repositoryID, err := RepositoryIDFromBytes(repositoryBytes)
+			if err != nil {
+				return Task{}, tx.Rollback(err)
+			}
+			var ids [2][IDBytes]byte
+			for index := range ids {
+				if _, err := rand.Read(ids[index][:]); err != nil || ids[index] == ([IDBytes]byte{}) {
+					if err == nil {
+						err = ErrCorruptState
+					}
+					return Task{}, tx.Rollback(err)
+				}
+			}
+			taskID, _ := TaskIDFromBytes(ids[0][:])
+			incarnationID, _ := IncarnationIDFromBytes(ids[1][:])
+			instruction := fmt.Sprintf("Repair %s#%d at exact head %s.", repository, pull, head)
+			created, err := insertTaskOnConnection(ctx, tx.connection, NewTask{ID: taskID, ProjectID: project, RepositoryID: repositoryID, IncarnationID: incarnationID, Title: fmt.Sprintf("Repair %s#%d", repository, pull), Body: instruction}, at)
+			if err != nil {
+				return Task{}, tx.Rollback(err)
+			}
+			body := SentBackBody(created, marker+note)
+			if _, err := tx.connection.ExecContext(ctx, `UPDATE tasks SET body = ?, sent_back_instruction_bytes = ? WHERE id = ?`, body, byteLen(instruction), taskID.Bytes()); err != nil {
+				return Task{}, tx.Rollback(err)
+			}
+			if _, err := tx.connection.ExecContext(ctx, `INSERT INTO publication_tasks (project_id, repository, pull_number, task_id, created_at_ms) VALUES (?, ?, ?, ?, ?)`, project.Bytes(), repository, pull, taskID.Bytes(), at.Int64()); err != nil {
+				return Task{}, tx.Rollback(err)
+			}
+			sentBytes := int64(byteLen(instruction))
+			created.Body, created.SentBackInstructionBytes = body, &sentBytes
+			if err := tx.Commit(ctx); err != nil {
+				return Task{}, err
+			}
+			return created, nil
 		}
 		return Task{}, tx.Rollback(err)
 	}

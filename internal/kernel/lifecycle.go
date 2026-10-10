@@ -367,15 +367,15 @@ func (store *Store) ProposeAttemptOutcome(ctx context.Context, digest AttemptDig
 
 // NeverStartedRunDetail is the failure of a run that never produced terminal
 // output or an attempt call: stalled 10m after launch, or found admitted at
-// recovery. Finalizing it queues the task again at the next work revision,
-// unless the previous run ended the same way.
+// recovery. Its FailureTransient code queues the task again at the next work
+// revision, unless the previous run ended the same way.
 const NeverStartedRunDetail = "never started: no terminal output or attempt call after launch"
 
 // RunLimitDetail cancels a worker run past its run limit: an automatic end.
 const RunLimitDetail = "Run time limit reached"
 
-// ProviderCapacityRunDetail is the provider-exit failure of a run whose
-// provider reported its model at capacity: transient, so it is retried as a
+// ProviderCapacityRunDetail is the transient failure of a run whose
+// provider reported its model at capacity: it is retried as a
 // never-started run is.
 const ProviderCapacityRunDetail = "provider reported its selected model at capacity"
 
@@ -392,7 +392,7 @@ func (store *Store) FailRun(ctx context.Context, runID RunID, expected Revision,
 		return Run{}, fmt.Errorf("%w: invalid run failure", ErrInvalidValue)
 	}
 	switch failure.code {
-	case FailureSpawn, FailureActivation, FailureSource, FailureProtocol, FailureInternal:
+	case FailureSpawn, FailureActivation, FailureSource, FailureProtocol, FailureInternal, FailureTransient:
 	default:
 		return Run{}, fmt.Errorf("%w: failure code is not daemon infrastructure authority", ErrInvalidValue)
 	}
@@ -731,9 +731,8 @@ func (store *Store) finalizeRun(ctx context.Context, runID RunID, expected Revis
 		taskStatus, blocked = TaskBlocked.String(), terminal.detail
 	case OutcomeFailed:
 		taskStatus, completed = TaskFailed.String(), at.Int64()
-		if terminal.code == FailureProtocol && (terminal.detail == NeverStartedRunDetail || terminal.detail == OverseerRunLimitDetail) || terminal.code == FailureProviderExit && terminal.detail == ProviderCapacityRunDetail {
-			// A run that never started, or met a transient provider condition:
-			// queue its task again once, unless the previous run ended the same way.
+		if terminal.code == FailureTransient {
+			// Queue its task again once, unless the previous run ended the same way.
 			var again bool
 			if err := tx.connection.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM runs WHERE task_id = ? AND task_incarnation_id = ? AND admitted_task_work_revision = ? AND terminal_code = ? AND terminal_detail = ?)`,
 				task.ID.Bytes(), run.TaskIncarnationID.Bytes(), run.AdmittedTaskWorkRevision.Int64()-1, terminal.code.String(), terminal.detail).Scan(&again); err != nil {

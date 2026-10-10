@@ -1,11 +1,12 @@
 import { useEffect, useId, useRef, useState, type FormEvent, type ReactNode } from "react";
-import { MAX_TASK_ATTACHMENTS, MAX_TASK_ATTACHMENT_BYTES, MAX_TASK_PRIORITY, type IntakeView, type IntakeBody, type DiscoveredAccount, type AccountItem, type AgentItem, type GitHubConnectionBody, type GitHubDelegationBody, type HumanRequestItem, type ProjectItem, type RepositoryMutation, type RunTelemetry, type RepositoryView, type StateView, type TaskHistoryView, type TaskItem, type TaskListView, type TaskPeerQuestion, type TaskContentPin } from "@dark-factory/client";
+import { MAX_TASK_ATTACHMENTS, MAX_TASK_ATTACHMENT_BYTES, MAX_TASK_PRIORITY, type IntakeView, type IntakeBody, type DiscoveredAccount, type AccountItem, type AgentItem, type IdleWakeOn, type GitHubConnectionBody, type GitHubDelegationBody, type HumanRequestItem, type ProjectItem, type RepositoryMutation, type RunTelemetry, type RepositoryView, type StateView, type TaskHistoryView, type TaskItem, type TaskListView, type TaskPeerQuestion, type TaskContentPin } from "@dark-factory/client";
 import type { FactoryEditView, FactoryHumanRequestView } from "./factory-app-controller.js";
 import type { FactoryGitHubView } from "./factory-settings-coordinator.js";
 import { rankLabel } from "./console-screens.js";
+import { activityLabel, type KnowledgeActivity } from "./project-board.js";
 import { AgentSprite } from "./factory-scene/factory-scene.js";
 import { telemetryLine } from "./factory-scene/scene.js";
-import { agentStatus, agentCurrentTask, agentActivity, needsYou, type WorkRow, type WorkState } from "./console-view.js";
+import { agentStatus, agentCurrentTask, agentActivity, isSpecialist, needsYou, type WorkRow, type WorkState } from "./console-view.js";
 import { productionKey, productionStages } from "./production-view.js";
 import { AnswerControls } from "./console-interactions.js";
 import { Icon, IconButton, type IconName } from "./icons.js";
@@ -14,7 +15,7 @@ import type { FloorAppearance } from "./floor-appearance.js";
 import type { PublishedRelease, RuntimeBuild } from "./production-data.js";
 
 /** Only the controls the operator actually changed; the rest are left alone. */
-export type AgentConfigEdit = Readonly<{ model?: string; reasoningEffort?: string; accountId?: string; paused?: boolean; archived?: boolean; idlePolicy?: "wait" | "standing_instruction"; idleAfterSeconds?: number; idleInstruction?: string; idleRunBudget?: number }>;
+export type AgentConfigEdit = Readonly<{ model?: string; reasoningEffort?: string; accountId?: string; paused?: boolean; archived?: boolean; idlePolicy?: "wait" | "standing_instruction"; idleAfterSeconds?: number; idleInstruction?: string; idleRunBudget?: number; idleWakeOn?: IdleWakeOn }>;
 
 export type TaskEdit = Readonly<{ title?: string; body?: string; priority?: number; assignedAgentId?: string; cancel?: boolean; retry?: boolean }>;
 export type TaskBrief = Readonly<{ taskId: string; revision: bigint; head: bigint; instruction: string; feedback: string; outcome?: string; peerQuestions: readonly TaskPeerQuestion[]; nextPeerOffset?: bigint }>;
@@ -58,10 +59,15 @@ export function AgentPanel({
   panel: panelProp,
   onPanel,
   telemetry,
+  contributions = [],
+  onOpenActivity,
 }: {
   agent: AgentItem;
   state: StateView | undefined;
   edit?: FactoryEditView;
+  /** A specialist's recorded Board and Library operations, already filtered to it. */
+  contributions?: readonly KnowledgeActivity[];
+  onOpenActivity?: (item: KnowledgeActivity) => void;
   ready: boolean;
   onSaveConfig?: (config: AgentConfigEdit) => void;
   onEditAppearance?: (agent: AgentItem) => void;
@@ -85,6 +91,7 @@ export function AgentPanel({
   const selectPanel = onPanel ?? setLocalPanel;
   const errorCopy = edit?.target === agent.id ? editErrorCopy(edit) : undefined;
   const archived = agent.archived === true;
+  const specialist = isSpecialist(agent);
   const queueHint = !archived && agent.paused
     ? "Queue paused"
     : current === undefined && queued.length > 0
@@ -105,14 +112,14 @@ export function AgentPanel({
           <Icon name="pencil" className="dfAgentSpriteEdit__icon" />
         </button>
         <div>
-          <p className="dfFactoryConsole__eyebrow">{rankLabel(agent.role)} · {agent.provider}{agent.effective_model === "" ? "" : ` · ${agent.effective_model}`}</p>
+          <p className="dfFactoryConsole__eyebrow">{rankLabel(specialist ? "specialist" : agent.role)} · {agent.provider}{agent.effective_model === "" ? "" : ` · ${agent.effective_model}`}</p>
           <h2>{agent.name}</h2>
           <p className="dfConsoleItem__meta">{state?.projects.get(agent.project_id)?.name ?? agent.project_id}</p>
         </div>
       </div>
 
-      <p className="dfConsoleSidebar__status"><Status stage={archived ? "archived" : activity} /></p>
-      {queueHint === undefined ? null : <p className="dfConsoleSidebar__inherit">{queueHint}</p>}
+      {specialist && state !== undefined ? <SpecialistSummary agent={agent} state={state} activity={activity} pending={edit?.pending === true} ready={ready} contributions={contributions} onOpenActivity={onOpenActivity} onSaveConfig={onSaveConfig} /> : <p className="dfConsoleSidebar__status"><Status stage={archived ? "archived" : activity} /></p>}
+      {queueHint === undefined || specialist ? null : <p className="dfConsoleSidebar__inherit">{queueHint}</p>}
       {effort === "" ? null : <p className="dfConsoleSidebar__inherit" aria-label={`Recorded by the agent: ${effort}`}>{effort}</p>}
 
       {archived ? null : <div className="dfConsoleViewToggle" role="group" aria-label="Agent controls">
@@ -124,7 +131,7 @@ export function AgentPanel({
       </section>}
 
       <section className="dfConsoleSidebar__section" aria-label="Agent configuration" hidden={!archived && panel !== "config"}>
-        <AgentConfig key={formKey(agent.id)} agent={agent} accounts={state === undefined ? [] : [...state.accounts.values()]} pending={edit?.pending === true} ready={ready} onSave={onSaveConfig} />
+        <AgentConfig key={formKey(agent.id)} agent={agent} accounts={state === undefined ? [] : [...state.accounts.values()]} pending={edit?.pending === true} ready={ready} onSave={onSaveConfig} running={current !== undefined} />
       </section>
 
       <RecentWork
@@ -137,6 +144,42 @@ export function AgentPanel({
       />
     </section>
   );
+}
+
+const WAITING: Record<string, string> = { budget: "review budget used", queued: "queued behind other work", capacity: "waiting for a free background slot" };
+const clock = (ms: number) => new Date(ms).toLocaleString([], { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" });
+
+/** What a specialist is doing, owes and has done; nothing here is inferred beyond what the factory serves. */
+function SpecialistSummary({ agent, state, activity, pending, ready, contributions, onOpenActivity, onSaveConfig }: {
+  agent: AgentItem; state: StateView; activity: string; pending: boolean; ready: boolean;
+  contributions: readonly KnowledgeActivity[]; onOpenActivity?: (item: KnowledgeActivity) => void; onSaveConfig?: (config: AgentConfigEdit) => void;
+}) {
+  const info = agent.specialist;
+  const failed = info !== undefined && state.tasks.get(info.last_review_task_id)?.status === "failed";
+  const [stage, text] = agent.archived ? ["stopped", "stopped"]
+    : activity === "working" || activity === "needs-you" ? [activity, activity === "working" ? "working: a review is running" : "needs you"]
+    : agent.paused ? ["paused", "paused: no new reviews"]
+    : failed ? ["failed", "failed: its latest review failed; open it under Recent work"]
+    : info?.waiting && WAITING[info.waiting] ? ["waiting", `waiting: ${WAITING[info.waiting]}`]
+    : ["ready", "ready: between reviews"];
+  const wake = (agent.idle_wake_on ?? "") === "" ? "" : ` or sooner on ${(agent.idle_wake_on ?? "").replace(",", " and ")}`;
+  const next = agent.archived || agent.paused || info === undefined || info.next_review_at_ms === 0 ? "" : `Next review ${clock(info.next_review_at_ms)}${info.next_reason === "" ? "" : ` (${info.next_reason})`}${wake}`;
+  const remit = agent.idle_instruction.split("\n", 1)[0]!.slice(0, 120);
+  const mine = contributions.filter((item) => item.agent_id === agent.id);
+  return <>
+    <p className="dfConsoleSidebar__status"><Status stage={stage}>{text}</Status></p>
+    {remit === "" ? null : <p className="dfConsoleItem__meta" aria-label="Remit">{remit}</p>}
+    {next === "" ? null : <p className="dfConsoleSidebar__inherit">{next}</p>}
+    <p className="dfConsoleSidebar__inherit" aria-label="Specialist usage">
+      Reviews {agent.idle_runs_used}/{agent.idle_run_budget === 0 ? "unlimited" : agent.idle_run_budget}
+      {info === undefined ? "" : ` · open proposals ${info.open_proposals}/${info.open_proposal_limit}`}
+    </p>
+    {agent.archived || onSaveConfig === undefined ? null : <button type="button" disabled={pending || !ready} onClick={() => onSaveConfig({ paused: !agent.paused })}>{agent.paused ? "Resume" : "Pause"}</button>}
+    <section className="dfConsoleSidebar__section" aria-label="Contributions">
+      <h3>Contributions</h3>
+      {mine.length === 0 ? <p className="dfFactoryConsole__empty">No recorded contributions yet.</p> : <ul>{mine.map((item) => <li key={item.key}><button type="button" disabled={!onOpenActivity} onClick={() => onOpenActivity?.(item)}>{activityLabel(item, state)}</button></li>)}</ul>}
+    </section>
+  </>;
 }
 
 function pullRequests(value: string): readonly Readonly<{ href: string; label: string }>[] {
@@ -334,7 +377,7 @@ export function WorkPanel({
   const [overseer, setOverseer] = useState(false);
   if (state === undefined) return <section className="dfConsoleSidebar__panel" aria-label="Work"><p className="dfFactoryConsole__empty">Waiting for the latest state…</p></section>;
   const agents = [...state.agents.values()];
-  const shown = rows.filter((row) => (filter === "all" || row.state === filter || filter === "needs-you" && needsYou(row)) && (overseer || row.origin !== "overseer" || row.state === "needs-you"));
+  const shown = rows.filter((row) => (filter === "all" || row.state === filter || filter === "needs-you" && needsYou(row)) && (overseer || row.origin !== "overseer" && row.origin !== "specialist" || row.state === "needs-you"));
   const busy = selectedHumanRequest?.phase === "replying" || selectedHumanRequest?.phase === "cancelling";
   const owner = (task?: TaskItem) => task === undefined ? "" : task.assigned_agent_id === "" ? "Any eligible worker" : state.agents.get(task.assigned_agent_id)?.name ?? "Agent";
   const chips = (row: WorkRow) => <>
@@ -375,7 +418,7 @@ export function WorkPanel({
         {FILTERS.map(([value, label]) => <button key={value} type="button" aria-pressed={!byMission && filter === value} disabled={!ready} onClick={() => onFilter(value)}>{label} {value === "needs-you" ? <Badge n={rows.filter(needsYou).length} /> : null}</button>)}
         <button type="button" aria-pressed={byMission} disabled={!ready} onClick={onByMission}>By mission</button>
       </div>
-      {byMission ? null : <IconButton icon="terminal" aria-label="Show overseer passes" aria-pressed={overseer} disabled={!ready} onClick={() => setOverseer(!overseer)} />}
+      {byMission ? null : <IconButton icon="terminal" aria-label="Show overseer and specialist passes" aria-pressed={overseer} disabled={!ready} onClick={() => setOverseer(!overseer)} />}
       {projectId === undefined ? <IconButton icon="history" aria-label="History" title="Choose a project" disabled /> : <RecentWork scope={{ project_id: projectId }} name={state.projects.get(projectId)?.name ?? projectId} label="History" icon="history" completionRevision={[...state.tasks.values()].map((task) => `${task.id}:${task.revision}`).join(" ")} onLoadTaskList={onLoadTaskList} onLoadTaskDetail={onLoadTaskDetail} onLoadTaskHistory={onLoadTaskHistory} />}
     </div>
     <div hidden={byMission}>
@@ -478,12 +521,15 @@ function AgentConfig({
   pending,
   ready,
   onSave,
+  running = false,
 }: {
   agent: AgentItem;
   accounts: readonly AccountItem[];
   pending: boolean;
   ready: boolean;
   onSave?: (config: AgentConfigEdit) => void;
+  /** A live run: the daemon refuses to archive under it. */
+  running?: boolean;
 }) {
   const [model, setModel] = useState(agent.model);
   const [reasoningEffort, setReasoningEffort] = useState(agent.reasoning_effort);
@@ -493,6 +539,8 @@ function AgentConfig({
   const [idlePolicy, setIdlePolicy] = useState(agent.idle_policy);
   const [idleAfterSeconds, setIdleAfterSeconds] = useState(String(agent.idle_after_seconds));
   const [idleInstruction, setIdleInstruction] = useState(agent.idle_instruction);
+  const [runBudget, setRunBudget] = useState(String(agent.idle_run_budget));
+  const [wakeOn, setWakeOn] = useState<IdleWakeOn>(agent.idle_wake_on ?? "");
   const served = useRef({ model: agent.model, reasoningEffort: agent.reasoning_effort, accountId: agent.account_id, paused: agent.paused, idlePolicy: agent.idle_policy, idleAfterSeconds: String(agent.idle_after_seconds), idleInstruction: agent.idle_instruction });
   useEffect(() => {
     const previous = served.current;
@@ -514,6 +562,13 @@ function AgentConfig({
   const idleAfter = Math.max(0, Math.floor(Number(idleAfterSeconds) || 0));
   const standing = idlePolicy === "standing_instruction";
   const supervising = agent.role === "orchestrator";
+  const specialist = isSpecialist(agent);
+  const budget = Math.max(0, Math.floor(Number(runBudget) || 0));
+  const toggleWake = (class_: "failures" | "merges", on: boolean) => {
+    const classes = new Set(wakeOn === "" ? [] : wakeOn.split(","));
+    if (on) classes.add(class_); else classes.delete(class_);
+    setWakeOn(["failures", "merges"].filter((item) => classes.has(item)).join(",") as IdleWakeOn);
+  };
   // Submit the complete standing rule when its wait or instruction changes.
   const ruleMoved = idlePolicy !== agent.idle_policy || idleAfter !== agent.idle_after_seconds || idleInstruction !== agent.idle_instruction;
   const ruleIncomplete = standing && (idleAfter < 1 || idleInstruction.trim() === "");
@@ -526,6 +581,8 @@ function AgentConfig({
       ...(accountId === agent.account_id ? {} : { accountId }),
       ...(paused === agent.paused ? {} : { paused }),
       ...(!ruleMoved ? {} : standing ? { idlePolicy, idleAfterSeconds: idleAfter, idleInstruction } : { idlePolicy }),
+      ...(!standing || budget === agent.idle_run_budget ? {} : { idleRunBudget: budget }),
+      ...(!standing || supervising || wakeOn === (agent.idle_wake_on ?? "") ? {} : { idleWakeOn: wakeOn }),
     });
   };
   return (
@@ -550,7 +607,7 @@ function AgentConfig({
         <input id={`df-paused-${agent.id}`} type="checkbox" checked={paused} disabled={pending} onChange={(event) => setPaused(event.currentTarget.checked)} />
         Paused
       </label>
-      {agent.role !== "worker" || agent.archived === undefined ? null : archiveConfirm ? <span><button type="button" className="dfDanger" autoFocus disabled={pending || !ready} onClick={() => onSave({ archived: true })}>Confirm archive</button><button type="button" disabled={pending} onClick={() => setArchiveConfirm(false)}>Keep worker</button></span> : <button type="button" className="dfDanger" disabled={pending || !ready} onClick={() => setArchiveConfirm(true)}>Archive worker</button>}
+      {agent.role !== "worker" || agent.archived === undefined ? null : archiveConfirm ? <span><button type="button" className="dfDanger" autoFocus disabled={pending || !ready} onClick={() => onSave({ archived: true })}>{specialist ? (running ? "Confirm stop (ends the running review)" : "Confirm stop") : "Confirm archive"}</button><button type="button" disabled={pending} onClick={() => setArchiveConfirm(false)}>{specialist ? "Keep specialist" : "Keep worker"}</button></span> : <button type="button" className="dfDanger" disabled={pending || !ready} onClick={() => setArchiveConfirm(true)}>{specialist ? "Stop specialist" : "Archive worker"}</button>}
       <h3>{supervising ? "Supervision" : "Rules"}</h3>
       <label htmlFor={`df-idle-${agent.id}`}>{supervising ? "When work changes" : "When ready"}</label>
       <select id={`df-idle-${agent.id}`} value={idlePolicy} disabled={pending} onChange={(event) => setIdlePolicy(event.currentTarget.value as typeof idlePolicy)}>
@@ -563,6 +620,14 @@ function AgentConfig({
           <input id={`df-idle-after-${agent.id}`} inputMode="numeric" value={idleAfterSeconds} disabled={pending} onChange={(event) => setIdleAfterSeconds(event.currentTarget.value)} />
           <label htmlFor={`df-idle-instruction-${agent.id}`}>Instruction</label>
           <textarea id={`df-idle-instruction-${agent.id}`} rows={3} value={idleInstruction} disabled={pending} onChange={(event) => setIdleInstruction(event.currentTarget.value)} />
+          {supervising ? null : <>
+            <label htmlFor={`df-idle-budget-${agent.id}`}>Review budget (0 = unlimited)</label>
+            <input id={`df-idle-budget-${agent.id}`} inputMode="numeric" value={runBudget} disabled={pending} onChange={(event) => setRunBudget(event.currentTarget.value)} />
+            <fieldset disabled={pending}><legend>Also review sooner on</legend>
+              <label><input type="checkbox" checked={wakeOn.includes("failures")} onChange={(event) => toggleWake("failures", event.currentTarget.checked)} /> failures</label>
+              <label><input type="checkbox" checked={wakeOn.includes("merges")} onChange={(event) => toggleWake("merges", event.currentTarget.checked)} /> merges</label>
+            </fieldset>
+          </>}
           <p className="dfConsoleSidebar__inherit">{agent.idle_runs_used} idle runs</p>
           {supervising ? <p className="dfConsoleSidebar__inherit">initial inspection, then worker events</p> : null}
           {ruleIncomplete ? <p className="dfConsoleSidebar__inherit">a standing instruction needs at least a second and text</p> : null}

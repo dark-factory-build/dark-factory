@@ -396,6 +396,9 @@ const (
 	FailureProtocol
 	FailureInternal
 	FailureAttempt
+	// FailureTransient is a run that never started or met a transient
+	// condition; finalization queues its task again once.
+	FailureTransient
 )
 
 func parseFailureCode(value string) (FailureCode, error) {
@@ -414,6 +417,8 @@ func parseFailureCode(value string) (FailureCode, error) {
 		return FailureInternal, nil
 	case "attempt":
 		return FailureAttempt, nil
+	case "transient":
+		return FailureTransient, nil
 	default:
 		return 0, corruptControl("failure code", value)
 	}
@@ -435,6 +440,8 @@ func (value FailureCode) String() string {
 		return "internal"
 	case FailureAttempt:
 		return "attempt"
+	case FailureTransient:
+		return "transient"
 	default:
 		return ""
 	}
@@ -972,7 +979,10 @@ type AttemptAuthority struct {
 	CurrentChangeRevision    *Revision
 	BaseCommit               []byte
 	ContinuationContexts     []ContinuationContext
-	task                     string
+	// Specialist is a specialist's review run (its carrier): it may also read
+	// its project's overseer status and observe its workers.
+	Specialist bool
+	task       string
 }
 
 func (authority AttemptAuthority) Task() string { return authority.task }

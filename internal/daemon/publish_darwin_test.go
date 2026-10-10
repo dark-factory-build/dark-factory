@@ -20,13 +20,22 @@ import (
 // fakePublishMaintainer is the App's journal: one result per operation id,
 // a replay of a completed id answered from it.
 type fakePublishMaintainer struct {
-	main     string
-	tip      string // the pull request branch's head
-	journal  map[string]json.RawMessage
-	planned  map[string]bool  // ids a write stopped before GitHub
-	writes   []map[string]any // every write sent
-	refuse   string           // a path publish_commit refuses
-	loseNext bool             // the next write lands but its response is lost
+	main           string
+	tip            string // the pull request branch's head
+	journal        map[string]json.RawMessage
+	planned        map[string]bool  // ids a write stopped before GitHub
+	writes         []map[string]any // every write sent
+	refuse         string           // a path publish_commit refuses
+	externalRefuse bool             // the Maintainer refuses before the App can apply it
+	unavailable    bool             // the Maintainer authority is temporarily unavailable
+	loseNext       bool             // the next write lands but its response is lost
+}
+
+func TestRepairPublicationUsesTaskTitle(t *testing.T) {
+	want := "Repair team/repo#31"
+	if got := publicationMessage(kernel.PublishableChange{Task: kernel.Task{Title: want}}); got != want {
+		t.Fatalf("repair publication message = %q, want %q", got, want)
+	}
 }
 
 func (f *fakePublishMaintainer) call(_ context.Context, name string, arguments map[string]any) (json.RawMessage, error) {
@@ -50,6 +59,9 @@ func (f *fakePublishMaintainer) call(_ context.Context, name string, arguments m
 		return nil, fmt.Errorf("conflict: operation %s replayed", id)
 	}
 	f.writes = append(f.writes, map[string]any{"name": name, "arguments": arguments})
+	if f.unavailable {
+		return nil, fmt.Errorf("review: Maintainer rejected operation: unavailable: Maintainer authority is unavailable.")
+	}
 	var result json.RawMessage
 	switch name {
 	case "publish_commit":
@@ -58,6 +70,9 @@ func (f *fakePublishMaintainer) call(_ context.Context, name string, arguments m
 		}
 		for _, entry := range arguments["changes"].([]map[string]any) {
 			if f.refuse != "" && strings.HasPrefix(entry["path"].(string), f.refuse) {
+				if f.externalRefuse {
+					return nil, fmt.Errorf("review: Maintainer rejected operation: refused: branch precondition")
+				}
 				return nil, fmt.Errorf("refused: %s cannot be written", f.refuse)
 			}
 		}
@@ -347,7 +362,7 @@ func TestRefusedPublicationEscalatesOnce(t *testing.T) {
 	}
 	document, found, err := fixture.store.ReviewOperation(ctx, c.Task.ProjectID, kernel.PublishFailureID(c.Change, c.Revision))
 	var op review.Operation
-	if err != nil || !found || json.Unmarshal(document, &op) != nil || op.State != "publish_failed" || !op.Handled ||
+	if err != nil || !found || json.Unmarshal(document, &op) != nil || !strings.Contains(string(document), `"retryable":false`) || op.State != "publish_failed" || !op.Handled ||
 		!strings.HasPrefix(op.Escalation, "factoryd cannot publish change "+c.Change.String()+" for task "+c.Task.ID.String()+": ") || !strings.Contains(op.Escalation, "refused: .github/workflows") {
 		t.Fatalf("failure record = %s %v %v", document, found, err)
 	}
@@ -366,6 +381,48 @@ func TestRefusedPublicationEscalatesOnce(t *testing.T) {
 	op = review.Operation{}
 	if err != nil || !found || json.Unmarshal(document, &op) != nil || op.State != "publish_failed" || op.Escalation != "" || !strings.Contains(op.Detail, "refused: .github/workflows") {
 		t.Fatalf("repeat failure record = %s %v %v", document, found, err)
+	}
+}
+
+func TestExternalPublicationRefusalRetriesWhenItClears(t *testing.T) {
+	fixture, c, source, app, checkout := publishFixture(t, 1, false)
+	app.refuse, app.externalRefuse = "f00.txt", true
+	ctx := context.Background()
+	if err := fixture.daemon.publishChange(ctx, c, "team/repo", source, app.call, checkout); err != nil {
+		t.Fatal(err)
+	}
+	document, found, err := fixture.store.ReviewOperation(ctx, c.Task.ProjectID, kernel.PublishFailureID(c.Change, c.Revision))
+	var op review.Operation
+	if err != nil || !found || json.Unmarshal(document, &op) != nil || !op.Retryable {
+		t.Fatalf("external refusal = %s %v %v", document, found, err)
+	}
+	app.refuse, app.externalRefuse = "", false
+	if err := fixture.daemon.publishChange(ctx, c, "team/repo", source, app.call, checkout); err != nil {
+		t.Fatal(err)
+	}
+	if len(app.writes) != 3 {
+		t.Fatalf("writes after refusal cleared = %d, want 3", len(app.writes))
+	}
+}
+
+func TestUnavailablePublicationRetriesWhenServiceRecovers(t *testing.T) {
+	fixture, c, source, app, checkout := publishFixture(t, 1, false)
+	app.unavailable = true
+	ctx := context.Background()
+	if err := fixture.daemon.publishChange(ctx, c, "team/repo", source, app.call, checkout); err != nil {
+		t.Fatal(err)
+	}
+	document, found, err := fixture.store.ReviewOperation(ctx, c.Task.ProjectID, kernel.PublishFailureID(c.Change, c.Revision))
+	var op review.Operation
+	if err != nil || !found || json.Unmarshal(document, &op) != nil || !op.Retryable {
+		t.Fatalf("unavailable refusal = %s %v %v", document, found, err)
+	}
+	app.unavailable = false
+	if err := fixture.daemon.publishChange(ctx, c, "team/repo", source, app.call, checkout); err != nil {
+		t.Fatal(err)
+	}
+	if len(app.writes) != 3 {
+		t.Fatalf("writes after service recovery = %d, want 3", len(app.writes))
 	}
 }
 
@@ -415,7 +472,7 @@ func TestDisabledAcceptedRepositoryEscalatesOnce(t *testing.T) {
 			var op review.Operation
 			if record.Kind == "reviewer" && json.Unmarshal(record.Document, &op) == nil && op.State == "publish_failed" {
 				failures++
-				if op.ID != kernel.PublishFailureID(c.Change, c.Revision) || op.Escalation != escalation || op.Detail != "repository disabled for new work" {
+				if op.ID != kernel.PublishFailureID(c.Change, c.Revision) || !op.Retryable || op.Escalation != escalation || op.Detail != "repository disabled for new work" {
 					t.Fatalf("failure record = %+v", op)
 				}
 			}

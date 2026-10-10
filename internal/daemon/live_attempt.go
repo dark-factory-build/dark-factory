@@ -299,10 +299,11 @@ type liveAttempt struct {
 	// recovered or replayed after this owner is gone.
 	pendingOutcome *kernel.Proposal
 	// usageLimit is a provider usage-limit or capacity report seen in live output and owed
-	// as a failed outcome; usageScan carries the tail across a frame boundary
+	// as a failed outcome with usageCode; usageScan carries the tail across a frame boundary
 	// and usageScanned is the stream offset scanned so far. All belong to the
 	// owner goroutine.
 	usageLimit   string
+	usageCode    kernel.FailureCode
 	usageScan    []byte
 	usageScanned uint64
 

@@ -520,6 +520,9 @@ type PublishableChange struct {
 	Revision   Revision
 	Base, Head string
 	Accepted   IntakeAcceptance
+	Repository RepositoryID
+	Repair     bool
+	Branch     string
 	Pull       uint64
 }
 
@@ -558,17 +561,21 @@ func (store *Store) PublishableChanges(ctx context.Context, at UnixMillis) ([]Pu
 		return nil, err
 	}
 	defer tx.Close()
-	rows, err := tx.connection.QueryContext(ctx, `SELECT c.id, c.task_id, c.revision, lower(hex(c.base_commit)), lower(hex(c.head_commit)), COALESCE(p.pull_number, 0) FROM changes c
+	rows, err := tx.connection.QueryContext(ctx, `SELECT c.id, c.task_id, c.revision, lower(hex(c.base_commit)), lower(hex(c.head_commit)), COALESCE(p.pull_number, 0), COALESCE((SELECT lower(hex(repository_id)) FROM task_repository_bindings WHERE task_id = c.task_id), ''), COALESCE((SELECT json_extract(r.document, '$.branch') FROM production_records r WHERE r.project_id = p.project_id AND r.repository = p.repository AND r.kind = 'pull_request' AND r.identity = CAST(p.pull_number AS TEXT)), '') FROM changes c
 		JOIN tasks t ON t.id = c.task_id AND t.incarnation_id = c.task_incarnation_id
-		JOIN intake_task_bindings b ON b.task_id = c.task_id JOIN intake_acceptances a ON a.id = b.acceptance_id
-		LEFT JOIN publication_tasks p ON p.change_id = c.id AND p.task_id = c.task_id AND t.work_revision > 1 AND c.updated_at_ms > p.created_at_ms
+		LEFT JOIN intake_task_bindings b ON b.task_id = c.task_id LEFT JOIN intake_acceptances a ON a.id = b.acceptance_id
+		LEFT JOIN publication_tasks p ON p.task_id = c.task_id AND c.updated_at_ms > p.created_at_ms
+		  AND (t.work_revision > 1 OR p.change_id IS NULL)
 		  AND EXISTS (SELECT 1 FROM production_records r WHERE r.project_id = p.project_id AND r.repository = p.repository AND r.kind = 'pull_request'
 		      AND r.identity = CAST(p.pull_number AS TEXT) AND json_extract(r.document, '$.state') = 'open')
 		WHERE c.phase = 'retained' AND t.status = 'succeeded' AND a.withdrawn_at_ms IS NULL AND c.head_commit <> c.base_commit
-		  AND `+factorydPublishesAcceptance+`
+		  AND ((a.id IS NOT NULL AND `+factorydPublishesAcceptance+`) OR (a.id IS NULL AND EXISTS (SELECT 1 FROM publication_tasks repair WHERE repair.project_id = c.project_id AND repair.task_id = c.task_id)))
 		  AND (p.pull_number IS NOT NULL OR NOT EXISTS (SELECT 1 FROM publication_tasks q WHERE q.change_id = c.id OR q.task_id = c.task_id))
 		  AND NOT EXISTS (SELECT 1 FROM production_records r WHERE r.project_id = c.project_id AND r.kind = 'reviewer'
-		      AND r.identity = 'publish-' || lower(hex(c.id)) || '-' || c.revision AND r.observed_at_ms + ? > ?)
+		      AND r.identity = 'publish-' || lower(hex(c.id)) || '-' || c.revision
+		      AND (json_extract(r.document, '$.retryable') = 0 OR
+		          ((json_extract(r.document, '$.retryable') = 1 OR json_extract(r.document, '$.retryable') IS NULL)
+		              AND r.observed_at_ms + ? > ?)))
 		ORDER BY c.updated_at_ms`, PublishRetryAfter.Milliseconds(), at.Int64())
 	if err != nil {
 		return nil, err
@@ -577,11 +584,22 @@ func (store *Store) PublishableChanges(ctx context.Context, at UnixMillis) ([]Pu
 	for rows.Next() {
 		var change, task []byte
 		var revision int64
+		var repository string
+		var branch string
 		var value PublishableChange
-		if err := rows.Scan(&change, &task, &revision, &value.Base, &value.Head, &value.Pull); err != nil {
+		if err := rows.Scan(&change, &task, &revision, &value.Base, &value.Head, &value.Pull, &repository, &branch); err != nil {
 			rows.Close()
 			return nil, err
 		}
+		if repository != "" {
+			raw, decodeErr := hex.DecodeString(repository)
+			if decodeErr != nil {
+				rows.Close()
+				return nil, decodeErr
+			}
+			value.Repository, err = RepositoryIDFromBytes(raw)
+		}
+		value.Branch = branch
 		if value.Change, err = ChangeIDFromBytes(change); err == nil {
 			if value.Task.ID, err = TaskIDFromBytes(task); err == nil {
 				value.Revision, err = NewRevision(revision)
@@ -601,8 +619,14 @@ func (store *Store) PublishableChanges(ctx context.Context, at UnixMillis) ([]Pu
 		if found[i].Task, ok, err = taskByID(ctx, tx.connection, found[i].Task.ID); err == nil {
 			found[i].Accepted, bound, err = intakeAcceptanceForTask(ctx, tx.connection, found[i].Task.ID)
 		}
-		if err == nil && (!ok || !bound) {
+		if err == nil && !ok {
 			err = ErrCorruptState
+		}
+		if err == nil {
+			found[i].Repair = !bound
+			if !bound && found[i].Repository.zero() {
+				err = ErrCorruptState
+			}
 		}
 		if err != nil {
 			return nil, err
@@ -621,7 +645,7 @@ func (store *Store) RecordCorrectionPublished(ctx context.Context, c Publishable
 		return err
 	}
 	defer tx.Close()
-	if _, err := tx.connection.ExecContext(ctx, `UPDATE publication_tasks SET created_at_ms = ? WHERE pull_number = ? AND task_id = ? AND change_id = ?`, at.Int64(), c.Pull, c.Task.ID.Bytes(), c.Change.Bytes()); err != nil {
+	if _, err := tx.connection.ExecContext(ctx, `UPDATE publication_tasks SET change_id = ?, created_at_ms = ? WHERE pull_number = ? AND task_id = ? AND (change_id = ? OR change_id IS NULL)`, c.Change.Bytes(), at.Int64(), c.Pull, c.Task.ID.Bytes(), c.Change.Bytes()); err != nil {
 		return tx.Rollback(err)
 	}
 	return tx.Commit(ctx)

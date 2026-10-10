@@ -44,7 +44,9 @@ func (store *Store) AdmitNext(ctx context.Context, keys AdmissionKeys, at UnixMi
 		return rollbackNoAdmission(tx, NoAdmissionDispatchDisabled)
 	}
 	// A task names one agent or none. An unassigned task is shared: any
-	// unarchived worker in its project is a candidate. Each agent prefers a
+	// unarchived worker in its project that is not a specialist is a
+	// candidate. A specialist's carrier waits while it would take the last
+	// free worker slot or exceed its project's specialist_runs. Each agent prefers a
 	// replacement, then its own specific work, then shared work; the global
 	// choice across agents keeps the canonical queue order. The winning agent
 	// is written into the task below, inside this same reserved transaction,
@@ -58,7 +60,7 @@ func (store *Store) AdmitNext(ctx context.Context, keys AdmissionKeys, at UnixMi
 			SELECT t.id, a.id AS agent_id, t.assigned_agent_id IS NULL AS shared, t.priority, t.created_at_ms,
 				d.successor_task_id IS NOT NULL AS replacement
 			FROM tasks AS t
-			JOIN agents AS a ON a.project_id = t.project_id AND (a.id = t.assigned_agent_id OR t.assigned_agent_id IS NULL AND a.role = 'worker')
+			JOIN agents AS a ON a.project_id = t.project_id AND (a.id = t.assigned_agent_id OR t.assigned_agent_id IS NULL AND a.role = 'worker' AND a.idle_policy = 'wait')
 			LEFT JOIN delivered_successors AS d ON d.successor_task_id = t.id
 			WHERE t.status = 'queued'
               AND NOT EXISTS (SELECT 1 FROM intake_task_bindings AS binding JOIN intake_acceptances AS acceptance ON acceptance.id = binding.acceptance_id WHERE binding.task_id = t.id AND acceptance.withdrawn_at_ms IS NOT NULL)
@@ -69,7 +71,8 @@ func (store *Store) AdmitNext(ctx context.Context, keys AdmissionKeys, at UnixMi
 			  AND NOT EXISTS (SELECT 1 FROM runs AS r WHERE r.agent_id = a.id AND r.phase <> 'terminal')
 			  AND NOT EXISTS (SELECT 1 FROM task_prerequisites AS prerequisite WHERE prerequisite.task_id = t.id AND prerequisite.consumed_run_id IS NULL AND NOT EXISTS (SELECT 1 FROM tasks AS upstream JOIN runs AS source_run ON source_run.task_id = upstream.id AND source_run.project_id = upstream.project_id AND source_run.task_incarnation_id = upstream.incarnation_id AND source_run.admitted_task_work_revision = prerequisite.upstream_work_revision AND source_run.phase = 'terminal' AND source_run.terminal_kind = 'succeeded' WHERE upstream.id = prerequisite.upstream_task_id AND upstream.status = 'succeeded' AND upstream.work_revision = prerequisite.upstream_work_revision))
 			  AND NOT EXISTS (SELECT 1 FROM task_conflict_paths AS candidate_path JOIN task_conflict_paths AS active_path ON active_path.path = candidate_path.path JOIN tasks AS active ON active.id = active_path.task_id JOIN task_repository_bindings AS candidate_repository ON candidate_repository.task_id = t.id JOIN task_repository_bindings AS active_repository ON active_repository.task_id = active.id AND active_repository.repository_id = candidate_repository.repository_id WHERE candidate_path.task_id = t.id AND active.project_id = t.project_id AND active.status = 'running')
-			  AND ((a.role = 'worker' AND (SELECT COUNT(*) FROM runs WHERE role = 'worker' AND phase <> 'terminal') < ?)
+			  AND NOT (`+specialistCarrierSQL+` AND `+specialistCarrierHeldSQL+`)
+			  AND ((a.role = 'worker' AND (SELECT COUNT(*) FROM runs WHERE role = 'worker' AND phase <> 'terminal') < ?1)
 			    OR (a.role = 'orchestrator' AND (SELECT COUNT(*) FROM runs WHERE role = 'orchestrator' AND project_id = t.project_id AND phase <> 'terminal') < 1))
 		), next_for_worker AS (
 			SELECT *, ROW_NUMBER() OVER (
@@ -98,13 +101,13 @@ func (store *Store) AdmitNext(ctx context.Context, keys AdmissionKeys, at UnixMi
 		var capacityBlocked int
 		if err := tx.connection.QueryRowContext(ctx, `SELECT EXISTS(
 			SELECT 1 FROM tasks AS t
-			JOIN agents AS a ON a.project_id = t.project_id AND (a.id = t.assigned_agent_id OR t.assigned_agent_id IS NULL AND a.role = 'worker')
+			JOIN agents AS a ON a.project_id = t.project_id AND (a.id = t.assigned_agent_id OR t.assigned_agent_id IS NULL AND a.role = 'worker' AND a.idle_policy = 'wait')
 			WHERE t.status = 'queued' AND a.paused = 0 AND a.archived = 0
 			  AND (a.role = 'orchestrator' OR a.tool_calls_used < a.tool_budget_limit)
 			  AND EXISTS (SELECT 1 FROM projects AS p WHERE p.id = t.project_id AND (p.run_budget_limit = 0 OR p.runs_used < p.run_budget_limit))
 			  AND NOT EXISTS (SELECT 1 FROM project_tokens AS k WHERE k.project_id = t.project_id AND k.token_limit > 0 AND k.tokens_used >= k.token_limit)
 			  AND NOT EXISTS (SELECT 1 FROM runs AS r WHERE r.agent_id = a.id AND r.phase <> 'terminal')
-			  AND ((a.role = 'worker' AND (SELECT COUNT(*) FROM runs WHERE role = 'worker' AND phase <> 'terminal') >= ?)
+			  AND ((a.role = 'worker' AND ((SELECT COUNT(*) FROM runs WHERE role = 'worker' AND phase <> 'terminal') >= ?1 OR `+specialistCarrierSQL+` AND `+specialistCarrierHeldSQL+`))
 		    OR (a.role = 'orchestrator' AND (SELECT COUNT(*) FROM runs WHERE role = 'orchestrator' AND project_id = t.project_id AND phase <> 'terminal') >= 1))
 		)`, factory.Capacity).Scan(&capacityBlocked); err != nil {
 			return AdmissionResult{}, tx.Rollback(err)

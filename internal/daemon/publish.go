@@ -55,11 +55,15 @@ func (daemon *Daemon) publishSettledChanges(ctx context.Context) {
 }
 
 func (daemon *Daemon) publishSettledChange(ctx context.Context, c kernel.PublishableChange) error {
-	target, verified, err := daemon.store.RepositorySourceIdentity(ctx, c.Accepted.RepositoryID)
+	repositoryID := c.Accepted.RepositoryID
+	if repositoryID == (kernel.RepositoryID{}) {
+		repositoryID = c.Repository
+	}
+	target, verified, err := daemon.store.RepositorySourceIdentity(ctx, repositoryID)
 	if err != nil {
 		return err
 	}
-	id, pinned, err := daemon.store.RepositoryGitHubID(ctx, c.Accepted.RepositoryID)
+	id, pinned, err := daemon.store.RepositoryGitHubID(ctx, repositoryID)
 	if err != nil {
 		return err
 	}
@@ -69,7 +73,7 @@ func (daemon *Daemon) publishSettledChange(ctx context.Context, c kernel.Publish
 	repo := strings.ToLower(target.PublicationRepository)
 	// Accepted work keeps its destination, but a disabled repository is
 	// neither cloned nor reviewed: the overseer or operator decides.
-	if repository, found, err := daemon.store.ProjectRepository(ctx, c.Accepted.RepositoryID); err != nil || !found || !repository.Enabled {
+	if repository, found, err := daemon.store.ProjectRepository(ctx, repositoryID); err != nil || !found || !repository.Enabled {
 		return daemon.publishFailed(ctx, c, repo, errors.Join(err, errors.New("repository disabled for new work")))
 	}
 	backend := &daemonReviewBackend{daemon: daemon, project: c.Task.ProjectID, repository: repo, repositoryID: id}
@@ -133,11 +137,23 @@ func (daemon *Daemon) publishFailed(ctx context.Context, c kernel.PublishableCha
 	if readErr != nil {
 		return errors.Join(err, readErr)
 	}
-	failed := review.Operation{ID: id, State: "publish_failed", Handled: true, Detail: why, CreatedAt: now, UpdatedAt: now}
+	failed := review.Operation{ID: id, State: "publish_failed", Retryable: publicationFailureRetryable(err), Handled: true, Detail: why, CreatedAt: now, UpdatedAt: now}
 	if !repeat {
 		failed.Escalation = fmt.Sprintf("factoryd cannot publish change %s for task %s: %s", c.Change, c.Task.ID, why)
 	}
 	return durableReviewStore{store: daemon.store, project: c.Task.ProjectID, repository: repo, now: daemon.now}.Create(ctx, failed)
+}
+
+// publicationFailureRetryable distinguishes a Maintainer refusal from a
+// change-caused validation failure. The former can be a branch or worker
+// precondition that changes outside factoryd; invalid_input is the App's
+// deterministic rejection of this Change and must remain terminal.
+func publicationFailureRetryable(err error) bool {
+	text := err.Error()
+	return strings.Contains(text, "review: Maintainer rejected operation: refused:") ||
+		strings.Contains(text, "review: Maintainer rejected operation: conflict:") ||
+		strings.Contains(text, "review: Maintainer rejected operation: unavailable:") ||
+		strings.Contains(text, "repository disabled for new work")
 }
 
 // publishPull is the overseer runbook's publication, made deterministic:
@@ -168,6 +184,9 @@ func (daemon *Daemon) publishPull(ctx context.Context, c kernel.PublishableChang
 		return true, json.Unmarshal(observed.Result, result)
 	}
 	branch := "factory/" + c.Change.String()[:12]
+	if c.Repair && c.Branch != "" {
+		branch = c.Branch
+	}
 	refHead := func(branch string) (string, error) {
 		response, err := call(ctx, "observe_ref", map[string]any{"repository": repo, "branch": branch})
 		var ref struct {
@@ -237,7 +256,7 @@ func (daemon *Daemon) publishPull(ctx context.Context, c kernel.PublishableChang
 	if len(changes) == 0 && (c.Pull != 0 || diffFrom != tip) {
 		return errors.New("nothing to publish: its head " + c.Head + " changes no file from " + diffFrom)
 	}
-	message := publicationTitle(c.Accepted.Snapshot.Title)
+	message := publicationMessage(c)
 	for i := 0; i*50 < len(changes); i++ {
 		step := prefix + strconv.Itoa(i+1)
 		var commit struct {
@@ -279,6 +298,13 @@ func (daemon *Daemon) publishPull(ctx context.Context, c kernel.PublishableChang
 	result = strings.ToValidUTF8(result[:min(len(result), 24000)], "")
 	body := fmt.Sprintf("%s\n\nPublished by factoryd from Change %s at %s: +%d -%d across %d files from %s.\n\nThe merge queue runs the gate.", result, c.Change, head, added, deleted, files, from)
 	if c.Pull != 0 {
+		if c.Repair {
+			at, err := daemon.timestamp()
+			if err != nil {
+				return err
+			}
+			return daemon.store.RecordCorrectionPublished(ctx, c, at)
+		}
 		// The corrected body keeps its closing line; factoryd's refresh
 		// reviews the new head.
 		step := "body-" + head[:8]
@@ -334,6 +360,14 @@ func (daemon *Daemon) publishPull(ctx context.Context, c kernel.PublishableChang
 func publicationTitle(title string) string {
 	title = strings.Join(strings.Fields(title), " ")
 	return strings.ToValidUTF8(title[:min(len(title), 256)], "")
+}
+
+func publicationMessage(c kernel.PublishableChange) string {
+	title := c.Accepted.Snapshot.Title
+	if title == "" {
+		title = c.Task.Title
+	}
+	return publicationTitle(title)
 }
 
 // publicationFrom is where a first publication's commits go: the Change's

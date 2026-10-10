@@ -105,9 +105,12 @@ func (daemon *Daemon) settleRun(ctx context.Context, changeParent string, runID 
 // supervisor's own finalize takes. A worktree that is gone from the Change's
 // name cannot be retained and cannot come back: that is the run's outcome,
 // a visible source failure, and the Change is abandoned so that the task's
-// retry makes a fresh worktree. Any other fault (the repository, Git, the
-// arguments) may pass tomorrow and leaves the run finalizing. A Change that
-// is still a Git-free tree, never adopted, settles as it is, with no head.
+// retry makes a fresh worktree. So is a worktree that fails its own
+// validation while the repository and Git verify (say, a worker added a
+// remote to its private config): it fails the same way tomorrow. Any other
+// fault (the repository, Git, I/O) may pass and leaves the run finalizing.
+// A Change that is still a Git-free tree, never adopted, settles as it is,
+// with no head.
 func (daemon *Daemon) retainedSettlement(ctx context.Context, changeParent string, changeState kernel.Change) (kernel.ChangeSettlement, error) {
 	if changeParent == "" || changeState.Selection == nil {
 		return kernel.ChangeSettlement{}, fmt.Errorf("%w: published change lacks retained evidence", kernel.ErrConflict)
@@ -132,6 +135,9 @@ func (daemon *Daemon) retainedSettlement(ctx context.Context, changeParent strin
 		return kernel.NewRefusedChangeSettlement(changeState.Revision, "the Change worktree is gone from changes/"+changeState.ID.String())
 	}
 	facts, err := change.InspectWorktree(ctx, *git, route.Root, repository, path)
+	if invalid := (*change.ValidationError)(nil); errors.As(err, &invalid) && invalid.Worktree {
+		return kernel.NewRefusedChangeSettlement(changeState.Revision, "the Change worktree did not verify: "+invalid.Reason)
+	}
 	if err != nil {
 		return kernel.ChangeSettlement{}, errors.Join(fmt.Errorf("%w: Change worktree did not verify", kernel.ErrConflict), err)
 	}

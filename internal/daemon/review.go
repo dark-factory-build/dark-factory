@@ -9,7 +9,6 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
-	"os/user"
 	"path/filepath"
 	"regexp"
 	"strings"
@@ -286,7 +285,7 @@ func (daemon *Daemon) routeSendBack(ctx context.Context, project kernel.ProjectI
 		err = daemon.escalatePull(op, "its send-back reached no task:\n\n"+note)
 	case err != nil:
 		return err // a running task refuses it until it settles
-	case !strings.Contains(kernel.TaskFeedback(task), "review-operation: "+op.ID+"\n") || task.WorkRevision.Int64() < 2:
+	case !strings.Contains(kernel.TaskFeedback(task), "review-operation: "+op.ID+"\n") || task.WorkRevision.Int64() < 1:
 		return errors.New("review: send-back did not move the task")
 	case task.WorkRevision.Int64() > 3:
 		err = daemon.escalatePull(op, "it is past two repair rounds; the latest went back to its task:\n\n"+note)
@@ -484,10 +483,11 @@ func (b *daemonReviewBackend) Review(ctx context.Context, checkout string, reque
 	prompt := reviewPrompt(checkout, request.Base, request.Body, diff)
 	for _, home := range homes {
 		var command *exec.Cmd
-		environment := reviewEnvironment(filepath.Dir(checkout))
+		// A later entry wins in exec, so the account's HOME replaces the
+		// review home for Claude Code.
+		environment := append(reviewEnvironment(filepath.Dir(checkout)), provider.AccountEnvironment(kind, filepath.Dir(home), home)...)
 		if kind == kernel.ProviderClaudeCode {
 			command = exec.CommandContext(ctx, tool, "-p", prompt, "--permission-mode", "plan", "--safe-mode", "--restricted", "--setting-sources", "", "--strict-mcp-config", "--tools", "Read,Grep,Glob", "--allowedTools", "Read,Grep,Glob")
-			environment = append(environment, claudeLogin(home))
 		} else {
 			command = exec.CommandContext(ctx, tool, "exec", "--disable", "computer_use", "--disable", "browser_use", "--disable", "plugins", "--ephemeral", "--ignore-user-config", "--strict-config", "-c", "approval_policy={ granular={sandbox_approval=false,rules=false,mcp_elicitations=false,request_permissions=false,skill_approval=false}}", "--ignore-rules", "--skip-git-repo-check")
 			// Git in the checkout reads the registered repository's objects
@@ -497,11 +497,6 @@ func (b *daemonReviewBackend) Review(ctx context.Context, checkout string, reque
 				readable = append(readable, strings.Split(strings.TrimSpace(string(alternates)), "\n")...)
 			}
 			command.Args = append(append(command.Args, provider.CodexReadOnly(readable...)...), prompt)
-			environment = append(environment, "CODEX_HOME="+home)
-		}
-		// The CLI finds its keychain login under $USER (#1107).
-		if account, err := user.Current(); err == nil {
-			environment = append(environment, "USER="+account.Username)
 		}
 		command.Dir, command.Env = checkout, environment
 		// The deadline kills the reviewer's whole process group, not only its
@@ -561,16 +556,6 @@ func namesChangedPath(ctx context.Context, checkout, base, text string) bool {
 		}
 	}
 	return false
-}
-
-// claudeLogin is the launcher's rule for one Claude login directory: a login
-// in its home's default directory keeps its OAuth account in that home's
-// .claude.json, reached through HOME; any other directory is named directly.
-func claudeLogin(directory string) string {
-	if home := filepath.Dir(directory); filepath.Dir(provider.ClaudeConfigFile(home, directory)) == home {
-		return "HOME=" + home
-	}
-	return "CLAUDE_CONFIG_DIR=" + directory
 }
 
 func reviewPrompt(checkout, base, body, diff string) string {
