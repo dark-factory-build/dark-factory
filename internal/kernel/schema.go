@@ -92,7 +92,7 @@ var schemaStatements = []string{
     daemon_id BLOB NOT NULL CHECK (length(daemon_id) = 16 AND daemon_id <> zeroblob(16)),
     dispatch_enabled INTEGER NOT NULL CHECK (dispatch_enabled IN (0, 1)),
     capacity INTEGER NOT NULL CHECK (capacity BETWEEN 1 AND 1024),
-	revision INTEGER NOT NULL CHECK (revision >= 1),
+    revision INTEGER NOT NULL CHECK (revision >= 1),
     next_invalidation_sequence INTEGER NOT NULL CHECK (next_invalidation_sequence >= 1),
     invalidation_floor INTEGER NOT NULL CHECK (invalidation_floor >= 1 AND invalidation_floor <= next_invalidation_sequence),
     updated_at_ms INTEGER NOT NULL CHECK (updated_at_ms >= 0)
