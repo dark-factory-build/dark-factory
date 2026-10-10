@@ -1000,6 +1000,37 @@ func TestSupervisorRetainedRetryReopensTheSameWorktree(t *testing.T) {
 	}
 }
 
+// A repair task's fresh Change starts at its pull request's exact head, which
+// is not on the base branch, with the base as origin/main: factoryd fetches
+// both, so the worker sees them offline.
+func TestSupervisorRepairChangeStartsAtThePullRequestHead(t *testing.T) {
+	fixture := newSupervisorFixture(t, "set -eu\ngit rev-parse HEAD refs/remotes/origin/main > __WITNESS__\n"+quoteShell(supervisorTestExecutable(t))+" --supervisor-attempt-succeed typed-success\n")
+	git := supervisorNativeGit(t)
+	origin, author := filepath.Join(fixture.root, "origin.git"), filepath.Join(fixture.root, "author")
+	supervisorGit(t, git, "clone", "--quiet", "--bare", filepath.Join(fixture.root, "repository"), origin)
+	supervisorGit(t, git, "clone", "--quiet", origin, author)
+	if err := os.WriteFile(filepath.Join(author, "repair.txt"), []byte("pull request\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	supervisorGit(t, git, "-C", author, "add", "repair.txt")
+	supervisorGit(t, git, "-C", author, "-c", "user.email=test@example.invalid", "-c", "user.name=test", "commit", "-q", "-m", "pull request")
+	supervisorGit(t, git, "-C", author, "push", "--quiet", "origin", "HEAD:refs/heads/feature/repair")
+	head := strings.TrimSpace(supervisorGitOutput(t, git, "-C", author, "rev-parse", "HEAD"))
+	supervisorGit(t, git, "-C", filepath.Join(fixture.root, "repository"), "remote", "add", "origin", origin)
+	pr := kernel.ProductionPullRequest{Number: 7, Title: "Repair", URL: "https://github.com/team/repo/pull/7", Head: head, Branch: "feature/repair", Base: "main", State: "open", Review: kernel.ProductionReview{Head: head, State: "unknown"}}
+	if err := fixture.store.RecordPublication(context.Background(), supervisorProjectID(t, 1), fixture.taskID, "team/repo", pr, supervisorTime()); err != nil {
+		t.Fatal(err)
+	}
+	run, err := fixture.daemon.RunNext(context.Background(), fixture.spec)
+	if err != nil {
+		t.Fatalf("RunNext: %v", err)
+	}
+	fixture.assertTerminal(t, run, kernel.OutcomeSucceeded)
+	if seen, err := os.ReadFile(fixture.witness); err != nil || string(seen) != head+"\n"+fixture.base+"\n" {
+		t.Fatalf("worker saw HEAD and origin/main %q, want %s and %s: %v", seen, head, fixture.base, err)
+	}
+}
+
 func TestSupervisorRetainedRetryFailsClosedOnDurableAuthorityMismatch(t *testing.T) {
 	for _, test := range []struct {
 		name   string

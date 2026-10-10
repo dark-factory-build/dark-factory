@@ -416,6 +416,17 @@ func (daemon *Daemon) runNext(ctx context.Context, spec SupervisorSpec) (resultR
 			return daemon.failRunBeforeRuntime(daemon.cleanupCtx, run, keys.resources.RuntimeRoot, kernel.FailureInternal, kernel.ErrCorruptState)
 		}
 	}
+	// A fresh Change for a pull request's repair starts at the pull request's
+	// branch, which the worker's selection fetches from origin.
+	revision, repair, repairing := repository.BaseRef, kernel.ProductionPullRequest{}, false
+	if worker && retained == nil {
+		if repair, repairing, err = daemon.store.OpenPullRequestForTask(ctx, run.TaskID); err != nil {
+			return daemon.failRunBeforeRuntime(daemon.cleanupCtx, run, keys.resources.RuntimeRoot, kernel.FailureInternal, err)
+		}
+		if repairing {
+			revision = "refs/remotes/origin/" + repair.Branch
+		}
+	}
 	var repositoryGitIdentity change.RepositoryIdentity
 	var repositoryOriginDigest [32]byte
 	source, sourceErr := inspectRegisteredRepository(ctx, repository.Root, "")
@@ -500,7 +511,7 @@ func (daemon *Daemon) runNext(ctx context.Context, spec SupervisorSpec) (resultR
 		AgentID: run.AgentID.String(), TaskIncarnationID: run.TaskIncarnationID.String(), PreviousWorkingDirectory: previousWorkingDirectory,
 		RuntimePath: gotRuntimePath, RuntimeIdentity: runtimeFileIdentity,
 		GitExecutable: spec.GitExecutable, FactoryctlExecutable: factoryctl.Path(), ToolPath: spec.ToolPath, ToolchainReadRoots: spec.ToolchainReadRoots, LocalCILeaseDir: localCILeaseDir, TraceReceiverPort: traceReceiverPort, RunID: telemetryRunID, AccountHome: spec.AccountHome, AccountConfigDir: accountConfigDir, RepositoryRoot: repository.Root, RepositoryIdentity: repositoryIdentity, RepositoryGitIdentity: repositoryGitIdentity, RepositoryOriginDigest: repositoryOriginDigest, GitCommonDir: gitCommonDir,
-		Revision: repository.BaseRef, ChangeParent: spec.ChangeParent, FinalName: finalName,
+		Revision: revision, ChangeParent: spec.ChangeParent, FinalName: finalName,
 		AttemptSocket: spec.AttemptSocket, Retained: retained, ProviderTask: providerTask,
 	}
 	workerConfig, err := changeworker.EncodeConfig(config)
@@ -694,6 +705,9 @@ func (daemon *Daemon) runNext(ctx context.Context, spec SupervisorSpec) (resultR
 		if selection, err = kernelSelectionCheckpoint(workerResult, repositoryIdentity); err != nil {
 			return daemon.failRun(run, kernel.FailureSource, err)
 		}
+		if repairing && !strings.EqualFold(workerResult.Base.Hex(), repair.Head) {
+			return daemon.failRun(run, kernel.FailureSource, fmt.Errorf("pull request branch %s is not at its head %s", repair.Branch, repair.Head))
+		}
 		at, err = daemon.timestamp()
 		if err != nil {
 			return daemon.failRun(run, kernel.FailureInternal, err)
@@ -717,10 +731,10 @@ func (daemon *Daemon) runNext(ctx context.Context, spec SupervisorSpec) (resultR
 		return daemon.failRun(run, kernel.FailureSource, errInvalidContract)
 	}
 	if worker {
-		if retained != nil {
+		if retained != nil || repairing {
 			// The registered checkout is factoryd's fetch boundary. Refresh the
 			// current base there, then copy that exact commit into the retained
-			// Change before the worker can run a correction offline.
+			// or repair Change before the worker can run a correction offline.
 			current, selectErr := change.SelectRegisteredGit(ctx, spec.GitExecutable, repository.Root, repository.BaseRef, change.RepositorySourceIdentity{Root: repositoryIdentity, Git: repositoryGitIdentity, OriginDigest: repositoryOriginDigest})
 			if selectErr != nil {
 				return daemon.failRun(run, kernel.FailureSource, selectErr)

@@ -651,6 +651,28 @@ func (store *Store) RecordCorrectionPublished(ctx context.Context, c Publishable
 	return tx.Commit(ctx)
 }
 
+// OpenPullRequestForTask is the open pull request a task's latest publication
+// names, the one a repair task works on; found is false when there is none or
+// it names no head branch.
+func (store *Store) OpenPullRequestForTask(ctx context.Context, task TaskID) (ProductionPullRequest, bool, error) {
+	tx, err := store.beginRead(ctx)
+	if err != nil {
+		return ProductionPullRequest{}, false, err
+	}
+	defer tx.Close()
+	var document string
+	err = tx.connection.QueryRowContext(ctx, `SELECT r.document FROM publication_tasks p JOIN production_records r ON r.project_id = p.project_id AND r.repository = p.repository AND r.kind = 'pull_request' AND r.identity = CAST(p.pull_number AS TEXT)
+		WHERE p.task_id = ? AND json_extract(r.document, '$.state') = 'open' ORDER BY p.created_at_ms DESC LIMIT 1`, task.Bytes()).Scan(&document)
+	if errors.Is(err, sql.ErrNoRows) {
+		return ProductionPullRequest{}, false, nil
+	}
+	var pr ProductionPullRequest
+	if err == nil && json.Unmarshal([]byte(document), &pr) != nil {
+		err = ErrCorruptState
+	}
+	return pr, err == nil && pr.Head != "" && pr.Branch != "", err
+}
+
 // RecordPublicationWithReviewOperation claims the independent review in the
 // same transaction as publication. This closes the shutdown window between
 // the publication record and review operation creation.
