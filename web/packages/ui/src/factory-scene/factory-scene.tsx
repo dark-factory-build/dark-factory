@@ -120,6 +120,19 @@ function shortLabel(label: string, limit = 18) {
   return `${glyphs.filter((glyph) => (width += columns(glyph)) <= limit - 2).join("")}…`;
 }
 
+function middleLabel(label: string, limit = 18) {
+  const glyphs = Array.from(LABEL_SEGMENTS.segment(label), ({ segment }) => segment);
+  const columns = (glyph: string) => /[^\u0000-\u00ff]/u.test(glyph) ? 2 : 1;
+  if (glyphs.reduce((width, glyph) => width + columns(glyph), 0) <= limit) return label;
+  let left = 0, right = glyphs.length - 1, used = 0;
+  const leftLimit = Math.ceil((limit - 2) / 2), rightLimit = limit - 2 - leftLimit;
+  while (left <= right && used + columns(glyphs[left]!) <= leftLimit) used += columns(glyphs[left++]!);
+  used = 0;
+  while (right >= left && used + columns(glyphs[right]!) <= rightLimit) used += columns(glyphs[right--]!);
+  const suffix = right + 1;
+  return `${glyphs.slice(0, left).join("")}…${glyphs.slice(suffix).join("")}`;
+}
+
 /** One 16px frame of the sheet, sized and placed in scene coordinates. */
 function Frame({ name, x, y, className }: { name: string; x: number; y: number; className?: string }) {
   return <use href={`#df-frame-${name}`} x={x} y={y} width={FRAME} height={FRAME} className={className} />;
@@ -839,7 +852,8 @@ function machineInfo(machine: SceneMachine, unit?: SceneUnit) {
   const reading = machine.reading;
   const deployed = reading.deployedAt === undefined ? "" : `\nDeployed ${new Date(reading.deployedAt).toLocaleString([], { dateStyle: "short", timeStyle: "short" })}`;
   const activity = reading.state === "unknown" ? "" : reading.state === "idle" ? " · idle" : ` · ${reading.state} · ${rate(reading.ratePerHour)}${reading.errorPermille > 0 ? ` · ${reading.errorPermille / 10}% errors` : ""}${reading.latencyMs > 0 ? ` · p95 ${reading.latencyMs} ms` : ""}`;
-  return `${machine.label}\n${kindText(machine, unit)}${unit !== undefined && unit.id !== machine.id ? ` in ${unit.label}` : machine.owner ? ` from ${machine.owner}` : ""}\n${OBSERVATION_TEXT[reading.observation]}${activity}\n${EVIDENCE_TEXT[reading.evidence]}${deployed}`;
+  const routes = machine.routes === undefined ? "" : `\n${machine.routes.map((route) => middleLabel(route, 24)).join("\n")}`;
+  return `${machine.label}${routes}\n${kindText(machine, unit)}${unit !== undefined && unit.id !== machine.id ? ` in ${unit.label}` : machine.owner ? ` from ${machine.owner}` : ""}\n${OBSERVATION_TEXT[reading.observation]}${activity}\n${EVIDENCE_TEXT[reading.evidence]}${deployed}`;
 }
 
 function Coverage({ summary }: { summary: NonNullable<SceneGraph["summary"]> }) {

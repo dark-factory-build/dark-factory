@@ -213,6 +213,13 @@ test("nothing live, runtime-only or worker-made moves a machine", () => {
   assert.deepEqual(relative(arrived), relative(layout));
 });
 
+test("a large development unit fills a compact block instead of leaving a right-hand bay empty", () => {
+  const large = unit("development", { machines: Array.from({ length: 11 }, (_, index) => machine(`job-${index}`, "job")) });
+  const layout = layoutScene(sceneGraph([large]));
+  assert.equal(layout.width, 452);
+  assert.equal(layout.height, 452);
+});
+
 test("worker identity is stable while operational state changes", () => {
   const base = { id: "stable-worker", name: "Builder", role: "worker", provider: "codex", activity: "busy", nodeId: "src" };
   const stableIdentity = 3;
@@ -1231,6 +1238,12 @@ test("zooming to twice the fitted scale lists a manifold's routes inside its unm
     await act(async () => renderer?.unmount());
     globalThis.window = priorWindow;
   }
+});
+
+test("a hub tooltip names route ends and shortens from the middle", () => {
+  const routes = ["→ share/orders/very-long-alpha", "→ share/orders/very-long-beta"];
+  const markup = renderToStaticMarkup(createElement(FactoryScene, { graph: sceneGraph([unit("api", { machines: [machine("api:docks", "ingress", { label: "2 routes", represented: routes, routes })] })]), appearance: scenic, workers: [] }));
+  assert.match(markup, /data-tooltip="2 routes\n→ share[^\"]*alpha\n→ share[^\"]*beta/);
 });
 
 test("a unit known busy only as a whole moves its intake while its machines stay partial", () => {

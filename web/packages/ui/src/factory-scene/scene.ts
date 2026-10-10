@@ -240,7 +240,6 @@ const union = (rects: readonly SceneRect[]) => {
   const x = Math.min(...rects.map((rect) => rect.x)), y = Math.min(...rects.map((rect) => rect.y));
   return { x, y, width: Math.max(...rects.map((rect) => rect.x + rect.width)) - x, height: Math.max(...rects.map((rect) => rect.y + rect.height)) - y };
 };
-
 type Links = ReadonlyMap<string, ReadonlyMap<string, number>>;
 
 /** Rectangles in buckets, so finding an overlap costs the same however large the floor. */
