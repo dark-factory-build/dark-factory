@@ -589,7 +589,7 @@ func TestSupervisorClaudeFetchesALongTaskThroughTheAttemptAPI(t *testing.T) {
 // it: the retry resumes the first attempt's own conversation on disk instead
 // of starting an unrelated fresh one.
 func TestSupervisorClaudeWorkerReusesNativeSessionAcrossSendBack(t *testing.T) {
-	fixture := newSupervisorFixture(t, "unused shell task")
+	fixture := newSupervisorFixture(t, "Codify the operator scripts")
 	if err := replaceSupervisorAgentLaunchControls(fixture.storePath, fixture.agentID, kernel.ProviderClaudeCode, "", ""); err != nil {
 		t.Fatal(err)
 	}
