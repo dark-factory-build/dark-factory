@@ -1379,13 +1379,9 @@ func RebaseWorktree(ctx context.Context, selection Selection, path string) (Work
 	if _, err := authority.inspectWorktree(ctx, path); err != nil {
 		return WorktreeFacts{}, err
 	}
-	admin := GitDirectoryForChange(selection.repositoryRoot, path)
-	gitArgs := []string{"-c", "core.hooksPath=/dev/null", "-c", "protocol.file.allow=always"}
-	if err := validatePrivateGitAdmin(admin); err == nil {
-		gitArgs = append(gitArgs, "--git-dir", admin, "--work-tree", path)
-	} else {
-		gitArgs = append(gitArgs, "-C", path)
-	}
+	// Use the linked worktree's .git indirection. Passing the private bare
+	// repository as --git-dir would select its unrelated HEAD and index.
+	gitArgs := []string{"-c", "core.hooksPath=/dev/null", "-c", "protocol.file.allow=always", "-C", path}
 	gitArgs = append(gitArgs, "rebase", "refs/remotes/origin/main")
 	result, err := authority.run(ctx, maxGitSelectionOutput, gitArgs...)
 	if err != nil {

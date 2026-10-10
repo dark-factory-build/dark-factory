@@ -746,6 +746,17 @@ func TestPublishableIntakeChangeIsFactorydsUntilPublishedOrFailed(t *testing.T) 
 	if err := store.writer.QueryRowContext(ctx, `SELECT count(*) FROM publication_tasks WHERE task_id = ? AND change_id = ?`, worker.TaskID.Bytes(), change.ID.Bytes()).Scan(&linked); err != nil || linked != 1 {
 		t.Fatalf("publication linked to its Change: %d %v", linked, err)
 	}
+	// A factoryd rebase changes only the retained head timestamp, not the
+	// worker revision; that first-publication correction remains publishable.
+	if _, err := store.writer.ExecContext(ctx, `UPDATE changes SET updated_at_ms = 72 WHERE id = ?`, change.ID.Bytes()); err != nil {
+		t.Fatal(err)
+	}
+	if found := candidates(); len(found) != 1 || found[0].Pull != 5 {
+		t.Fatalf("first-publication rebase correction candidates = %+v", found)
+	}
+	if _, err := store.writer.ExecContext(ctx, `UPDATE changes SET updated_at_ms = 70 WHERE id = ?`, change.ID.Bytes()); err != nil {
+		t.Fatal(err)
+	}
 	if len(candidates()) != 0 || !closed() {
 		t.Fatal("a published intake branch is open to the overseer, or published again")
 	}

@@ -565,7 +565,7 @@ func (store *Store) PublishableChanges(ctx context.Context, at UnixMillis) ([]Pu
 		JOIN tasks t ON t.id = c.task_id AND t.incarnation_id = c.task_incarnation_id
 		LEFT JOIN intake_task_bindings b ON b.task_id = c.task_id LEFT JOIN intake_acceptances a ON a.id = b.acceptance_id
 		LEFT JOIN publication_tasks p ON p.task_id = c.task_id AND c.updated_at_ms > p.created_at_ms
-		  AND (t.work_revision > 1 OR p.change_id IS NULL)
+		  AND (t.work_revision > 1 OR p.change_id IS NULL OR c.updated_at_ms > p.created_at_ms)
 		  AND EXISTS (SELECT 1 FROM production_records r WHERE r.project_id = p.project_id AND r.repository = p.repository AND r.kind = 'pull_request'
 		      AND r.identity = CAST(p.pull_number AS TEXT) AND json_extract(r.document, '$.state') = 'open')
 		WHERE c.phase = 'retained' AND t.status = 'succeeded' AND a.withdrawn_at_ms IS NULL AND c.head_commit <> c.base_commit
