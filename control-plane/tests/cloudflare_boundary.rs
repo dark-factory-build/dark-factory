@@ -436,17 +436,16 @@ fn observe_merge_surface_matches_shared_contract() {
         .map_or(rest.len(), |offset| offset + 1);
     let tool = &rest[..end];
     for (schema_name, contract_name) in [("inputSchema", "request"), ("outputSchema", "response")] {
-        let schema = &tool[tool.find(&format!(r#""{schema_name}""#)).unwrap()..];
-        let required_start = schema.find(r#""required": "#).unwrap();
-        let required = &schema
-            [required_start..schema[required_start..].find(']').unwrap() + required_start + 1];
-        let expected = serde_json::to_string(&contract[contract_name]["required"]).unwrap();
-        assert!(
-            required.contains(&expected[1..expected.len() - 1]),
+        let schema_start = tool.find(&format!(r#""{schema_name}": {{"#)).unwrap();
+        let schema = object_at(tool, schema_start);
+        let actual_required: serde_json::Value =
+            serde_json::from_str(&own_required_in(&schema)).unwrap();
+        assert_eq!(
+            actual_required, contract[contract_name]["required"],
             "{schema_name} required fields drifted"
         );
         let properties_start = schema.find(r#""properties": {"#).unwrap();
-        let properties = &schema[properties_start..required_start];
+        let properties = object_at(&schema, properties_start);
         let expected_properties = contract[contract_name]["properties"].as_object().unwrap();
         for field in expected_properties.keys() {
             assert!(
