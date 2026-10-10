@@ -7,7 +7,7 @@ export DF_CI_CACHE_ROOT="$temporary/cache"
 # Each fixture selects the Node/Corepack pair supplied by its own PATH. The
 # authoritative gate exports its selected pair, so discard that parent-only
 # implementation detail before exercising the isolated boundaries below.
-unset DF_CI_NODE DF_CI_COREPACK DARK_FACTORY_E2E_NODE DARK_FACTORY_E2E_COREPACK
+unset DF_CI_GO DF_CI_NODE DF_CI_COREPACK DARK_FACTORY_E2E_GO DARK_FACTORY_E2E_NODE DARK_FACTORY_E2E_COREPACK
 fail() { echo "go gate fault fixtures failed: $*" >&2; exit 1; }
 test_cleanup() {
     test_status=$?
