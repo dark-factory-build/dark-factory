@@ -1450,6 +1450,16 @@ func TestAttemptCallWaitsOutDaemonRestart(t *testing.T) {
 		return writeTestResponse(connection, wireAttemptDomain, body)
 	}
 	const outage = time.Second
+	// The new generation keeps listening after it answers: the client
+	// revalidates the socket once the reply is read.
+	replacements := make(chan *net.UnixListener, 1)
+	defer func() {
+		select {
+		case replacement := <-replacements:
+			replacement.Close()
+		default:
+		}
+	}()
 	done := make(chan error, 1)
 	go func() {
 		if err := serve(old, `{"ok":false,"error":"unavailable"}`, old.Close); err != nil {
@@ -1467,7 +1477,7 @@ func TestAttemptCallWaitsOutDaemonRestart(t *testing.T) {
 			done <- err
 			return
 		}
-		defer replacement.Close()
+		replacements <- replacement
 		// factoryd proves its binding before it makes the socket private.
 		time.Sleep(10 * restartRetryInterval)
 		if err := os.Chmod(socket, 0o600); err != nil {
