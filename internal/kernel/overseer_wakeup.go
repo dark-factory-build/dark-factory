@@ -105,7 +105,7 @@ item AS (
 	  printf('Escalated: factoryd %s failed in phase %s: %s', d.identity, d.phase, d.reason), d.key
 	FROM (SELECT *, max(COALESCE((SELECT MAX(o.at) FROM release AS o WHERE o.failure IS NOT r.failure), 0),
 		COALESCE((SELECT MAX(c.at) FROM carrier AS c WHERE instr(c.names, '[release:') AND NOT instr(c.names, r.key)), 0)) AS since
-		FROM (SELECT *, '[release:' || substr(failure, 1, 80) || ']' AS key FROM release ORDER BY at DESC LIMIT 1) AS r) AS d WHERE d.failure IS NOT NULL
+		FROM (SELECT *, '[release:' || replace(failure, ']', ')') || ']' AS key FROM release ORDER BY at DESC LIMIT 1) AS r) AS d WHERE d.failure IS NOT NULL
 	UNION ALL SELECT NULL, c.created_at_ms, 3, 'Proposal ' || lower(hex(c.id)) || ' from ' || COALESCE((SELECT name FROM agents WHERE id = ` + authorAgentSQL + `), 'the operator') || ': '
 		|| replace(substr(c.title, 1, 100), char(10), ' '), '[proposal:' || lower(hex(c.id)) || ']'
 	FROM project_content_revisions AS c WHERE c.project_id = ?1 AND ` + openProposalSQL + `),
