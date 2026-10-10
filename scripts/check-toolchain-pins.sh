@@ -12,6 +12,7 @@ check_pin() {
 }
 
 check_pin scripts/local-ci.sh "go-ci-owned.sh" "the authoritative Go gate stage"
+check_pin go.mod "go 1.27.2" "the patched release toolchain"
 
 check_pin .github/workflows/ci.yml 'https://dl.google.com/go/$go_archive.sha256' "checksum-verified go.dev Go provisioning"
 check_pin .github/workflows/ci.yml 'node-v22.20.0-darwin-' "isolated Node 22.20.0 with bundled Corepack"
