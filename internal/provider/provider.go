@@ -34,9 +34,9 @@ const (
 	maxPathBytes     = 4096
 	claudeConfigDir  = ".claude"
 	codexConfigDir   = ".codex"
-	// bootstrapPrompt is both native providers' fixed positional prompt: the
-	// exact task is read through the attempt API, never typed into the PTY.
-	bootstrapPrompt = `Use the factory_attempt.factory tool with argv ["attempt","task"] before doing anything else. The returned JSON task field is the exact task: complete only that task. When it reports an observed problem, rerun its cited commands or read its cited file:line before editing, and quote each with what you saw in your attempt succeed result; if the problem does not reproduce, end with attempt fail and a detail starting "premise not reproduced:" that quotes them instead. Use this tool for every factoryctl attempt or overseer command, passing argv without the executable; shell commands cannot access the attempt API. Peer collaboration is asynchronous: use argv ["attempt","peer","status"] to read or answer task-linked questions, but it grants no task or terminal control. For a stale paged peer status, restart from the first page. Before exiting, report the durable outcome with attempt succeed, block, or fail through this tool. When assigned a writable task checkout, read and edit it directly, including corrections after send-back; never add Git remotes or fetch from the network inside it. Never substitute another task or private Change path. Scope file discovery to the task checkout and private runtime home. Locate tools with command -v and the checkout's documented setup. Never recursively search the user home, Library, Documents, Desktop, Music or Photos for tools or instructions. If a required path is not provided or present, report the missing prerequisite instead of widening the search. In UI review, screenshots are illustrative only and never blocking evidence; judge correctness from render tests and source behavior.`
+	// bootstrapPrompt is both native providers' fixed positional prompt. The
+	// daemon writes the exact task to this runtime-home file before launch.
+	bootstrapPrompt = `Read the exact task from "$DARK_FACTORY_TASK_FILE" before doing anything else and complete only that task. The file contains the full task and continuation context. Use the registered attempt tool for every factoryctl attempt or overseer command, passing argv without the executable; shell commands cannot access the attempt API. Before exiting, report the durable outcome with attempt succeed, block or fail through that tool.`
 )
 
 var (
@@ -963,12 +963,6 @@ func PrepareTask(kind kernel.Provider, task []byte) (TaskDelivery, []byte, error
 	case kernel.ProviderShell:
 		return TaskDeliveryFD11, bytes.Clone(task), nil
 	case kernel.ProviderClaudeCode, kernel.ProviderCodex:
-		// The provider reads this value through a tool result. Keep the exact
-		// task comfortably below the model-visible result bound even after JSON
-		// turns every DEL/C1 code point into a six-byte escape.
-		if len(task) > runner.MaxNativeTaskBytes {
-			return 0, nil, ErrInvalid
-		}
 		return TaskDeliveryAttemptAPI, nil, nil
 	default:
 		return 0, nil, ErrInvalid
@@ -1117,6 +1111,7 @@ func (runtime RuntimePaths) valid() bool {
 func (runtime RuntimePaths) environmentForRole(kind kernel.Provider, role kernel.AgentRole) []string {
 	environment := []string{
 		"DARK_FACTORY_TASK_ATTACHMENTS=" + filepath.Join(runtime.home, "task-attachments"),
+		"DARK_FACTORY_TASK_FILE=" + filepath.Join(runtime.home, "factory-task"),
 		"DARK_FACTORY_SOCKET=" + runtime.socket,
 		"DARK_FACTORY_ATTEMPT_TOKEN_FILE=" + runtime.token,
 		"DARK_FACTORY_FACTORYCTL=" + runtime.factoryctl,
