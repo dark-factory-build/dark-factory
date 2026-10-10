@@ -140,6 +140,8 @@ func reviewNow(ctx context.Context, daemon *Daemon, project kernel.ProjectID, re
 
 func waitForMergePipeline(t *testing.T, daemon *Daemon) {
 	t.Helper()
+	// reviewNow wakes the production merge pass; finish it before this test
+	// changes the backend observation that pass reads.
 	deadline := time.Now().Add(2 * time.Second)
 	for daemon.pipelineBusy.Load() && time.Now().Before(deadline) {
 		time.Sleep(time.Millisecond)
