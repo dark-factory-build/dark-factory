@@ -970,7 +970,7 @@ func PrepareTask(kind kernel.Provider, task []byte) (TaskDelivery, []byte, error
 		}
 		return TaskDeliveryFD11, bytes.Clone(task), nil
 	case kernel.ProviderClaudeCode, kernel.ProviderCodex:
-		if len(task) > kernel.MaxContinuationTaskBytes {
+		if len(task) > runner.MaxProviderTaskBytes {
 			return 0, nil, ErrInvalid
 		}
 		return TaskDeliveryAttemptAPI, nil, nil

@@ -18,7 +18,7 @@ import (
 // record a transient failure.
 func TestCurrentAndLegacyHomesOpenWithEveryRow(t *testing.T) {
 	t.Parallel()
-	for _, version := range []int{userVersion, v39UserVersion, v38UserVersion, v37UserVersion} {
+	for _, version := range []int{userVersion, v40UserVersion, v39UserVersion, v38UserVersion, v37UserVersion} {
 		t.Run(fmt.Sprintf("v%d", version), func(t *testing.T) { testHomeOpensWithEveryRow(t, version) })
 	}
 }
@@ -76,10 +76,17 @@ func downgradeHome(t *testing.T, store *Store, version int) {
 			`UPDATE sqlite_schema SET sql = replace(sql, '''transient''', '''runner_exit''') WHERE name = 'runs'`,
 			"PRAGMA writable_schema = OFF")
 	}
-	if version != userVersion {
+	if version <= v40UserVersion {
+		statements = append(statements, "PRAGMA writable_schema = ON",
+			`UPDATE sqlite_schema SET sql = replace(sql, 'length(CAST(body AS BLOB)) <= 148480', 'length(CAST(body AS BLOB)) <= 131072') WHERE type = 'table' AND name = 'tasks'`,
+			"PRAGMA writable_schema = OFF")
+	}
+	if version <= v39UserVersion {
 		statements = append(append(statements, browserSecurityEventStatements...),
 			`INSERT INTO browser_security_events(kind, client_id, occurred_at_ms) VALUES('challenge_minted', NULL, 1)`,
 			fmt.Sprintf("PRAGMA user_version = %d", version))
+	} else if version != userVersion {
+		statements = append(statements, fmt.Sprintf("PRAGMA user_version = %d", version))
 	}
 	for _, statement := range statements {
 		if _, err := store.writer.ExecContext(context.Background(), statement); err != nil {
@@ -182,16 +189,20 @@ func TestSchemaDigestsArePinned(t *testing.T) {
 	if got := hex.EncodeToString(sum[:]); got != "0c6127471419ccacc641fe9fd99e6499cca04953c16bf8ee01063303c913f455" {
 		t.Errorf("current schema digest = %s", got)
 	}
+	sum = sha256.Sum256([]byte(strings.Join(legacySchemaStatements(v40UserVersion), "\n")))
+	if got := hex.EncodeToString(sum[:]); got != "97d786b424ca0c3097e97738821298f75b60f3a29c49629fdc47de5dba623268" {
+		t.Errorf("v40 schema digest = %s", got)
+	}
 	sum = sha256.Sum256([]byte(strings.Join(legacySchemaStatements(v39UserVersion), "\n")))
-	if got := hex.EncodeToString(sum[:]); got != "e87322562dd366beb90686dfccaef1b774a7efb16484c73d7dbbd4e7c450c96f" {
+	if got := hex.EncodeToString(sum[:]); got != "3a54481cb3246bb70309c06135c4b61d5efc739bcf5c38b6432aa4b698f5f25b" {
 		t.Errorf("v39 schema digest = %s", got)
 	}
 	sum = sha256.Sum256([]byte(strings.Join(legacySchemaStatements(v38UserVersion), "\n")))
-	if got := hex.EncodeToString(sum[:]); got != "806d5de1881f58485c464952a474afa3ebd7dfa8add9dc6c5f895fd6d46c6577" {
+	if got := hex.EncodeToString(sum[:]); got != "29c9a3043f03be927336f6331f7c7ce24bcab875fb4607fc55003b688739fc2e" {
 		t.Errorf("v38 schema digest = %s", got)
 	}
 	sum = sha256.Sum256([]byte(strings.Join(legacySchemaStatements(v37UserVersion), "\n")))
-	if got := hex.EncodeToString(sum[:]); got != "db3b7cd9be9a606d71aead0fed528f04a8264e8502f175acebe1e50863312367" {
+	if got := hex.EncodeToString(sum[:]); got != "819c191d4e411ad35a2f7cf19db739d0492d0f8cf1c9c5fe0bd50a5197b5bb6c" {
 		t.Errorf("v37 schema digest = %s", got)
 	}
 }
