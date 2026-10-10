@@ -277,16 +277,16 @@ func (c Coordinator) Advance(ctx context.Context, op Operation) (Operation, erro
 		if err := c.Backend.Enqueue(ctx, op); errors.Is(err, ErrRefused) {
 			// Missing approval or a required check can clear without a new head.
 			// Leave the operation waiting so the next refresh gets one attempt.
-			if pull.ReviewDecision == "REVIEW_REQUIRED" || pull.Pending {
-				return op, nil
+			if pull.ReviewDecision != "REVIEW_REQUIRED" && !pull.Pending {
+				// Terminal for this head: fail it, escalate once, and never re-enqueue.
+				return c.fail(ctx, op, err, false)
 			}
-			// Terminal for this head: fail it, escalate once, and never re-enqueue.
-			return c.fail(ctx, op, err, false)
 		} else if err != nil {
 			op.Failures, op.Escalation = failures, escalation
 			return c.failedPass(ctx, op, err)
+		} else {
+			op.Enqueues++
 		}
-		op.Enqueues++
 	}
 	if op.State == "enqueued" && failures == 0 && escalation == "" && op.Enqueues == enqueues {
 		return op, nil // waiting, unchanged

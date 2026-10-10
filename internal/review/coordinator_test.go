@@ -349,6 +349,20 @@ func TestRefusedEnqueueWaitsForRequiredApprovalThenRetriesOncePerRefresh(t *test
 	}
 }
 
+func TestRefusedEnqueuePersistsRecoveryOfPriorFailure(t *testing.T) {
+	store := &memoryStore{}
+	backend := &fakeBackend{
+		pull:       &Pull{Head: reviewRequest().Head, State: "open", ReviewDecision: "REVIEW_REQUIRED"},
+		enqueueErr: fmt.Errorf("%w (rejected before execution as UNPROCESSABLE)", ErrRefused),
+	}
+	c := Coordinator{Store: store, Backend: backend, Now: func() time.Time { return time.Unix(20, 0) }}
+	op := Operation{ID: "op", Request: reviewRequest(), State: "enqueued", Verdict: "allow", Submitted: true, Failures: 3, Escalation: "stale"}
+	waiting, err := c.Advance(context.Background(), op)
+	if err != nil || waiting.Failures != 0 || waiting.Escalation != "" || len(store.values) != 1 {
+		t.Fatalf("recovery was not durable: operation=%+v err=%v writes=%d", waiting, err, len(store.values))
+	}
+}
+
 // Any other enqueue failure is escalated only once it has persisted for
 // FailuresBeforeEscalation consecutive passes, and only once.
 func TestPersistingEnqueueFailureEscalatesOnceAfterTheGracePasses(t *testing.T) {
