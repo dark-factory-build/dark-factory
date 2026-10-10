@@ -523,7 +523,17 @@ func runSupervisorClaudeFixture() error {
 	if len(os.Args) < 2 || os.Args[len(os.Args)-2] != "--" || !strings.Contains(os.Args[len(os.Args)-1], "Read the exact Factory task") {
 		return fmt.Errorf("launch argv lacks the native task prompt")
 	}
-	taskBytes, err := os.ReadFile(provider.NativeTaskPath(os.Getenv("HOME")))
+	prompt := os.Args[len(os.Args)-1]
+	taskPath, found := strings.CutPrefix(prompt, "Complete only the exact Factory task below.")
+	if !found {
+		return fmt.Errorf("launch prompt lacks exact task path")
+	}
+	_, taskPath, found = strings.Cut(taskPath, " from ")
+	if !found {
+		return fmt.Errorf("launch prompt lacks exact task file")
+	}
+	taskPath = strings.TrimSuffix(taskPath, ".")
+	taskBytes, err := os.ReadFile(taskPath)
 	if err != nil {
 		return err
 	}
@@ -559,9 +569,9 @@ func runSupervisorClaudeFixture() error {
 	return err
 }
 
-// Claude starts from the bootstrap prompt and fetches a task longer than a
-// terminal line through the attempt API, as Codex does, through the real
-// runner, worker and PTY.
+// Claude starts from the launch prompt and reads a task longer than a
+// terminal line from the private task file through the real runner, worker
+// and PTY. The historical test name retains the published check identity.
 func TestSupervisorClaudeFetchesALongTaskThroughTheAttemptAPI(t *testing.T) {
 	task := strings.Repeat("Codify the operator scripts and the deploy order. ", 128)
 	fixture := newSupervisorFixture(t, "unused shell task")
