@@ -581,7 +581,6 @@ func (store *Store) PublishableChanges(ctx context.Context, at UnixMillis) ([]Pu
 		JOIN tasks t ON t.id = c.task_id AND t.incarnation_id = c.task_incarnation_id
 		LEFT JOIN intake_task_bindings b ON b.task_id = c.task_id LEFT JOIN intake_acceptances a ON a.id = b.acceptance_id
 		LEFT JOIN publication_tasks p ON p.task_id = c.task_id AND c.updated_at_ms > p.created_at_ms
-		  AND (t.work_revision > 1 OR p.change_id IS NULL)
 		  AND EXISTS (SELECT 1 FROM production_records r WHERE r.project_id = p.project_id AND r.repository = p.repository AND r.kind = 'pull_request'
 		      AND r.identity = CAST(p.pull_number AS TEXT) AND json_extract(r.document, '$.state') = 'open')
 		WHERE c.phase = 'retained' AND t.status = 'succeeded' AND a.withdrawn_at_ms IS NULL AND c.head_commit <> c.base_commit
@@ -589,10 +588,12 @@ func (store *Store) PublishableChanges(ctx context.Context, at UnixMillis) ([]Pu
 		  AND (p.pull_number IS NOT NULL OR NOT EXISTS (SELECT 1 FROM publication_tasks q WHERE q.change_id = c.id OR q.task_id = c.task_id))
 		  AND NOT EXISTS (SELECT 1 FROM production_records r WHERE r.project_id = c.project_id AND r.kind = 'reviewer'
 		      AND r.identity = 'publish-' || lower(hex(c.id)) || '-' || c.revision
+		      AND r.observed_at_ms <= ?
+		      AND (p.pull_number IS NULL OR r.observed_at_ms >= p.created_at_ms)
 		      AND (json_extract(r.document, '$.retryable') = 0 OR
 		          ((json_extract(r.document, '$.retryable') = 1 OR json_extract(r.document, '$.retryable') IS NULL)
 		              AND r.observed_at_ms + ? > ?)))
-		ORDER BY c.updated_at_ms`, PublishRetryAfter.Milliseconds(), at.Int64())
+		ORDER BY c.updated_at_ms`, at.Int64(), PublishRetryAfter.Milliseconds(), at.Int64())
 	if err != nil {
 		return nil, err
 	}

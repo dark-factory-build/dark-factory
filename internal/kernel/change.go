@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 )
 
@@ -341,6 +342,72 @@ func (store *Store) ReclaimChange(ctx context.Context, id ChangeID, expected Rev
 
 func reclaimCutoffs(at UnixMillis) []any {
 	return []any{at.Int64() - changeReclaimAfterEnd.Milliseconds(), at.Int64() - changeReclaimAfterSuccess.Milliseconds()}
+}
+
+// PublishedChangeID returns the Change currently published to one pull
+// request. Publication rows for a worker are preferred over later overseer
+// rows, matching review send-back routing.
+func (store *Store) PublishedChangeID(ctx context.Context, project ProjectID, repository string, pull uint64) (ChangeID, bool, error) {
+	if project.zero() || !productionRepository.MatchString(repository) || pull == 0 {
+		return ChangeID{}, false, ErrInvalidValue
+	}
+	tx, err := store.beginRead(ctx)
+	if err != nil {
+		return ChangeID{}, false, err
+	}
+	defer tx.Close()
+	var raw []byte
+	err = tx.connection.QueryRowContext(ctx, `SELECT change_id FROM publication_tasks WHERE project_id = ? AND repository = ? AND pull_number = ? AND change_id IS NOT NULL ORDER BY change_id IS NOT NULL DESC, created_at_ms ASC LIMIT 1`, project.Bytes(), strings.ToLower(repository), pull).Scan(&raw)
+	if errors.Is(err, sql.ErrNoRows) {
+		return ChangeID{}, false, nil
+	}
+	if err != nil {
+		return ChangeID{}, false, err
+	}
+	id, err := ChangeIDFromBytes(raw)
+	return id, err == nil, err
+}
+
+// RecordChangeRebased advances a retained Change's durable head after
+// factoryd has cleanly rebased its worktree onto the current main. The Change
+// revision remains the worker's settled revision; only the Git head changed.
+func (store *Store) RecordChangeRebased(ctx context.Context, id ChangeID, expected Revision, oldHead, newHead CommitID, at UnixMillis) (Change, error) {
+	if id.zero() || oldHead.Format() == ObjectFormat(0) || newHead.Format() == ObjectFormat(0) || oldHead.Format() != newHead.Format() {
+		return Change{}, fmt.Errorf("%w: invalid rebased Change", ErrInvalidValue)
+	}
+	tx, err := store.beginValidatedWrite(ctx)
+	if err != nil {
+		return Change{}, err
+	}
+	defer tx.Close()
+	current, found, err := changeByID(ctx, tx.connection, id)
+	if err != nil || !found {
+		if err == nil {
+			err = ErrNotFound
+		}
+		return Change{}, tx.Rollback(err)
+	}
+	if current.Revision != expected || current.Phase != ChangeRetained || current.HeadCommit == nil || !current.HeadCommit.equal(oldHead) {
+		return Change{}, tx.Rollback(ErrRevisionConflict)
+	}
+	if at.Int64() < current.UpdatedAt.Int64() {
+		return Change{}, tx.Rollback(ErrRevisionConflict)
+	}
+	result, err := tx.connection.ExecContext(ctx, `UPDATE changes SET head_commit = ?, updated_at_ms = ? WHERE id = ? AND revision = ? AND phase = 'retained' AND head_commit = ?`, newHead.Bytes(), at.Int64(), id.Bytes(), expected.Int64(), oldHead.Bytes())
+	if err := requireOneRow(result, err); err != nil {
+		return Change{}, tx.Rollback(err)
+	}
+	updated, found, err := changeByID(ctx, tx.connection, id)
+	if err != nil || !found {
+		if err == nil {
+			err = ErrCorruptState
+		}
+		return Change{}, tx.Rollback(err)
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return Change{}, err
+	}
+	return updated, nil
 }
 
 func (store *Store) advanceChange(ctx context.Context, id ChangeID, expected Revision, at UnixMillis, apply func(Change, *sql.Conn) (bool, error)) (Change, error) {
