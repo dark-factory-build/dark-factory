@@ -318,8 +318,7 @@ func TestDaemonDispatchesOperatorCallsAndBoundsProjection(t *testing.T) {
 		ID: testID(3), ProjectID: projectInput.ID, AssignedAgentID: testID(2), IncarnationID: testID(4),
 		Title: "oversized", Body: strings.Repeat("x", kernel.MaxContinuationTaskBytes+1), Priority: 7,
 	})
-	var oversized *api.RemoteError
-	if !errors.As(err, &oversized) || oversized.Code() != api.RemoteInvalidRequest {
+	if !errors.Is(err, api.ErrInvalidInput) {
 		t.Fatalf("oversized Codex task must be refused before admission: %v", err)
 	}
 	waitDispatch(t, done)

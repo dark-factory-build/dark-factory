@@ -540,7 +540,7 @@ func sendBackTask(ctx context.Context, connection *sql.Conn, task Task, head, no
 	}
 	next := task.WorkRevision.Int64() + 1
 	body := SentBackBody(task, note)
-	if byteLen(body) > 131072 {
+	if byteLen(body) > MaxContinuationTaskBytes {
 		return Task{}, fmt.Errorf("%w: send-back note does not fit the task body", ErrInvalidValue)
 	}
 	result, err := connection.ExecContext(ctx, `UPDATE tasks SET status = 'queued', work_revision = ?, body = ?, sent_back_instruction_bytes = ?, blocked_reason = NULL, result = NULL, completed_at_ms = NULL, revision = revision + 1, updated_at_ms = ? WHERE id = ? AND revision = ?`,
