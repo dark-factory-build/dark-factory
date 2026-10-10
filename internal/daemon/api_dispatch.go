@@ -72,8 +72,13 @@ type Daemon struct {
 	// time, read only by the scheduler loop, and whether a pass is running.
 	pipelineAt   atomic.Int64 // unix nanoseconds of the next merge-stage pass
 	pipelineBusy atomic.Bool
-	store        *kernel.Store
-	now          func() time.Time
+	// The scheduler's Change reclaim pass (tickChangeReclaim), alike, and the
+	// Changes it kept, each logged once; only the pass in flight touches it.
+	reclaimAt   atomic.Int64
+	reclaimBusy atomic.Bool
+	keptChanges map[kernel.ChangeID]bool
+	store       *kernel.Store
+	now         func() time.Time
 	// livenessClock is deliberately separate from now. The latter is also
 	// used by supervisor ordering tests and may be an injected, blocking
 	// clock; liveness telemetry must never enter that ordering boundary.

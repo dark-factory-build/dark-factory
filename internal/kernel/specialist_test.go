@@ -289,7 +289,23 @@ func TestSpecialistOverseerItems(t *testing.T) {
 	if _, err := store.CreateContent(ctx, proposal, mustTime(t, at)); err != nil {
 		t.Fatal(err)
 	}
-	line := "\nProposal " + proposal.ID.String() + " from worker: Split the gate [proposal:" + proposal.ID.String() + "]"
+	challenge := knowledgeSpec(t, worker.ProjectID, 83, ContentObservation, KnowledgeMetadata{Status: "tentative", RecordType: "contribution", RecordID: proposal.ID.String()})
+	if _, err := store.CreateContent(ctx, challenge, mustTime(t, at)); err != nil {
+		t.Fatal(err)
+	}
+	revised := challenge
+	if _, err := store.ReviseContent(ctx, Revision{value: 1}, revised, mustTime(t, at)); err != nil {
+		t.Fatal(err)
+	}
+	withdrawn := knowledgeSpec(t, worker.ProjectID, 84, ContentObservation, KnowledgeMetadata{Status: "tentative", RecordType: "contribution", RecordID: proposal.ID.String()})
+	if _, err := store.CreateContent(ctx, withdrawn, mustTime(t, at)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.DeprecateContent(ctx, withdrawn.ID, worker.ProjectID, Revision{value: 1}, "operator:local", mustTime(t, at)); err != nil {
+		t.Fatal(err)
+	}
+	// A revised note counts once and a withdrawn one not at all.
+	line := "\nProposal " + proposal.ID.String() + " from worker: Split the gate (1 notes from the operator) [proposal:" + proposal.ID.String() + "]"
 	at += overseerWakeSettle.Milliseconds()
 	if bodies := wakeBodies(t, store, at); len(bodies) != 1 || !strings.Contains(bodies[0], line) {
 		t.Fatalf("proposal wake = %q", bodies)
@@ -543,5 +559,36 @@ func TestArchiveStopsSpecialist(t *testing.T) {
 	}
 	if task, _, _ := store.Task(ctx, shared.ID); task.Status != TaskQueued || task.Revision != shared.Revision {
 		t.Fatalf("shared task = %+v", task)
+	}
+}
+
+func TestSpecialistWakeListsOtherSpecialists(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	store, _, project, a := newAdmissionStore(t, RoleWorker, 4)
+	defer store.Close()
+	a = makeSpecialist(t, store, a, "failures", 10)
+	for i, name := range []string{"ops", "gone"} {
+		b, err := store.CreateAgent(ctx, NewAgent{ID: agentID(t, byte(60+i)), ProjectID: project.ID, Name: name, Role: RoleWorker, Provider: ProviderCodex, ToolBudgetLimit: 5}, mustTime(t, 4))
+		if err != nil {
+			t.Fatal(err)
+		}
+		b = makeSpecialist(t, store, b, "failures", 10)
+		instruction := name + " remit line\nsecond line"
+		if _, err := store.writer.Exec(`UPDATE agents SET idle_instruction = ?, archived = ? WHERE id = ?`, instruction, i, b.ID.Bytes()); err != nil {
+			t.Fatal(err)
+		}
+	}
+	var found bool
+	for _, body := range wakeBodies(t, store, 20) {
+		if strings.HasPrefix(body, "Review the factory.") {
+			found = true
+			if !strings.Contains(body, "\nOther specialists:\n- ops: ops remit line\n") || strings.Contains(body, "- a:") || strings.Contains(body, "gone") || strings.Contains(body, "second line") {
+				t.Fatalf("wake body = %q", body)
+			}
+		}
+	}
+	if !found {
+		t.Fatal("no wake for the first specialist")
 	}
 }

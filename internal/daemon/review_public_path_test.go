@@ -552,9 +552,8 @@ func TestMergeQueueEjectionWithNoHeadFailureRequeuesOnceThenSendsBack(t *testing
 	}
 }
 
-// An enqueue the App refused as UNPROCESSABLE (#1510: no CI run, so the
-// required check can never exist) is terminal for the head: never enqueued
-// again, and escalated once as an item due to the project's overseer.
+// An enqueue the App refused as UNPROCESSABLE waits on the exact head, never
+// retries without a changed observation, and escalates once to the overseer.
 func TestRefusedEnqueueBecomesAnOverseerItem(t *testing.T) {
 	fixture, project, _, settle := publishedTask(t)
 	settle()
@@ -574,7 +573,7 @@ func TestRefusedEnqueueBecomesAnOverseerItem(t *testing.T) {
 		}
 	}
 	op := lastDurableReview(t, fixture.store, project)
-	if op.State != "failed" || !op.Handled || op.Retryable || backend.enqueues != 1 || backend.reviews != 1 || !strings.Contains(op.Escalation, "refuses this exact head") || !strings.Contains(op.Escalation, "UNPROCESSABLE") {
+	if op.State != "enqueued" || op.Handled || op.Retryable || !op.Refused || backend.enqueues != 1 || backend.reviews != 1 || !strings.Contains(op.Escalation, "refuses this exact head") || !strings.Contains(op.Escalation, "UNPROCESSABLE") {
 		t.Fatalf("refused enqueue operation = %+v enqueues=%d reviews=%d", op, backend.enqueues, backend.reviews)
 	}
 	overseer, err := fixture.store.CreateAgent(ctx, kernel.NewAgent{ID: mustAgentID(t, testID(234)), ProjectID: project, Name: "overseer", Role: kernel.RoleOrchestrator, Provider: kernel.ProviderCodex, ToolBudgetLimit: 2}, mustKernelTime(t, 1001))
@@ -833,19 +832,33 @@ func TestReviewBindsTheStoredBody(t *testing.T) {
 // Only the checks the base branch's rules require gate the merge: an optional
 // check that fails (CodeQL), is cancelled or never finishes decides nothing.
 func TestOnlyRequiredChecksGateTheMerge(t *testing.T) {
-	failing, pending, err := requiredChecks(json.RawMessage(`{"checks":[
+	failing, pending, states, err := requiredChecks(json.RawMessage(`{"checks":[
 		{"name":"checks","conclusion":"success","required":true},
 		{"name":"review","conclusion":"skipped","required":true},
 		{"name":"CodeQL","conclusion":"failure","required":false},
 		{"name":"stale lint","conclusion":"cancelled","required":false},
 		{"name":"preview","conclusion":null,"required":false}]}`))
-	if err != nil || len(failing) != 0 || pending {
-		t.Fatalf("optional checks decided: failing=%v pending=%v err=%v", failing, pending, err)
+	if err != nil || len(failing) != 0 || pending || strings.Join(states, ",") != "checks=success,review=skipped" {
+		t.Fatalf("optional checks decided: failing=%v pending=%v states=%v err=%v", failing, pending, states, err)
 	}
-	failing, pending, err = requiredChecks(json.RawMessage(`{"checks":[
+	failing, pending, states, err = requiredChecks(json.RawMessage(`{"checks":[
 		{"name":"checks","conclusion":"failure","required":true},
 		{"name":"ui","conclusion":null,"required":true}]}`))
-	if err != nil || strings.Join(failing, ",") != "checks" || !pending {
-		t.Fatalf("required checks ignored: failing=%v pending=%v err=%v", failing, pending, err)
+	if err != nil || strings.Join(failing, ",") != "checks" || !pending || strings.Join(states, ",") != "checks=failure,ui=pending" {
+		t.Fatalf("required checks ignored: failing=%v pending=%v states=%v err=%v", failing, pending, states, err)
+	}
+}
+
+func TestRequiredCheckAppearanceChangesObservation(t *testing.T) {
+	missing, pending, missingStates, err := requiredChecks(json.RawMessage(`{"checks":[]}`))
+	if err != nil || pending || len(missing) != 0 || len(missingStates) != 0 {
+		t.Fatalf("missing check = failing=%v pending=%v states=%v err=%v", missing, pending, missingStates, err)
+	}
+	passing, pending, passingStates, err := requiredChecks(json.RawMessage(`{"checks":[{"name":"checks","status":"completed","conclusion":"success","required":true}]}`))
+	if err != nil || pending || len(passing) != 0 || strings.Join(passingStates, ",") != "checks=success" {
+		t.Fatalf("passing check = failing=%v pending=%v states=%v err=%v", passing, pending, passingStates, err)
+	}
+	if strings.Join(missingStates, ",") == strings.Join(passingStates, ",") {
+		t.Fatal("missing and passing required checks had the same observation")
 	}
 }

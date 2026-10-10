@@ -189,6 +189,7 @@ func (daemon *Daemon) RunScheduler(ctx context.Context, spec SupervisorSpec) err
 				daemon.tickMergePipeline(ownedCtx)
 				daemon.tickIntake(ownedCtx)
 				daemon.tickRelease(ownedCtx)
+				daemon.tickChangeReclaim(ownedCtx)
 			}
 			daemon.observe("internal", map[string]string{"code.function.name": schedulerFunction}, nil, paused > 0, time.Since(tick))
 			if !stopping && probeID == 0 {

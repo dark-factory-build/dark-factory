@@ -20,6 +20,8 @@ test("only what changes between two looks at the floor is news", () => {
   const started = [task("t-ada", "ada", "running"), task("t-grace", "grace", "running"), task("t-shared", "", "running"), task("t-new", "linus", "running")];
   assert.deepEqual(observe(first.seen, started, [question("q0", "t-ada", "t-grace")]).events, [{ key: "assign t-grace", kind: "assign", to: "grace" }],
     "work is handed over when it was seen waiting and now runs for someone: not work with nobody, nor work first seen already running");
+  const pass = { ...task("t-pass", "ada", "queued"), title: "Standing instruction" };
+  assert.deepEqual(observe(observe(undefined, [pass], []).seen, [{ ...pass, status: "running" }], []).events, [], "a standing pass is never handed over from the tray");
   assert.deepEqual(observe(first.seen, tasks, [question("q0", "t-ada", "t-grace", true), question("q1", "t-grace", "t-ada"), question("q2", "t-ada", "t-grace", true), question("q3", "t-ada", "t-gone"), question("q4", "t-ada", "t-ada2")]).events, [
     { key: "answer q0", kind: "answer", from: "grace", to: "ada", subject: "q0" },
     { key: "ask q1", kind: "ask", from: "grace", to: "ada", subject: "q1" },
