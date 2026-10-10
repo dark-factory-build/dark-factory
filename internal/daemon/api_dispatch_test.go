@@ -37,7 +37,7 @@ type dispatchFixture struct {
 
 func newDispatchFixture(t *testing.T) *dispatchFixture {
 	t.Helper()
-	return newDispatchFixtureAt(t, "")
+	return newDispatchFixtureAt(t, "/private/tmp")
 }
 
 func TestBackupCreateOperatorAPI(t *testing.T) {
