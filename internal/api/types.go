@@ -736,8 +736,8 @@ type DashboardSnapshot struct {
 	Projects      []ProjectSummary      `json:"projects"`
 	Agents        []AgentSummary        `json:"agents"`
 	Tasks         []TaskSummary         `json:"tasks"`
-	Accounts      []AccountSummary      `json:"accounts"`
-	PeerQuestions []PeerQuestionSummary `json:"peer_questions"`
+	Accounts      []AccountSummary      `json:"accounts,omitempty"`
+	PeerQuestions []PeerQuestionSummary `json:"peer_questions,omitempty"`
 }
 
 // OverseerSnapshot is the private, project-scoped view granted to a running
