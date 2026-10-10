@@ -536,7 +536,7 @@ func overseerWake(ctx context.Context, connection *sql.Conn, agent Agent, at int
 // overseerWakeLine summarises one due task in a line: identity, title, status,
 // work revision, its latest Change head, its pull request and why it waits.
 const overseerWakeLine = `SELECT printf('- %s "%s" %s rev=%d', lower(hex(t.id)), replace(substr(t.title, 1, 60), char(10), ' '), t.status, t.work_revision)
-	|| COALESCE((SELECT printf(' change=%s@%s', substr(lower(hex(c.id)), 1, 12), substr(lower(hex(c.head_commit)), 1, 8)) FROM changes AS c
+	|| COALESCE((SELECT printf(' change=%s@%s', substr(lower(hex(c.id)), 1, 12), lower(hex(c.head_commit))) FROM changes AS c
 		WHERE c.task_id = t.id AND c.head_commit IS NOT NULL ORDER BY c.updated_at_ms DESC LIMIT 1), '')
 	|| COALESCE((SELECT printf(' PR #%d %s/%s', p.pull_number, json_extract(r.document, '$.state'), json_extract(r.document, '$.review.state'))
 		FROM publication_tasks AS p JOIN production_records AS r ON r.project_id = p.project_id AND r.repository = p.repository AND r.kind = 'pull_request' AND r.identity = CAST(p.pull_number AS TEXT)

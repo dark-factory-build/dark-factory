@@ -312,7 +312,7 @@ func TestPreProviderRetainedRetryKeepsPublishedHead(t *testing.T) {
 			if err != nil || !found {
 				t.Fatalf("task after first settlement = %+v, found=%v, err=%v", task, found, err)
 			}
-			if _, err := store.SendBackTask(context.Background(), task.ID, task.Revision, "continue the retained correction", mustTime(t, 90)); err != nil {
+			if _, err := store.SendBackTask(context.Background(), task.ID, task.Revision, changeHead(t, store, task.ID), "continue the retained correction", mustTime(t, 90)); err != nil {
 				t.Fatalf("send task back for correction: %v", err)
 			}
 			candidate := changeID(t, 230)
