@@ -52,7 +52,7 @@ func (daemon *Daemon) refreshProduction(ctx context.Context, project kernel.Proj
 		if !verified || !pinned || identity.PublicationRepository == "" {
 			continue
 		}
-	known, _, err := daemon.store.KnownProductionPulls(ctx, project, identity.PublicationRepository, productionRefreshPRLimit)
+		known, _, err := daemon.store.KnownProductionPulls(ctx, project, identity.PublicationRepository, productionRefreshPRLimit)
 		var settled map[kernel.ProductionHead]bool
 		if err == nil {
 			settled, err = daemon.store.SettledProductionChecks(ctx, project, identity.PublicationRepository)
