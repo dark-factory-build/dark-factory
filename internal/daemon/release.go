@@ -257,8 +257,9 @@ func (daemon *Daemon) FinishRelease(ctx context.Context, sha, state, reason stri
 	if err != nil || !found {
 		return err
 	}
-	// A failed release keeps the phase it failed in (the trial).
-	delivery.State, delivery.Reason = state, reason
+	// Only the trial decides a release after the restart; a restored backup
+	// still records the phase before it.
+	delivery.State, delivery.Phase, delivery.Reason = state, "trial", reason
 	if state == "verified" {
 		delivery.Phase = ""
 	}
