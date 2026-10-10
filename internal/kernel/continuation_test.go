@@ -71,6 +71,28 @@ func TestOrchestratorHumanQuestionYieldsAndRevokesBearer(t *testing.T) {
 	}
 }
 
+func TestSettledHumanQuestionYieldStillAcceptsReply(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	store, run, keys := runningWorkerRun(t)
+	defer store.Close()
+	request, err := store.CreateHumanQuestionAndYieldForAttempt(ctx, keys.AttemptDigest, NewHumanQuestion{
+		IdempotencyKey: humanKey(235), QuestionText: "reply after cleanup",
+	}, mustTime(t, 40))
+	if err != nil {
+		t.Fatalf("create and yield question: %v", err)
+	}
+	observeMissingProcessExits(t, store, run.ID, 43)
+	releaseAllRunResources(t, store, run.ID, 44)
+	closed := closeTerminalSessionAtCurrent(t, store, run.ID, 45)
+	if _, err := store.FinalizeRun(ctx, run.ID, closed.Revision, mustTime(t, 46)); err != nil {
+		t.Fatalf("settle yielded run: %v", err)
+	}
+	if replied, err := store.ResolveHumanContinuationForOperator(ctx, request.ID, request.Revision, humanDeliveryID(t, 236), "answer", mustTime(t, 47)); err != nil || !replied {
+		t.Fatalf("reply after settled yield: replied=%v err=%v", replied, err)
+	}
+}
+
 func TestYieldedHumanReplyPersistsFullSchemaBound(t *testing.T) {
 	t.Parallel()
 	for _, size := range []int{4097, MaxHumanRequestReplyBytes} {

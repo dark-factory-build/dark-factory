@@ -881,7 +881,8 @@ func transitionHumanRequestsForRun(ctx context.Context, connection *sql.Conn, ru
 		var continuationWaiting, taskTerminal int
 		if err := connection.QueryRowContext(ctx, `SELECT c.id, c.revision,
 			EXISTS(SELECT 1 FROM tasks t JOIN runs r ON r.task_id = t.id AND r.task_incarnation_id = t.incarnation_id AND r.admitted_task_work_revision = t.work_revision
-				WHERE r.id = ? AND t.status NOT IN ('queued', 'running'))
+				WHERE r.id = ? AND t.status NOT IN ('queued', 'running')
+				  AND NOT (r.terminal_kind = 'cancelled' AND r.terminal_detail = 'yielded awaiting human_request'))
 			FROM continuations c WHERE c.condition_kind='human_request' AND c.condition_id=? AND c.state IN ('waiting','queued')
 			ORDER BY c.revision DESC LIMIT 1`, runID.Bytes(), item.id.Bytes()).Scan(&continuationID, &continuationRevision, &taskTerminal); err != nil && !errors.Is(err, sql.ErrNoRows) {
 			return nil, err
