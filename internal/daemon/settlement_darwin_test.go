@@ -122,6 +122,31 @@ func (fixture *recoveryFixture) settlementWorktree(t *testing.T) (kernel.Change,
 	return available, path
 }
 
+// privateSettlementWorktree is settlementWorktree remade with its own private
+// Git administration, as AddPrivateWorktree makes it; it also returns that
+// administration.
+func (fixture *recoveryFixture) privateSettlementWorktree(t *testing.T) (kernel.Change, string, string) {
+	t.Helper()
+	changeState, path := fixture.settlementWorktree(t)
+	repository := filepath.Join(filepath.Dir(filepath.Dir(fixture.parentPath)), "repo")
+	git := change.TrustedGitExecutable
+	branch := change.BranchName(changeState.ID.String())
+	base := strings.TrimSpace(settlementGit(t, git, repository, "rev-parse", "HEAD"))
+	settlementGit(t, git, repository, "worktree", "remove", "--force", path)
+	settlementGit(t, git, repository, "branch", "-D", branch)
+	admin := change.GitDirectoryForChange(repository, path)
+	if err := os.MkdirAll(filepath.Dir(admin), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	settlementGit(t, git, repository, "init", "-q", "--bare", admin)
+	settlementGit(t, git, repository, "--git-dir", admin, "fetch", "-q", "--no-tags", "--no-write-fetch-head", repository, base)
+	settlementGit(t, git, repository, "--git-dir", admin, "worktree", "add", "-q", "-b", branch, path, base)
+	if err := os.Chmod(path, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	return changeState, path, admin
+}
+
 func settlementGit(t *testing.T, git, directory string, arguments ...string) string {
 	t.Helper()
 	command := exec.Command(git, append([]string{"-C", directory}, arguments...)...)
@@ -409,24 +434,7 @@ func TestSettleRunRefusesUnverifiableAndAbandonsMissingWorktree(t *testing.T) {
 func TestSettleRunRefusesAChangeWhosePrivateConfigGainedARemote(t *testing.T) {
 	fixture := newRecoveryFixtureWithRole(t, 0x81, kernel.RoleWorker)
 	ctx := context.Background()
-	changeState, path := fixture.settlementWorktree(t)
-	// Remake the worktree with private administration, as AddPrivateWorktree does.
-	repository := filepath.Join(filepath.Dir(filepath.Dir(fixture.parentPath)), "repo")
-	git := change.TrustedGitExecutable
-	branch := change.BranchName(changeState.ID.String())
-	base := strings.TrimSpace(settlementGit(t, git, repository, "rev-parse", "HEAD"))
-	settlementGit(t, git, repository, "worktree", "remove", "--force", path)
-	settlementGit(t, git, repository, "branch", "-D", branch)
-	admin := change.GitDirectoryForChange(repository, path)
-	if err := os.MkdirAll(filepath.Dir(admin), 0o700); err != nil {
-		t.Fatal(err)
-	}
-	settlementGit(t, git, repository, "init", "-q", "--bare", admin)
-	settlementGit(t, git, repository, "--git-dir", admin, "fetch", "-q", "--no-tags", "--no-write-fetch-head", repository, base)
-	settlementGit(t, git, repository, "--git-dir", admin, "worktree", "add", "-q", "-b", branch, path, base)
-	if err := os.Chmod(path, 0o700); err != nil {
-		t.Fatal(err)
-	}
+	changeState, _, admin := fixture.privateSettlementWorktree(t)
 	config, err := os.OpenFile(filepath.Join(admin, "config"), os.O_APPEND|os.O_WRONLY, 0)
 	if err != nil {
 		t.Fatal(err)
@@ -703,6 +711,76 @@ func TestSettlementWaitsForWriterUsingLifecycleContext(t *testing.T) {
 			}
 			if current := fixture.currentRun(t); current.Phase != kernel.RunTerminal {
 				t.Fatalf("settlement=%+v", current)
+			}
+		})
+	}
+}
+
+// A reclaim pass removes a retained Change with nothing in it and records it
+// abandoned; one whose removal already happened before a crash is only
+// recorded; a dirty or unverifiable one is kept and reported once.
+func TestReclaimChangesRemovesEmptyWorkAndKeepsDirtyWork(t *testing.T) {
+	ctx := context.Background()
+	for _, test := range []struct {
+		name  string
+		setup func(t *testing.T, path, admin string)
+		want  int
+		kept  string
+	}{
+		{name: "empty", want: 1},
+		{name: "removed before a crash", want: 1, setup: func(t *testing.T, path, admin string) {
+			settlementGit(t, change.TrustedGitExecutable, filepath.Dir(path), "--git-dir", admin, "worktree", "remove", path)
+			if err := os.RemoveAll(filepath.Dir(admin)); err != nil {
+				t.Fatal(err)
+			}
+		}},
+		{name: "dirty", kept: "uncommitted work", setup: func(t *testing.T, path, _ string) {
+			if err := os.WriteFile(filepath.Join(path, "draft.txt"), []byte("unsaved\n"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+		}},
+		{name: "unverifiable", kept: "unsupported authority", setup: func(t *testing.T, _, admin string) {
+			settlementGit(t, change.TrustedGitExecutable, admin, "config", "remote.origin.url", "https://example.invalid/repo.git")
+		}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			fixture := newRecoveryFixtureWithRole(t, 0x83, kernel.RoleWorker)
+			changeState, path, admin := fixture.privateSettlementWorktree(t)
+			fixture.failBeforeRuntime(t)
+			if settled, err := fixture.daemon.settleRun(ctx, fixture.changeParent, fixture.run.ID); err != nil || settled.Phase != kernel.RunTerminal {
+				t.Fatalf("settled = %+v, %v", settled, err)
+			}
+			if test.setup != nil {
+				test.setup(t, path, admin)
+			}
+			var log bytes.Buffer
+			fixture.daemon.log = &log
+			for range 2 {
+				if got := fixture.daemon.reclaimChanges(ctx); got != test.want {
+					t.Fatalf("reclaimed = %d, want %d; log %s", got, test.want, log.String())
+				}
+				test.want = 0
+			}
+			after, _, err := fixture.store.Change(ctx, changeState.ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if test.kept != "" {
+				if after.Phase != kernel.ChangeRetained || strings.Count(log.String(), "keeping Change") != 1 || !strings.Contains(log.String(), test.kept) {
+					t.Fatalf("kept Change = %+v, log %q", after, log.String())
+				}
+				if _, err := os.Stat(filepath.Join(path, "payload.txt")); err != nil {
+					t.Fatalf("kept worktree touched: %v", err)
+				}
+				return
+			}
+			if after.Phase != kernel.ChangeAbandoned || log.Len() != 0 {
+				t.Fatalf("reclaimed Change = %+v, log %q", after, log.String())
+			}
+			for _, gone := range []string{path, filepath.Dir(admin)} {
+				if _, err := os.Lstat(gone); !errors.Is(err, os.ErrNotExist) {
+					t.Fatalf("%s survived reclaim: %v", gone, err)
+				}
 			}
 		})
 	}

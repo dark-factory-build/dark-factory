@@ -7,6 +7,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"time"
 
 	"github.com/dark-factory-build/dark-factory/internal/change"
 	"github.com/dark-factory-build/dark-factory/internal/kernel"
@@ -151,4 +152,82 @@ func (daemon *Daemon) retainedSettlement(ctx context.Context, changeParent strin
 		return kernel.ChangeSettlement{}, err
 	}
 	return kernel.NewRetainedChangeSettlement(changeState.Revision, &head)
+}
+
+// changeReclaimBatch bounds one reclaim pass, so the backlog drains a few
+// Changes a second without long writer holds or I/O spikes.
+const changeReclaimBatch = 4
+
+// tickChangeReclaim starts a reclaim pass off the scheduler loop: at once
+// after a full batch, otherwise a minute after the last pass.
+func (daemon *Daemon) tickChangeReclaim(ctx context.Context) {
+	if daemon.now().UnixNano() < daemon.reclaimAt.Load() || !daemon.reclaimBusy.CompareAndSwap(false, true) {
+		return
+	}
+	go func() {
+		defer daemon.reclaimBusy.Store(false)
+		next := time.Minute
+		if daemon.reclaimChanges(ctx) == changeReclaimBatch {
+			next = 0
+		}
+		daemon.reclaimAt.Store(daemon.now().Add(next).UnixNano())
+	}()
+}
+
+// reclaimChanges removes the worktree and private Git administration of up
+// to changeReclaimBatch retained Changes the kernel's rule allows, then
+// records each abandoned, as a Change whose worktree is gone: the task's
+// retry makes a fresh one. A Change whose worktree is dirty, unverifiable,
+// off its recorded head or on the shared legacy administration is kept and
+// logged once. A removal whose record failed is found again next pass and,
+// with nothing left on disk, only recorded.
+func (daemon *Daemon) reclaimChanges(ctx context.Context) int {
+	parent, git := daemon.changeParent.Load(), daemon.gitExecutable.Load()
+	at, err := daemon.timestamp()
+	if parent == nil || *parent == "" || git == nil || *git == "" || err != nil {
+		return 0
+	}
+	candidates, err := daemon.store.ReclaimableChanges(ctx, at)
+	if err != nil {
+		LogFactoryd(daemon.log, "factoryd: reclaim Changes: %v\n", err)
+		return 0
+	}
+	if daemon.keptChanges == nil {
+		daemon.keptChanges = map[kernel.ChangeID]bool{}
+	}
+	reclaimed := 0
+	for _, candidate := range candidates {
+		if reclaimed == changeReclaimBatch || ctx.Err() != nil {
+			break
+		}
+		if daemon.keptChanges[candidate.ID] {
+			continue
+		}
+		route, err := daemon.repositoryForChange(ctx, candidate)
+		var repository change.RepositoryIdentity
+		var head change.ObjectID
+		if err == nil {
+			repository, err = changeRepositoryIdentity(candidate.Selection.RepositoryIdentity())
+		}
+		if err == nil {
+			_, head, err = changeCommit(*candidate.HeadCommit)
+		}
+		if err == nil {
+			err = change.RemoveWorktree(ctx, *git, route.Root, repository, filepath.Join(*parent, candidate.ID.String()), head)
+		}
+		if err != nil {
+			daemon.keptChanges[candidate.ID] = true
+			LogFactoryd(daemon.log, "factoryd: keeping Change %s: %v\n", candidate.ID, err)
+			continue
+		}
+		if at, err = daemon.timestamp(); err == nil {
+			_, err = daemon.store.ReclaimChange(ctx, candidate.ID, candidate.Revision, at)
+		}
+		if err != nil {
+			LogFactoryd(daemon.log, "factoryd: record reclaimed Change %s: %v\n", candidate.ID, err)
+			continue
+		}
+		reclaimed++
+	}
+	return reclaimed
 }

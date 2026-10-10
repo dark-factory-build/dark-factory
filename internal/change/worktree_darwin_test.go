@@ -584,3 +584,102 @@ func TestFetchBaseGivesAPrivateChangeTheCurrentMainTip(t *testing.T) {
 		t.Fatalf("origin/main = %s, want %s", got, tip)
 	}
 }
+
+// Reclaiming removes only a clean private Change at its recorded head,
+// ignored build output included, converges after a crash part way, and
+// leaves the branch free for a fresh worktree at a newer base.
+func TestRemoveWorktreeReclaimsOnlyACleanPrivateChange(t *testing.T) {
+	ctx := context.Background()
+	fixture := newLocalGitFixture(t, "sha1")
+	selected, err := SelectGit(ctx, fixture.git, fixture.repository, "HEAD", fixture.identity)
+	if err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(secureTempDir(t), testChangeID)
+	branch := BranchName(testChangeID)
+	if _, err := AddPrivateWorktree(ctx, selected, path, branch); err != nil {
+		t.Fatal(err)
+	}
+	admin := GitDirectoryForChange(fixture.repository, path)
+	if err := os.WriteFile(filepath.Join(path, "work.txt"), []byte("work\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	runFixtureGit(t, fixture.git, path, "add", "work.txt")
+	runFixtureGit(t, fixture.git, path, "commit", "-m", "work")
+	head, err := NewObjectIDFromHex("sha1", strings.TrimSpace(runFixtureGitOutput(t, fixture.git, path, "rev-parse", "HEAD")))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(admin, "info", "exclude"), []byte("target/\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(path, "target"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(path, "target", "build"), []byte("output\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(path, "draft.txt"), []byte("unsaved\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	var invalid *ValidationError
+	if err := RemoveWorktree(ctx, fixture.git, fixture.repository, fixture.identity, path, head); !errors.As(err, &invalid) || !strings.Contains(invalid.Reason, "uncommitted") {
+		t.Fatalf("dirty removal = %v", err)
+	}
+	if err := os.Remove(filepath.Join(path, "draft.txt")); err != nil {
+		t.Fatal(err)
+	}
+	if err := RemoveWorktree(ctx, fixture.git, fixture.repository, fixture.identity, path, fixture.base); !errors.As(err, &invalid) {
+		t.Fatalf("removal off the recorded head = %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(path, "work.txt")); err != nil {
+		t.Fatalf("refused removal touched the worktree: %v", err)
+	}
+	if err := RemoveWorktree(ctx, fixture.git, fixture.repository, fixture.identity, path, head); err != nil {
+		t.Fatal(err)
+	}
+	for _, gone := range []string{path, filepath.Dir(admin)} {
+		if _, err := os.Lstat(gone); !errors.Is(err, os.ErrNotExist) {
+			t.Fatalf("%s survived reclaim: %v", gone, err)
+		}
+	}
+	if err := RemoveWorktree(ctx, fixture.git, fixture.repository, fixture.identity, path, head); err != nil {
+		t.Fatalf("repeated removal = %v", err)
+	}
+
+	// The retry: a fresh worktree on the same branch at the newer base.
+	if err := os.WriteFile(filepath.Join(fixture.repository, "README.md"), []byte("newer\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	runFixtureGit(t, fixture.git, fixture.repository, "add", "README.md")
+	runFixtureGit(t, fixture.git, fixture.repository, "commit", "-m", "newer")
+	newer, err := SelectGit(ctx, fixture.git, fixture.repository, "HEAD", fixture.identity)
+	if err != nil {
+		t.Fatal(err)
+	}
+	facts, err := AddPrivateWorktree(ctx, newer, path, branch)
+	if err != nil || !facts.Head().equal(newer.base) || facts.Branch() != branch || facts.Dirty() {
+		t.Fatalf("fresh worktree after reclaim = %+v, %v", facts, err)
+	}
+
+	// A crash after Git removed the worktree leaves only the administration.
+	runFixtureGit(t, fixture.git, fixture.repository, "--git-dir", admin, "worktree", "remove", path)
+	if err := RemoveWorktree(ctx, fixture.git, fixture.repository, fixture.identity, path, newer.base); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Lstat(filepath.Dir(admin)); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("administration survived the converging removal: %v", err)
+	}
+
+	// A legacy worktree on the project's own administration is never removed.
+	legacy, err := AddWorktree(ctx, newer, path, branch)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := RemoveWorktree(ctx, fixture.git, fixture.repository, fixture.identity, path, legacy.Head()); !errors.As(err, &invalid) || !strings.Contains(invalid.Reason, "shared") {
+		t.Fatalf("legacy removal = %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(path, ".git")); err != nil {
+		t.Fatalf("legacy worktree touched: %v", err)
+	}
+}

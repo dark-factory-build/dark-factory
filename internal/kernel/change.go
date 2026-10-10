@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"time"
 )
 
 const changeColumns = `id, project_id, task_id, task_incarnation_id, phase,
@@ -251,6 +252,70 @@ func (store *Store) RecordChangeWorktree(ctx context.Context, id ChangeID, expec
 		return Change{}, err
 	}
 	return change, nil
+}
+
+// A retained Change's worktree may be reclaimed once nothing of value is left
+// in it: its task neither queued nor running (nor blocked, which may be
+// retried, unless for changeReclaimAfterEnd), and the work is empty, merged
+// at its exact head, given up (failed or cancelled) for changeReclaimAfterEnd,
+// or succeeded and never published for changeReclaimAfterSuccess. The daemon
+// adds the filesystem half: the worktree is clean, verifies, and uses its own
+// private Git administration.
+const (
+	changeReclaimAfterEnd     = 14 * 24 * time.Hour
+	changeReclaimAfterSuccess = 30 * 24 * time.Hour
+)
+
+// reclaimableChange is that rule over c (changes) and t (its task), with ?1
+// the latest blocked or ended time for changeReclaimAfterEnd and ?2 for
+// changeReclaimAfterSuccess. A retained Change has no current run.
+const reclaimableChange = `c.phase = 'retained' AND c.head_commit IS NOT NULL
+	AND (t.status IN ('succeeded', 'failed', 'cancelled') OR t.status = 'blocked' AND t.updated_at_ms <= ?1)
+	AND (c.head_commit = c.base_commit
+		OR EXISTS (SELECT 1 FROM publication_tasks p JOIN production_records r ON r.project_id = p.project_id AND r.repository = p.repository AND r.kind = 'pull_request' AND r.identity = CAST(p.pull_number AS TEXT)
+			WHERE (p.change_id = c.id OR p.task_id = c.task_id) AND json_extract(r.document, '$.state') = 'merged' AND lower(json_extract(r.document, '$.head')) = lower(hex(c.head_commit)))
+		OR t.status IN ('failed', 'cancelled') AND t.completed_at_ms <= ?1
+		OR t.status = 'succeeded' AND t.completed_at_ms <= ?2 AND NOT EXISTS (SELECT 1 FROM publication_tasks p WHERE p.change_id = c.id OR p.task_id = c.task_id))`
+
+// ReclaimableChanges lists the retained Changes the kernel half of the
+// reclaim rule allows at at, oldest first.
+func (store *Store) ReclaimableChanges(ctx context.Context, at UnixMillis) ([]Change, error) {
+	tx, err := store.beginRead(ctx)
+	if err != nil {
+		return nil, err
+	}
+	defer tx.Close()
+	rows, err := tx.connection.QueryContext(ctx, `SELECT `+changeColumns+` FROM changes WHERE id IN (SELECT c.id FROM changes c JOIN tasks t ON t.id = c.task_id WHERE `+reclaimableChange+`) ORDER BY updated_at_ms, id`, reclaimCutoffs(at)...)
+	if err != nil {
+		return nil, err
+	}
+	var changes []Change
+	for rows.Next() {
+		change, _, err := scanChange(rows)
+		if err != nil {
+			return nil, errors.Join(err, rows.Close())
+		}
+		changes = append(changes, change)
+	}
+	return changes, errors.Join(rows.Err(), rows.Close())
+}
+
+// ReclaimChange records that the daemon removed a retained Change's worktree
+// and private Git administration: the Change is abandoned, as one whose
+// worktree is gone, so the task's retry makes a fresh worktree. The rule is
+// checked again in the same transaction. The Change keeps the time it
+// settled, so history and the console still place it where its work ended.
+func (store *Store) ReclaimChange(ctx context.Context, id ChangeID, expected Revision, at UnixMillis) (Change, error) {
+	return store.advanceChange(ctx, id, expected, at, func(change Change, connection *sql.Conn) (bool, error) {
+		result, err := connection.ExecContext(ctx, `UPDATE changes SET phase = 'abandoned', object_format = NULL, base_commit = NULL, repository_dev = NULL, repository_inode = NULL, head_commit = NULL, prepared_at_ms = NULL, available_at_ms = NULL, revision = revision + 1
+			WHERE id = ?4 AND revision = ?5 AND updated_at_ms <= ?3 AND EXISTS (SELECT 1 FROM changes c JOIN tasks t ON t.id = c.task_id WHERE c.id = changes.id AND `+reclaimableChange+`)`,
+			append(reclaimCutoffs(at), at.Int64(), id.Bytes(), expected.Int64())...)
+		return false, requireOneRow(result, err)
+	})
+}
+
+func reclaimCutoffs(at UnixMillis) []any {
+	return []any{at.Int64() - changeReclaimAfterEnd.Milliseconds(), at.Int64() - changeReclaimAfterSuccess.Milliseconds()}
 }
 
 func (store *Store) advanceChange(ctx context.Context, id ChangeID, expected Revision, at UnixMillis, apply func(Change, *sql.Conn) (bool, error)) (Change, error) {

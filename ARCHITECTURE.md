@@ -401,8 +401,23 @@ treat an unimplemented verifier as proof of success.
 Regenerable runtime data may be reclaimed only through exact registered,
 unleased identity. A writer makes status incomplete; after exact effect absence
 the daemon remeasures before cleanup. A live or reused process/group identity
-keeps finalization pending. Unique retained Changes are never automatic cleanup
-targets, and the daemon does not claim an instantaneous filesystem byte ceiling.
+keeps finalization pending. The daemon does not claim an instantaneous
+filesystem byte ceiling.
+
+A retained Change is reclaimed once nothing of value can be lost: its task is
+neither queued nor running nor blocked (unless blocked for 14 days), and its
+head equals its base, or its pull request merged at that exact head, or its
+task failed or was cancelled at least 14 days ago, or succeeded unpublished at
+least 30 days ago. The worktree must also verify on its own branch at the
+recorded head with its private Git administration and have no uncommitted
+work. The scheduler then removes it without force with `git worktree remove`,
+deletes that Change's private administration, and in one short transaction
+that rechecks the rule records the Change abandoned, as one whose worktree is
+gone: the task's retry makes a fresh worktree on the same branch. A few go per
+pass. A dirty, unverifiable or legacy shared-administration worktree is kept
+and logged once. A crash after the removal converges on the next pass, which
+finds nothing left on disk and only records it. The shared repository is
+never pruned.
 
 ## Clients and integrations
 

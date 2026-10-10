@@ -1377,6 +1377,51 @@ func inspectWorktree(ctx context.Context, gitExecutable, repositoryRoot string, 
 	return facts, err
 }
 
+// RemoveWorktree reclaims the Change worktree at path and the Change's
+// private Git administration. The worktree must verify on its own branch at
+// head, use its private administration and be clean; Git removes it without
+// force, so it refuses uncommitted work as well. A worktree already gone
+// leaves only that administration to remove, and both gone is done. Nothing
+// else in the repository is touched.
+func RemoveWorktree(ctx context.Context, gitExecutable, repositoryRoot string, expected RepositoryIdentity, path string, head ObjectID) error {
+	if err := validateWorktreePath(path); err != nil {
+		return err
+	}
+	authority, err := openGitAuthority(gitExecutable, repositoryRoot, expected, nil, true)
+	if err != nil {
+		return err
+	}
+	defer authority.close()
+	admin := GitDirectoryForChange(authority.repositoryRoot, path)
+	if _, err := os.Lstat(path); err == nil {
+		facts, err := authority.inspectWorktree(ctx, path)
+		switch {
+		case err != nil:
+			return err
+		case facts.GitDirectory() != admin:
+			return &ValidationError{Reason: "the Change uses the project's shared Git administration"}
+		case facts.Dirty():
+			return &ValidationError{Reason: "the Change worktree has uncommitted work"}
+		case !facts.Head().equal(head) || facts.Branch() != BranchName(filepath.Base(path)):
+			return &ValidationError{Reason: "the Change worktree is not at its recorded head"}
+		}
+		if _, err := authority.succeed(ctx, maxGitSelectionOutput, "--git-dir", admin, "worktree", "remove", path); err != nil {
+			return err
+		}
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return newGitError(gitFailurePrivateIO)
+	}
+	if _, err := os.Lstat(admin); errors.Is(err, os.ErrNotExist) {
+		return nil
+	} else if err != nil {
+		return newGitError(gitFailurePrivateIO)
+	}
+	if err := validatePrivateGitAdmin(admin); err != nil {
+		return err
+	}
+	return os.RemoveAll(filepath.Dir(admin))
+}
+
 // DescendsFrom reports whether the worktree's head descends from base: the
 // Change's recorded base is an ancestor of the work on its branch.
 func DescendsFrom(ctx context.Context, gitExecutable, repositoryRoot string, expected RepositoryIdentity, path string, base ObjectID) (bool, error) {
