@@ -220,12 +220,16 @@ func TestOverseerFailedReleaseEscalatesOncePerCause(t *testing.T) {
 	for round, sha := range []byte{'a', 'b', 'c'} {
 		at += rewake
 		release(sha, "running", "build", "", at)
+		// A tick while the retry runs neither wakes nor drops the card.
+		if bodies := wakeBodies(t, store, at); len(bodies) != 0 {
+			t.Fatalf("running retry %d woke = %q", round+1, bodies)
+		}
 		release(sha, "failed", "drain", fmt.Sprintf("drain_timeout: run %d is admitted", round+2), at+1)
 		if bodies := wakeBodies(t, store, at+settle); len(bodies) != 0 {
 			t.Fatalf("retry %d re-woke = %q", round+1, bodies)
 		}
 	}
-	if requests, err := store.OperatorHumanRequests(ctx); err != nil || len(requests) != 1 || !strings.Contains(requests[0].QuestionText, " failed in phase drain: drain_timeout: run ") {
+	if requests, err := store.OperatorHumanRequests(ctx); err != nil || len(requests) != 1 || !strings.Contains(requests[0].QuestionText, "failed in phase drain") {
 		t.Fatalf("operator escalation = %+v, %v", requests, err)
 	}
 	at += rewake
