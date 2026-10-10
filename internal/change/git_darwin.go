@@ -39,6 +39,11 @@ const (
 	gitPipeDrainGrace     = time.Second
 )
 
+// ErrRebaseConflict means Git stopped a rebase because the Change needs a
+// human/worker to resolve textual conflicts. The worktree is returned to its
+// pre-rebase state before this error is reported.
+var ErrRebaseConflict = errors.New("Change rebase conflicts with the current base")
+
 type gitCommandSpec struct {
 	program     string
 	repository  string
@@ -1353,6 +1358,46 @@ func FetchBase(ctx context.Context, selection Selection, path string) error {
 		return validatePrivateGitAdmin(admin)
 	}
 	return nil
+}
+
+// RebaseWorktree rebases a retained Change onto the selected current base.
+// The caller must have fetched selection.base to refs/remotes/origin/main
+// first. A clean rebase leaves the Change branch at its new head; a conflict
+// is aborted so the existing worker send-back path can inspect a clean tree.
+func RebaseWorktree(ctx context.Context, selection Selection, path string) (WorktreeFacts, error) {
+	if !selection.valid() {
+		return WorktreeFacts{}, &ValidationError{Reason: "worktree selection is invalid"}
+	}
+	if err := validateWorktreePath(path); err != nil {
+		return WorktreeFacts{}, err
+	}
+	authority, err := openGitAuthority(selection.gitExecutable, selection.repositoryRoot, selection.repository.root, nil, true)
+	if err != nil {
+		return WorktreeFacts{}, err
+	}
+	defer authority.close()
+	if _, err := authority.inspectWorktree(ctx, path); err != nil {
+		return WorktreeFacts{}, err
+	}
+	admin := GitDirectoryForChange(selection.repositoryRoot, path)
+	gitArgs := []string{"-c", "core.hooksPath=/dev/null", "-c", "protocol.file.allow=always"}
+	if err := validatePrivateGitAdmin(admin); err == nil {
+		gitArgs = append(gitArgs, "--git-dir", admin, "--work-tree", path)
+	} else {
+		gitArgs = append(gitArgs, "-C", path)
+	}
+	gitArgs = append(gitArgs, "rebase", "refs/remotes/origin/main")
+	result, err := authority.run(ctx, maxGitSelectionOutput, gitArgs...)
+	if err != nil {
+		return WorktreeFacts{}, err
+	}
+	if result.exitCode != 0 {
+		abort := append([]string{}, gitArgs[:len(gitArgs)-2]...)
+		abort = append(abort, "rebase", "--abort")
+		_, _ = authority.run(ctx, maxGitSelectionOutput, abort...)
+		return WorktreeFacts{}, ErrRebaseConflict
+	}
+	return authority.inspectWorktree(ctx, path)
 }
 
 // InspectWorktree verifies that path is a linked worktree of the repository

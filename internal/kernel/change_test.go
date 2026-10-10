@@ -132,6 +132,34 @@ func TestRecordChangeWorktreeFillsTheHeadOfAGitFreeChangeOnce(t *testing.T) {
 	}
 }
 
+func TestRecordChangeRebasedUpdatesRetainedHeadWithoutOpeningWork(t *testing.T) {
+	t.Parallel()
+	blocked, _ := NewBlockedProposal("rebased")
+	store, finalizing := finalizingReleasedRun(t, RoleWorker, blocked)
+	defer store.Close()
+	ctx := context.Background()
+	current, found, err := store.Change(ctx, *finalizing.ChangeID)
+	if err != nil || !found || current.HeadCommit == nil {
+		t.Fatalf("settled Change = %+v, found=%v, err=%v", current, found, err)
+	}
+	settlement, err := NewRetainedChangeSettlement(current.Revision, current.HeadCommit)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.FinalizeWorkerRun(ctx, finalizing.ID, finalizing.Revision, settlement, mustTime(t, 80)); err != nil {
+		t.Fatal(err)
+	}
+	retained, _, _ := store.Change(ctx, current.ID)
+	newHead, _ := NewCommitID(retained.HeadCommit.format, bytes.Repeat([]byte{0x7a}, retained.HeadCommit.format.oidLength()))
+	updated, err := store.RecordChangeRebased(ctx, retained.ID, retained.Revision, *retained.HeadCommit, newHead, mustTime(t, 81))
+	if err != nil || updated.Phase != ChangeRetained || updated.Revision != retained.Revision || updated.HeadCommit == nil || !updated.HeadCommit.equal(newHead) {
+		t.Fatalf("rebased Change = %+v, err=%v", updated, err)
+	}
+	if _, err := store.RecordChangeRebased(ctx, current.ID, updated.Revision, *current.HeadCommit, newHead, mustTime(t, 82)); !errors.Is(err, ErrRevisionConflict) {
+		t.Fatalf("stale rebase replay = %v", err)
+	}
+}
+
 func TestChangeSchemaIsPathFreeCanonicalAndCircularlyBound(t *testing.T) {
 	t.Parallel()
 	store, _ := newTestStore(t)

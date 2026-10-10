@@ -165,6 +165,22 @@ func (daemon *Daemon) advanceReviewOperations(ctx context.Context, startup bool)
 					continue
 				}
 			}
+			if err == nil && op.State == "ejected" && op.RoutePending && strings.Contains(op.Detail, "conflicts with") {
+				var rebased bool
+				rebased, err = daemon.tryAutoRebase(ctx, operation.Project, operation.Repository, op)
+				if err == nil && rebased {
+					// Reuse the ordinary correction publication and refresh paths;
+					// this makes the new exact head visible without waiting for the
+					// next scheduler tick. A later pass retries a transient publish.
+					daemon.publishSettledChanges(ctx)
+					_ = daemon.refreshProduction(ctx, operation.Project)
+					op.State, op.RoutePending, op.UpdatedAt = "superseded", false, daemon.now()
+					err = durableReviewStore{store: daemon.store, project: operation.Project, repository: operation.Repository, now: daemon.now}.Update(ctx, op)
+					if err == nil {
+						continue
+					}
+				}
+			}
 			if err == nil {
 				err = daemon.finishReviewRouting(ctx, operation.Project, operation.Repository, op)
 			}
@@ -206,6 +222,68 @@ func (daemon *Daemon) advanceReviewOperations(ctx context.Context, startup bool)
 		}
 	}
 	return advanced, nil
+}
+
+// tryAutoRebase repairs the common merge-queue conflict without consuming a
+// worker turn. It returns false only for a real Git conflict; other failures
+// remain pending so the normal durable retry/escalation path can handle them.
+func (daemon *Daemon) tryAutoRebase(ctx context.Context, project kernel.ProjectID, repository string, op review.Operation) (bool, error) {
+	changeID, found, err := daemon.store.PublishedChangeID(ctx, project, repository, op.Request.PullNumber)
+	if err != nil || !found {
+		return false, err
+	}
+	state, found, err := daemon.store.Change(ctx, changeID)
+	if err != nil || !found || state.Phase != kernel.ChangeRetained || state.Selection == nil || state.HeadCommit == nil {
+		return false, err
+	}
+	parent, git := daemon.changeParent.Load(), daemon.gitExecutable.Load()
+	if parent == nil || *parent == "" || git == nil || *git == "" {
+		return false, errPublishLater
+	}
+	repositoryState, err := daemon.repositoryForChange(ctx, state)
+	if err != nil {
+		return false, err
+	}
+	source, verified, err := daemon.store.RepositorySourceIdentity(ctx, repositoryState.ID)
+	if err != nil || !verified {
+		return false, errors.Join(err, kernel.ErrConflict)
+	}
+	root, err := change.NewRepositoryIdentity(source.RootDevice, source.RootInode)
+	if err != nil {
+		return false, err
+	}
+	gitIdentity, err := change.NewRepositoryIdentity(source.GitDevice, source.GitInode)
+	if err != nil {
+		return false, err
+	}
+	current, err := change.SelectRegisteredGit(ctx, *git, repositoryState.Root, repositoryState.BaseRef, change.RepositorySourceIdentity{Root: root, Git: gitIdentity, OriginDigest: source.OriginDigest})
+	if err != nil {
+		return false, err
+	}
+	path := filepath.Join(*parent, state.ID.String())
+	if err := change.FetchBase(ctx, current, path); err != nil {
+		return false, err
+	}
+	facts, err := change.RebaseWorktree(ctx, current, path)
+	if errors.Is(err, change.ErrRebaseConflict) {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	if facts.Dirty() || facts.Branch() != change.BranchName(state.ID.String()) {
+		return false, errors.New("rebased Change worktree failed verification")
+	}
+	newHead, err := kernelCommit(facts.Head())
+	if err != nil {
+		return false, err
+	}
+	at, err := daemon.timestamp()
+	if err != nil {
+		return false, err
+	}
+	_, err = daemon.store.RecordChangeRebased(ctx, state.ID, state.Revision, *state.HeadCommit, newHead, at)
+	return err == nil, err
 }
 
 func (daemon *Daemon) reviewCoordinator(ctx context.Context, project kernel.ProjectID, repository string) (review.Coordinator, error) {
