@@ -47,6 +47,7 @@ jobs:
             case "$path" in
               docs/*|README.md|ARCHITECTURE.md|CONTRIBUTING.md|ROADMAP.md|SECURITY.md|CLAUDE.md|LICENSE|LICENSE.*|launchd/README.md)
                 ;;
+              .gitignore) macos=true; control_plane=true ;;
               control-plane|control-plane/*)
                 macos=true
                 control_plane=true
