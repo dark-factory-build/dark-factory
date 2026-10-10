@@ -347,12 +347,13 @@ and publication binding are separate checks. A verified publication binding
 still requires live write permission for every publication operation.
 
 Once a repository is bound to a project, factoryd also reviews its open pull
-requests, including ones it did not publish. When a blocking verdict or
-merge-queue ejection lands on a same-repository pull request whose head has not
-moved, factoryd creates one `Repair OWNER/REPO#N` worker task and publishes its
-result to that pull request's own branch. Repair is limited to two rounds;
-after that the pull request is escalated to the project's overseer. A pull
-request from a fork only receives the verdict on GitHub.
+requests, including ones it did not publish. A blocking verdict or merge-queue
+ejection on a head that has not moved goes back to the task that published the
+pull request. For a same-repository pull request factoryd did not publish, it
+first creates one `Repair OWNER/REPO#N` worker task and publishes its result to
+that pull request's own branch. Each send-back after the second repair round
+is also escalated to the project's overseer; it does not stop further repair.
+A pull request from a fork only receives the verdict on GitHub.
 
 ## Project repositories (v0.4.0+)
 
