@@ -1,16 +1,13 @@
 name: Release
 run-name: Release ${{ github.ref_name }}
-
 # A semver tag (`vX.Y.Z`) pushed by a maintainer builds the macOS arm64
 # and Intel binaries serially and publishes them, a SHA256SUMS file, a tap
 # formula candidate as a GitHub Release.
 on:
   push:
     tags: ["v*"]
-
 permissions:
   contents: write
-
 jobs:
   release:
     name: release
@@ -43,10 +40,8 @@ jobs:
           git fetch --depth=1 origin "$GITHUB_SHA"
           git checkout --force --detach FETCH_HEAD
           git clean -ffdx
-
       - name: Resolve the immutable release source
         run: ./scripts/prepare-release-source.sh
-
       # Fresh arm64 images do not carry Go. Bootstrap it through the same
       # Homebrew boundary as CI, then expose that exact binary to later steps.
       - name: Provide the Homebrew Go toolchain
@@ -58,7 +53,6 @@ jobs:
           fi
           echo "/opt/homebrew/bin" >> "$GITHUB_PATH"
           /opt/homebrew/bin/go version
-
       # The build bundles the console factoryd embeds; same Node as ci.yml.
       - name: Provide Node and Corepack
         run: |
@@ -69,7 +63,6 @@ jobs:
           (cd "$RUNNER_TEMP" && grep " $node_release.tar.gz\$" node-shasums.txt | shasum -a 256 -c -)
           tar -xzf "$RUNNER_TEMP/$node_release.tar.gz" -C "$RUNNER_TEMP"
           printf '%s\n' "$RUNNER_TEMP/$node_release/bin" >> "$GITHUB_PATH"
-
       # One Go implementation (internal/buildinfo, shared with factoryd's
       # self-release) checks the tag against VERSION, cross-compiles both
       # targets with go.mod's toolchain, packages the four assets, and
@@ -77,40 +70,13 @@ jobs:
       - name: Build release binaries
         run: |
           "$RELEASE_ARTIFACT" build "$TAG" "$SOURCE_SHA" release
-
       - name: Package
         run: |
           "$RELEASE_ARTIFACT" package "$TAG" "$SOURCE_SHA" dist "$GITHUB_REPOSITORY" \
             aarch64-apple-darwin release/aarch64-apple-darwin \
             x86_64-apple-darwin release/x86_64-apple-darwin
-
       - name: Publish the GitHub release
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           "$RELEASE_ARTIFACT" publish "$TAG" "$SOURCE_SHA" "$GITHUB_REPOSITORY" dist/*
-
-      - name: Publish bounded workflow summary
-        if: always()
-        run: |
-          if [ -x ./scripts/github-step-summary.sh ]; then
-            DF_SUMMARY_KIND=release \
-            DF_SUMMARY_REF="refs/tags/$TAG" \
-            DF_SUMMARY_SHA="$SOURCE_SHA" \
-            DF_SUMMARY_RESULT="${{ job.status }}" \
-            DF_SUMMARY_TARGET="$TAG" \
-            DF_SUMMARY_TARGET_URL="$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/releases/tag/$TAG" \
-            DF_SUMMARY_RUN_URL="$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID" \
-              ./scripts/github-step-summary.sh
-          else
-            # The checkout can fail before repository files exist. Keep this
-            # immutable fallback static: no untrusted value is interpolated.
-            {
-              printf '%s\n' '### Dark Factory workflow summary'
-              printf '%s\n' '- Result: <code>failure</code>'
-              printf '%s\n' '- Ref: <code>unavailable before checkout</code>'
-              printf '%s\n' '- SHA: <code>unavailable before checkout</code>'
-              printf '%s\n' '- Release target: <code>unavailable before checkout</code>'
-              printf '%s\n' '- Links: workflow run summary'
-            } >>"$GITHUB_STEP_SUMMARY"
-          fi

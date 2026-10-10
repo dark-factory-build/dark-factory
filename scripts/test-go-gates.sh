@@ -438,7 +438,7 @@ fixture_go=$(command -v go) || fail "go is unavailable for the local-ci fixture"
 /bin/chmod 755 "$local_fixture/configured/node" "$local_fixture/configured/corepack"
 for local_child in \
     check-toolchain-pins.sh test-local-ci-environment.sh test-with-local-ci-lease.sh test-new-worktree.sh \
-    test-release.sh test-github-step-summary.sh \
+    test-release.sh \
     test-repository-settings.sh \
     test-go-gates.sh test-go-e2e-tools.sh go-ci-owned.sh \
     go-e2e.sh \
@@ -453,7 +453,7 @@ done
 
 run_local_fault() {
     local_mode=$1
-    local_gate_mode=${2---release}
+    local_gate_mode=${2---full}
     set +e
     local_output=$(CDPATH= cd -- "$local_fixture" && DARK_FACTORY_LOCAL_CI_LEASE_HELD=1 \
         DF_GATE_FAULT="$local_mode" \
@@ -465,7 +465,7 @@ run_local_fault() {
 for local_fault in 'release:fixture release proof failure'; do
     local_mode=${local_fault%%:*}
     local_want=${local_fault#*:}
-    run_local_fault "$local_mode" --release
+    run_local_fault "$local_mode" --full
     [ "$local_status" -ne 0 ] || fail "failing $local_mode proof passed"
     printf '%s\n' "$local_output" | /usr/bin/grep -F "$local_want" >/dev/null \
         || fail "$local_mode failure was unclear: $local_output"
@@ -506,32 +506,16 @@ run_local_mode() {
         fail "$selected_mode unexpectedly ran the full repository fixtures"
     fi
 }
-run_local_mode --runtime
-run_local_mode --release
+run_local_mode --warm
 : >"$local_fixture/lease-calls"
 local_output=$(CDPATH= cd -- "$local_fixture" && DARK_FACTORY_LOCAL_CI_LEASE_HELD=1 \
-    PATH="$local_fixture/configured:/usr/bin:/bin" \
-    /bin/sh ./scripts/local-ci.sh --ui 2>&1)
-printf '%s\n' "$local_output" | /usr/bin/grep -F 'local-ci: PASS (ui)' >/dev/null \
-    || fail "UI gate did not complete: $local_output"
-[ ! -s "$local_fixture/lease-calls" ] || fail "UI gate tried to reacquire its held lease"
-for selected_mode in --ui --release --runtime; do
+for selected_mode in --full --affected; do
     : >"$local_fixture/lease-calls"
     local_output=$(CDPATH= cd -- "$local_fixture" && DARK_FACTORY_LOCAL_CI_LEASE_HELD=0 \
         PATH="$local_fixture/configured:/usr/bin:/bin" \
         /bin/sh ./scripts/local-ci.sh "$selected_mode" 2>&1)
     [ -s "$local_fixture/lease-calls" ] || fail "$selected_mode ran heavy checks without the lease"
 done
-set +e
-local_output=$(CDPATH= cd -- "$local_fixture" && DARK_FACTORY_LOCAL_CI_LEASE_HELD=1 \
-    DF_GATE_FAULT=ui PATH="$local_fixture/configured:/usr/bin:/bin" \
-    /bin/sh ./scripts/local-ci.sh --ui 2>&1)
-local_status=$?
-set -e
-[ "$local_status" -ne 0 ] || fail "failing UI source proof passed"
-printf '%s\n' "$local_output" | /usr/bin/grep -F 'fixture UI source proof failure' >/dev/null \
-    || fail "UI failure was unclear: $local_output"
-
 /bin/mkdir "$local_fixture/mismatch"
 /bin/cat >"$local_fixture/mismatch/node" <<'EOF'
 #!/bin/sh

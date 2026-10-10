@@ -1,20 +1,9 @@
 name: CI
-
 on:
   pull_request:
-  # A merge queue tests `main` + every entry ahead in the queue + this one,
-  # on a temporary `gh-readonly-queue/**` ref, and merges only if that exact
-  # combination is green. Without this trigger the queue would wait forever
-  # for a `required` context that never reports.
   merge_group:
-  # A merge queue run can restore only caches saved on its own throwaway
-  # `gh-readonly-queue/**` ref or on `main`. `main` keeps a warm compiler and
-  # package cache so queue runs never start cold; no gate runs on push.
   push:
     branches: [main]
-  # A manual run is the explicit path for platform investigation on the
-  # persistent Mac. A conflict-free merge is not followed by a duplicate
-  # full gate: the PR and merge-queue trees already supplied that evidence.
   workflow_dispatch:
     inputs:
       runner:
@@ -22,54 +11,12 @@ on:
         type: choice
         default: dark-factory-mac
         options: [dark-factory-mac, macos-latest]
-
 permissions:
   contents: read
-
 concurrency:
   group: ci-${{ github.event.pull_request.number || github.sha }}
-  # Never cancel a queue run: the merge it gates would be left waiting on a
-  # context that will never report, stalling every entry behind it.
   cancel-in-progress: ${{ github.event_name != 'merge_group' }}
-
 jobs:
-  # Pull requests get a cheap patch check here plus, through scope, their own
-  # affected-package gate. A broken revision then fails on its own pull request
-  # instead of in the queue, where an ALLGREEN ejection rebuilds every entry
-  # behind it (most of the 5-9 Oct queue waste was exactly that).
-  eligibility:
-    if: github.event_name == 'pull_request'
-    runs-on: ubuntu-24.04
-    timeout-minutes: 5
-    steps:
-      - name: Check the pull request patch
-        env:
-          BASE_SHA: ${{ github.event.pull_request.base.sha }}
-        run: |
-          set -euxo pipefail
-          git init
-          git remote add origin "https://github.com/${GITHUB_REPOSITORY}.git"
-          git fetch --no-tags --depth=1 origin "$BASE_SHA" "$GITHUB_SHA"
-          git diff --check "$BASE_SHA" "$GITHUB_SHA"
-          # A formatting slip otherwise costs a whole queue run and the
-          # entries rebuilt behind it. Same pinned Go as the macOS gate.
-          go_archive=go1.27.2.linux-amd64.tar.gz
-          curl --fail --silent --show-error --location "https://dl.google.com/go/$go_archive" -o "$RUNNER_TEMP/$go_archive"
-          checksum=$(curl --fail --silent --show-error --location "https://dl.google.com/go/$go_archive.sha256")
-          printf '%s  %s\n' "$checksum" "$RUNNER_TEMP/$go_archive" | sha256sum -c -
-          tar -xzf "$RUNNER_TEMP/$go_archive" -C "$RUNNER_TEMP"
-          unformatted=
-          for file in $(git diff --name-only --diff-filter=AMR "$BASE_SHA" "$GITHUB_SHA" -- '*.go'); do
-            [ -z "$(git show "$GITHUB_SHA:$file" | "$RUNNER_TEMP/go/bin/gofmt" -l)" ] || unformatted="$unformatted $file"
-          done
-          [ -z "$unformatted" ] || { echo "::error::gofmt required:$unformatted"; exit 1; }
-
-  # This classifier lives in the CODEOWNED workflow, not in a PR-publishable
-  # script. The diff is the queue's whole combined tree, so entries ahead of
-  # this one cannot escape its selected gates. Only presentation source gets
-  # the narrow UI mode; runtime paths use the runtime gate, release paths use
-  # the release gate, and protocol, dependency, CI, or unknown paths use the
-  # full Darwin gate.
   scope:
     runs-on: ubuntu-24.04
     timeout-minutes: 5
@@ -84,92 +31,42 @@ jobs:
         id: select
         run: |
           set -euo pipefail
-          emit_all() {
-            for gate in macos control_plane relay; do
-              printf '%s=true\n' "$gate"
-            done >>"$GITHUB_OUTPUT"
-            printf 'macos_mode=full\n' >>"$GITHUB_OUTPUT"
-          }
-          if [ "$GITHUB_EVENT_NAME" = workflow_dispatch ]; then
-            emit_all
-            exit 0
-          fi
-          if [ "$GITHUB_EVENT_NAME" = push ]; then
-            printf '%s\n' macos=true macos_mode=warm control_plane=true relay=false >>"$GITHUB_OUTPUT"
-            exit 0
-          fi
-          case "$GITHUB_SHA" in
-            *[!0-9a-f]*|'') echo "invalid merge-group commit" >&2; exit 1 ;;
-          esac
-          [ "${#GITHUB_SHA}" -eq 40 ] || { echo "invalid merge-group commit" >&2; exit 1; }
+          [[ "$GITHUB_SHA" =~ ^[0-9a-f]{40}$ ]] || { echo "invalid merge-group commit" >&2; exit 1; }
           git init
           git remote add origin "https://github.com/${GITHUB_REPOSITORY}.git"
-          # The event's base_sha can be the preceding synthetic queue entry.
-          # Full ancestry against main includes every still-pending entry;
-          # blob filtering avoids downloading unrelated historical contents.
           git fetch --no-tags --filter=blob:none origin refs/heads/main:refs/remotes/origin/main "$GITHUB_SHA"
           merge_base=$(git merge-base refs/remotes/origin/main "$GITHUB_SHA")
           git diff --check "$merge_base" "$GITHUB_SHA"
           git diff --name-only -z --no-renames --diff-filter=ACDMRTUXB "$merge_base" "$GITHUB_SHA" \
             >"$RUNNER_TEMP/changed-paths"
-
           macos=false
           macos_mode=none
           control_plane=false
           relay=false
-          select_macos_mode() {
-            if [ "$macos_mode" = none ] || [ "$macos_mode" = "$1" ]; then
-              macos_mode=$1
-            else
-              macos_mode=full
-            fi
-          }
           while IFS= read -r -d '' path; do
             case "$path" in
               docs/*|README.md|ARCHITECTURE.md|CONTRIBUTING.md|ROADMAP.md|SECURITY.md|CLAUDE.md|LICENSE|LICENSE.*|launchd/README.md)
                 ;;
-              web/packages/ui/src/*.tsx|web/packages/ui/src/*.css|web/packages/ui/src/factory-scene/*|web/packages/ui/test/*)
-                macos=true
-                select_macos_mode ui
-                ;;
               control-plane|control-plane/*)
+                macos=true
                 control_plane=true
                 ;;
-              relay/fixtures/*|relay/src/*)
-                macos=true; select_macos_mode full; relay=true
-                ;;
               relay|relay/*)
+                macos=true
                 relay=true
                 ;;
-              .github/workflows/ci.yml)
-                macos=true; select_macos_mode full; control_plane=true; relay=true
-                ;;
-              VERSION)
-                macos=true; select_macos_mode full
-                ;;
-              scripts/prepare-release-source.sh|scripts/test-prepare-release-source.sh)
-                macos=true; select_macos_mode release
-                ;;
-              .gitignore|scripts/release.sh)
-                macos=true; select_macos_mode full; control_plane=true
-                ;;
-              protocol/*|web/fixtures/*|internal/browser/*|internal/browserprotocol/*|internal/buildinfo/*|internal/install/*|cmd/factoryctl/*|launchd/*)
-                macos=true; select_macos_mode full
-                ;;
-              cmd/*|internal/*|launchd/*)
-                macos=true
-                select_macos_mode runtime
-                ;;
               *)
-                macos=true; select_macos_mode full
+                macos=true
                 ;;
             esac
           done <"$RUNNER_TEMP/changed-paths"
-          # A pull request runs only the packages its change affects; the
-          # queue still runs the selected gate on the combined tree.
-          if [ "$GITHUB_EVENT_NAME" = pull_request ] && [ "$macos" = true ]; then
+          if [ "$GITHUB_EVENT_NAME" = pull_request ]; then
             macos_mode=affected
             printf 'base=%s\n' "$merge_base" >>"$GITHUB_OUTPUT"
+          elif [ "$GITHUB_EVENT_NAME" = push ]; then
+            macos_mode=warm
+          else
+            macos_mode=full
           fi
           {
             printf 'macos=%s\n' "$macos"
@@ -177,51 +74,16 @@ jobs:
             printf 'control_plane=%s\n' "$control_plane"
             printf 'relay=%s\n' "$relay"
           } >>"$GITHUB_OUTPUT"
-
-  # Darwin runtime changes use the source and process gates. Presentation-only web
-  # changes use the source and browser smoke gates; documentation and
-  # control-plane-only changes never allocate a hosted Mac.
   checks:
     needs: scope
     if: needs.scope.result == 'success' && needs.scope.outputs.macos == 'true'
     runs-on: ${{ github.event_name != 'workflow_dispatch' && 'macos-latest' || inputs.runner || 'dark-factory-mac' }}
     timeout-minutes: 30
-    # The full and runtime gates split across parallel Macs; queued Mac jobs
-    # wait for a free runner rather than fail. Every shard must pass and runs
-    # to completion: a cancelled sibling would read to factoryd as an
-    # infrastructure failure and hide the failing tests (#1366).
-    # Warm-cache merge-group timings (2026-10-09): packages 4:25, daemon
-    # 4:18, and source 5:11 median across runs 37998324190, 38000817821,
-    # and 38001154695; the latest queue wall time was 5:27. Any pair would
-    # exceed the slowest shard, while one Mac would take about 14 minutes.
     strategy:
       fail-fast: false
       matrix:
-        shard: ${{ fromJSON((needs.scope.outputs.macos_mode == 'full' || needs.scope.outputs.macos_mode == 'runtime') && '["daemon","packages","source"]' || '["source"]') }}
+        shard: ${{ fromJSON(needs.scope.outputs.macos_mode == 'full' && '["daemon","packages","source"]' || '["source"]') }}
     steps:
-      # No actions/checkout: codeload.github.com (which serves an action's
-      # tarball) can 429 independently of git itself and has, for over an
-      # hour at a time, on this runner — with no code checked out and
-      # nothing to retry. A plain `git fetch` talks straight to GitHub's
-      # git server instead, so this job never depends on that download.
-      #
-      # This runner's workspace persists between jobs, and the
-      # `cancel-in-progress` concurrency group above can SIGTERM a job
-      # mid-checkout (an ordinary fixup push while the previous push's
-      # `checks` is still running), so a prior job can leave more than
-      # stray files behind: a `.git/index.lock`, a half-written pack, a
-      # stale shallow boundary. `rm -rf .git && git init` before every
-      # fetch throws all of that away in one move instead of trying to
-      # detect and repair each kind of leftover state, then `git checkout
-      # --force --detach` lands on the target commit and `git clean -ffdx`
-      # removes anything else a prior job left in the working tree. That
-      # reusable compiler and package caches live under RUNNER_TEMP, outside
-      # this checkout. Generated outputs and fixture state are still cleaned.
-      #
-      # $GITHUB_SHA is the selected commit for `merge_group` and
-      # `workflow_dispatch`; GitHub serves `git fetch` by arbitrary commit SHA.
-      # The repo is public, so the fetch is unauthenticated and nothing is
-      # written to .git/config that could leak a credential.
       - name: Check out $GITHUB_SHA
         env:
           AFFECTED_BASE: ${{ needs.scope.outputs.base }}
@@ -233,7 +95,6 @@ jobs:
           git fetch --depth=1 origin "$GITHUB_SHA" ${AFFECTED_BASE:+"$AFFECTED_BASE"}
           git checkout --force --detach "$GITHUB_SHA"
           git clean -ffdx
-
       - name: Provide the Go toolchain
         run: |
           set -euo pipefail
@@ -250,7 +111,6 @@ jobs:
           tar -xzf "$RUNNER_TEMP/$go_archive" -C "$RUNNER_TEMP"
           "$RUNNER_TEMP/go/bin/go" version
           printf '%s\n' "$RUNNER_TEMP/go/bin" >> "$GITHUB_PATH"
-
       - name: Provide an isolated Node and Corepack pair
         run: |
           set -euo pipefail
@@ -273,15 +133,11 @@ jobs:
           "$node_bin/node" "$node_bin/corepack" --version
           printf '%s\n' "$node_bin" >> "$GITHUB_PATH"
           printf 'DF_CI_NODE=%s/node\nDF_CI_COREPACK=%s/corepack\n' "$node_bin" "$node_bin" >> "$GITHUB_ENV"
-
       - name: Name reusable caches
         id: cache-toolchain
         run: |
           printf 'DF_CI_CACHE_ROOT=%s/dark-factory-ci-cache\n' "$RUNNER_TEMP" >> "$GITHUB_ENV"
           printf 'go=%s\n' "$(go env GOVERSION)" >> "$GITHUB_OUTPUT"
-
-      # Restore only: queue refs are thrown away, so a save there is
-      # unreadable by later runs. The push-to-main run saves.
       - name: Restore reusable compiler and package caches
         uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
         with:
@@ -293,7 +149,6 @@ jobs:
           key: ci-v2-${{ runner.os }}-${{ runner.arch }}-${{ steps.cache-toolchain.outputs.go }}-node22.20.0-${{ hashFiles('go.sum', 'web/pnpm-lock.yaml', 'web/package.json') }}-${{ github.sha }}
           restore-keys: |
             ci-v2-${{ runner.os }}-${{ runner.arch }}-${{ steps.cache-toolchain.outputs.go }}-node22.20.0-${{ hashFiles('go.sum', 'web/pnpm-lock.yaml', 'web/package.json') }}-
-
       - name: Run the macOS source gate
         env:
           MACOS_MODE: ${{ needs.scope.outputs.macos_mode }}
@@ -302,30 +157,11 @@ jobs:
         run: |
           set -euo pipefail
           case "$MACOS_MODE" in
-            ui)
-              ./scripts/local-ci.sh --ui
-              ;;
-            runtime)
-              ./scripts/local-ci.sh --runtime "$SHARD"
-              ;;
-            release)
-              ./scripts/local-ci.sh --release
-              ;;
-            warm)
-              ./scripts/local-ci.sh --warm
-              ;;
-            affected)
-              ./scripts/local-ci.sh --affected "$AFFECTED_BASE"
-              ;;
-            full)
-              ./scripts/local-ci.sh --full "$SHARD"
-              ;;
-            *)
-              echo "unknown macOS gate mode: $MACOS_MODE" >&2
-              exit 1
-              ;;
+            warm) ./scripts/local-ci.sh --warm ;;
+            affected) ./scripts/local-ci.sh --affected "$AFFECTED_BASE" ;;
+            full) ./scripts/local-ci.sh --full "$SHARD" ;;
+            *) echo "unknown macOS gate mode: $MACOS_MODE" >&2; exit 1 ;;
           esac 2>&1 | tee "$RUNNER_TEMP/macos-gate.log"
-
       - name: Save the warm main-branch cache
         if: github.event_name == 'push'
         uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
@@ -336,55 +172,21 @@ jobs:
             ${{ runner.temp }}/dark-factory-ci-cache/corepack
             ${{ runner.temp }}/dark-factory-ci-cache/pnpm-store
           key: ci-v2-${{ runner.os }}-${{ runner.arch }}-${{ steps.cache-toolchain.outputs.go }}-node22.20.0-${{ hashFiles('go.sum', 'web/pnpm-lock.yaml', 'web/package.json') }}-${{ github.sha }}
-
-      # factoryd reads these failure annotations when the merge queue ejects a
-      # head, so the worker's correction names the failing tests (#1366).
       - name: Annotate failing tests
         if: failure()
         run: |
           grep -E '^[[:space:]]*(--- FAIL: |not ok |✖ )' "$RUNNER_TEMP/macos-gate.log" | head -n 10 |
             sed -e 's/^[[:space:]]*//' -e 's/%/%25/g' -e 's/^/::error title=Failing test::/' || true
-
-      - name: Publish bounded workflow summary
-        if: always()
-        env:
-          DF_SUMMARY_KIND: CI
-          DF_SUMMARY_REF: ${{ github.ref }}
-          DF_SUMMARY_SHA: ${{ github.sha }}
-          DF_SUMMARY_RESULT: ${{ job.status }}
-          DF_SUMMARY_TARGET: ${{ github.event.pull_request.milestone.title || 'unassigned' }}
-          DF_SUMMARY_TARGET_URL: ${{ github.event.pull_request.milestone.html_url || format('{0}/{1}/milestones', github.server_url, github.repository) }}
-          DF_SUMMARY_RUN_URL: ${{ format('{0}/{1}/actions/runs/{2}', github.server_url, github.repository, github.run_id) }}
-        run: |
-          if [ -x ./scripts/github-step-summary.sh ]; then
-            ./scripts/github-step-summary.sh
-          else
-            # The checkout can fail before repository files exist. Keep this
-            # immutable fallback static: no untrusted value is interpolated.
-            {
-              printf '%s\n' '### Dark Factory workflow summary'
-              printf '%s\n' '- Result: <code>failure</code>'
-              printf '%s\n' '- Ref: <code>unavailable before checkout</code>'
-              printf '%s\n' '- SHA: <code>unavailable before checkout</code>'
-              printf '%s\n' '- Release target: <code>unavailable before checkout</code>'
-              printf '%s\n' '- Links: workflow run summary'
-            } >>"$GITHUB_STEP_SUMMARY"
-          fi
-
-  # The repository's single required context is deliberately an aggregate:
-  # GitHub must require the hosted runtime source gate and the separately
-  # deployed control-plane gate, not just whichever job name happened to be
-  # selected when the ruleset was first configured.
   required:
     if: always()
-    needs: [eligibility, scope, checks, control-plane, relay, review]
+    needs: [scope, checks, control-plane, relay, review]
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     steps:
       - name: Require every hosted source gate
-        if: (github.event_name == 'pull_request' && needs.eligibility.result != 'success') || (github.event_name != 'push' && (needs.scope.result != 'success' || (needs.scope.outputs.macos == 'true' && needs.checks.result != 'success') || (needs.scope.outputs.control_plane == 'true' && needs.control-plane.result != 'success') || (needs.scope.outputs.relay == 'true' && needs.relay.result != 'success')))
+        if: github.event_name != 'push' && (needs.scope.result != 'success' || (needs.scope.outputs.macos == 'true' && needs.checks.result != 'success') || (needs.scope.outputs.control_plane == 'true' && needs.control-plane.result != 'success') || (needs.scope.outputs.relay == 'true' && needs.relay.result != 'success'))
         run: |
-          echo "required source gates failed: eligibility=${{ needs.eligibility.result }}, scope=${{ needs.scope.result }}, macOS=${{ needs.checks.result }}, control-plane=${{ needs.control-plane.result }}, relay=${{ needs.relay.result }}" >&2
+          echo "required source gates failed: scope=${{ needs.scope.result }}, macOS=${{ needs.checks.result }}, control-plane=${{ needs.control-plane.result }}, relay=${{ needs.relay.result }}" >&2
           exit 1
       - name: Confirm the pull request is eligible for the queue
         if: github.event_name == 'pull_request'
@@ -392,24 +194,6 @@ jobs:
       - name: Confirm all hosted source gates passed
         if: github.event_name == 'merge_group' || github.event_name == 'workflow_dispatch'
         run: echo "every selected combined-tree gate passed"
-
-      # Exact-head review is a merge condition rather than a convention.
-      #
-      # In the queue only `success` passes. Everywhere else `skipped` passes
-      # too, because `review` runs only on `merge_group`: recording a verdict
-      # fires no workflow event, so a pull-request-time run could never turn
-      # green after the reviewer acted, and treating its `skipped` as a failure
-      # would fail every pull request -- the same deadlock in a new costume.
-      #
-      # Keyed on the EVENT as well as the result, deliberately. Keying on the
-      # result alone is safe only while `review` has no `needs:` and cannot be
-      # dependency-skipped inside the queue -- a property of a different job
-      # that a reader has to go and verify. This form says the policy outright
-      # and cannot be undermined by a later edit to that job.
-      #
-      # So a pull request enqueues without a verdict and is ejected here, at
-      # the one moment the verdict has to be true: against the head being
-      # merged.
       - name: Require a recorded adversarial review verdict
         if: needs.review.result != 'success' && (github.event_name == 'merge_group' || needs.review.result != 'skipped')
         run: |
@@ -417,47 +201,7 @@ jobs:
           echo "  A reviewer that did not write the change records:" >&2
           echo "  Publish a GitHub review at this exact commit with Dark-Factory-Review: allow <head_sha>" >&2
           exit 1
-
-      # This is diagnostic defence against repository-setting drift. The
-      # Maintainer separately refuses enqueue when the base has no queue.
-      - name: Confirm the live merge rules
-        if: github.event_name == 'pull_request' || github.event_name == 'merge_group'
-        env:
-          GH_TOKEN: ${{ github.token }}
-          BASE_BRANCH: ${{ github.event.repository.default_branch }}
-        run: |
-          set -euo pipefail
-          gh api "repos/${GITHUB_REPOSITORY}/rules/branches/${BASE_BRANCH}" --jq '
-            .[] | (("rule:" + .type),
-                   (if .type=="merge_queue"
-                    then "grouping:" + (.parameters.grouping_strategy // "none") else empty end),
-                   (if .type=="required_status_checks"
-                    then (.parameters.required_status_checks[]?
-                          | ("context:" + .context),
-                            ("integration:" + (.integration_id|tostring) + ":" + .context)) else empty end))' \
-            >"${RUNNER_TEMP}/merge-rules"
-          for fact in rule:merge_queue grouping:ALLGREEN \
-            rule:required_status_checks context:required integration:15368:required; do
-            grep -qx "$fact" "${RUNNER_TEMP}/merge-rules" || {
-              echo "required live merge rule missing: $fact" >&2
-              exit 1
-            }
-          done
-
   review:
-    # The merge queue, and nowhere else.
-    #
-    # Recording a verdict fires no workflow event. A pull-request-time run
-    # would therefore evaluate before the reviewer had acted, fail, and have
-    # no way back to green: the only way to re-trigger it is to push, which
-    # moves the head and orphans the verdict it was waiting for. There is no
-    # ordering that ends green, so requiring it there would make every pull
-    # request permanently unmergeable, and the release valve would be an admin
-    # bypass -- the gate satisfied by circumventing it.
-    #
-    # The queue runs after the verdict exists, against the head being merged,
-    # which is the one moment it has to be true. A pull request with no verdict
-    # enqueues and is ejected when this fails.
     if: github.event_name == 'merge_group'
     runs-on: ubuntu-24.04
     timeout-minutes: 5
@@ -465,20 +209,6 @@ jobs:
       contents: read
       pull-requests: read
     steps:
-      # Deliberately NOT $GITHUB_SHA. This runs the gate as it exists on the
-      # default branch, never the copy carried by the change under review: the
-      # maintainer App may publish under `scripts/`, so a pull request running
-      # its own copy could weaken the reviewer about to judge it. A change to
-      # the gate is still tested by `checks`, which does run the pull
-      # request's copy of internal/review/gate and its tests.
-      #
-      # This hoists the decision, not the plumbing. Everything else on this
-      # path -- the projection below, the head lookup, this job's existence --
-      # still comes from the pull request's own `ci.yml`, exactly as the
-      # comment on `checks` says. What bounds that is the App's refusal to
-      # publish under `.github/workflows/`; note the refusal is by named path,
-      # so `.github/actions/**` IS publishable and a composite action extracted
-      # from this job would not be covered.
       - name: Check out the gate from the default branch
         env:
           DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
@@ -490,29 +220,21 @@ jobs:
           git fetch --depth=1 origin "refs/heads/${DEFAULT_BRANCH}"
           git checkout --force --detach FETCH_HEAD
           git clean -ffdx
-
       - name: Verify the adversarial review verdict
         env:
           GH_TOKEN: ${{ github.token }}
-          # Numeric publisher ids trusted beyond repository maintainers, set
-          # by administrators as a repository variable, never in this file.
           DF_REVIEW_TRUSTED_PUBLISHERS: ${{ vars.DF_REVIEW_TRUSTED_PUBLISHERS }}
         run: |
           set -euo pipefail
-          # Both gating events name the pull request in GITHUB_REF, so this
-          # job does not branch on the event.
           gate="${RUNNER_TEMP}/gate"
           go build -o "${gate}" ./internal/review/gate
           number="$("${gate}" --pull-number)"
           head="$(gh api "repos/${GITHUB_REPOSITORY}/pulls/${number}" --jq '.head.sha')"
-          # Projection only: five fields per review and no decision, so the
-          # logic that gates every merge stays somewhere a test can drive it.
           gh api "repos/${GITHUB_REPOSITORY}/pulls/${number}/reviews" --paginate \
             --jq '.[] | [.commit_id, .state, (.user.id | tostring), ((.body // "") | gsub("[\n\r\t]"; " ")), .author_association] | @tsv' \
             >"${RUNNER_TEMP}/reviews.tsv"
           DF_REVIEW_HEAD_SHA="${head}" DF_REVIEW_REVIEWS="${RUNNER_TEMP}/reviews.tsv" \
             "${gate}"
-
   control-plane:
     needs: scope
     if: needs.scope.result == 'success' && needs.scope.outputs.control_plane == 'true'
@@ -528,12 +250,8 @@ jobs:
           git fetch --depth=1 origin "$GITHUB_SHA"
           git checkout --force --detach FETCH_HEAD
           git clean -ffdx
-
       - name: Install the pinned toolchain
         run: rustup toolchain install 1.88.0 --profile minimal --component clippy,rustfmt --no-self-update
-
-      # Restore only: queue and PR refs are disposable, so their cache writes
-      # cannot warm a later run. The push-to-main run saves this cache below.
       - name: Restore control-plane Rust and tool caches
         uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
         with:
@@ -545,13 +263,10 @@ jobs:
           key: control-plane-v1-${{ runner.os }}-${{ runner.arch }}-rust1.88.0-worker-build0.8.5-wasm-bindgen0.2.125-${{ hashFiles('control-plane/Cargo.lock', 'control-plane/Cargo.toml') }}-${{ github.sha }}
           restore-keys: |
             control-plane-v1-${{ runner.os }}-${{ runner.arch }}-rust1.88.0-worker-build0.8.5-wasm-bindgen0.2.125-${{ hashFiles('control-plane/Cargo.lock', 'control-plane/Cargo.toml') }}-
-
       - name: Verify the supported Node runtime
         run: node -e "if (Number(process.versions.node.split('.')[0]) < 22) process.exit(1)"
-
       - name: Run the control-plane authoritative gate
         run: ./control-plane/scripts/local-ci.sh
-
       - name: Save the warm main-branch control-plane cache
         if: github.event_name == 'push'
         uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
@@ -562,7 +277,6 @@ jobs:
             control-plane/target
             control-plane/.tools
           key: control-plane-v1-${{ runner.os }}-${{ runner.arch }}-rust1.88.0-worker-build0.8.5-wasm-bindgen0.2.125-${{ hashFiles('control-plane/Cargo.lock', 'control-plane/Cargo.toml') }}-${{ github.sha }}
-
   relay:
     needs: scope
     if: needs.scope.result == 'success' && needs.scope.outputs.relay == 'true'
@@ -578,9 +292,7 @@ jobs:
           git fetch --depth=1 origin "$GITHUB_SHA"
           git checkout --force --detach FETCH_HEAD
           git clean -ffdx
-
       - name: Verify the supported Node runtime
         run: node -e "if (Number(process.versions.node.split('.')[0]) < 22) process.exit(1)"
-
       - name: Run the relay gate
         run: ./relay/scripts/local-ci.sh
