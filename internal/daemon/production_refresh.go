@@ -278,7 +278,7 @@ func pullRequestObservation(ctx context.Context, call maintainerMCP, repository 
 	result.Overflow = productionPullRequestOverflow(page)
 	for _, value := range open {
 		if value.Number == 0 || len(value.Head) != 40 || strings.Trim(value.Head, "0123456789abcdef") != "" {
-			return kernel.ProductionObservation{}, fmt.Errorf("invalid pull request head")
+			return kernel.ProductionObservation{}, fmt.Errorf("Maintainer returned an invalid pull request head")
 		}
 		pr := productionPullRequest(value)
 		if review, ok := prior[value.Number]; ok && strings.EqualFold(review.Head, value.Head) {
@@ -374,7 +374,7 @@ func recordDeployments(ctx context.Context, call maintainerMCP, repository strin
 		} `json:"deployments"`
 	}
 	if json.Unmarshal(content, &value) != nil || len(value.Deployments) > 30 {
-		return nil, nil, fmt.Errorf("invalid deployments response")
+		return nil, nil, fmt.Errorf("Maintainer returned an invalid deployments response")
 	}
 	// ponytail: one production environment and alias map per home, not per
 	// repository; key them by repository if two systems ever disagree.
@@ -391,7 +391,7 @@ func recordDeployments(ctx context.Context, call maintainerMCP, repository strin
 		created, createdErr := time.Parse(time.RFC3339, deployment.CreatedAt)
 		updated, updatedErr := time.Parse(time.RFC3339, deployment.UpdatedAt)
 		if createdErr != nil || updatedErr != nil {
-			return nil, nil, fmt.Errorf("invalid deployment time")
+			return nil, nil, fmt.Errorf("Maintainer returned an invalid deployment time")
 		}
 		isProduction := deployment.Environment == production || production == "" && deployment.Production
 		if isProduction {
@@ -447,7 +447,7 @@ func readMaintainerChecks(ctx context.Context, call maintainerMCP, repository st
 		} `json:"checks"`
 	}
 	if json.Unmarshal(content, &value) != nil || !strings.EqualFold(value.Head, pr.Head) || len(value.Checks) > 100 {
-		return nil, fmt.Errorf("invalid checks response")
+		return nil, fmt.Errorf("Maintainer returned an invalid checks response")
 	}
 	checks := make([]kernel.ProductionCheck, 0, len(value.Checks))
 	for _, check := range value.Checks {
@@ -456,7 +456,7 @@ func readMaintainerChecks(ctx context.Context, call maintainerMCP, repository st
 		}
 		id := path.Base(check.URL)
 		if id == "" || strings.Trim(id, "0123456789") != "" {
-			return nil, fmt.Errorf("invalid check url")
+			return nil, fmt.Errorf("Maintainer returned an invalid check url")
 		}
 		conclusion := ""
 		if check.Conclusion != nil {
@@ -540,7 +540,7 @@ func maintainerTool(ctx context.Context, call maintainerMCP, repository string, 
 		Error json.RawMessage `json:"error"`
 	}
 	if json.Unmarshal(response, &envelope) != nil || envelope.Result.IsError || len(envelope.Error) != 0 {
-		return nil, fmt.Errorf("invalid %s response", name)
+		return nil, fmt.Errorf("Maintainer returned an invalid %s response", name)
 	}
 	return envelope.Result.Content, nil
 }
@@ -548,11 +548,11 @@ func maintainerTool(ctx context.Context, call maintainerMCP, repository string, 
 func parseMaintainerPullRequestPage(content []byte) (maintainerPullRequestPage, error) {
 	var page maintainerPullRequestPage
 	if json.Unmarshal(content, &page) != nil || len(page.PullRequests) > productionRefreshPRLimit || (page.NextPage != nil && (*page.NextPage < 2 || *page.NextPage > 1000)) {
-		return maintainerPullRequestPage{}, fmt.Errorf("invalid pull request page")
+		return maintainerPullRequestPage{}, fmt.Errorf("Maintainer returned an invalid pull request page")
 	}
 	for _, value := range page.PullRequests {
 		if value.Number == 0 || len(value.Head) != 40 || strings.Trim(value.Head, "0123456789abcdef") != "" {
-			return maintainerPullRequestPage{}, fmt.Errorf("invalid pull request head")
+			return maintainerPullRequestPage{}, fmt.Errorf("Maintainer returned an invalid pull request head")
 		}
 	}
 	return page, nil

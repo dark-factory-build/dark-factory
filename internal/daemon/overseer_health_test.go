@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -93,8 +94,9 @@ func TestFailingIntakeSyncWakesTheOverseer(t *testing.T) {
 	}
 }
 
-// Repeated Maintainer faults, a 503 or an answer outside its contract, wake
-// the overseer with the logged signature; one or two, or other errors, do not.
+// Repeated Maintainer faults, a 503 or an answer outside its contract (here a
+// malformed pull request page the refresh reads), wake the overseer with the
+// logged signature; one or two, or other errors, do not.
 func TestRepeatedMaintainerFaultsWakeTheOverseer(t *testing.T) {
 	fixture := newIntakePollFixture(t, 120)
 	fixture.daemon.noteMaintainerFault(errors.New("review: no such pull request"))
@@ -103,8 +105,12 @@ func TestRepeatedMaintainerFaultsWakeTheOverseer(t *testing.T) {
 	if health := fixture.daemon.overseerHealth(); len(health) != 0 {
 		t.Fatalf("two faults held: %+v", health)
 	}
-	fixture.daemon.noteMaintainerFault(errors.New("review: Maintainer returned an invalid merge observation"))
-	if body := healthWake(t, fixture); !strings.Contains(body, "\nHealth since 1970-01-01T00:16:40Z: 3 Maintainer faults in factoryd.stderr.log, last at 1970-01-01T00:16:40Z: review: Maintainer returned an invalid merge observation [health:maintainer]") {
+	malformed := func(context.Context, json.RawMessage, map[string]uint64) (json.RawMessage, error) {
+		return json.RawMessage(`{"jsonrpc":"2.0","id":1,"result":{"structuredContent":{"pull_requests":[{"number":7,"head_sha":"short"}]}}}`), nil
+	}
+	_, err := pullRequestObservation(context.Background(), malformed, "o/r", 1, nil, nil)
+	fixture.daemon.noteMaintainerFault(err)
+	if body := healthWake(t, fixture); !strings.Contains(body, "\nHealth since 1970-01-01T00:16:40Z: 3 Maintainer faults in factoryd.stderr.log, last at 1970-01-01T00:16:40Z: Maintainer returned an invalid pull request head [health:maintainer]") {
 		t.Fatalf("wake = %q", body)
 	}
 	fixture.now = fixture.now.Add(time.Hour)
