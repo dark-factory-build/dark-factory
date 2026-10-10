@@ -575,7 +575,7 @@ Stop handling this change for now.
 ## 6. Hand off and finish
 
 If a merged PR touched `cmd/` or `internal/`, it may need a live-service
-reinstall, and if it touched `web/`, it may need a site re-vendor. Before a
+reinstall; a `web/` change ships in that same build. Before a
 runtime reinstall request, run `"$DARK_FACTORY_FACTORYCTL" --build-identity`.
 With its exact `source` as `installed`, run `git -C repo fetch origin "$installed" "<merge-commit>"`, then verify each with `git -C repo rev-parse --verify "<revision>^{commit}"`. Run `git -C repo merge-base --is-ancestor
 <merge-commit> "$installed"`: status 0 means that merge is already installed,
@@ -583,7 +583,7 @@ so skip that request and never recommend an older merge; only status 1 says it
 is absent. Require `"release": true`; a missing, malformed, or development
 identity, a fetch or verification failure, or any other ancestry error warrants
 a human request to verify the installed source, not a claim that the merge is
-absent. If the runtime merge is absent, or the site needs a re-vendor, raise
+absent. If the runtime merge is absent, raise
 one human request naming the merge commit and applicable deployment, then wait
 as below. A
 worker run whose worktree was gone at settlement ends failed with that
