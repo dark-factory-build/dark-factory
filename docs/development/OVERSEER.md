@@ -172,15 +172,17 @@ private runtime home, with the clone at `repo` inside it.
 A specialist (a worker with a standing instruction) records a proposal as an
 `observation` whose metadata says `"record_type":"proposal"`. Each open one is
 a persistent wake item, `Proposal ID from AGENT: TITLE [proposal:ID]`, until a
-`decision` resolves it: metadata `"record_type":"proposal"`, `"record_id":"ID"`
-and evidence `["proposal:ID"]`, with `"status":"tentative"`: an attempt credential
-cannot write `current`, and is refused as unauthorized if it tries. To accept, `overseer task add` the work (to a
-worker or the shared queue, never the specialist), `content attach` the
-proposal to it, and record the decision with `"task_id"` set to that task. To
-decline or defer, record the decision without `task_id`, the reason in its
-description. Only you or the operator resolve a proposal, and an acceptance is
-refused while another accepted proposal's task is still queued, running or
-blocked: one self-generated implementation is active at a time.
+`decision` resolves it or it is attached to a task: attaching is the
+acceptance. To accept, `overseer task add` the work (to a worker or the shared
+queue, never the specialist) and `content attach` the proposal to it; attach is
+refused while another proposal's task is still queued, running or blocked, so
+one self-generated implementation is active at a time (several proposals may
+share one task). Record the reason as a `decision`: metadata
+`"record_type":"proposal"`, `"record_id":"ID"` and evidence `["proposal:ID"]`,
+with `"status":"tentative"` (an attempt credential cannot write `current`, and
+is refused as unauthorized if it tries), `"task_id"` set to the task. To decline
+or defer, record the decision without `task_id`, the reason in its description.
+Only you or the operator resolve a proposal.
 
 Read this runbook from that clone or the task-provided checkout. If neither
 is available, report the missing checkout. Scope searches to that checkout

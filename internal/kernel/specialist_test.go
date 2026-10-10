@@ -545,3 +545,61 @@ func TestArchiveStopsSpecialist(t *testing.T) {
 		t.Fatalf("shared task = %+v", task)
 	}
 }
+
+// Attaching a proposal to a task is its acceptance: it stops being open, and
+// only one task carrying proposals is active at a time.
+func TestSpecialistAttachAcceptsProposal(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	store, run, _ := runningWorkerRun(t)
+	defer store.Close()
+	var proposals []ContentRevision
+	var tasks []Task
+	for index, seed := range []byte{110, 111, 112} {
+		p, err := store.CreateContent(ctx, knowledgeSpec(t, run.ProjectID, seed, ContentObservation, KnowledgeMetadata{Status: "tentative", RecordType: "proposal"}), mustTime(t, 40+int64(index)))
+		if err != nil {
+			t.Fatal(err)
+		}
+		proposals = append(proposals, p)
+		task, err := store.EnqueueTask(ctx, NewTask{ID: taskID(t, seed+10), ProjectID: run.ProjectID, IncarnationID: incarnationID(t, seed+11), Title: "implement"}, mustTime(t, 50))
+		if err != nil {
+			t.Fatal(err)
+		}
+		tasks = append(tasks, task)
+	}
+	attach := func(i, j int) error {
+		return store.AttachContentToTask(ctx, tasks[j].ID, run.ProjectID, proposals[i].ID, proposals[i].Revision, mustTime(t, 60))
+	}
+	open := func() (n int) {
+		c, err := store.beginRead(ctx)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer c.Close()
+		if err := c.connection.QueryRowContext(ctx, `SELECT count(*) FROM project_content_revisions AS c WHERE `+openProposalSQL).Scan(&n); err != nil {
+			t.Fatal(err)
+		}
+		return n
+	}
+	if open() != 3 {
+		t.Fatalf("open before attach = %d", open())
+	}
+	if err := attach(0, 0); err != nil {
+		t.Fatal(err)
+	}
+	if open() != 2 {
+		t.Fatalf("open after attach = %d", open())
+	}
+	if err := attach(2, 0); err != nil {
+		t.Fatalf("second proposal on the same task: %v", err)
+	}
+	if err := attach(1, 1); !errors.Is(err, ErrConflict) {
+		t.Fatalf("proposal on a second active task = %v", err)
+	}
+	if _, err := store.UpdateTask(ctx, tasks[0].ID, tasks[0].Revision, TaskPatch{Cancel: true}, mustTime(t, 70)); err != nil {
+		t.Fatal(err)
+	}
+	if err := attach(1, 1); err != nil {
+		t.Fatalf("proposal after the first task finished: %v", err)
+	}
+}
