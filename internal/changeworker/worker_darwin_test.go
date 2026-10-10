@@ -830,7 +830,10 @@ func runGit(t testing.TB, git string, args ...string) {
 
 func workerSecureTempDir(t testing.TB) string {
 	t.Helper()
-	path, err := os.MkdirTemp("/private/tmp", "dark-factory-worker-")
+	path, err := os.MkdirTemp("", "dark-factory-worker-")
+	if err == nil {
+		path, err = filepath.EvalSymlinks(path)
+	}
 	if err != nil {
 		t.Fatal(err)
 	}

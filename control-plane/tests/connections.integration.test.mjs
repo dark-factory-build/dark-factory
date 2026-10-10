@@ -8,6 +8,8 @@ import { Miniflare, convertV4MiniflareOptions } from 'miniflare';
 const hash = value => createHash('sha256').update(value).digest('hex');
 const prefix = '/v1/github/connections';
 const json = (body, status = 200) => new Response(JSON.stringify(body), { status, headers: { 'content-type': 'application/json' } });
+const githubFixtures = JSON.parse(await readFile(join(process.cwd(), 'tests/fixtures/github-behaviors.json'), 'utf8'));
+const quotaFixture = githubFixtures.find(fixture => fixture.name === 'worker-503-on-github-quota-exhaustion');
 
 test('two principals: callback, pagination, refresh, replay, grants and revocation', async () => {
   const persistence = await mkdtemp(join(tmpdir(), 'df-connections-'));
@@ -130,7 +132,11 @@ test('two principals: callback, pagination, refresh, replay, grants and revocati
       const who = request.headers.get('authorization')?.replace('Bearer ', '').split('-')[0];
       assert.ok(['alice', 'bob'].includes(who), 'only broker-held user tokens leave for GitHub');
       if (revoked && who === 'alice') return json({}, 401);
-      if (url.pathname === '/user') return json({ id: who === 'alice' ? 10 : 20, login: who === 'alice' ? aliceLogin : who });
+      if (url.pathname === '/user') {
+        const reply = json({ id: who === 'alice' ? 10 : 20, login: who === 'alice' ? aliceLogin : who });
+        for (const [name, value] of [['x-ratelimit-remaining', '4321'], ['x-ratelimit-limit', '5000'], ['x-ratelimit-reset', '2000000000']]) reply.headers.set(name, value);
+        return reply;
+      }
       if (url.pathname === '/user/installations') return json({ installations: url.searchParams.get('page') === '1'
         ? Array.from({ length: 100 }, (_, i) => ({ id: i + 100, app_id: 999, repository_selection: 'selected', suspended_at: null, account: { id: 1, login: 'other' } }))
         : [{ id: 7, app_id: 5678, repository_selection: 'selected', suspended_at: null, account: { id: 1, login: 'team', type: 'Organization' }, html_url: 'https://github.com/organizations/team/settings/installations/7' }, { id: 8, app_id: 5678, repository_selection: 'selected', suspended_at: '2026-09-18', account: { id: 1, login: 'team' } }, { id: 9, app_id: 5678, repository_selection: 'all', suspended_at: null, account: { id: 1, login: 'team' } }] });
@@ -211,6 +217,11 @@ test('two principals: callback, pagination, refresh, replay, grants and revocati
     const repos = await (await send(`${alice.path}/repositories?installation_id=7&page=2`, 'GET', undefined, alice.credential)).json();
     assert.equal(repos.repositories[0].id, 2);
     for (const c of [alice, bob]) assert.equal((await send(`${c.path}/repositories`, 'PUT', { repositories: [{ installation_id: 7, repository_id: 2, repository: 'team/shared' }] }, c.credential)).status, 200);
+    // #1510: a reply tells the host the owner-token GitHub calls it cost (the
+    // user, then two installation and two repository pages) and the quota.
+    const accounted = await send(alice.path, 'GET', undefined, alice.credential);
+    assert.equal(accounted.status, 200);
+    assert.deepEqual(['x-github-requests', 'x-ratelimit-remaining', 'x-ratelimit-limit', 'x-ratelimit-reset'].map(name => accounted.headers.get(name)), ['5', '4321', '5000', '2000000000']);
     assert.equal(refreshed, 1);
     const call = (c, name, arguments_) => send(`${c.path}/mcp`, 'POST', { jsonrpc: '2.0', id: 1, method: 'tools/call', params: { name, arguments: arguments_ } }, c.credential);
     const publication = { repository: 'team/shared', operation_id: '7d1f0f8e-7f1f-11f0-952e-acde48001122', branch: 'attribution', expected_head_sha: 'a'.repeat(40), message: 'Operator change', changes: [{ path: 'notes.txt', content_base64: 'aGk=' }] };
@@ -284,6 +295,11 @@ test('two principals: callback, pagination, refresh, replay, grants and revocati
       assert.equal(failed.result.isError, true);
       assert.match(failed.result.content[0].text, /unavailable/);
     }
+    unavailable = ''; unavailableStatus = 503;
+    unavailable = '/user'; unavailableStatus = quotaFixture.github_status;
+    const quotaFailure = await send(`${alice.path}/mcp`, 'POST', { jsonrpc: '2.0', id: 1, method: 'tools/call', params: { name: 'observe_operation', arguments: { repository: 'team/shared', operation_id: '7d1f0f8e-7f1f-11f0-952e-acde48001122' } } }, alice.credential);
+    assert.equal(quotaFailure.status, quotaFixture.worker_status ?? 503);
+    assert.deepEqual(await quotaFailure.json(), quotaFixture.worker_response);
     unavailable = ''; unavailableStatus = 503;
     const issuePage = (await (await call(bob, 'list_issues', { repository: 'team/shared', page: 1, label: 'needs triage' })).json()).result.structuredContent;
     assert.equal(issuePage.repository_id, 2);

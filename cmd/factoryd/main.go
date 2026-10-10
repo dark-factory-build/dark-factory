@@ -9,11 +9,13 @@ import (
 	"net"
 	"net/url"
 	"os"
+	"os/exec"
 	"os/signal"
 	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 	"unicode/utf8"
@@ -27,6 +29,7 @@ import (
 	"github.com/dark-factory-build/dark-factory/internal/provider"
 	"github.com/dark-factory-build/dark-factory/internal/relayhost"
 	"github.com/dark-factory-build/dark-factory/internal/runner"
+	"golang.org/x/sys/unix"
 )
 
 const (
@@ -42,9 +45,12 @@ const (
 	exitFailure           = 1
 	exitUsage             = 64
 	// exitRestart is unsuccessful, so launchd's KeepAlive starts the job
-	// again: on the swapped binaries after a release, or the old ones after
-	// a rollback.
+	// again: on the promoted binaries after a release's trial, or the old
+	// ones after a trial that failed.
 	exitRestart = 75
+	// trialEnv marks the supervised trial child, which leaves its release to
+	// the parent.
+	trialEnv = "FACTORYD_TRIAL"
 
 	usage = `usage:
   factoryd --home ABSOLUTE [--git PATH] [--tool-path PATH] [--toolchain-read-roots PATH_LIST] [--base-revision REVISION]
@@ -59,17 +65,11 @@ const (
 
 var (
 	errRestart = errors.New("restarting for a release")
-	// The self-upgrade trial limits (#1106): a trial build that is not up
-	// and verified within trialLimit exits and is rolled back; one that is
-	// promotes promoteAfter after it came up.
-	trialLimit   = 5 * time.Minute
-	promoteAfter = 60 * time.Second
-	// Package-test seams for the trial boot.
-	selfSource      = func() string { return buildinfo.Current().Source() }
-	trialExit       = os.Exit
-	rollbackService = install.ServiceRollback
-	verifyRelease   = install.VerifyInstalledRelease
-	removeUpgrade   = install.RemoveUpgrade
+	// trialLimit bounds how long a staged build has to answer as itself;
+	// trialPoll spaces the asks. Both, and selfSource, are package-test seams.
+	trialLimit = 5 * time.Minute
+	trialPoll  = time.Second
+	selfSource = func() string { return buildinfo.Current().Source() }
 
 	cleanStartupCancellation = errors.New("factoryd: clean startup cancellation")
 	startupPhaseHook         func(string)
@@ -89,6 +89,9 @@ type config struct {
 	// relayOrigin enables the outbound remote-access relay. Empty is
 	// disabled: the loopback browser surface is unchanged either way.
 	relayOrigin string
+	// args are the arguments factoryd was started with, which a staged
+	// build's trial is started with too.
+	args []string
 	// Supervisor inputs. Empty runner/factoryctl select sibling self-location
 	// at boot; every executable is committed before the process serves.
 	gitExecutable        string
@@ -190,6 +193,7 @@ func run(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 		_, _ = io.WriteString(stderr, usage)
 		return exitUsage
 	}
+	configuration.args = args
 	if err := serve(ctx, configuration); err != nil {
 		daemon.LogFactoryd(recoveryLog, "factoryd: %v\n", err)
 		if errors.Is(err, errRestart) {
@@ -336,86 +340,132 @@ func serve(ctx context.Context, configuration config) error {
 			return errors.New("invalid factoryd configuration")
 		}
 	}
-	// The trial boot runs before the store opens, so a rollback can restore
-	// the database the old build expects.
-	marker, upgrading, err := install.ReadUpgradeMarker(configuration.home)
-	if err != nil {
-		return err
-	}
-	trial := upgrading && marker.Target == selfSource()
-	var limit *time.Timer
-	if trial {
-		marker.Boots++
-		// Any boot after the first means the trial build exited: it crashed,
-		// hung past trialLimit, or failed verification.
-		if marker.Boots >= 2 {
-			reason := cmp.Or(marker.Reason, "the new build exited before it was promoted")
-			if err := rollbackService(ctx, configuration.home, marker.UserVersion != kernel.SchemaVersion, reason); err != nil {
-				return fmt.Errorf("roll back release %s: %w", marker.Target, err)
-			}
-			return fmt.Errorf("%w: rolled back %s: %s", errRestart, marker.Target, reason)
-		}
-		if err := install.WriteUpgradeMarker(configuration.home, marker); err != nil {
-			return err
-		}
-		limit = time.AfterFunc(trialLimit, func() { trialExit(exitRestart) })
-		defer limit.Stop()
-	}
 	owner, err := openProcess(ctx, configuration)
+	// A store a newer build migrated, under a marker naming another build
+	// (or one torn unreadable), is a failed trial's migration; the backup is
+	// the store this build left. Nothing else restores it: any other failed
+	// trial keeps this build's writes since the backup.
+	if marker, upgrading, markerErr := install.ReadUpgradeMarker(configuration.home); errors.Is(err, kernel.ErrNewerSchema) && (markerErr != nil || upgrading && marker.Target != selfSource()) && os.Getenv(trialEnv) == "" {
+		if err = install.RestoreUpgradeBackup(configuration.home); err == nil {
+			owner, err = openProcess(ctx, configuration)
+		}
+	}
 	if err != nil {
 		if errors.Is(err, cleanStartupCancellation) {
 			return nil
 		}
 		return err
 	}
-	if trial {
-		go owner.promote(ctx, configuration.home, marker, limit)
-	} else if upgrading {
-		// The old build is back: the release rolled back, or never swapped.
-		owner.settleRelease(ctx, configuration.home, marker.Target, "failed", cmp.Or(marker.Reason, "interrupted in state "+marker.State))
+	if os.Getenv(trialEnv) != "" {
+		// Bounded on its own, so even an orphan never holds the home for long.
+		limit, cancel := context.WithTimeout(ctx, trialLimit)
+		defer cancel()
+		<-limit.Done()
+		return owner.close()
+	}
+	// Only bin/current boots under launchd, so a marker naming this build
+	// means its trial promoted it; any other marker is a release that did not.
+	if marker, upgrading, err := install.ReadUpgradeMarker(configuration.home); upgrading || err != nil {
+		if err != nil {
+			daemon.LogFactoryd(recoveryLog, "factoryd: discarding the upgrade marker: %v\n", err)
+		}
+		// A promotion interrupted after its rename leaves the receipt behind.
+		if err := install.RebindServiceReceipt(configuration.home); err != nil {
+			daemon.LogFactoryd(recoveryLog, "factoryd: rebinding the service receipt: %v\n", err)
+		}
+		if marker.Target == selfSource() {
+			owner.settleRelease(ctx, configuration.home, marker.Target, "verified", "")
+		} else {
+			owner.settleRelease(ctx, configuration.home, marker.Target, "failed", cmp.Or(marker.Reason, "interrupted before promotion"))
+		}
+	} else if err := install.RemoveUpgrade(configuration.home); err != nil {
+		// A backup never outlives its release.
+		daemon.LogFactoryd(recoveryLog, "factoryd: removing a stale upgrade backup: %v\n", err)
 	}
 	if err := owner.wait(ctx); err != nil {
 		return err
 	}
-	// A release swapped the binaries and shut this build down.
-	if next, ok, _ := install.ReadUpgradeMarker(configuration.home); ok && next.State == install.UpgradeTrial && next.Target != selfSource() {
-		return fmt.Errorf("%w: %s installed", errRestart, next.Target)
+	// A release staged another build and shut this one down.
+	if marker, ok, _ := install.ReadUpgradeMarker(configuration.home); ok && marker.Target != selfSource() {
+		return superviseTrial(configuration.home, configuration.args, marker)
 	}
 	return nil
 }
 
-// promote verifies the trial build once it has stayed up, then records the
-// release verified and forgets the upgrade. A failed verification exits, so
-// the next boot rolls back.
-func (owner *process) promote(ctx context.Context, home string, marker install.UpgradeMarker, limit *time.Timer) {
-	select {
-	case <-ctx.Done():
-		return
-	case <-time.After(promoteAfter):
+// superviseTrial runs the staged build as a child against this home, which
+// this build has released. Only a child that answers as the release and then
+// stops cleanly is promoted, so launchd never runs an unproven build and the
+// staged build decides nothing. Either way this build exits for launchd to
+// start bin/current, whose boot settles the release (#1390).
+func superviseTrial(home string, args []string, marker install.UpgradeMarker) error {
+	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	defer stop()
+	ctx, cancel := context.WithTimeout(ctx, trialLimit)
+	defer cancel()
+	child := exec.CommandContext(ctx, filepath.Join(install.ServiceDirectoryPath(home), "bin", "previous", "factoryd"), args...)
+	child.Env = append(os.Environ(), trialEnv+"=1")
+	child.Stderr = recoveryLog
+	// Its own process group, recorded in the marker: launchd does not end a
+	// child whose supervisor died, so the next boot does.
+	child.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	child.Cancel = func() error { return syscall.Kill(-child.Process.Pid, syscall.SIGTERM) }
+	child.WaitDelay = time.Minute
+	var answered atomic.Bool
+	err := child.Start()
+	if err == nil {
+		marker.Trial, marker.TrialStart = child.Process.Pid, processStart(child.Process.Pid)
+		if err = install.WriteUpgradeMarker(home, marker); err != nil {
+			cancel()
+		}
+		go func() {
+			for ctx.Err() == nil {
+				select {
+				case <-ctx.Done():
+				case <-time.After(trialPoll):
+					if client, err := api.NewOperatorClient(install.LocalAPISocketPath(home), install.OperatorTokenPath(home)); err == nil {
+						if web, err := client.WebStatus(ctx); err == nil && web.Build.Source == marker.Target {
+							answered.Store(true)
+							cancel()
+						}
+					}
+				}
+			}
+		}()
+		err = errors.Join(err, child.Wait())
 	}
-	if err := verifyRelease(ctx, home, buildinfo.Current()); err != nil {
-		marker.Reason = "verification failed: " + err.Error()
-		_ = install.WriteUpgradeMarker(home, marker)
-		trialExit(exitRestart)
-		return
+	limit := ctx.Err()
+	cancel()
+	// Wait reports the cancel even when the child then exits cleanly.
+	if answered.Load() && child.ProcessState.Success() {
+		if err = install.PromoteService(home); err == nil {
+			return fmt.Errorf("%w: promoted %s", errRestart, marker.Target)
+		}
 	}
-	if owner.settleRelease(ctx, home, marker.Target, "verified", "") {
-		limit.Stop()
+	marker.Trial, marker.TrialStart = 0, 0
+	marker.Reason = fmt.Sprintf("the new build was not promoted (answered %t): %v", answered.Load(), cmp.Or(err, limit, errors.New("it exited")))
+	return errors.Join(fmt.Errorf("%w: %s", errRestart, marker.Reason), install.WriteUpgradeMarker(home, marker))
+}
+
+// processStart is the start time of process pid in microseconds, or 0.
+func processStart(pid int) int64 {
+	info, err := unix.SysctlKinfoProc("kern.proc.pid", pid)
+	if err != nil || info.Proc.P_pid != int32(pid) {
+		return 0
 	}
+	return info.Proc.P_starttime.Sec*1_000_000 + int64(info.Proc.P_starttime.Usec)
 }
 
 // settleRelease forgets the upgrade first: while its marker remains, the next
 // boot still decides the release, so nothing is recorded.
-func (owner *process) settleRelease(ctx context.Context, home, target, state, reason string) bool {
-	err := removeUpgrade(home)
+func (owner *process) settleRelease(ctx context.Context, home, target, state, reason string) {
+	err := install.RemoveUpgrade(home)
 	if _, present, readErr := install.ReadUpgradeMarker(home); present || readErr != nil {
 		daemon.LogFactoryd(recoveryLog, "factoryd: forgetting release %s failed: %v\n", target, errors.Join(err, readErr))
-		return false
+		return
 	}
 	if err = errors.Join(err, owner.daemon.FinishRelease(ctx, target, state, reason)); err != nil {
 		daemon.LogFactoryd(recoveryLog, "factoryd: recording release %s %s failed: %v\n", target, state, err)
 	}
-	return true
 }
 
 func openProcess(ctx context.Context, configuration config) (_ *process, resultErr error) {
@@ -432,6 +482,14 @@ func openProcess(ctx context.Context, configuration config) (_ *process, resultE
 		}
 	}()
 
+	// A supervisor that died mid-trial leaves its child running. Only the
+	// process that started when the child did: a reused pid is someone else's.
+	if marker, _, _ := install.ReadUpgradeMarker(configuration.home); os.Getenv(trialEnv) == "" {
+		for deadline := time.Now().Add(10 * time.Second); marker.Trial > 0 && processStart(marker.Trial) == marker.TrialStart && time.Now().Before(deadline); {
+			_ = syscall.Kill(-marker.Trial, syscall.SIGKILL)
+			time.Sleep(50 * time.Millisecond)
+		}
+	}
 	var err error
 	owner.home, err = install.OpenOperationalHome(ownedContext, configuration.home)
 	if err != nil {
@@ -469,42 +527,55 @@ func openProcess(ctx context.Context, configuration config) (_ *process, resultE
 	if err := owner.daemon.ConfigureMaintainer(owner.home); err != nil {
 		return nil, err
 	}
-	startupPhase("review recovery")
 	owner.daemon.ConfigureHost(configuration.home, owner.supervisorSpec.ToolPath)
-	if _, err := owner.daemon.RecoverReviewOperations(ownedContext); err != nil {
-		return nil, err
-	}
-	startupPhase("daemon")
-	// A leftover finalizing worker run with an available Change needs the
-	// Git executable to settle its worktree; publish it before the sweep
-	// runs rather than waiting for the first admitted attempt to remember it.
-	owner.daemon.RememberSupervisorAccount(owner.supervisorSpec.ChangeParent, owner.supervisorSpec.AccountHome, owner.supervisorSpec.GitExecutable)
-	// The sweep runs to a quiet state before any listener opens so no client
-	// can act on unrecovered durable state. A run the sweep leaves unresolved
-	// is durable fail-closed residue, reported but never a boot refusal.
-	dispositions, err := owner.daemon.RecoverAbandonedRuns(ownedContext, owner.runtimeParent, owner.supervisorSpec.ChangeParent)
-	if err != nil {
-		return nil, err
-	}
+	// A trial child proves every boot step that can refuse the process, and
+	// acts on nothing: no recovery, runs, ticks, GitHub or relay, and every
+	// call but web_status refused, so a trial that does not promote leaves
+	// nothing behind but its migration (#1390).
+	trial := os.Getenv(trialEnv) != ""
 	var recoveryContinuations []kernel.RunID
-	for _, disposition := range dispositions {
-		if disposition.Err != nil {
-			daemon.LogFactoryd(recoveryLog, "factoryd: recovered run %s: %s: %v\n", disposition.RunID.String(), disposition.Action, disposition.Err)
-			if disposition.Action == daemon.RecoveredResultConsumed || disposition.Action == daemon.RecoveredResultConsumedUnsettled {
-				recoveryContinuations = append(recoveryContinuations, disposition.RunID)
-			}
-			continue
+	if trial {
+		owner.daemon.AnswerStatusOnly()
+	} else {
+		// Recovery reports its failures and never refuses the boot: the
+		// scheduler's ticks sweep ownerless runs and advance reviews again.
+		startupPhase("review recovery")
+		if _, err := owner.daemon.RecoverReviewOperations(ownedContext); err != nil {
+			daemon.LogFactoryd(recoveryLog, "factoryd: review recovery: %v\n", err)
 		}
-		daemon.LogFactoryd(recoveryLog, "factoryd: recovered run %s: %s\n", disposition.RunID.String(), disposition.Action)
+		startupPhase("daemon")
+		// A leftover finalizing worker run with an available Change needs the
+		// Git executable to settle its worktree; publish it before the sweep
+		// runs rather than waiting for the first admitted attempt to remember it.
+		owner.daemon.RememberSupervisorAccount(owner.supervisorSpec.ChangeParent, owner.supervisorSpec.AccountHome, owner.supervisorSpec.GitExecutable)
+		// A sweep that succeeds runs to a quiet state before any listener
+		// opens, so no client acts on unrecovered durable state. One that
+		// fails is reported and the listener opens anyway; the scheduler's
+		// ownerless-run sweep retries it. A run the sweep leaves unresolved
+		// is durable fail-closed residue, reported but never a boot refusal.
+		dispositions, err := owner.daemon.RecoverAbandonedRuns(ownedContext, owner.runtimeParent, owner.supervisorSpec.ChangeParent)
+		if err != nil {
+			daemon.LogFactoryd(recoveryLog, "factoryd: recovery sweep: %v\n", err)
+		}
+		for _, disposition := range dispositions {
+			if disposition.Err != nil {
+				daemon.LogFactoryd(recoveryLog, "factoryd: recovered run %s: %s: %v\n", disposition.RunID.String(), disposition.Action, disposition.Err)
+				if disposition.Action == daemon.RecoveredResultConsumed || disposition.Action == daemon.RecoveredResultConsumedUnsettled {
+					recoveryContinuations = append(recoveryContinuations, disposition.RunID)
+				}
+				continue
+			}
+			daemon.LogFactoryd(recoveryLog, "factoryd: recovered run %s: %s\n", disposition.RunID.String(), disposition.Action)
+		}
+		// Like an unresolved run above, a refused mark (a clock that moved
+		// backwards) is reported residue, never a boot refusal.
+		if unknown, err := owner.daemon.RecoverHumanDeliveries(ownedContext); err != nil {
+			daemon.LogFactoryd(recoveryLog, "factoryd: human reply deliveries left by the previous daemon were not marked uncertain: %v\n", err)
+		} else if unknown != 0 {
+			daemon.LogFactoryd(recoveryLog, "factoryd: %d human reply deliveries left uncertain by the previous daemon\n", unknown)
+		}
+		startupPhase("recovery sweep")
 	}
-	// Like an unresolved run above, a refused mark (a clock that moved
-	// backwards) is reported residue, never a boot refusal.
-	if unknown, err := owner.daemon.RecoverHumanDeliveries(ownedContext); err != nil {
-		daemon.LogFactoryd(recoveryLog, "factoryd: human reply deliveries left by the previous daemon were not marked uncertain: %v\n", err)
-	} else if unknown != 0 {
-		daemon.LogFactoryd(recoveryLog, "factoryd: %d human reply deliveries left uncertain by the previous daemon\n", unknown)
-	}
-	startupPhase("recovery sweep")
 	owner.apiAuthority, err = owner.home.OpenLocalAPI(ownedContext)
 	if err != nil {
 		return nil, err
@@ -520,13 +591,24 @@ func openProcess(ctx context.Context, configuration config) (_ *process, resultE
 		return nil, err
 	}
 	startupPhase("browser")
+	if trial {
+		// The browser bound; a trial serves nothing on it.
+		if err := owner.browser.Close(); err != nil {
+			return nil, err
+		}
+		owner.apiStart = true
+		go owner.accept(ownedContext, owner.listener)
+		startupPhase("trial")
+		keep = true
+		return owner, nil
+	}
 	if configuration.relayOrigin != "" {
 		// The relay is a client of the listener above. It is started after the
 		// listener exists so a relayed controller can never reach a daemon
-		// with no loopback surface, and it never blocks boot on reachability.
-		owner.relay, err = owner.daemon.DialRelay(ownedContext, configuration.relayOrigin, configuration.home, owner.browser.Addr())
-		if err != nil {
-			return nil, err
+		// with no loopback surface. Remote access is optional, so a relay that
+		// cannot start is reported, never a boot refusal.
+		if owner.relay, err = owner.daemon.DialRelay(ownedContext, configuration.relayOrigin, configuration.home, owner.browser.Addr()); err != nil {
+			daemon.LogFactoryd(recoveryLog, "factoryd: relay: %v\n", err)
 		}
 		startupPhase("relay")
 	}

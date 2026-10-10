@@ -21,7 +21,7 @@ const GITHUB_API_VERSION: &str = "2026-03-10";
 // GitHub list endpoints below request at most 100 records. Issue comments and
 // review bodies can each be 65,536 characters, so a webhook-sized 64 KiB cap
 // rejected valid bounded pages before their typed count checks could run.
-const MAX_GITHUB_RESPONSE_BYTES: usize = 8 * 1024 * 1024;
+pub(crate) const MAX_GITHUB_RESPONSE_BYTES: usize = 8 * 1024 * 1024;
 /// Publication bounds. A commit is a bounded, reviewable unit of work, not a
 /// bulk upload channel, and the Worker must hold every blob in memory.
 const MAX_COMMIT_FILES: usize = 50;
@@ -124,12 +124,14 @@ pub(crate) enum OperationError {
 /// Why GitHub refused, said with typed classifications only. GitHub's
 /// error text can quote caller input, so the text never rides along -- the
 /// same discipline `github_graphql` applies to its logging.
-#[derive(Clone, Copy, Debug, Eq, PartialEq, thiserror::Error)]
+#[derive(Clone, Debug, Eq, PartialEq, thiserror::Error)]
 pub(crate) enum RefusalReason {
     /// The mutation was rejected before execution, and these are the typed
     /// error classes GitHub returned at the mutation root.
     #[error("rejected before execution as {0}")]
     Rejected(RejectionKinds),
+    #[error("required CODEOWNERS approval is missing")]
+    CodeownersApproval,
     /// The mutation answered with neither an effect nor an error.
     #[error("answered with neither an effect nor an error")]
     NoEffect,
@@ -168,6 +170,7 @@ pub(crate) struct RejectionKinds {
     forbidden: bool,
     unprocessable: bool,
     rate_limited: bool,
+    codeowners_approval: bool,
 }
 
 impl std::fmt::Display for RejectionKinds {
@@ -178,6 +181,7 @@ impl std::fmt::Display for RejectionKinds {
             (self.forbidden, "FORBIDDEN"),
             (self.unprocessable, "UNPROCESSABLE"),
             (self.rate_limited, "RATE_LIMITED"),
+            (self.codeowners_approval, "CODEOWNERS_APPROVAL"),
         ] {
             if present {
                 if separate {
@@ -757,6 +761,9 @@ pub(crate) struct CheckResult {
     pub(crate) url: String,
     /// The pull request's base branch rules require this check by name.
     pub(crate) required: bool,
+    /// A failed check's failure annotations: the failing tests CI names.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub(crate) annotations: Vec<String>,
 }
 
 impl AppAuthority {
@@ -3279,11 +3286,17 @@ impl Authority {
             },
         )
         .await?;
-        let entry = enqueue_outcome(
-            data.and_then(|data| data.enqueue)
-                .and_then(|payload| payload.entry),
-            failure,
-        )?;
+        let entry = data
+            .and_then(|data| data.enqueue)
+            .and_then(|payload| payload.entry);
+        if entry.is_none() {
+            if let Some(GraphQlFailure::Rejected(kinds)) = failure {
+                if kinds.codeowners_approval {
+                    return Err(OperationError::Refused(RefusalReason::CodeownersApproval));
+                }
+            }
+        }
+        let entry = enqueue_outcome(entry, failure)?;
         entry.into_result(request)
     }
 
@@ -3709,13 +3722,24 @@ impl Authority {
         {
             return Err(OperationError::Unavailable);
         }
-        let mut checks = response
-            .check_runs
-            .into_iter()
-            .map(CheckResult::try_from)
-            .collect::<Result<Vec<_>, _>>()?;
-        for check in &mut checks {
+        let mut checks = Vec::with_capacity(response.check_runs.len());
+        let mut annotated = 0;
+        for run in response.check_runs {
+            let id = run.id;
+            let mut check = CheckResult::try_from(run)?;
             check.required = required.contains(&check.name);
+            // Best effort, as for a merge group: an unreadable list names no tests.
+            if failed(check.conclusion.as_deref()) && annotated < MERGE_GROUP_JOBS {
+                annotated += 1;
+                let annotations: Vec<Annotation> = github_json(
+                    &format!("{api}/check-runs/{id}/annotations?per_page=100"),
+                    token.as_str(),
+                )
+                .await
+                .unwrap_or_default();
+                check.annotations = failure_lines(annotations);
+            }
+            checks.push(check);
         }
         checks.sort_by(|left, right| left.name.cmp(&right.name));
         Ok(ChecksResult {
@@ -4551,6 +4575,7 @@ struct CheckRuns {
 #[cfg(target_arch = "wasm32")]
 #[derive(Deserialize)]
 struct CheckRun {
+    id: i64,
     name: String,
     status: String,
     conclusion: Option<String>,
@@ -4589,6 +4614,7 @@ impl TryFrom<CheckRun> for CheckResult {
             conclusion: check.conclusion,
             url: check.html_url,
             required: false,
+            annotations: Vec::new(),
         })
     }
 }
@@ -4706,21 +4732,26 @@ impl WorkflowJob {
         failed(self.conclusion.as_deref())
     }
 
-    /// Bounded failure annotations: the failing test lines CI writes, and
-    /// GitHub's own notes on a cancelled job or lost runner.
     fn into_result(self, annotations: Vec<Annotation>) -> MergeGroupJob {
         MergeGroupJob {
             name: bounded_line(&self.name),
             conclusion: self.conclusion.unwrap_or_default(),
-            annotations: annotations
-                .into_iter()
-                .filter(|annotation| annotation.annotation_level == "failure")
-                .map(|annotation| bounded_line(&annotation.message))
-                .filter(|line| !line.is_empty())
-                .take(MERGE_GROUP_ANNOTATIONS)
-                .collect(),
+            annotations: failure_lines(annotations),
         }
     }
+}
+
+/// Bounded failure annotations: the failing test lines CI writes, and
+/// GitHub's own notes on a cancelled job or lost runner.
+#[cfg(any(target_arch = "wasm32", test))]
+fn failure_lines(annotations: Vec<Annotation>) -> Vec<String> {
+    annotations
+        .into_iter()
+        .filter(|annotation| annotation.annotation_level == "failure")
+        .map(|annotation| bounded_line(&annotation.message))
+        .filter(|line| !line.is_empty())
+        .take(MERGE_GROUP_ANNOTATIONS)
+        .collect()
 }
 
 #[cfg(any(target_arch = "wasm32", test))]
@@ -4876,6 +4907,8 @@ struct GraphQlError {
     /// select into, so the effect may already exist -- whatever the type says.
     #[serde(default)]
     path: Vec<serde_json::Value>,
+    #[serde(default)]
+    message: String,
 }
 
 /// Classify a GraphQL `errors` array into what it establishes about the
@@ -4917,7 +4950,13 @@ fn classify_graphql_errors(errors: &[GraphQlError]) -> Option<GraphQlFailure> {
         match error.kind.as_deref() {
             Some("NOT_FOUND") => kinds.not_found = true,
             Some("FORBIDDEN") => kinds.forbidden = true,
-            Some("UNPROCESSABLE") => kinds.unprocessable = true,
+            Some("UNPROCESSABLE") => {
+                kinds.unprocessable = true;
+                kinds.codeowners_approval |= error
+                    .message
+                    .to_ascii_lowercase()
+                    .contains("required approval");
+            }
             Some("RATE_LIMITED") => kinds.rate_limited = true,
             _ => return Some(GraphQlFailure::Unknown),
         }
@@ -5075,7 +5114,7 @@ async fn github_response(
 }
 
 #[cfg(target_arch = "wasm32")]
-async fn github_request(
+pub(crate) async fn github_request(
     method: worker::Method,
     url: &str,
     credential: &str,
@@ -5214,6 +5253,59 @@ async fn sign_rs256(private_key: &[u8], message: &[u8]) -> Result<Vec<u8>, Error
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn sourced_github_fixtures() -> serde_json::Value {
+        serde_json::from_str(include_str!("../tests/fixtures/github-behaviors.json")).unwrap()
+    }
+
+    fn fixture(name: &str) -> serde_json::Value {
+        sourced_github_fixtures()
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|fixture| fixture["name"] == name)
+            .cloned()
+            .unwrap_or_else(|| panic!("missing GitHub fixture {name}"))
+    }
+
+    #[test]
+    fn sourced_fixtures_name_the_production_evidence() {
+        for fixture in sourced_github_fixtures().as_array().unwrap() {
+            assert!(fixture["source"].as_str().unwrap().contains("2026-10-09"));
+        }
+    }
+
+    #[test]
+    fn sourced_enqueue_refusals_keep_the_real_root_error_shape() {
+        for name in [
+            "enqueue-refused-before-codeowners-approval",
+            "enqueue-refused-for-head-conflict",
+        ] {
+            let response = fixture(name)["response"].clone();
+            let errors: Vec<GraphQlError> =
+                serde_json::from_value(response["errors"].clone()).unwrap();
+            assert!(matches!(
+                classify_graphql_errors(&errors),
+                Some(GraphQlFailure::Rejected(kinds))
+                    if kinds.to_string()
+                        == if name == "enqueue-refused-before-codeowners-approval" {
+                            "UNPROCESSABLE+CODEOWNERS_APPROVAL"
+                        } else {
+                            "UNPROCESSABLE"
+                        }
+            ));
+            assert!(response["data"]["enqueuePullRequest"].is_null());
+        }
+    }
+
+    #[test]
+    fn an_explicit_author_commit_fixture_is_accepted_by_sha_not_signature() {
+        let response = fixture("commit-created-with-explicit-author")["response"].clone();
+        assert!(!response["verification"]["verified"].as_bool().unwrap());
+        assert_eq!(response["verification"]["reason"], "unsigned");
+        let commit: GitObjectId = serde_json::from_value(response).unwrap();
+        assert_eq!(valid_sha(&commit.sha), Ok(()));
+    }
 
     #[test]
     fn jwt_claims_are_bounded_and_use_the_numeric_app_id() {
@@ -5972,6 +6064,7 @@ mod tests {
                 .map(|kind| GraphQlError {
                     kind: kind.map(Into::into),
                     path: vec!["enqueuePullRequest".into()],
+                    message: String::new(),
                 })
                 .collect::<Vec<_>>()
         };
@@ -5979,6 +6072,7 @@ mod tests {
             vec![GraphQlError {
                 kind: Some(kind.into()),
                 path: path.iter().map(|part| (*part).into()).collect(),
+                message: String::new(),
             }]
         };
 
@@ -6168,10 +6262,12 @@ mod tests {
             GraphQlError {
                 kind: Some("NOT_FOUND".into()),
                 path: vec!["enqueuePullRequest".into()],
+                message: String::new(),
             },
             GraphQlError {
                 kind: Some("RATE_LIMITED".into()),
                 path: vec![],
+                message: String::new(),
             },
         ];
         match classify_graphql_errors(&mixed) {

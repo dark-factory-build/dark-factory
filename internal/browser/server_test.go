@@ -888,7 +888,7 @@ func startHeldClockServer(t *testing.T, backend Backend) (*Server, *atomic.Int64
 	if err != nil {
 		t.Fatal(err)
 	}
-	server := start(backend, map[string]struct{}{testOrigin: {}, devOrigin: {}}, listener, func() time.Time { return time.Unix(0, clock.Load()) })
+	server := start(backend, map[string]struct{}{testOrigin: {}, devOrigin: {}}, nil, listener, func() time.Time { return time.Unix(0, clock.Load()) })
 	t.Cleanup(func() {
 		if err := server.Close(); err != nil {
 			t.Errorf("close: %v", err)

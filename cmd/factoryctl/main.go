@@ -3,7 +3,6 @@ package main
 import (
 	"context"
 	"crypto/rand"
-	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -26,10 +25,11 @@ import (
 )
 
 const (
-	// Covers the daemon's ten-second dispatch budget: a shorter one abandons a
-	// mutation the daemon is still allowed to finish and reports the durable
-	// write it did make as a timeout.
-	attemptRequestTimeout           = 15 * time.Second
+	// Covers a release restart the attempt client waits out, then the daemon's
+	// ten-second dispatch budget: a shorter one abandons a mutation the daemon
+	// is still allowed to finish and reports the durable write it did make as
+	// a timeout.
+	attemptRequestTimeout           = api.RestartRetryWindow + 15*time.Second
 	retainedSourceRequestTimeout    = 10 * time.Minute
 	storageCompactionRequestTimeout = 10 * time.Minute
 	serviceRequestTimeout           = 30 * time.Second
@@ -68,7 +68,7 @@ const (
   factoryctl attempt block --detail TEXT
   factoryctl attempt fail [--detail TEXT]
   factoryctl attempt request-human --idempotency-key HEX32 --question TEXT [--option TEXT ...]
-  factoryctl attempt turn-complete [NOTIFICATION_JSON]
+	factoryctl attempt turn-complete
   factoryctl attempt peer status [--targets [--target-offset N]] [--offset N] [--head HEAD]
   factoryctl attempt peer ask --task ID --idempotency-key HEX32 --question TEXT
   factoryctl attempt peer answer --question ID --revision REVISION --idempotency-key HEX32 --answer TEXT
@@ -94,10 +94,10 @@ const (
   factoryctl project repository base --id ID --revision REVISION --base REF
   factoryctl project repository default|enable|disable|remove --id ID --revision REVISION
   factoryctl project repository fetch|github --id ID
-  factoryctl project limits --project ID --revision REVISION --run-budget N --max-run-seconds N [--token-budget N]
+  factoryctl project limits --project ID --revision REVISION --run-budget N --max-run-seconds N [--token-budget N] [--specialist-runs N] [--specialist-open-proposals N]
   factoryctl agent create --project ID --name TEXT --provider shell|claude_code|codex --tool-budget N [--role worker|orchestrator] [--model TEXT] [--reasoning-effort low|medium|high|xhigh|max|ultra] [--account ID]
   factoryctl agent idle-policy --agent ID --revision REVISION --policy wait
-  factoryctl agent idle-policy --agent ID --revision REVISION --policy standing_instruction --after-seconds N --instruction TEXT [--run-budget N]
+  factoryctl agent idle-policy --agent ID --revision REVISION --policy standing_instruction --after-seconds N --instruction TEXT [--run-budget N] [--wake-on failures|merges|failures,merges]
   factoryctl agent pause|resume|archive|restore --agent ID --revision REVISION
   factoryctl worker stop --operation-id ID --task ID --task-revision REVISION --run ID --run-revision REVISION
   factoryctl worker replace --operation-id ID --task ID --task-revision REVISION --run ID --run-revision REVISION --successor-task ID --successor-incarnation ID --instruction TEXT
@@ -121,9 +121,10 @@ const (
   factoryctl storage compact
     Requires dispatch off and no nonterminal runs.
   factoryctl backup create PATH | verify PATH
-	  factoryctl release SHA [--start] [--wait]
-    Installs merged commit SHA into this factory's service, with rollback.
-    --wait exits 0 verified, 1 failed or rolled back, 75 refused with no effect.
+  factoryctl release SHA [--start] [--wait]
+    Reads the release of merged commit SHA; --start installs it into this
+    factory's service, with rollback, if it descends from the running build.
+    --wait exits 0 verified, 1 failed its trial, 75 refused with no effect.
   factoryctl task read --task ID --revision REVISION [--offset N]
   factoryctl dispatch on|off [--revision REVISION]
   factoryctl capacity --workers N --revision REVISION
@@ -271,6 +272,9 @@ type attemptCommand struct {
 	maxBytes            uint32
 	maxRunSeconds       uint32
 	tokenBudget         *uint64
+	specialistRuns      *uint32
+	openProposals       *uint32
+	wakeOn              string
 	priority            int64
 	prioritySet         bool
 	offset              uint64
@@ -773,18 +777,6 @@ func parse(args []string) (attemptCommand, bool, bool) {
 	case "turn-complete":
 		if len(args) == 2 {
 			return attemptCommand{kind: commandTurnComplete}, false, true
-		}
-		if len(args) == 3 {
-			var notification struct {
-				Type     string `json:"type"`
-				ThreadID string `json:"thread-id"`
-				TurnID   string `json:"turn-id"`
-				CWD      string `json:"cwd"`
-			}
-			if json.Unmarshal([]byte(args[2]), &notification) == nil && notification.Type == "agent-turn-complete" && validOperatorText(notification.ThreadID, 1, 256) && validOperatorText(notification.TurnID, 1, 256) && validOperatorText(notification.CWD, 1, 4096) {
-				digest := sha256.Sum256([]byte(notification.ThreadID + "\x00" + notification.TurnID + "\x00" + notification.CWD))
-				return attemptCommand{kind: commandTurnComplete, idempotencyKey: hex.EncodeToString(digest[:16]), text: "Codex turn completed without a durable attempt outcome; resume this session and record succeed, block, or fail."}, false, true
-			}
 		}
 	case "peer":
 		if len(args) >= 3 && args[2] == "status" {
@@ -1588,11 +1580,11 @@ func parseOperator(args []string) (attemptCommand, bool, bool) {
 	case "project create":
 		command.kind, names = commandProjectCreate, []string{"--name", "--root"}
 	case "project limits":
-		command.kind, names = commandProjectLimits, []string{"--project", "--revision", "--run-budget", "--token-budget", "--max-run-seconds"}
+		command.kind, names = commandProjectLimits, []string{"--project", "--revision", "--run-budget", "--token-budget", "--max-run-seconds", "--specialist-runs", "--specialist-open-proposals"}
 	case "agent create":
 		command.kind, names = commandAgentCreate, []string{"--project", "--name", "--role", "--provider", "--model", "--reasoning-effort", "--account", "--tool-budget"}
 	case "agent idle-policy":
-		command.kind, names = commandAgentIdlePolicy, []string{"--agent", "--revision", "--policy", "--after-seconds", "--instruction", "--run-budget"}
+		command.kind, names = commandAgentIdlePolicy, []string{"--agent", "--revision", "--policy", "--after-seconds", "--instruction", "--run-budget", "--wake-on"}
 	case "agent select-account":
 		command.kind, names = commandAgentSelectAccount, []string{"--agent", "--account", "--revision"}
 	case "agent select-model":
@@ -1631,6 +1623,12 @@ func parseOperator(args []string) (attemptCommand, bool, bool) {
 			command.toolBudget = count
 		case name == "--token-budget" && command.kind == commandProjectLimits && isCount:
 			command.tokenBudget = &count
+		case name == "--specialist-runs" && command.kind == commandProjectLimits && isCount && count <= kernel.MaxSpecialistRuns:
+			command.specialistRuns = &[]uint32{uint32(count)}[0]
+		case name == "--specialist-open-proposals" && command.kind == commandProjectLimits && isCount && count <= kernel.MaxSpecialistOpenProposals:
+			command.openProposals = &[]uint32{uint32(count)}[0]
+		case name == "--wake-on" && command.kind == commandAgentIdlePolicy:
+			command.wakeOn = value
 		case name == "--max-run-seconds" && command.kind == commandProjectLimits && isCount && count <= 86400:
 			command.maxRunSeconds = uint32(count)
 		case name == "--agent" && (command.kind == commandTaskAdd || command.kind == commandAgentIdlePolicy || command.kind == commandAgentSelectAccount || command.kind == commandAgentSelectModel || command.kind == commandAgentPaths) && (validHumanRequestKey(value) || command.kind == commandTaskAdd && value == "any"):
@@ -1703,7 +1701,7 @@ func parseOperator(args []string) (attemptCommand, bool, bool) {
 			return attemptCommand{}, false, false
 		}
 	case commandAgentIdlePolicy:
-		if command.agent == "" || command.expectedRevision == 0 || command.provider == "" || (command.provider == "wait" && (command.maxRunSeconds != 0 || command.text != "" || command.toolBudget != 0)) || (command.provider == "standing_instruction" && (command.maxRunSeconds == 0 || command.text == "")) {
+		if command.agent == "" || command.expectedRevision == 0 || command.provider == "" || (command.provider == "wait" && (command.maxRunSeconds != 0 || command.text != "" || command.toolBudget != 0 || command.wakeOn != "")) || (command.provider == "standing_instruction" && (command.maxRunSeconds == 0 || command.text == "")) {
 			return attemptCommand{}, false, false
 		}
 	case commandAgentSelectAccount:
@@ -2318,7 +2316,7 @@ func runOperator(ctx context.Context, command attemptCommand, getenv func(string
 			Revision uint64 `json:"revision"`
 		}{ID: id, Head: result.Head, Revision: result.Revision})
 	case commandProjectLimits:
-		result, callErr := client.SetProjectLimits(callContext, api.ProjectLimitsInput{ProjectID: command.project, ExpectedRevision: command.expectedRevision, RunBudget: command.toolBudget, MaxRunSeconds: command.maxRunSeconds, TokenBudget: command.tokenBudget})
+		result, callErr := client.SetProjectLimits(callContext, api.ProjectLimitsInput{ProjectID: command.project, ExpectedRevision: command.expectedRevision, RunBudget: command.toolBudget, MaxRunSeconds: command.maxRunSeconds, TokenBudget: command.tokenBudget, SpecialistRuns: command.specialistRuns, SpecialistOpenProposals: command.openProposals})
 		if callErr != nil {
 			return writeWebFailure(stderr, "project limits", callErr)
 		}
@@ -2380,7 +2378,7 @@ func runOperator(ctx context.Context, command attemptCommand, getenv func(string
 			Revision uint64 `json:"revision"`
 		}{ID: id, Head: result.Head, Revision: result.Revision})
 	case commandAgentIdlePolicy:
-		result, callErr := client.SetAgentIdlePolicy(callContext, api.AgentIdlePolicyInput{AgentID: command.agent, ExpectedRevision: command.expectedRevision, Policy: command.provider, AfterSeconds: command.maxRunSeconds, Instruction: command.text, RunBudget: command.toolBudget})
+		result, callErr := client.SetAgentIdlePolicy(callContext, api.AgentIdlePolicyInput{AgentID: command.agent, ExpectedRevision: command.expectedRevision, Policy: command.provider, AfterSeconds: command.maxRunSeconds, Instruction: command.text, RunBudget: command.toolBudget, WakeOn: command.wakeOn})
 		if callErr != nil {
 			return writeWebFailure(stderr, "agent idle-policy", callErr)
 		}

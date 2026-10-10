@@ -507,7 +507,7 @@ fn tools() -> Value {
     }, {
         "name": "observe_pull_request_checks",
         "title": "Observe exact-head pull request checks",
-        "description": "Return the complete bounded set of GitHub check runs for one exact pull request head commit, each marked whether its base branch's rules require it.",
+        "description": "Return the complete bounded set of GitHub check runs for one exact pull request head commit, each marked whether its base branch's rules require it; a failed one carries its failure annotations.",
         "inputSchema": {
             "type": "object",
             "properties": {
@@ -532,7 +532,8 @@ fn tools() -> Value {
                             "status": {"type": "string"},
                             "conclusion": {"type": ["string", "null"]},
                             "url": {"type": "string"},
-                            "required": {"type": "boolean"}
+                            "required": {"type": "boolean"},
+                            "annotations": {"type": "array", "maxItems": 10, "items": {"type": "string", "maxLength": 240}}
                         },
                         "required": ["name", "status", "conclusion", "url", "required"],
                         "additionalProperties": false

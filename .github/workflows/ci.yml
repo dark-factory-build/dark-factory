@@ -33,9 +33,10 @@ concurrency:
   cancel-in-progress: ${{ github.event_name != 'merge_group' }}
 
 jobs:
-  # Pull requests need one cheap green context so GitHub will admit them to
-  # the queue. The queue then tests the exact combined tree once; running the
-  # full macOS and control-plane gates here as well would duplicate that work.
+  # Pull requests get a cheap patch check here plus, through scope, their own
+  # affected-package gate. A broken revision then fails on its own pull request
+  # instead of in the queue, where an ALLGREEN ejection rebuilds every entry
+  # behind it (most of the 5-9 Oct queue waste was exactly that).
   eligibility:
     if: github.event_name == 'pull_request'
     runs-on: ubuntu-24.04
@@ -70,7 +71,6 @@ jobs:
   # the release gate, and protocol, dependency, CI, or unknown paths use the
   # full Darwin gate.
   scope:
-    if: github.event_name == 'merge_group' || github.event_name == 'workflow_dispatch' || github.event_name == 'push'
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     outputs:
@@ -78,6 +78,7 @@ jobs:
       macos_mode: ${{ steps.select.outputs.macos_mode }}
       control_plane: ${{ steps.select.outputs.control_plane }}
       relay: ${{ steps.select.outputs.relay }}
+      base: ${{ steps.select.outputs.base }}
     steps:
       - name: Select fixed gates from the combined tree
         id: select
@@ -94,7 +95,7 @@ jobs:
             exit 0
           fi
           if [ "$GITHUB_EVENT_NAME" = push ]; then
-            printf '%s\n' macos=true macos_mode=warm control_plane=false relay=false >>"$GITHUB_OUTPUT"
+            printf '%s\n' macos=true macos_mode=warm control_plane=true relay=false >>"$GITHUB_OUTPUT"
             exit 0
           fi
           case "$GITHUB_SHA" in
@@ -164,6 +165,12 @@ jobs:
                 ;;
             esac
           done <"$RUNNER_TEMP/changed-paths"
+          # A pull request runs only the packages its change affects; the
+          # queue still runs the selected gate on the combined tree.
+          if [ "$GITHUB_EVENT_NAME" = pull_request ] && [ "$macos" = true ]; then
+            macos_mode=affected
+            printf 'base=%s\n' "$merge_base" >>"$GITHUB_OUTPUT"
+          fi
           {
             printf 'macos=%s\n' "$macos"
             printf 'macos_mode=%s\n' "$macos_mode"
@@ -177,12 +184,16 @@ jobs:
   checks:
     needs: scope
     if: needs.scope.result == 'success' && needs.scope.outputs.macos == 'true'
-    runs-on: ${{ (github.event_name == 'merge_group' || github.event_name == 'push') && 'macos-latest' || inputs.runner || 'dark-factory-mac' }}
+    runs-on: ${{ github.event_name != 'workflow_dispatch' && 'macos-latest' || inputs.runner || 'dark-factory-mac' }}
     timeout-minutes: 30
     # The full and runtime gates split across parallel Macs; queued Mac jobs
     # wait for a free runner rather than fail. Every shard must pass and runs
     # to completion: a cancelled sibling would read to factoryd as an
     # infrastructure failure and hide the failing tests (#1366).
+    # Warm-cache merge-group timings (2026-10-09): packages 4:25, daemon
+    # 4:18, and source 5:11 median across runs 37998324190, 38000817821,
+    # and 38001154695; the latest queue wall time was 5:27. Any pair would
+    # exceed the slowest shard, while one Mac would take about 14 minutes.
     strategy:
       fail-fast: false
       matrix:
@@ -212,13 +223,15 @@ jobs:
       # The repo is public, so the fetch is unauthenticated and nothing is
       # written to .git/config that could leak a credential.
       - name: Check out $GITHUB_SHA
+        env:
+          AFFECTED_BASE: ${{ needs.scope.outputs.base }}
         run: |
           set -euxo pipefail
           rm -rf .git
           git init
           git remote add origin "https://github.com/${GITHUB_REPOSITORY}.git"
-          git fetch --depth=1 origin "$GITHUB_SHA"
-          git checkout --force --detach FETCH_HEAD
+          git fetch --depth=1 origin "$GITHUB_SHA" ${AFFECTED_BASE:+"$AFFECTED_BASE"}
+          git checkout --force --detach "$GITHUB_SHA"
           git clean -ffdx
 
       - name: Provide the Go toolchain
@@ -284,6 +297,7 @@ jobs:
       - name: Run the macOS source gate
         env:
           MACOS_MODE: ${{ needs.scope.outputs.macos_mode }}
+          AFFECTED_BASE: ${{ needs.scope.outputs.base }}
           SHARD: ${{ matrix.shard }}
         run: |
           set -euo pipefail
@@ -300,6 +314,9 @@ jobs:
             warm)
               ./scripts/local-ci.sh --warm
               ;;
+            affected)
+              ./scripts/local-ci.sh --affected "$AFFECTED_BASE"
+              ;;
             full)
               ./scripts/local-ci.sh --full "$SHARD"
               ;;
@@ -308,6 +325,11 @@ jobs:
               exit 1
               ;;
           esac 2>&1 | tee "$RUNNER_TEMP/macos-gate.log"
+
+      # Reported beside a failing gate rather than hidden behind it.
+      - name: Refuse known dependency advisories
+        if: ${{ !cancelled() && matrix.shard == 'source' }}
+        run: python3 ./scripts/check-advisories.py
 
       - name: Save the warm main-branch cache
         if: github.event_name == 'push'
@@ -365,7 +387,7 @@ jobs:
     timeout-minutes: 5
     steps:
       - name: Require every hosted source gate
-        if: (github.event_name == 'pull_request' && needs.eligibility.result != 'success') || ((github.event_name == 'merge_group' || github.event_name == 'workflow_dispatch') && (needs.scope.result != 'success' || (needs.scope.outputs.macos == 'true' && needs.checks.result != 'success') || (needs.scope.outputs.control_plane == 'true' && needs.control-plane.result != 'success') || (needs.scope.outputs.relay == 'true' && needs.relay.result != 'success')))
+        if: (github.event_name == 'pull_request' && needs.eligibility.result != 'success') || (github.event_name != 'push' && (needs.scope.result != 'success' || (needs.scope.outputs.macos == 'true' && needs.checks.result != 'success') || (needs.scope.outputs.control_plane == 'true' && needs.control-plane.result != 'success') || (needs.scope.outputs.relay == 'true' && needs.relay.result != 'success')))
         run: |
           echo "required source gates failed: eligibility=${{ needs.eligibility.result }}, scope=${{ needs.scope.result }}, macOS=${{ needs.checks.result }}, control-plane=${{ needs.control-plane.result }}, relay=${{ needs.relay.result }}" >&2
           exit 1
@@ -515,11 +537,36 @@ jobs:
       - name: Install the pinned toolchain
         run: rustup toolchain install 1.88.0 --profile minimal --component clippy,rustfmt --no-self-update
 
+      # Restore only: queue and PR refs are disposable, so their cache writes
+      # cannot warm a later run. The push-to-main run saves this cache below.
+      - name: Restore control-plane Rust and tool caches
+        uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            control-plane/target
+            control-plane/.tools
+          key: control-plane-v1-${{ runner.os }}-${{ runner.arch }}-rust1.88.0-worker-build0.8.5-wasm-bindgen0.2.125-${{ hashFiles('control-plane/Cargo.lock', 'control-plane/Cargo.toml') }}-${{ github.sha }}
+          restore-keys: |
+            control-plane-v1-${{ runner.os }}-${{ runner.arch }}-rust1.88.0-worker-build0.8.5-wasm-bindgen0.2.125-${{ hashFiles('control-plane/Cargo.lock', 'control-plane/Cargo.toml') }}-
+
       - name: Verify the supported Node runtime
         run: node -e "if (Number(process.versions.node.split('.')[0]) < 22) process.exit(1)"
 
       - name: Run the control-plane authoritative gate
         run: ./control-plane/scripts/local-ci.sh
+
+      - name: Save the warm main-branch control-plane cache
+        if: github.event_name == 'push'
+        uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            control-plane/target
+            control-plane/.tools
+          key: control-plane-v1-${{ runner.os }}-${{ runner.arch }}-rust1.88.0-worker-build0.8.5-wasm-bindgen0.2.125-${{ hashFiles('control-plane/Cargo.lock', 'control-plane/Cargo.toml') }}-${{ github.sha }}
 
   relay:
     needs: scope

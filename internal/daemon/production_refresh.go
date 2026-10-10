@@ -6,13 +6,16 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"maps"
 	"path"
+	"slices"
 	"strings"
 	"time"
 
 	"github.com/dark-factory-build/dark-factory/internal/kernel"
+	"github.com/dark-factory-build/dark-factory/internal/maintainer"
 	"github.com/dark-factory-build/dark-factory/internal/opgraph"
 	"github.com/dark-factory-build/dark-factory/internal/review"
 )
@@ -56,7 +59,7 @@ func (daemon *Daemon) refreshProduction(ctx context.Context, project kernel.Proj
 		}
 		var observation kernel.ProductionObservation
 		if err == nil {
-			observation, err = pullRequestObservation(ctx, daemon.github.MCP, identity.PublicationRepository, githubID, known, settled)
+			observation, err = pullRequestObservation(ctx, daemon.github.MCP, identity.PublicationRepository, githubID, known, settled, daemon.noteMaintainerFault)
 		}
 		if err != nil {
 			LogFactoryd(daemon.log, "factoryd: refresh %s: %v\n", identity.PublicationRepository, err)
@@ -70,7 +73,7 @@ func (daemon *Daemon) refreshProduction(ctx context.Context, project kernel.Proj
 		observation.ObservedAt = at.Int64()
 		if units := daemon.deployedUnits(project, repository.ID.String()); len(units) > 0 {
 			var hosts map[string][]string
-			if observation.DeployedAt, hosts, err = recordDeployments(ctx, daemon.github.MCP, identity.PublicationRepository, githubID, units, daemon.observeSources(), daemon.runtimeStore(), at.Int64()); err != nil {
+			if observation.DeployedAt, hosts, err = recordDeployments(ctx, daemon.github.MCP, identity.PublicationRepository, githubID, units, daemon.observeSources(), daemon.runtimeStore(), at.Int64(), daemon.noteMaintainerFault); err != nil {
 				LogFactoryd(daemon.log, "factoryd: refresh %s deployments: %v\n", identity.PublicationRepository, err)
 			} else {
 				daemon.setHosts("github\x00"+identity.PublicationRepository, hosts)
@@ -140,7 +143,87 @@ func changedProductionHeads(known []kernel.ProductionPullRequest, observed []ker
 	return changed
 }
 
+// githubQuotaLow holds back non-urgent GitHub polling (pull request refresh,
+// merge-stage observation, issue intake) while the owner's quota, shared with
+// host sessions and agents, is under a tenth until it resets (#1510).
+func (daemon *Daemon) githubQuotaLow() bool {
+	if daemon.github == nil {
+		return false
+	}
+	quota, ok := daemon.github.Quota()
+	return ok && quota.Low(daemon.now())
+}
+
+// holdHealth holds the condition key (or, with no detail, drops it), keeping
+// when it began while it stays held.
+func (daemon *Daemon) holdHealth(key string, project kernel.ProjectID, detail string) {
+	daemon.healthMu.Lock()
+	defer daemon.healthMu.Unlock()
+	held, ok := daemon.heldHealth[key]
+	if detail == "" {
+		delete(daemon.heldHealth, key)
+		return
+	}
+	if !ok {
+		since, err := kernel.NewUnixMillis(daemon.now().UnixMilli())
+		if err != nil {
+			return
+		}
+		held = kernel.OverseerHealth{Key: key, Since: since}
+	}
+	if daemon.heldHealth == nil {
+		daemon.heldHealth = map[string]kernel.OverseerHealth{}
+	}
+	held.Project, held.Detail = project, detail
+	daemon.heldHealth[key] = held
+}
+
+// noteMaintainerFault counts a Maintainer failure: an unavailable
+// Maintainer (its 503s) or an answer outside its contract. Faults closer
+// than two merge-stage passes apart are one streak.
+func (daemon *Daemon) noteMaintainerFault(err error) {
+	if !errors.Is(err, maintainer.ErrUnavailable) && !strings.Contains(err.Error(), "Maintainer returned an invalid") {
+		return
+	}
+	now := daemon.now()
+	daemon.healthMu.Lock()
+	defer daemon.healthMu.Unlock()
+	faults := &daemon.maintainerFaults
+	if now.Sub(faults.last) > 2*productionRefreshInterval {
+		faults.first, faults.count = now, 0
+	}
+	faults.last, faults.fault = now, err.Error()
+	faults.count++
+}
+
+// overseerHealth is every condition factoryd holds only in memory that the
+// overseer must see: the owner's GitHub quota under a tenth (500 of 5,000), a
+// failing intake sync (held by pollIntakeSource), and a streak of three or
+// more Maintainer faults.
+func (daemon *Daemon) overseerHealth() []kernel.OverseerHealth {
+	quota := ""
+	if daemon.githubQuotaLow() {
+		value, _ := daemon.github.Quota()
+		quota = fmt.Sprintf("GitHub quota %d/%d remaining (Maintainer x-ratelimit-remaining) until %s; GitHub polling waits", value.Remaining, value.Limit, time.Unix(value.Reset, 0).UTC().Format(time.RFC3339))
+	}
+	daemon.holdHealth("github-quota", kernel.ProjectID{}, quota)
+	now := daemon.now()
+	daemon.healthMu.Lock()
+	defer daemon.healthMu.Unlock()
+	health := slices.Collect(maps.Values(daemon.heldHealth))
+	if faults := daemon.maintainerFaults; faults.count >= 3 && now.Sub(faults.last) <= 2*productionRefreshInterval {
+		if since, err := kernel.NewUnixMillis(faults.first.UnixMilli()); err == nil {
+			health = append(health, kernel.OverseerHealth{Key: "maintainer", Since: since,
+				Detail: fmt.Sprintf("%d Maintainer faults, last at %s: %s", faults.count, faults.last.UTC().Format(time.RFC3339), faults.fault)})
+		}
+	}
+	return health
+}
+
 func (daemon *Daemon) productionRefreshAllowed(project kernel.ProjectID, now time.Time) bool {
+	if daemon.githubQuotaLow() {
+		return false
+	}
 	daemon.productionRefreshMu.Lock()
 	defer daemon.productionRefreshMu.Unlock()
 	if daemon.productionRefreshAt == nil {
@@ -170,7 +253,14 @@ type maintainerPullRequest struct {
 // maintainerMCP is the broker call, daemon.github.MCP in production.
 type maintainerMCP func(ctx context.Context, request json.RawMessage, repositories map[string]uint64) (json.RawMessage, error)
 
-func pullRequestObservation(ctx context.Context, call maintainerMCP, repository string, githubID uint64, known []kernel.ProductionPullRequest, settled map[kernel.ProductionHead]bool) (kernel.ProductionObservation, error) {
+// pullRequestObservation and recordDeployments report every Maintainer fault
+// they meet to fault, the ones a best-effort refresh skips past included.
+func pullRequestObservation(ctx context.Context, call maintainerMCP, repository string, githubID uint64, known []kernel.ProductionPullRequest, settled map[kernel.ProductionHead]bool, fault func(error)) (_ kernel.ProductionObservation, err error) {
+	defer func() {
+		if err != nil {
+			fault(err)
+		}
+	}()
 	page, err := readMaintainerPullRequests(ctx, call, repository, githubID, map[string]any{"repository": repository, "page": 1, "per_page": productionRefreshPRLimit})
 	if err != nil {
 		return kernel.ProductionObservation{}, err
@@ -182,7 +272,9 @@ func pullRequestObservation(ctx context.Context, call maintainerMCP, repository 
 	}
 	for _, prior := range rereadPulls(known, seen) {
 		exact, err := readMaintainerPullRequests(ctx, call, repository, githubID, map[string]any{"repository": repository, "page": 1, "per_page": 1, "pull_number": prior.Number})
-		if err == nil {
+		if err != nil {
+			fault(err)
+		} else {
 			open = append(open, exact.PullRequests...)
 		}
 	}
@@ -194,7 +286,7 @@ func pullRequestObservation(ctx context.Context, call maintainerMCP, repository 
 	result.Overflow = productionPullRequestOverflow(page)
 	for _, value := range open {
 		if value.Number == 0 || len(value.Head) != 40 || strings.Trim(value.Head, "0123456789abcdef") != "" {
-			return kernel.ProductionObservation{}, fmt.Errorf("invalid pull request head")
+			return kernel.ProductionObservation{}, fmt.Errorf("Maintainer returned an invalid pull request head")
 		}
 		pr := productionPullRequest(value)
 		if review, ok := prior[value.Number]; ok && strings.EqualFold(review.Head, value.Head) {
@@ -213,6 +305,7 @@ func pullRequestObservation(ctx context.Context, call maintainerMCP, repository 
 		}
 		checks, err := readMaintainerChecks(ctx, call, repository, githubID, pr)
 		if err != nil {
+			fault(err)
 			result.Unavailable = "checks"
 			continue
 		}
@@ -274,7 +367,12 @@ func (daemon *Daemon) deployedUnits(project kernel.ProjectID, repository string)
 // successful production deployment's creation time (0 when production has
 // none), nil when GitHub records no production deployment, and the hosts
 // each unit's successful deployments serve at.
-func recordDeployments(ctx context.Context, call maintainerMCP, repository string, githubID uint64, units []string, sources []observeSource, store *opgraph.Runtime, now int64) (*int64, map[string][]string, error) {
+func recordDeployments(ctx context.Context, call maintainerMCP, repository string, githubID uint64, units []string, sources []observeSource, store *opgraph.Runtime, now int64, fault func(error)) (_ *int64, _ map[string][]string, err error) {
+	defer func() {
+		if err != nil {
+			fault(err)
+		}
+	}()
 	content, err := maintainerTool(ctx, call, repository, githubID, "list_deployments", map[string]any{"repository": repository, "per_page": 30})
 	if err != nil {
 		return nil, nil, err
@@ -290,7 +388,7 @@ func recordDeployments(ctx context.Context, call maintainerMCP, repository strin
 		} `json:"deployments"`
 	}
 	if json.Unmarshal(content, &value) != nil || len(value.Deployments) > 30 {
-		return nil, nil, fmt.Errorf("invalid deployments response")
+		return nil, nil, fmt.Errorf("Maintainer returned an invalid deployments response")
 	}
 	// ponytail: one production environment and alias map per home, not per
 	// repository; key them by repository if two systems ever disagree.
@@ -307,7 +405,7 @@ func recordDeployments(ctx context.Context, call maintainerMCP, repository strin
 		created, createdErr := time.Parse(time.RFC3339, deployment.CreatedAt)
 		updated, updatedErr := time.Parse(time.RFC3339, deployment.UpdatedAt)
 		if createdErr != nil || updatedErr != nil {
-			return nil, nil, fmt.Errorf("invalid deployment time")
+			return nil, nil, fmt.Errorf("Maintainer returned an invalid deployment time")
 		}
 		isProduction := deployment.Environment == production || production == "" && deployment.Production
 		if isProduction {
@@ -363,7 +461,7 @@ func readMaintainerChecks(ctx context.Context, call maintainerMCP, repository st
 		} `json:"checks"`
 	}
 	if json.Unmarshal(content, &value) != nil || !strings.EqualFold(value.Head, pr.Head) || len(value.Checks) > 100 {
-		return nil, fmt.Errorf("invalid checks response")
+		return nil, fmt.Errorf("Maintainer returned an invalid checks response")
 	}
 	checks := make([]kernel.ProductionCheck, 0, len(value.Checks))
 	for _, check := range value.Checks {
@@ -372,7 +470,7 @@ func readMaintainerChecks(ctx context.Context, call maintainerMCP, repository st
 		}
 		id := path.Base(check.URL)
 		if id == "" || strings.Trim(id, "0123456789") != "" {
-			return nil, fmt.Errorf("invalid check url")
+			return nil, fmt.Errorf("Maintainer returned an invalid check url")
 		}
 		conclusion := ""
 		if check.Conclusion != nil {
@@ -456,7 +554,7 @@ func maintainerTool(ctx context.Context, call maintainerMCP, repository string, 
 		Error json.RawMessage `json:"error"`
 	}
 	if json.Unmarshal(response, &envelope) != nil || envelope.Result.IsError || len(envelope.Error) != 0 {
-		return nil, fmt.Errorf("invalid %s response", name)
+		return nil, fmt.Errorf("Maintainer returned an invalid %s response", name)
 	}
 	return envelope.Result.Content, nil
 }
@@ -464,11 +562,11 @@ func maintainerTool(ctx context.Context, call maintainerMCP, repository string, 
 func parseMaintainerPullRequestPage(content []byte) (maintainerPullRequestPage, error) {
 	var page maintainerPullRequestPage
 	if json.Unmarshal(content, &page) != nil || len(page.PullRequests) > productionRefreshPRLimit || (page.NextPage != nil && (*page.NextPage < 2 || *page.NextPage > 1000)) {
-		return maintainerPullRequestPage{}, fmt.Errorf("invalid pull request page")
+		return maintainerPullRequestPage{}, fmt.Errorf("Maintainer returned an invalid pull request page")
 	}
 	for _, value := range page.PullRequests {
 		if value.Number == 0 || len(value.Head) != 40 || strings.Trim(value.Head, "0123456789abcdef") != "" {
-			return maintainerPullRequestPage{}, fmt.Errorf("invalid pull request head")
+			return maintainerPullRequestPage{}, fmt.Errorf("Maintainer returned an invalid pull request head")
 		}
 	}
 	return page, nil

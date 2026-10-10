@@ -987,7 +987,7 @@ func TestFreshSelectionFetchesConfiguredUpstreamWithoutMovingCheckout(t *testing
 			t.Fatalf("parallel fresh selection: %v", err)
 		}
 	}
-	for _, policy := range []string{"HEAD", "refs/remotes/upstream/" + strings.TrimPrefix(branch, "refs/heads/")} {
+	for _, policy := range []string{"HEAD", localBranch, "refs/heads/" + localBranch, "refs/remotes/upstream/" + strings.TrimPrefix(branch, "refs/heads/")} {
 		selected, err := SelectGit(context.Background(), fixture.git, fixture.repository, policy, fixture.identity)
 		if err != nil || selected.Base().Hex() != want {
 			t.Fatalf("policy=%s source=%s want=%s err=%v", policy, selected.Base().Hex(), want, err)
@@ -1033,8 +1033,9 @@ func TestFreshSelectionFetchesConfiguredUpstreamWithoutMovingCheckout(t *testing
 	if _, err := SelectGit(context.Background(), fixture.git, fixture.repository, "HEAD", fixture.identity); err == nil {
 		t.Fatal("broken tracking configuration silently selected local source")
 	}
-	// Explicit local pins and detached HEAD remain usable without the remote.
-	for _, policy := range []string{fixture.base.Hex(), "refs/heads/" + localBranch} {
+	// An explicit commit pin remains usable without the remote; a configured
+	// local branch must refuse a broken upstream rather than use its stale tip.
+	for _, policy := range []string{fixture.base.Hex()} {
 		selected, err := SelectGit(context.Background(), fixture.git, fixture.repository, policy, fixture.identity)
 		if err != nil || selected.Base().Hex() != fixture.base.Hex() {
 			t.Fatalf("local policy=%s err=%v", policy, err)
@@ -1118,6 +1119,32 @@ func TestFreshSelectionStartsFromOriginDefaultBranchNotCheckout(t *testing.T) {
 	runFixtureGit(t, fixture.git, fixture.repository, "remote", "set-url", "origin", filepath.Join(t.TempDir(), "missing"))
 	if _, err := SelectGit(ctx, fixture.git, fixture.repository, "HEAD", fixture.identity); err == nil || !strings.Contains(err.Error(), "source refresh failed") {
 		t.Fatalf("failed origin fetch selected old source: %v", err)
+	}
+}
+
+// A repair of a pull request a person opened starts from the pull request's
+// head, which the registered checkout and its base branch do not have.
+func TestFreshSelectionFetchesAPullRequestHeadNotOnTheBase(t *testing.T) {
+	ctx := context.Background()
+	fixture := newLocalGitFixture(t, "sha1")
+	remote := newLocalGitFixture(t, "sha1")
+	runFixtureGit(t, fixture.git, fixture.repository, "remote", "add", "origin", remote.repository)
+	// Fixture-only local transport; production keeps Git's protocol policy.
+	runFixtureGit(t, fixture.git, fixture.repository, "config", "protocol.file.allow", "always")
+	runFixtureGit(t, remote.git, remote.repository, "commit", "--quiet", "--allow-empty", "-m", "pull request work")
+	head := strings.TrimSpace(runFixtureGitOutput(t, remote.git, remote.repository, "rev-parse", "HEAD"))
+	runFixtureGit(t, remote.git, remote.repository, "update-ref", "refs/pull/7/head", head)
+	runFixtureGit(t, remote.git, remote.repository, "reset", "--quiet", "--hard", "HEAD~1")
+	source, err := InspectRepositorySource(ctx, fixture.git, fixture.repository, "", fixture.identity)
+	if err != nil {
+		t.Fatal(err)
+	}
+	selected, err := SelectRegisteredGit(ctx, fixture.git, fixture.repository, "refs/pull/7/head", source)
+	if err != nil || selected.Base().Hex() != head {
+		t.Fatalf("base=%s want pull request head %s: %v", selected.Base().Hex(), head, err)
+	}
+	if _, err := SelectRegisteredGit(ctx, fixture.git, fixture.repository, "refs/pull/8/head", source); err == nil || !strings.Contains(err.Error(), "source refresh failed") {
+		t.Fatalf("selected a pull request the origin does not have: %v", err)
 	}
 }
 

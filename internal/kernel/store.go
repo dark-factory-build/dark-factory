@@ -465,6 +465,16 @@ func validateNewTask(spec NewTask) error {
 	return nil
 }
 
+func validateNonCarrierTask(spec NewTask) error {
+	if err := validateNewTask(spec); err != nil {
+		return err
+	}
+	if spec.Title == overseerWakeTitle {
+		return fmt.Errorf("%w: reserved standing instruction title", ErrInvalidValue)
+	}
+	return nil
+}
+
 func validReasoningEffort(value string) bool {
 	switch value {
 	case "", "low", "medium", "high", "xhigh", "max", "ultra":

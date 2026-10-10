@@ -15,8 +15,8 @@ export const fixtureState = {
   head: 42n,
   factory: { dispatch_enabled: true, capacity: 8, active_runs: 2, revision: 42n },
   projects: new Map([
-    [projectID, { id: projectID, name: "North Workshop", run_budget_limit: 12n, runs_used: 5n, max_run_seconds: 900, revision: 4n }],
-    [secondProjectID, { id: secondProjectID, name: "South Workshop", run_budget_limit: 0n, runs_used: 3n, max_run_seconds: 0, revision: 5n }],
+    [projectID, { id: projectID, name: "North Workshop", run_budget_limit: 12n, runs_used: 5n, max_run_seconds: 900, specialist_runs: 1, specialist_open_proposals: 3, revision: 4n }],
+    [secondProjectID, { id: secondProjectID, name: "South Workshop", run_budget_limit: 0n, runs_used: 3n, max_run_seconds: 0, specialist_runs: 1, specialist_open_proposals: 3, revision: 5n }],
   ]),
   agents: new Map([
     [agentID, { id: agentID, project_id: projectID, name: "Builder One", role: "worker", provider: "claude_code", paused: false, model: "claude-opus-5", reasoning_effort: "high", effective_model: "claude-opus-5", effective_reasoning_effort: "high", model_source: "agent", revision: 10n, account_id: accountID, idle_policy: "wait", idle_after_seconds: 0, idle_instruction: "", idle_run_budget: 0, idle_runs_used: 0 }],
@@ -37,10 +37,18 @@ export const fixtureState = {
   ]),
 };
 
+/** Two standing specialists: one reviewing now, one waiting for a free slot. */
+const specialist = (id, name, remit, waiting) => [id, { ...fixtureState.agents.get(thirdAgentID), id, name, project_id: projectID, idle_policy: "standing_instruction", idle_after_seconds: 3600, idle_instruction: remit, idle_run_budget: 0, idle_runs_used: 2,
+  specialist: { next_review_at_ms: waiting === "" ? 0 : 1760003600000, next_reason: waiting === "" ? "" : "scheduled", waiting, quiet_reviews: 0, open_proposals: 1, open_proposal_limit: 3, last_review_task_id: "" } }];
+export const operationsSpecialistID = "24".repeat(16);
+export const securitySpecialistID = "25".repeat(16);
 export const fixtureFloorState = {
   ...fixtureState,
-  agents: new Map(fixtureState.agents).set(secondAgentID, { ...fixtureState.agents.get(secondAgentID), paused: false }),
-  tasks: new Map(fixtureState.tasks).set(secondRunningTaskID, { id: secondRunningTaskID, project_id: secondProjectID, assigned_agent_id: secondAgentID, title: "Coordinate the release train", status: "running", priority: 9, revision: 16n }),
+  agents: new Map([...fixtureState.agents, specialist(operationsSpecialistID, "operations", "Operations: make delivery reliable and every failure diagnosable.\nRead factory status first.", ""), specialist(securitySpecialistID, "security", "Security: keep secrets, sandboxes and pairing tight.", "capacity")])
+    .set(secondAgentID, { ...fixtureState.agents.get(secondAgentID), paused: false }),
+  tasks: new Map(fixtureState.tasks).set(secondRunningTaskID, { id: secondRunningTaskID, project_id: secondProjectID, assigned_agent_id: secondAgentID, title: "Coordinate the release train", status: "running", priority: 9, revision: 16n })
+    .set("36".repeat(16), { id: "36".repeat(16), project_id: projectID, assigned_agent_id: operationsSpecialistID, title: "Standing instruction", status: "running", priority: 1, revision: 17n })
+    .set("37".repeat(16), { id: "37".repeat(16), project_id: projectID, assigned_agent_id: securitySpecialistID, title: "Standing instruction", status: "queued", priority: 1, revision: 18n }),
 };
 
 const nodeID = (prefix) => prefix.repeat(16);

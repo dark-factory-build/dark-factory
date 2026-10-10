@@ -14,6 +14,7 @@ import (
 // durable column existed before this and admission is the only place that can
 // honour it.
 func TestUpdateAgentPauseWithholdsTheAgentFromAdmission(t *testing.T) {
+	t.Parallel()
 	store, _, project, agent := newAdmissionStore(t, RoleOrchestrator, 2)
 	defer store.Close()
 	ctx := context.Background()
@@ -42,6 +43,7 @@ func TestUpdateAgentPauseWithholdsTheAgentFromAdmission(t *testing.T) {
 }
 
 func TestArchiveWorkerIsDrainedAndRestoreStaysPaused(t *testing.T) {
+	t.Parallel()
 	store, _, project, worker := newAdmissionStore(t, RoleWorker, 2)
 	defer store.Close()
 	ctx := context.Background()
@@ -67,6 +69,7 @@ func TestArchiveWorkerIsDrainedAndRestoreStaysPaused(t *testing.T) {
 }
 
 func TestArchiveWorkerRefusesOutstandingWorkAndUnauthorizedOverseers(t *testing.T) {
+	t.Parallel()
 	t.Run("queued", func(t *testing.T) {
 		store, _, project, worker := newAdmissionStore(t, RoleWorker, 2)
 		defer store.Close()
@@ -129,6 +132,7 @@ func TestArchiveWorkerRefusesOutstandingWorkAndUnauthorizedOverseers(t *testing.
 }
 
 func TestUpdateAgentValidatesLaunchControlsAtTheObservedRevision(t *testing.T) {
+	t.Parallel()
 	store, _, _, agent := newAdmissionStore(t, RoleOrchestrator, 2)
 	defer store.Close()
 	ctx := context.Background()
@@ -147,6 +151,7 @@ func TestUpdateAgentValidatesLaunchControlsAtTheObservedRevision(t *testing.T) {
 }
 
 func TestUpdateAgentModelChangesFutureAdmissionsWhileRunIsActive(t *testing.T) {
+	t.Parallel()
 	store, running, _, _ := runningWorkerAndOverseer(t)
 	defer store.Close()
 	ctx := context.Background()
@@ -169,6 +174,7 @@ func TestUpdateAgentModelChangesFutureAdmissionsWhileRunIsActive(t *testing.T) {
 }
 
 func TestUpdateAgentAppearancePersistsAndResetsAtomically(t *testing.T) {
+	t.Parallel()
 	store, _, _, agent := newAdmissionStore(t, RoleOrchestrator, 2)
 	defer store.Close()
 	ctx := context.Background()
@@ -187,6 +193,7 @@ func TestUpdateAgentAppearancePersistsAndResetsAtomically(t *testing.T) {
 // A stored row may hold a combination new launches refuse. Pausing such an
 // agent touches no launch control, so the launch rules do not apply to it.
 func TestUpdateAgentPausesALegacyAgentItCouldNotRelaunch(t *testing.T) {
+	t.Parallel()
 	store, _, project, _ := newAdmissionStore(t, RoleOrchestrator, 2)
 	defer store.Close()
 	ctx := context.Background()
@@ -212,6 +219,7 @@ func TestUpdateAgentPausesALegacyAgentItCouldNotRelaunch(t *testing.T) {
 }
 
 func TestUpdateAgentPausesLegacyZeroBudgetStandingInstruction(t *testing.T) {
+	t.Parallel()
 	store, _, project, _ := newAdmissionStore(t, RoleOrchestrator, 2)
 	defer store.Close()
 	ctx := context.Background()
@@ -230,6 +238,7 @@ func TestUpdateAgentPausesLegacyZeroBudgetStandingInstruction(t *testing.T) {
 }
 
 func TestUpdateTaskEditsAndCancelsOnlyWhileQueued(t *testing.T) {
+	t.Parallel()
 	store, _, project, agent := newAdmissionStore(t, RoleOrchestrator, 2)
 	defer store.Close()
 	ctx := context.Background()
@@ -271,6 +280,7 @@ func TestUpdateTaskEditsAndCancelsOnlyWhileQueued(t *testing.T) {
 }
 
 func TestTaskBodyWithInstructionRetainsOnlyLatestSendBackNote(t *testing.T) {
+	t.Parallel()
 	previousOffset := int64(len("original"))
 	task := Task{Title: "fallback title", Body: "original\n\n## Sent back for work revision 2\n\nlatest review", SentBackInstructionBytes: &previousOffset}
 	body, offset := TaskBodyWithInstruction(task, "replacement")
@@ -285,6 +295,7 @@ func TestTaskBodyWithInstructionRetainsOnlyLatestSendBackNote(t *testing.T) {
 }
 
 func TestUpdateTaskForOverseerTargetsOnlyWorkers(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	store, run, keys := runningOrchestratorRun(t)
 	defer store.Close()
@@ -329,6 +340,7 @@ func TestUpdateTaskForOverseerTargetsOnlyWorkers(t *testing.T) {
 }
 
 func TestUpdateAgentForOverseerOnlyControlsWorkerLifecycle(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	store, run, keys := runningOrchestratorRun(t)
 	defer store.Close()
@@ -370,6 +382,7 @@ func TestUpdateAgentForOverseerOnlyControlsWorkerLifecycle(t *testing.T) {
 }
 
 func TestOperatorIdlePolicyReplacesRuleAndRejectsStaleOrInvalid(t *testing.T) {
+	t.Parallel()
 	store, _, _, worker := newAdmissionStore(t, RoleOrchestrator, 2)
 	defer store.Close()
 	ctx := context.Background()
@@ -388,6 +401,7 @@ func TestOperatorIdlePolicyReplacesRuleAndRejectsStaleOrInvalid(t *testing.T) {
 }
 
 func TestIdlePolicyWriteUsesProviderDeliveryBound(t *testing.T) {
+	t.Parallel()
 	store, _, project, worker := newAdmissionStore(t, RoleOrchestrator, 2)
 	defer store.Close()
 	ctx := context.Background()
@@ -419,6 +433,7 @@ func TestIdlePolicyWriteUsesProviderDeliveryBound(t *testing.T) {
 // reach: work revision 2, with a run history stopping one revision behind it.
 // The run-topology invariant admitted only a queued task there.
 func TestUpdateTaskCancelsATaskRequeuedAfterATerminalRun(t *testing.T) {
+	t.Parallel()
 	store, terminal, _, _ := retryQueuedWorker(t, 90)
 	defer store.Close()
 	ctx := context.Background()
@@ -441,6 +456,7 @@ func TestUpdateTaskCancelsATaskRequeuedAfterATerminalRun(t *testing.T) {
 }
 
 func TestUpdateTaskRetiresABlockedTaskButNeverEditsIt(t *testing.T) {
+	t.Parallel()
 	for _, role := range []AgentRole{RoleWorker, RoleOrchestrator} {
 		blocked, _ := NewBlockedProposal("external prerequisite")
 		store, finalizing := finalizingReleasedRun(t, role, blocked)
@@ -474,7 +490,66 @@ func TestUpdateTaskRetiresABlockedTaskButNeverEditsIt(t *testing.T) {
 	}
 }
 
+func TestUpdateTaskForOverseerRetiresUnpublishedSucceededTask(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	success, _ := NewSuccessProposal("completed result")
+	store, finalizing := finalizingReleasedRun(t, RoleWorker, success)
+	defer store.Close()
+	terminal, err := finalizeTestRun(t, store, finalizing, 70)
+	if err != nil {
+		t.Fatal(err)
+	}
+	workerTask, found, err := store.Task(ctx, terminal.TaskID)
+	if err != nil || !found || workerTask.Status != TaskSucceeded || workerTask.Result != "completed result" {
+		t.Fatalf("successful worker task = %+v, found=%v, err=%v", workerTask, found, err)
+	}
+	overseer, err := store.CreateAgent(ctx, NewAgent{ID: agentID(t, 180), ProjectID: terminal.ProjectID, Name: "overseer", Role: RoleOrchestrator, Provider: ProviderCodex, ToolBudgetLimit: 1}, mustTime(t, 71))
+	if err != nil {
+		t.Fatal(err)
+	}
+	queued, err := store.EnqueueTask(ctx, NewTask{ID: taskID(t, 181), ProjectID: terminal.ProjectID, AssignedAgentID: overseer.ID, IncarnationID: incarnationID(t, 182), Title: "overseer"}, mustTime(t, 72))
+	if err != nil {
+		t.Fatal(err)
+	}
+	keys := admissionKeys(t, 183, nil)
+	admission, err := store.AdmitNext(ctx, keys, mustTime(t, 73))
+	if err != nil || !admission.Admitted() || admission.Run.TaskID != queued.ID {
+		t.Fatalf("overseer admission = %+v, err=%v", admission, err)
+	}
+	resources := resourcesForRunTest(t, store, admission.Run.ID)
+	runtime := resourceOfKind(t, resources, ResourceRuntimeRoot)
+	runtimeIdentity, _ := NewPathResourceIdentity(190, 191)
+	_, err = store.ActivateResource(ctx, admission.Run.ID, runtime.ID, runtime.Revision, runtimeIdentity, mustTime(t, 74))
+	if err != nil {
+		t.Fatal(err)
+	}
+	runner := resourceOfKind(t, resources, ResourceRunnerProcess)
+	startedRun, startingRunner, err := store.BeginRunnerStart(ctx, admission.Run.ID, runner.ID, admission.Run.Revision, runner.Revision, mustTime(t, 75))
+	if err != nil {
+		t.Fatal(err)
+	}
+	activeRun, _, err := store.ActivateRunner(ctx, admission.Run.ID, runner.ID, startedRun.Revision, startingRunner.Revision, processIdentity(t, 192), mustTime(t, 76))
+	if err != nil {
+		t.Fatal(err)
+	}
+	provider := resourceOfKind(t, resources, ResourceProviderProcess)
+	group := resourceOfKind(t, resources, ResourceProviderGroup)
+	if _, _, err := store.ActivateProviderResources(ctx, admission.Run.ID, provider.ID, provider.Revision, group.ID, group.Revision, processIdentity(t, 193), mustTime(t, 77)); err != nil {
+		t.Fatal(err)
+	}
+	session := terminalSessionForRunTest(t, store, admission.Run.ID)
+	if _, err := store.ActivateRun(ctx, admission.Run.ID, session.ID, activeRun.Revision, session.Revision, mustTime(t, 78)); err != nil {
+		t.Fatal(err)
+	}
+	retired, err := store.UpdateTaskForOverseer(ctx, keys.AttemptDigest, workerTask.ID, workerTask.Revision, TaskPatch{Cancel: true}, mustTime(t, 79))
+	if err != nil || retired.Status != TaskCancelled || retired.Result != "" || retired.WorkRevision.Int64() != workerTask.WorkRevision.Int64()+1 {
+		t.Fatalf("retired successful task = %+v, err=%v", retired, err)
+	}
+}
+
 func TestExpireBlockedTasksCancelsOnlyStaleUnaskedBlockedTasks(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	blockedFixture := func(t *testing.T) (*Store, Task, Run) {
 		blocked, _ := NewBlockedProposal("external prerequisite")

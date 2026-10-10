@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"sync/atomic"
@@ -146,18 +147,19 @@ func releaseFixture(t *testing.T) (*dispatchFixture, func(), chan string) {
 	}
 	fixture.daemon.ConfigureHost(home, "/usr/bin:/bin")
 	events := make(chan string, 8)
-	build, upgrade, exit, limit, poll := releaseBuild, releaseUpgrade, releaseExit, releaseDrainLimit, releaseDrainPoll
+	build, worker, upgrade, exit, limit, poll := releaseBuild, releaseWorker, releaseUpgrade, releaseExit, releaseDrainLimit, releaseDrainPoll
 	t.Cleanup(func() {
-		releaseBuild, releaseUpgrade, releaseExit, releaseDrainLimit, releaseDrainPoll = build, upgrade, exit, limit, poll
+		releaseBuild, releaseWorker, releaseUpgrade, releaseExit, releaseDrainLimit, releaseDrainPoll = build, worker, upgrade, exit, limit, poll
 	})
 	releaseBuild = func(_ context.Context, _ *Daemon, root string, _ change.RepositorySourceIdentity, sha, _ string) (buildinfo.Identity, error) {
 		events <- "build " + root
 		value, _ := buildinfo.Expected("1.2.3", sha, "darwin/arm64")
 		return value, nil
 	}
-	releaseUpgrade = func(_ context.Context, upgradeHome, _ string, identity buildinfo.Identity, userVersion int) error {
-		if _, err := os.Stat(install.UpgradeBackupPath(upgradeHome)); err != nil || userVersion != kernel.SchemaVersion {
-			t.Errorf("upgrade without a backup: %v, user_version %d", err, userVersion)
+	releaseWorker = func(context.Context, *Daemon, string, string, string) error { return nil }
+	releaseUpgrade = func(_ context.Context, upgradeHome, _ string, identity buildinfo.Identity) error {
+		if _, err := os.Stat(install.UpgradeBackupPath(upgradeHome)); err != nil {
+			t.Errorf("upgrade without a backup: %v", err)
 		}
 		events <- "upgrade " + identity.Source()
 		return nil
@@ -185,12 +187,17 @@ func awaitRelease(t *testing.T, daemon *Daemon, sha string, settled func(kernel.
 func TestReleaseBuildsDrainsBacksUpAndSwapsThenRestarts(t *testing.T) {
 	fixture, settle, events := releaseFixture(t)
 	settle()
+	releaseWorker = func(_ context.Context, _ *Daemon, _, _, sha string) error {
+		events <- "worker " + sha
+		return nil
+	}
 	sha := strings.Repeat("a", 40)
 	delivery, err := fixture.daemon.Release(context.Background(), sha, true)
 	if err != nil || delivery.State != "running" || delivery.Phase != "build" || delivery.ID != "release:"+sha {
 		t.Fatalf("start = %+v, %v", delivery, err)
 	}
-	for _, want := range []string{"build /self-repository", "upgrade " + sha, "exit"} {
+	// The Worker is deployed before factoryd is staged (#1512).
+	for _, want := range []string{"build /self-repository", "worker " + sha, "upgrade " + sha, "exit"} {
 		if got := <-events; got != want {
 			t.Fatalf("event %q, want %q", got, want)
 		}
@@ -240,7 +247,7 @@ func TestReleaseDrainTimeoutReleasesTheHoldAndNeverWritesDispatch(t *testing.T) 
 func TestReleaseRecordsAFailedUpgradeAndNeverRestarts(t *testing.T) {
 	fixture, settle, events := releaseFixture(t)
 	settle()
-	releaseUpgrade = func(context.Context, string, string, buildinfo.Identity, int) error {
+	releaseUpgrade = func(context.Context, string, string, buildinfo.Identity) error {
 		events <- "upgrade"
 		return errors.New("receipt")
 	}
@@ -249,11 +256,147 @@ func TestReleaseRecordsAFailedUpgradeAndNeverRestarts(t *testing.T) {
 		t.Fatal(err)
 	}
 	delivery := awaitRelease(t, fixture.daemon, sha, func(value kernel.ProductionDelivery) bool { return value.State == "failed" })
-	if delivery.Phase != "swap" || delivery.Reason != "upgrade: receipt" || fixture.daemon.releaseHold.Load() {
+	if delivery.Phase != "stage" || delivery.Reason != "upgrade: receipt" || fixture.daemon.releaseHold.Load() {
 		t.Fatalf("failed upgrade = %+v, hold %t", delivery, fixture.daemon.releaseHold.Load())
 	}
 	if <-events != "build /self-repository" || <-events != "upgrade" || len(events) != 0 {
 		t.Fatal("a failed upgrade went on to restart")
+	}
+	// A backup never outlives its release.
+	if _, err := os.Lstat(install.UpgradeBackupPath(fixture.daemon.home)); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("a failed release left its backup: %v", err)
+	}
+}
+
+// A Worker that does not deploy stops the release before factoryd is staged.
+func TestReleaseRecordsAFailedWorkerAndNeverStagesFactoryd(t *testing.T) {
+	fixture, settle, events := releaseFixture(t)
+	settle()
+	releaseWorker = func(context.Context, *Daemon, string, string, string) error {
+		return errors.New("release: control-plane health_failed rolled back")
+	}
+	sha := strings.Repeat("9", 40)
+	if _, err := fixture.daemon.Release(context.Background(), sha, true); err != nil {
+		t.Fatal(err)
+	}
+	delivery := awaitRelease(t, fixture.daemon, sha, func(value kernel.ProductionDelivery) bool { return value.State == "failed" })
+	if delivery.Phase != "stage" || delivery.Reason != "worker: release: control-plane health_failed rolled back" || fixture.daemon.releaseHold.Load() {
+		t.Fatalf("failed worker = %+v, hold %t", delivery, fixture.daemon.releaseHold.Load())
+	}
+	if <-events != "build /self-repository" || len(events) != 0 {
+		t.Fatal("a failed Worker deploy went on to stage factoryd")
+	}
+	if _, worker, found, err := fixture.store.Delivery(context.Background(), "worker"); err != nil || !found || worker.State != "failed" || worker.Revision != sha {
+		t.Fatalf("failed worker record = %+v, %t, %v", worker, found, err)
+	}
+}
+
+// A release whose factoryd trial fails keeps the Worker it deployed, so the
+// next release compares with that Worker, not with the running build.
+func TestReleaseComparesWithTheLiveWorkerNotTheRunningBuild(t *testing.T) {
+	fixture, settle, events := releaseFixture(t)
+	settle()
+	lives := make(chan string, 2)
+	releaseWorker = func(_ context.Context, _ *Daemon, _, live, _ string) error {
+		lives <- live
+		return nil
+	}
+	ctx := context.Background()
+	failed, next := strings.Repeat("b", 40), strings.Repeat("c", 40)
+	if _, err := fixture.daemon.Release(ctx, failed, true); err != nil {
+		t.Fatal(err)
+	}
+	awaitRelease(t, fixture.daemon, failed, func(value kernel.ProductionDelivery) bool { return value.Phase == "trial" })
+	// The failed trial restored the backup taken in the stage phase.
+	project, staged, _, err := fixture.store.Delivery(ctx, "release:"+failed)
+	staged.Phase = "stage"
+	if err == nil {
+		err = fixture.daemon.writeRelease(ctx, project, &staged)
+	}
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := fixture.daemon.FinishRelease(ctx, failed, "failed", "trial"); err != nil {
+		t.Fatal(err)
+	}
+	if delivery, err := fixture.daemon.Release(ctx, failed, false); err != nil || delivery.State != "failed" || delivery.Phase != "trial" {
+		t.Fatalf("failed trial = %+v, %v", delivery, err)
+	}
+	for range 3 {
+		<-events
+	}
+	fixture.daemon.releaseHold.Store(false)
+	fixture.daemon.releaseBusy.Store(false)
+	if _, err := fixture.daemon.Release(ctx, next, true); err != nil {
+		t.Fatal(err)
+	}
+	awaitRelease(t, fixture.daemon, next, func(value kernel.ProductionDelivery) bool { return value.Phase == "trial" })
+	if first, second := <-lives, <-lives; first != "" || second != failed {
+		t.Fatalf("live Workers = %q, %q", first, second)
+	}
+	if _, worker, found, err := fixture.store.Delivery(ctx, "worker"); err != nil || !found || worker.State != "verified" || worker.Revision != next {
+		t.Fatalf("worker record = %+v, %t, %v", worker, found, err)
+	}
+}
+
+// #1512: a release whose range touches control-plane/ deploys the Worker with
+// scripts/release.sh; one that does not skips it.
+func TestDeployWorkerRunsOnlyWhenTheControlPlaneChanged(t *testing.T) {
+	tree := t.TempDir()
+	git := func(args ...string) string {
+		output, err := exec.Command(change.TrustedGitExecutable, append([]string{"-C", tree, "-c", "user.name=test", "-c", "user.email=test@example.invalid", "-c", "commit.gpgsign=false"}, args...)...).Output()
+		if err != nil {
+			t.Fatalf("git %v: %v", args, err)
+		}
+		return strings.TrimSpace(string(output))
+	}
+	write := func(name, content string, mode os.FileMode) {
+		path := filepath.Join(tree, name)
+		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(path, []byte(content), mode); err != nil {
+			t.Fatal(err)
+		}
+	}
+	git("init", "--quiet")
+	write("scripts/release.sh", "#!/bin/sh\necho \"$1\" >>deployed\n[ -z \"$(cat fail 2>/dev/null)\" ] || { echo noise; echo 'release: control-plane deploy_failed' >&2; exit 1; }\n", 0o755)
+	write("control-plane/worker.rs", "one\n", 0o644)
+	write(".gitignore", "deployed\nfail\n", 0o644)
+	git("add", "-A")
+	git("commit", "--quiet", "-m", "live")
+	live := git("rev-parse", "HEAD")
+	write("README.md", "docs\n", 0o644)
+	git("add", "-A")
+	git("commit", "--quiet", "-m", "factoryd only")
+	unchanged := git("rev-parse", "HEAD")
+	write("control-plane/worker.rs", "two\n", 0o644)
+	git("add", "-A")
+	git("commit", "--quiet", "-m", "worker contract")
+	changed := git("rev-parse", "HEAD")
+
+	daemon := &Daemon{toolPath: "/usr/bin:/bin"}
+	ctx := context.Background()
+	deployed := func() string {
+		data, _ := os.ReadFile(filepath.Join(tree, "deployed"))
+		_ = os.Remove(filepath.Join(tree, "deployed"))
+		return string(data)
+	}
+	if err := deployWorker(ctx, daemon, tree, live, unchanged); err != nil || deployed() != "" {
+		t.Fatalf("unchanged control plane deployed: %v", err)
+	}
+	if err := deployWorker(ctx, daemon, tree, live, changed); err != nil || deployed() != changed+"\n" {
+		t.Fatalf("changed control plane not deployed: %v", err)
+	}
+	// An unknown live Worker, or one the tree cannot compare, is deployed.
+	for _, unknown := range []string{"", strings.Repeat("1", 40)} {
+		if err := deployWorker(ctx, daemon, tree, unknown, unchanged); err != nil || deployed() != unchanged+"\n" {
+			t.Fatalf("unknown live Worker %q not deployed: %v", unknown, err)
+		}
+	}
+	write("fail", "1", 0o644)
+	if err := deployWorker(ctx, daemon, tree, live, changed); err == nil || !strings.HasSuffix(err.Error(), ": release: control-plane deploy_failed") {
+		t.Fatalf("failed deploy = %v", err)
 	}
 }
 
@@ -295,7 +438,7 @@ func TestTickReleasesEachNewBaseTipOnce(t *testing.T) {
 		t.Fatal("a released tip was released again")
 	}
 
-	releaseUpgrade = func(context.Context, string, string, buildinfo.Identity, int) error { return errors.New("receipt") }
+	releaseUpgrade = func(context.Context, string, string, buildinfo.Identity) error { return errors.New("receipt") }
 	tick(failed)
 	awaitRelease(t, fixture.daemon, failed, func(value kernel.ProductionDelivery) bool { return value.State == "failed" })
 	<-events
@@ -372,5 +515,37 @@ func TestSchedulerAdmitsNothingWhileAReleaseHoldsAdmission(t *testing.T) {
 	cancel()
 	if err := waitSchedulerDone(t, done); err != nil {
 		t.Fatal(err)
+	}
+}
+
+// #1390: reading an older commit's release once started it and downgraded
+// the factory. A release must descend from the running build.
+func TestReleaseRefusesACommitOlderThanTheRunningBuild(t *testing.T) {
+	tree := t.TempDir()
+	git := func(args ...string) string {
+		output, err := exec.Command(change.TrustedGitExecutable, append([]string{"-C", tree, "-c", "user.name=test", "-c", "user.email=test@example.invalid"}, args...)...).Output()
+		if err != nil {
+			t.Fatalf("git %v: %v", args, err)
+		}
+		return strings.TrimSpace(string(output))
+	}
+	git("init", "--quiet")
+	git("commit", "--quiet", "--allow-empty", "-m", "older")
+	older := git("rev-parse", "HEAD")
+	git("commit", "--quiet", "--allow-empty", "-m", "running")
+	running := git("rev-parse", "HEAD")
+	ctx := context.Background()
+	if err := releaseDescends(ctx, "ROOT", tree, running, older); !errors.Is(err, kernel.ErrConflict) {
+		t.Fatalf("older release = %v", err)
+	}
+	// A running build the checkout lacks names the fix, not a downgrade.
+	if err := releaseDescends(ctx, "ROOT", tree, strings.Repeat("1", 40), running); err == nil || !strings.Contains(err.Error(), "git -C ROOT fetch --unshallow origin") {
+		t.Fatalf("missing running build = %v", err)
+	}
+	git("commit", "--quiet", "--allow-empty", "-m", "newer")
+	for _, sha := range []string{running, git("rev-parse", "HEAD")} {
+		if err := releaseDescends(ctx, "ROOT", tree, running, sha); err != nil {
+			t.Fatalf("release %s = %v", sha, err)
+		}
 	}
 }

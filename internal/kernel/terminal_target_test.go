@@ -27,6 +27,7 @@ func terminalTargetClient(t *testing.T, store *Store, id BrowserClientID, capabi
 }
 
 func TestResolveAgentTerminalTargetReturnsExactRunningCoordinates(t *testing.T) {
+	t.Parallel()
 	store, run, _ := runningOrchestratorRun(t)
 	defer store.Close()
 	client := terminalTargetClient(t, store, browserTestID(t, 201), BrowserCapabilityObserve)
@@ -56,6 +57,7 @@ func TestResolveAgentTerminalTargetReturnsExactRunningCoordinates(t *testing.T) 
 }
 
 func TestTerminalTargetRejectsNonActiveSession(t *testing.T) {
+	t.Parallel()
 	store, run, _ := runningOrchestratorRun(t)
 	defer store.Close()
 	session := terminalSessionForRunTest(t, store, run.ID)
@@ -66,6 +68,7 @@ func TestTerminalTargetRejectsNonActiveSession(t *testing.T) {
 }
 
 func TestResolveAgentTerminalTargetRejectsStaleObservation(t *testing.T) {
+	t.Parallel()
 	store, run, _ := runningOrchestratorRun(t)
 	defer store.Close()
 	client := terminalTargetClient(t, store, browserTestID(t, 202), BrowserCapabilityObserve)
@@ -80,6 +83,7 @@ func TestResolveAgentTerminalTargetRejectsStaleObservation(t *testing.T) {
 }
 
 func TestResolveAgentTerminalTargetOldHeadCannotSelectReplacementRun(t *testing.T) {
+	t.Parallel()
 	store, first, firstKeys := runningOrchestratorRun(t)
 	defer store.Close()
 	client := terminalTargetClient(t, store, browserTestID(t, 203), BrowserCapabilityObserve)
@@ -126,6 +130,7 @@ func TestResolveAgentTerminalTargetOldHeadCannotSelectReplacementRun(t *testing.
 }
 
 func TestResolveAgentTerminalTargetReturnsUnavailableForNonAttachableRun(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name string
 		make func(*testing.T) (*Store, Agent)
@@ -176,6 +181,7 @@ func TestResolveAgentTerminalTargetReturnsUnavailableForNonAttachableRun(t *test
 }
 
 func TestResolveAgentTerminalTargetRequiresObservedClient(t *testing.T) {
+	t.Parallel()
 	store, run, _ := runningOrchestratorRun(t)
 	defer store.Close()
 	agent, _, _ := store.Agent(context.Background(), run.AgentID)
@@ -194,6 +200,7 @@ func TestResolveAgentTerminalTargetRequiresObservedClient(t *testing.T) {
 }
 
 func TestResolveAgentTerminalTargetRejectsInvalidInputsAndClose(t *testing.T) {
+	t.Parallel()
 	store, run, _ := runningOrchestratorRun(t)
 	agent, _, _ := store.Agent(context.Background(), run.AgentID)
 	head, _ := store.Factory(context.Background())
@@ -226,6 +233,7 @@ func TestResolveAgentTerminalTargetRejectsInvalidInputsAndClose(t *testing.T) {
 }
 
 func TestResolveAgentTerminalTargetNoCrossAgentSelection(t *testing.T) {
+	t.Parallel()
 	store, _, _, agent := newAdmissionStore(t, RoleOrchestrator, 2)
 	defer store.Close()
 	otherProject, err := store.CreateProject(context.Background(), NewProject{ID: projectID(t, 251), Name: "other", Root: "/other"}, mustTime(t, 4))
@@ -244,6 +252,7 @@ func TestResolveAgentTerminalTargetNoCrossAgentSelection(t *testing.T) {
 }
 
 func TestResolveAgentTerminalTargetContextCancellation(t *testing.T) {
+	t.Parallel()
 	store, run, _ := runningOrchestratorRun(t)
 	defer store.Close()
 	client := terminalTargetClient(t, store, browserTestID(t, 254), BrowserCapabilityObserve)

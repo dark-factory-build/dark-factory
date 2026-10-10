@@ -9,12 +9,19 @@ import (
 
 const (
 	applicationID = 0x4446474f
-	userVersion   = 36
+	userVersion   = 39
 
 	// SQLite reserves the exact lower-case "sqlite_" prefix. Use a literal,
 	// binary prefix test: LIKE would treat '_' as a wildcard and hide names
 	// such as sqliteXforeign from exact schema validation.
 	internalSchemaNamePredicate = "substr(name, 1, 7) = 'sqlite_' COLLATE BINARY"
+)
+
+// The v38 columns, as SQLite records them after ALTER TABLE ADD COLUMN:
+// each definition is spliced in after the last column, behind ", ".
+const (
+	agentWakeOnColumn        = `, idle_wake_on TEXT NOT NULL DEFAULT '' CHECK (idle_wake_on IN ('', 'failures', 'merges', 'failures,merges'))`
+	projectSpecialistColumns = `, specialist_runs INTEGER NOT NULL DEFAULT 1 CHECK (specialist_runs BETWEEN 0 AND 16), specialist_open_proposals INTEGER NOT NULL DEFAULT 3 CHECK (specialist_open_proposals BETWEEN 0 AND 32)`
 )
 
 var schemaStatements = []string{
@@ -102,7 +109,7 @@ var schemaStatements = []string{
     revision INTEGER NOT NULL CHECK (revision >= 1),
     created_at_ms INTEGER NOT NULL CHECK (created_at_ms >= 0),
     updated_at_ms INTEGER NOT NULL CHECK (updated_at_ms >= created_at_ms)
-) STRICT, WITHOUT ROWID`,
+` + projectSpecialistColumns + `) STRICT, WITHOUT ROWID`,
 	`CREATE UNIQUE INDEX projects_root_unique ON projects(root)`,
 	`CREATE TABLE project_repositories (
     id BLOB PRIMARY KEY CHECK (length(id) = 16 AND id <> zeroblob(16)),
@@ -211,7 +218,7 @@ var schemaStatements = []string{
     tool_calls_used INTEGER NOT NULL CHECK (tool_calls_used >= 0 AND tool_calls_used <= tool_budget_limit),
     revision INTEGER NOT NULL CHECK (revision >= 1),
     created_at_ms INTEGER NOT NULL CHECK (created_at_ms >= 0),
-    updated_at_ms INTEGER NOT NULL CHECK (updated_at_ms >= created_at_ms),
+    updated_at_ms INTEGER NOT NULL CHECK (updated_at_ms >= created_at_ms)` + agentWakeOnColumn + `,
     CHECK (provider <> 'shell' OR (model IS NULL AND reasoning_effort IS NULL AND account_id IS NULL)),
     CHECK (idle_policy <> 'standing_instruction' OR (idle_after_seconds >= 1 AND idle_instruction <> ''))
 ) STRICT, WITHOUT ROWID`,
@@ -360,11 +367,11 @@ var schemaStatements = []string{
 	    verification_policy TEXT NOT NULL CHECK (verification_policy IN ('none', 'rust_workspace_test', 'go_workspace_test')),
 	    phase TEXT NOT NULL CHECK (phase IN ('admitted', 'running', 'finalizing', 'terminal')),
     proposal_kind TEXT CHECK (proposal_kind IS NULL OR proposal_kind IN ('succeeded', 'blocked', 'failed', 'cancelled')),
-    proposal_code TEXT CHECK (proposal_code IS NULL OR proposal_code IN ('spawn', 'activation', 'source', 'provider_exit', 'runner_exit', 'protocol', 'internal', 'attempt')),
+    proposal_code TEXT CHECK (proposal_code IS NULL OR proposal_code IN ('spawn', 'activation', 'source', 'provider_exit', 'transient', 'protocol', 'internal', 'attempt')),
     proposal_detail TEXT CHECK (proposal_detail IS NULL OR length(CAST(proposal_detail AS BLOB)) BETWEEN 1 AND 4096),
     proposal_result TEXT CHECK (proposal_result IS NULL OR length(CAST(proposal_result AS BLOB)) <= 131072),
     terminal_kind TEXT CHECK (terminal_kind IS NULL OR terminal_kind IN ('succeeded', 'blocked', 'failed', 'cancelled')),
-	    terminal_code TEXT CHECK (terminal_code IS NULL OR terminal_code IN ('spawn', 'activation', 'source', 'provider_exit', 'runner_exit', 'protocol', 'internal', 'attempt')),
+	    terminal_code TEXT CHECK (terminal_code IS NULL OR terminal_code IN ('spawn', 'activation', 'source', 'provider_exit', 'transient', 'protocol', 'internal', 'attempt')),
     terminal_detail TEXT CHECK (terminal_detail IS NULL OR length(CAST(terminal_detail AS BLOB)) BETWEEN 1 AND 4096),
     terminal_result TEXT CHECK (terminal_result IS NULL OR length(CAST(terminal_result AS BLOB)) <= 131072),
 	    credential_digest BLOB NOT NULL CHECK (length(credential_digest) = 32),
@@ -628,7 +635,20 @@ var schemaStatements = []string{
     payload BLOB NOT NULL CHECK (length(payload) <= 1048576 AND length(payload) <= head - floor),
     captured_at_ms INTEGER NOT NULL CHECK (captured_at_ms >= 0)
 ) STRICT, WITHOUT ROWID`,
+	taskAutomaticEventsTable,
 }
+
+// taskAutomaticEventsTable records what factoryd did to a task on its own,
+// at the task row revision it left: a blocked expiry, which is the cause of
+// the task's end only while the task is still at that revision (any later
+// transition, an operator's cancel included, moves it), and each intake retry,
+// which the retry bound counts. An operator cancel records nothing.
+const taskAutomaticEventsTable = `CREATE TABLE task_automatic_events (
+    task_id BLOB NOT NULL CHECK (length(task_id) = 16) REFERENCES tasks(id),
+    task_revision INTEGER NOT NULL CHECK (task_revision >= 1),
+    kind TEXT NOT NULL CHECK (kind IN ('blocked_expired', 'intake_retried')),
+    at_ms INTEGER NOT NULL CHECK (at_ms >= 0)
+) STRICT`
 
 type schemaObject struct {
 	kind string
@@ -677,7 +697,11 @@ func validateSchemaVersion(ctx context.Context, connection *sql.Conn, wantVersio
 		return err
 	}
 	if appID != applicationID || version != wantVersion {
-		return fmt.Errorf("%w: application_id=%#x user_version=%d, this build opens only %#x/%d", ErrForeignDatabase, appID, version, applicationID, wantVersion)
+		cause := ErrForeignDatabase
+		if appID == applicationID && version > wantVersion {
+			cause = ErrNewerSchema
+		}
+		return fmt.Errorf("%w: application_id=%#x user_version=%d, this build opens only %#x/%d", cause, appID, version, applicationID, wantVersion)
 	}
 
 	expected := expectedSchemaOf(statements)

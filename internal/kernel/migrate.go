@@ -5,20 +5,40 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"slices"
+	"strings"
 )
 
-// v35UserVersion is the one earlier version Open migrates. v36 has the same
-// schema; it drops the review-operation state 'enqueuing', so a v35 home's
-// operations in it become 'enqueued', where each pass ensures the exact head
-// is queued.
-const v35UserVersion = 35
+// Open migrates the two earlier versions. v39 names the retryable failure
+// code 'transient' where v38 named 'runner_exit', which nothing ever wrote;
+// v38 added the specialist columns (agents.idle_wake_on,
+// projects.specialist_runs and projects.specialist_open_proposals) to v37
+// and changed nothing else.
+const (
+	v37UserVersion = 37
+	v38UserVersion = 38
+)
 
-// validateOpenableSnapshot accepts a current database or an exact v35 one.
+func legacySchemaStatements(version int) []string {
+	replacer := strings.NewReplacer("'transient'", "'runner_exit'")
+	if version == v37UserVersion {
+		replacer = strings.NewReplacer("'transient'", "'runner_exit'", agentWakeOnColumn, "", projectSpecialistColumns, "")
+	}
+	statements := slices.Clone(schemaStatements)
+	for index, statement := range statements {
+		statements[index] = replacer.Replace(statement)
+	}
+	return statements
+}
+
+// validateOpenableSnapshot accepts a current database or an exact v37 or v38
+// one, whose durable controls are checked inside the migration before it
+// commits.
 func validateOpenableSnapshot(ctx context.Context, connection *sql.Conn) error {
 	if _, version, err := inspectIdentity(ctx, connection); err != nil {
 		return err
-	} else if version == v35UserVersion {
-		if err := validateSchemaVersion(ctx, connection, version, schemaStatements); err != nil {
+	} else if version == v37UserVersion || version == v38UserVersion {
+		if err := validateSchemaVersion(ctx, connection, version, legacySchemaStatements(version)); err != nil {
 			return err
 		}
 		if err := validateIntegrity(ctx, connection); err != nil {
@@ -40,7 +60,7 @@ func validateContentGitPins(ctx context.Context, connection *sql.Conn) error {
 	return nil
 }
 
-// migrateLegacy takes an exact v35 home to the current schema in one
+// migrateLegacy takes an exact v37 or v38 home to the current schema in one
 // transaction, or leaves it byte-untouched and refuses; it refuses any other
 // earlier version. Open calls it with the writer before the store is
 // published, and before refreshing its pinned sidecar facts, which the
@@ -51,7 +71,7 @@ func (store *Store) migrateLegacy(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	_, version, err := inspectIdentity(ctx, connection)
+	appID, version, err := inspectIdentity(ctx, connection)
 	if err != nil {
 		releaseUncertainConnection(connection)
 		return err
@@ -59,26 +79,65 @@ func (store *Store) migrateLegacy(ctx context.Context) error {
 	switch version {
 	case userVersion:
 		return connection.Close()
-	case v35UserVersion:
+	case v37UserVersion, v38UserVersion:
 	default:
-		return errors.Join(fmt.Errorf("%w: home is at user_version %d, this build requires %d", ErrForeignDatabase, version, userVersion), connection.Close())
+		cause := ErrForeignDatabase
+		if appID == applicationID && version > userVersion {
+			cause = ErrNewerSchema
+		}
+		return errors.Join(fmt.Errorf("%w: home is at user_version %d, this build requires %d", cause, version, userVersion), connection.Close())
 	}
-	if err := migrateTransaction(ctx, connection, migrateV35); err != nil {
+	if err := migrateTransaction(ctx, connection, func(ctx context.Context, connection *sql.Conn) error {
+		return migrateFrom(ctx, connection, version)
+	}); err != nil {
 		releaseUncertainConnection(connection)
 		return err
 	}
 	return connection.Close()
 }
 
-func migrateV35(ctx context.Context, connection *sql.Conn) error {
-	if err := validateSchemaVersion(ctx, connection, v35UserVersion, schemaStatements); err != nil {
+// migrateFrom rewrites the runs table's failure-code checks in place: the
+// value it replaces was never written, so no row can violate the new text.
+// Bumping schema_version makes every connection, this one and the open
+// readers, load the new text, as SQLite's own ALTER TABLE procedure does.
+func migrateFrom(ctx context.Context, connection *sql.Conn, version int) error {
+	if err := validateSchemaVersion(ctx, connection, version, legacySchemaStatements(version)); err != nil {
 		return err
 	}
-	for _, statement := range []string{`UPDATE production_records SET document = json_set(document, '$.state', 'enqueued')
-        WHERE kind = 'reviewer' AND json_extract(document, '$.state') = 'enqueuing'`, fmt.Sprintf("PRAGMA user_version = %d", userVersion)} {
+	if version == v37UserVersion {
+		columns := strings.Split(projectSpecialistColumns, ", ")[1:]
+		for _, statement := range []string{
+			"ALTER TABLE agents ADD COLUMN " + strings.TrimPrefix(agentWakeOnColumn, ", "),
+			"ALTER TABLE projects ADD COLUMN " + columns[0],
+			"ALTER TABLE projects ADD COLUMN " + columns[1],
+		} {
+			if _, err := connection.ExecContext(ctx, statement); err != nil {
+				return err
+			}
+		}
+	}
+	var schemaVersion int
+	if err := connection.QueryRowContext(ctx, "PRAGMA schema_version").Scan(&schemaVersion); err != nil {
+		return err
+	}
+	for _, statement := range []string{
+		"PRAGMA writable_schema = ON",
+		`UPDATE sqlite_schema SET sql = replace(sql, '''runner_exit''', '''transient''') WHERE type = 'table' AND name = 'runs'`,
+		"PRAGMA writable_schema = OFF",
+		fmt.Sprintf("PRAGMA schema_version = %d", schemaVersion+1),
+		fmt.Sprintf("PRAGMA user_version = %d", userVersion),
+	} {
 		if _, err := connection.ExecContext(ctx, statement); err != nil {
 			return err
 		}
+	}
+	// The earlier retryable failures take the code, so finalization and the
+	// retry-history match treat them as before. A terminal run's code is its
+	// proposal's.
+	if _, err := connection.ExecContext(ctx, `UPDATE runs SET proposal_code = 'transient', terminal_code = iif(terminal_code IS NULL, NULL, 'transient')
+		WHERE proposal_code = 'protocol' AND proposal_detail IN (?, ?) OR proposal_code = 'provider_exit' AND proposal_detail = ?`,
+		NeverStartedRunDetail, OverseerRunLimitDetail, ProviderCapacityRunDetail); err != nil {
+		return err
 	}
 	if err := validateExactSchema(ctx, connection); err != nil {
 		return err

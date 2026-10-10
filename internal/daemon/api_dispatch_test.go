@@ -1371,7 +1371,7 @@ func TestOverseerPastAProjectLimitIsRequeuedAndAWorkerCancelled(t *testing.T) {
 	}{
 		{57, "orchestrator", 60, kernel.OutcomeFailed, kernel.OverseerRunLimitDetail},
 		{67, "orchestrator", kernel.MaxOverseerRunSeconds, kernel.OutcomeFailed, kernel.OverseerRunLimitDetail},
-		{77, "worker", 60, kernel.OutcomeCancelled, runLimitDetail},
+		{77, "worker", 60, kernel.OutcomeCancelled, kernel.RunLimitDetail},
 	} {
 		fixture := newDispatchFixture(t)
 		active := prepareActiveAttemptInProjectWithProvider(t, fixture, test.seed, testID(test.seed), test.role, "codex")
@@ -1797,7 +1797,7 @@ func TestDaemonSourceRefusesProviderWithoutReadOnlyBoundary(t *testing.T) {
 	done := fixture.serve(t)
 	_, err := active.client.Source(context.Background(), testID(73))
 	var remote *api.RemoteError
-	if !errors.As(err, &remote) || remote.Code() != api.RemoteUnavailable {
+	if !errors.As(err, &remote) || remote.Code() != api.RemoteForbidden {
 		t.Fatalf("unprotected source = %v", err)
 	}
 	waitDispatch(t, done)

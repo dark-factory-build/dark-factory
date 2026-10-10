@@ -9,6 +9,7 @@ import (
 )
 
 func TestWorkerActivationRequiresExactChangeOwnershipRevision(t *testing.T) {
+	t.Parallel()
 	for _, test := range []struct {
 		name     string
 		revision func(Run) int64
@@ -68,6 +69,7 @@ func TestWorkerActivationRequiresExactChangeOwnershipRevision(t *testing.T) {
 }
 
 func TestRetainedRetryProvenanceRejectsSecondFreshJumpBeforeResourceMutation(t *testing.T) {
+	t.Parallel()
 	for _, test := range []struct {
 		name         string
 		extraRetries int
@@ -130,6 +132,7 @@ func TestRetainedRetryProvenanceRejectsSecondFreshJumpBeforeResourceMutation(t *
 }
 
 func TestEveryUnsettledChangeRequiresCurrentOwner(t *testing.T) {
+	t.Parallel()
 	for _, phase := range []ChangePhase{ChangeReserved, ChangePrepared, ChangeAvailable} {
 		for _, write := range []string{"SetDispatch", "CreateProject"} {
 			t.Run(phase.String()+"/"+write, func(t *testing.T) {
@@ -180,6 +183,7 @@ func TestEveryUnsettledChangeRequiresCurrentOwner(t *testing.T) {
 // that names another head, or forgets the head a worktree Change has, is
 // refused before it touches anything.
 func TestPreRunningWorkerSettlementCannotBlessChangedContent(t *testing.T) {
+	t.Parallel()
 	for _, retained := range []bool{false, true} {
 		name := "fresh A+2"
 		if retained {
@@ -250,6 +254,7 @@ func phaseRevision(phase ChangePhase) int64 {
 // A worker that ran may have committed: its settlement records the branch
 // head it left, and a later read of the Change sees exactly that head.
 func TestRunningWorkerSettlementMayUpdateContentOnStableTree(t *testing.T) {
+	t.Parallel()
 	blocked, _ := NewBlockedProposal("retain edits")
 	store, finalizing := finalizingReleasedRun(t, RoleWorker, blocked)
 	defer store.Close()
@@ -274,6 +279,7 @@ func TestRunningWorkerSettlementMayUpdateContentOnStableTree(t *testing.T) {
 }
 
 func TestPreProviderRetainedRetryKeepsPublishedHead(t *testing.T) {
+	t.Parallel()
 	for _, test := range []struct {
 		name string
 		head func(Change) *CommitID
@@ -360,8 +366,33 @@ func TestPreProviderRetainedRetryKeepsPublishedHead(t *testing.T) {
 }
 
 func TestRetainedRetryHistoryLoadsAndHistoricalFinalizationReplays(t *testing.T) {
+	t.Parallel()
 	store, first := terminalPreRunningAvailableWorker(t)
 	defer store.Close()
+	second, secondSettlement := settleRetainedRetry(t, store, first)
+	_, thirdKeys := queueRetryForTerminalSeed(t, store, second, 81, 230)
+	third, err := store.AdmitNext(context.Background(), thirdKeys, mustTime(t, 81))
+	if err != nil || !third.Admitted() {
+		t.Fatalf("third admission = %+v, %v", third, err)
+	}
+	for _, run := range []Run{first, second, *third.Run} {
+		if _, found, err := store.Run(context.Background(), run.ID); err != nil || !found {
+			t.Fatalf("Run(%s) found=%v, err=%v", run.ID, found, err)
+		}
+	}
+	firstChangeSettlement, _ := NewRetainedChangeSettlement(mustRevision(t, first.AdmittedChangeRevision.Int64()+2), secondSettlement.head)
+	if replay, err := store.FinalizeWorkerRun(context.Background(), first.ID, mustRevision(t, first.Revision.Int64()-1), firstChangeSettlement, mustTime(t, 1)); err != nil || replay.Revision != first.Revision {
+		t.Fatalf("first replay = %+v, %v", replay, err)
+	}
+	if replay, err := store.FinalizeWorkerRun(context.Background(), second.ID, mustRevision(t, second.Revision.Int64()-1), secondSettlement, mustTime(t, 1)); err != nil || replay.Revision != second.Revision {
+		t.Fatalf("second replay = %+v, %v", replay, err)
+	}
+}
+
+// settleRetainedRetry retries first on its retained Change and settles that
+// retry, failed, retained again at 80.
+func settleRetainedRetry(t *testing.T, store *Store, first Run) (Run, ChangeSettlement) {
+	t.Helper()
 	_, secondKeys := queueRetryForTerminal(t, store, first, 40)
 	secondAdmission, err := store.AdmitNext(context.Background(), secondKeys, mustTime(t, 40))
 	if err != nil || !secondAdmission.Admitted() {
@@ -373,14 +404,13 @@ func TestRetainedRetryHistoryLoadsAndHistoricalFinalizationReplays(t *testing.T)
 	if err != nil {
 		t.Fatal(err)
 	}
-	blocked, _ := NewBlockedProposal("retry again")
-	secondFinalizing, err := store.ProposeAttemptOutcome(context.Background(), secondKeys.AttemptDigest, blocked, mustTime(t, 70))
-	if err != nil {
+	failed, _ := NewFailureProposal(FailureAttempt, "retry again")
+	if _, err := store.ProposeAttemptOutcome(context.Background(), secondKeys.AttemptDigest, failed, mustTime(t, 70)); err != nil {
 		t.Fatal(err)
 	}
-	secondFinalizing = observeMissingProcessExits(t, store, secondRunning.ID, 71)
+	observeMissingProcessExits(t, store, secondRunning.ID, 71)
 	releaseAllRunResources(t, store, secondRunning.ID, 72)
-	secondFinalizing = closeTerminalSessionAtCurrent(t, store, secondRunning.ID, 80)
+	secondFinalizing := closeTerminalSessionAtCurrent(t, store, secondRunning.ID, 80)
 	secondChange, found, err := store.Change(context.Background(), *secondRunning.ChangeID)
 	if err != nil || !found {
 		t.Fatalf("second Change = %+v, found=%v, err=%v", secondChange, found, err)
@@ -390,23 +420,7 @@ func TestRetainedRetryHistoryLoadsAndHistoricalFinalizationReplays(t *testing.T)
 	if err != nil {
 		t.Fatal(err)
 	}
-	_, thirdKeys := queueRetryForTerminalSeed(t, store, second, 81, 230)
-	third, err := store.AdmitNext(context.Background(), thirdKeys, mustTime(t, 81))
-	if err != nil || !third.Admitted() {
-		t.Fatalf("third admission = %+v, %v", third, err)
-	}
-	for _, run := range []Run{first, second, *third.Run} {
-		if _, found, err := store.Run(context.Background(), run.ID); err != nil || !found {
-			t.Fatalf("Run(%s) found=%v, err=%v", run.ID, found, err)
-		}
-	}
-	firstChangeSettlement, _ := NewRetainedChangeSettlement(mustRevision(t, first.AdmittedChangeRevision.Int64()+2), headForChange(t, secondChange))
-	if replay, err := store.FinalizeWorkerRun(context.Background(), first.ID, mustRevision(t, first.Revision.Int64()-1), firstChangeSettlement, mustTime(t, 1)); err != nil || replay.Revision != first.Revision {
-		t.Fatalf("first replay = %+v, %v", replay, err)
-	}
-	if replay, err := store.FinalizeWorkerRun(context.Background(), second.ID, secondFinalizing.Revision, secondSettlement, mustTime(t, 1)); err != nil || replay.Revision != second.Revision {
-		t.Fatalf("second replay = %+v, %v", replay, err)
-	}
+	return second, secondSettlement
 }
 
 func materializeAdmittedWorkerChange(t *testing.T, store *Store, run Run, at int64) Change {

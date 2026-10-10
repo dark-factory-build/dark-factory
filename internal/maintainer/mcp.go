@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"net/http"
+	"regexp"
 	"strings"
 )
 
@@ -15,8 +16,10 @@ func (host *Host) CustomerMode() bool {
 	return host.connection.ID != "" || host.connection.Disabled
 }
 
-// MCP keeps the credential and the live numeric repository join under the
-// same gate as disconnect. The broker repeats live GitHub authorization.
+// MCP keeps the credential and the numeric repository join under the same
+// gate as disconnect. The join uses the last observed delegation, which only
+// this host can change; the broker repeats live GitHub authorization of the
+// user and repository on every call (control-plane/src/connection.rs).
 func (host *Host) MCP(ctx context.Context, request json.RawMessage, repositories map[string]uint64) (json.RawMessage, error) {
 	host.mu.Lock()
 	defer host.mu.Unlock()
@@ -24,20 +27,21 @@ func (host *Host) MCP(ctx context.Context, request json.RawMessage, repositories
 	if err != nil {
 		return nil, err
 	}
+	var call struct {
+		Params struct {
+			Name string `json:"name"`
+		} `json:"params"`
+	}
+	if json.Unmarshal(request, &call) != nil || !toolName.MatchString(call.Params.Name) {
+		call.Params.Name = "other"
+	}
+	ctx = context.WithValue(ctx, operationKey{}, "mcp "+call.Params.Name)
 	var response json.RawMessage
 	if err := host.client.requestBounded(ctx, credential, http.MethodPost, prefix+"/"+credential.id+"/mcp", request, &response, 8<<20); err != nil {
+		host.delegations = nil // re-observe a revoked or changed connection
 		return nil, err
 	}
 	return response, nil
-}
-
-// AuthorizeRepositories verifies the retained live customer delegation without
-// sending a broker MCP request.
-func (host *Host) AuthorizeRepositories(ctx context.Context, repositories map[string]uint64) error {
-	host.mu.Lock()
-	defer host.mu.Unlock()
-	_, err := host.authorizeRepositories(ctx, repositories)
-	return err
 }
 
 func (host *Host) authorizeRepositories(ctx context.Context, repositories map[string]uint64) (Credential, error) {
@@ -45,24 +49,33 @@ func (host *Host) authorizeRepositories(ctx context.Context, repositories map[st
 	if err != nil {
 		return Credential{}, err
 	}
-	status, err := host.status(ctx, credential)
-	if err != nil {
-		return Credential{}, err
+	if host.delegations == nil || !delegated(host.delegations, repositories) {
+		status, err := host.status(ctx, credential)
+		if err != nil {
+			return Credential{}, err
+		}
+		if status.State != "connected" || !delegated(status.Repositories, repositories) {
+			return Credential{}, ErrDenied
+		}
 	}
-	if status.State != "connected" {
-		return Credential{}, ErrDenied
-	}
+	return credential, nil
+}
+
+// toolName bounds what a caller's tool name can add to telemetry.
+var toolName = regexp.MustCompile(`^[a-z_]{1,64}$`)
+
+func delegated(delegations []Delegation, repositories map[string]uint64) bool {
 	for name, id := range repositories {
 		found := false
-		for _, delegated := range status.Repositories {
+		for _, delegated := range delegations {
 			if delegated.RepositoryID > 0 && uint64(delegated.RepositoryID) == id && strings.EqualFold(delegated.Repository, name) {
 				found = true
 				break
 			}
 		}
 		if !found {
-			return Credential{}, ErrDenied
+			return false
 		}
 	}
-	return credential, nil
+	return true
 }

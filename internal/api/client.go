@@ -32,7 +32,13 @@ const (
 	responsePrelude          = 1
 	outcomeReceiptBytes      = 32
 	requestTimeout           = 5 * time.Second
-	attemptTokenFileEnv      = "DARK_FACTORY_ATTEMPT_TOKEN_FILE"
+	// RestartRetryWindow covers a release restart: launchd respawns factoryd
+	// at once, and the new daemon rebinds after opening and recovering its
+	// store. An attempt call retries what that daemon provably did not act on
+	// for this long before it surfaces the failure.
+	RestartRetryWindow   = 30 * time.Second
+	restartRetryInterval = 100 * time.Millisecond
+	attemptTokenFileEnv  = "DARK_FACTORY_ATTEMPT_TOKEN_FILE"
 )
 
 type credential [credentialBytes]byte
@@ -86,7 +92,9 @@ func newClient(socketPath, tokenPath string, domain byte) (client, error) {
 	if err != nil {
 		return client{}, err
 	}
-	if _, err := inspectSocket(socketPath); err != nil {
+	// An attempt client may start while factoryd restarts; call retries the
+	// socket instead of reporting a broken client.
+	if _, err := inspectSocket(socketPath); err != nil && domain != attemptDomain {
 		return client{}, err
 	}
 	return client{socketPath: socketPath, tokenPath: tokenPath, token: token, domain: domain}, nil
@@ -684,26 +692,51 @@ func (client client) call(ctx context.Context, method string, params, output any
 		ctx, cancel = context.WithTimeout(ctx, requestTimeout)
 	}
 	defer cancel()
+	// An attempt outlives factoryd generations. A restart unbinds the socket
+	// and drains in-flight requests as unavailable, so the call waits the
+	// restart out instead of handing the run a blocker. A mutation's
+	// unavailable reply may follow its commit, so only reads replay it.
+	retryUntil := time.Now().Add(RestartRetryWindow)
+	for {
+		err := client.exchange(ctx, method, encoded, output)
+		retry := readMethod(method) && unavailable(err)
+		var failure undelivered
+		if errors.As(err, &failure) {
+			err, retry = failure.err, true
+		}
+		if !retry || client.domain != attemptDomain || time.Now().After(retryUntil) {
+			return err
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(restartRetryInterval):
+		}
+	}
+}
+
+func (client client) exchange(ctx context.Context, method string, encoded []byte, output any) error {
 	before, err := inspectSocket(client.socketPath)
 	// The daemon deliberately rebinds this canonical socket during a clean
 	// handover. The path and its private parent remain the authority; the
 	// socket inode is generation-scoped and must not be pinned in a client
 	// that can outlive one daemon generation. Between the old daemon's unlink
 	// and the new one's bind the path is absent: that is a transport outage
-	// to retry, not an invalid client.
+	// to retry, not an invalid client. The new socket is bound before it is
+	// made private, so an invalid one is retried too: nothing was sent.
 	if err != nil {
-		if _, statErr := os.Lstat(client.socketPath); errors.Is(statErr, fs.ErrNotExist) {
-			return classifyTransport(ctx)
+		if socketAbsent(client.socketPath) {
+			return classifyUndelivered(ctx, ErrTransport)
 		}
-		return ErrInvalidClient
+		return classifyUndelivered(ctx, ErrInvalidClient)
 	}
 	connection, err := (&net.Dialer{}).DialContext(ctx, "unix", client.socketPath)
 	if err != nil {
-		return classifyTransport(ctx)
+		return classifyUndelivered(ctx, ErrTransport)
 	}
 	defer connection.Close()
 	if err := verifySocketConnection(connection, before); err != nil {
-		return err
+		return classifyUndelivered(ctx, err)
 	}
 	if err := setConnectionDeadline(connection, ctx); err != nil {
 		return classifyTransport(ctx)
@@ -780,7 +813,9 @@ func (client client) call(ctx context.Context, method string, params, output any
 	if err := requireEOF(connection); err != nil {
 		return classifyFrameError(ctx, err)
 	}
-	if err := client.revalidate(before); err != nil {
+	// A draining daemon may answer after its socket is gone. Unavailable
+	// carries nothing to trust, so it stays retryable rather than invalid.
+	if err := client.revalidate(before); err != nil && !unavailable(responseErr) {
 		return err
 	}
 	return responseErr
@@ -807,6 +842,19 @@ func (client client) revalidate(before socketRecord) error {
 		return ErrInvalidClient
 	}
 	return nil
+}
+
+func unavailable(err error) bool {
+	var remote *RemoteError
+	return errors.As(err, &remote) && remote.code == RemoteUnavailable
+}
+
+func readMethod(method string) bool {
+	switch method {
+	case "task", "source", "peer_status", "overseer_snapshot", "terminal_observe", "attempt_content_list", "attempt_content_read", "attempt_content_body", "attempt_content_attachments", "attempt_outcome_read", "attempt_outcome_list":
+		return true
+	}
+	return false
 }
 
 func outcomeMethod(method string) bool {
@@ -1329,6 +1377,31 @@ func validTaskStatus(status string) bool {
 	default:
 		return false
 	}
+}
+
+// undelivered is a failure before any request byte reached a daemon: nothing
+// was acted on, so call may retry it before it reports err.
+type undelivered struct{ err error }
+
+func (failure undelivered) Error() string { return failure.err.Error() }
+
+// socketAbsent is the gap between daemon generations: the private parent
+// stands and only the socket name is missing.
+func socketAbsent(path string) bool {
+	root, _, err := openPrivateParent(path)
+	if err != nil {
+		return false
+	}
+	defer root.Close()
+	_, err = root.Lstat(filepath.Base(path))
+	return errors.Is(err, fs.ErrNotExist)
+}
+
+func classifyUndelivered(ctx context.Context, err error) error {
+	if ctxErr := ctx.Err(); ctxErr != nil {
+		return ctxErr
+	}
+	return undelivered{err}
 }
 
 func classifyTransport(ctx context.Context) error {

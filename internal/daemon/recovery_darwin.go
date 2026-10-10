@@ -461,7 +461,7 @@ func (daemon *Daemon) recoverWithoutResult(ctx context.Context, run kernel.Run, 
 		code, detail := kernel.FailureInternal, "recovered active attempt without an attempt result"
 		if run.Phase == kernel.RunAdmitted {
 			// It never started (a release restart can land here): requeue it.
-			code, detail = kernel.FailureProtocol, kernel.NeverStartedRunDetail
+			code, detail = kernel.FailureTransient, kernel.NeverStartedRunDetail
 		}
 		failure, err := kernel.NewFailureProposal(code, detail)
 		if err != nil {
@@ -652,8 +652,11 @@ func recoveredConsumedAttemptResult(run kernel.Run, runtimeRoot, providerProcess
 	return kernel.NewInnerConvergedAttemptResult(run.ID, run.CredentialDigest, run.ResultProofDigest(), runtimeRoot.Identity, providerProcess.Identity, exit)
 }
 
+// A variable only so tests can force a pass to yield after one bounded call.
+var runtimeCleanupPass = 4 * time.Second
+
 func (daemon *Daemon) removeRecordedRuntime(ctx context.Context, parent *RuntimeParent, runID kernel.RunID, fileIdentity runner.FileIdentity) error {
-	deadline := time.Now().Add(4 * time.Second)
+	deadline := time.Now().Add(runtimeCleanupPass)
 	for {
 		done, err := RemoveRecordedRuntime(ctx, parent, runID.String(), fileIdentity)
 		if err != nil {

@@ -20,12 +20,22 @@ import (
 // fakePublishMaintainer is the App's journal: one result per operation id,
 // a replay of a completed id answered from it.
 type fakePublishMaintainer struct {
-	main     string
-	tip      string // the pull request branch's head
-	journal  map[string]json.RawMessage
-	writes   []map[string]any // every write sent
-	refuse   string           // a path publish_commit refuses
-	loseNext bool             // the next write lands but its response is lost
+	main           string
+	tip            string // the pull request branch's head
+	journal        map[string]json.RawMessage
+	planned        map[string]bool  // ids a write stopped before GitHub
+	writes         []map[string]any // every write sent
+	refuse         string           // a path publish_commit refuses
+	externalRefuse bool             // the Maintainer refuses before the App can apply it
+	unavailable    bool             // the Maintainer authority is temporarily unavailable
+	loseNext       bool             // the next write lands but its response is lost
+}
+
+func TestRepairPublicationUsesTaskTitle(t *testing.T) {
+	want := "Repair team/repo#31"
+	if got := publicationMessage(kernel.PublishableChange{Task: kernel.Task{Title: want}}); got != want {
+		t.Fatalf("repair publication message = %q, want %q", got, want)
+	}
 }
 
 func (f *fakePublishMaintainer) call(_ context.Context, name string, arguments map[string]any) (json.RawMessage, error) {
@@ -40,12 +50,18 @@ func (f *fakePublishMaintainer) call(_ context.Context, name string, arguments m
 		if result, ok := f.journal[id]; ok {
 			return json.Marshal(map[string]any{"operation_id": id, "state": "completed", "result": result})
 		}
+		if f.planned[id] {
+			return json.Marshal(map[string]any{"operation_id": id, "state": "planned"})
+		}
 		return json.Marshal(map[string]any{"operation_id": id, "state": "missing"})
 	}
-	if _, replay := f.journal[id]; replay {
+	if _, replay := f.journal[id]; replay || f.planned[id] {
 		return nil, fmt.Errorf("conflict: operation %s replayed", id)
 	}
 	f.writes = append(f.writes, map[string]any{"name": name, "arguments": arguments})
+	if f.unavailable {
+		return nil, fmt.Errorf("review: Maintainer rejected operation: unavailable: Maintainer authority is unavailable.")
+	}
 	var result json.RawMessage
 	switch name {
 	case "publish_commit":
@@ -54,6 +70,9 @@ func (f *fakePublishMaintainer) call(_ context.Context, name string, arguments m
 		}
 		for _, entry := range arguments["changes"].([]map[string]any) {
 			if f.refuse != "" && strings.HasPrefix(entry["path"].(string), f.refuse) {
+				if f.externalRefuse {
+					return nil, fmt.Errorf("review: Maintainer rejected operation: refused: branch precondition")
+				}
 				return nil, fmt.Errorf("refused: %s cannot be written", f.refuse)
 			}
 		}
@@ -233,6 +252,22 @@ func TestFirstPublicationOfAChangedHeadBuildsOnItsBranch(t *testing.T) {
 	}
 }
 
+// A pull request create left planned (stopped before GitHub, bound to the
+// main it named) is not replayed against a moved main: the create goes under
+// an id bound to the current main.
+func TestAPlannedPullRequestCreateMovesToTheCurrentMain(t *testing.T) {
+	fixture, c, source, app, checkout := publishFixture(t, 1, false)
+	ctx := context.Background()
+	app.planned = map[string]bool{uuid5("dark-factory:" + c.Change.String() + ":pr-" + c.Head[:8]): true}
+	if err := fixture.daemon.publishChange(ctx, c, "team/repo", source, app.call, checkout); err != nil {
+		t.Fatal(err)
+	}
+	pull := app.writes[len(app.writes)-1]["arguments"].(map[string]any)
+	if pull["operation_id"] != uuid5("dark-factory:"+c.Change.String()+":pr-"+c.Head[:8]+"-"+app.main) || pull["base_sha"] != app.main {
+		t.Fatalf("pull request = %+v", pull)
+	}
+}
+
 // A branch an earlier attempt already brought to the head's tree, with no
 // pull request, gets its pull request at that branch head and no commit.
 func TestFirstPublicationOfAnAlreadyPublishedTreeOpensItsPullRequest(t *testing.T) {
@@ -327,7 +362,7 @@ func TestRefusedPublicationEscalatesOnce(t *testing.T) {
 	}
 	document, found, err := fixture.store.ReviewOperation(ctx, c.Task.ProjectID, kernel.PublishFailureID(c.Change, c.Revision))
 	var op review.Operation
-	if err != nil || !found || json.Unmarshal(document, &op) != nil || op.State != "publish_failed" || !op.Handled ||
+	if err != nil || !found || json.Unmarshal(document, &op) != nil || !strings.Contains(string(document), `"retryable":false`) || op.State != "publish_failed" || !op.Handled ||
 		!strings.HasPrefix(op.Escalation, "factoryd cannot publish change "+c.Change.String()+" for task "+c.Task.ID.String()+": ") || !strings.Contains(op.Escalation, "refused: .github/workflows") {
 		t.Fatalf("failure record = %s %v %v", document, found, err)
 	}
@@ -336,6 +371,58 @@ func TestRefusedPublicationEscalatesOnce(t *testing.T) {
 	}
 	if len(app.writes) != 1 {
 		t.Fatalf("writes = %d", len(app.writes))
+	}
+	// A retry past the window that is refused again refreshes the record
+	// without escalating a second time.
+	if err := fixture.daemon.publishChange(ctx, c, "team/repo", source, app.call, checkout); err != nil {
+		t.Fatal(err)
+	}
+	document, found, err = fixture.store.ReviewOperation(ctx, c.Task.ProjectID, kernel.PublishFailureID(c.Change, c.Revision))
+	op = review.Operation{}
+	if err != nil || !found || json.Unmarshal(document, &op) != nil || op.State != "publish_failed" || op.Escalation != "" || !strings.Contains(op.Detail, "refused: .github/workflows") {
+		t.Fatalf("repeat failure record = %s %v %v", document, found, err)
+	}
+}
+
+func TestExternalPublicationRefusalRetriesWhenItClears(t *testing.T) {
+	fixture, c, source, app, checkout := publishFixture(t, 1, false)
+	app.refuse, app.externalRefuse = "f00.txt", true
+	ctx := context.Background()
+	if err := fixture.daemon.publishChange(ctx, c, "team/repo", source, app.call, checkout); err != nil {
+		t.Fatal(err)
+	}
+	document, found, err := fixture.store.ReviewOperation(ctx, c.Task.ProjectID, kernel.PublishFailureID(c.Change, c.Revision))
+	var op review.Operation
+	if err != nil || !found || json.Unmarshal(document, &op) != nil || !op.Retryable {
+		t.Fatalf("external refusal = %s %v %v", document, found, err)
+	}
+	app.refuse, app.externalRefuse = "", false
+	if err := fixture.daemon.publishChange(ctx, c, "team/repo", source, app.call, checkout); err != nil {
+		t.Fatal(err)
+	}
+	if len(app.writes) != 3 {
+		t.Fatalf("writes after refusal cleared = %d, want 3", len(app.writes))
+	}
+}
+
+func TestUnavailablePublicationRetriesWhenServiceRecovers(t *testing.T) {
+	fixture, c, source, app, checkout := publishFixture(t, 1, false)
+	app.unavailable = true
+	ctx := context.Background()
+	if err := fixture.daemon.publishChange(ctx, c, "team/repo", source, app.call, checkout); err != nil {
+		t.Fatal(err)
+	}
+	document, found, err := fixture.store.ReviewOperation(ctx, c.Task.ProjectID, kernel.PublishFailureID(c.Change, c.Revision))
+	var op review.Operation
+	if err != nil || !found || json.Unmarshal(document, &op) != nil || !op.Retryable {
+		t.Fatalf("unavailable refusal = %s %v %v", document, found, err)
+	}
+	app.unavailable = false
+	if err := fixture.daemon.publishChange(ctx, c, "team/repo", source, app.call, checkout); err != nil {
+		t.Fatal(err)
+	}
+	if len(app.writes) != 3 {
+		t.Fatalf("writes after service recovery = %d, want 3", len(app.writes))
 	}
 }
 
@@ -371,29 +458,30 @@ func TestDisabledAcceptedRepositoryEscalatesOnce(t *testing.T) {
 		t.Fatal(err)
 	}
 	c.Accepted.RepositoryID = id
-	for range 2 {
+	// The first pass escalates; a repeat only refreshes the one record.
+	for _, escalation := range []string{"factoryd cannot publish change " + c.Change.String() + " for task " + c.Task.ID.String() + ": repository disabled for new work", ""} {
 		if err := fixture.daemon.publishSettledChange(ctx, c); err != nil {
 			t.Fatal(err)
 		}
-	}
-	page, err := fixture.store.Production(ctx, c.Task.ProjectID, 0, 8, kernel.UnixMillis{})
-	if err != nil {
-		t.Fatal(err)
-	}
-	escalations := 0
-	for _, record := range page.Records {
-		var op review.Operation
-		if record.Kind == "reviewer" && json.Unmarshal(record.Document, &op) == nil && op.Escalation != "" {
-			escalations++
-			if op.ID != kernel.PublishFailureID(c.Change, c.Revision) || op.Escalation != "factoryd cannot publish change "+c.Change.String()+" for task "+c.Task.ID.String()+": repository disabled for new work" {
-				t.Fatalf("escalation = %+v", op)
+		page, err := fixture.store.Production(ctx, c.Task.ProjectID, 0, 8, kernel.UnixMillis{})
+		if err != nil {
+			t.Fatal(err)
+		}
+		failures := 0
+		for _, record := range page.Records {
+			var op review.Operation
+			if record.Kind == "reviewer" && json.Unmarshal(record.Document, &op) == nil && op.State == "publish_failed" {
+				failures++
+				if op.ID != kernel.PublishFailureID(c.Change, c.Revision) || !op.Retryable || op.Escalation != escalation || op.Detail != "repository disabled for new work" {
+					t.Fatalf("failure record = %+v", op)
+				}
+			}
+			if record.Kind == "pull_request" {
+				t.Fatalf("published into a disabled repository: %s", record.Document)
 			}
 		}
-		if record.Kind == "pull_request" {
-			t.Fatalf("published into a disabled repository: %s", record.Document)
+		if failures != 1 {
+			t.Fatalf("failure records = %d, want 1", failures)
 		}
-	}
-	if escalations != 1 {
-		t.Fatalf("escalations = %d, want 1", escalations)
 	}
 }

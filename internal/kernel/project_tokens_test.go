@@ -6,13 +6,14 @@ import (
 )
 
 func TestProjectTokenCeilingStopsAdmissionUntilTheAllowanceIsRaised(t *testing.T) {
+	t.Parallel()
 	store, _, project, agent := newAdmissionStore(t, RoleOrchestrator, 1)
 	defer store.Close()
 	ctx := context.Background()
 	limit := func(tokens uint64, at int64) {
 		t.Helper()
 		var err error
-		if project, err = store.SetProjectLimitsWithTokens(ctx, project.ID, project.Revision, 0, 0, &tokens, mustTime(t, at)); err != nil {
+		if project, err = store.SetProjectLimitsWithTokens(ctx, project.ID, project.Revision, 0, 0, &tokens, nil, nil, mustTime(t, at)); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -50,7 +51,7 @@ func TestProjectTokenCeilingStopsAdmissionUntilTheAllowanceIsRaised(t *testing.T
 	}
 	// A stale revision changes neither the run limits nor the token ceiling.
 	stale, tokens := project.Revision, uint64(999)
-	if _, err := store.SetProjectLimitsWithTokens(ctx, project.ID, Revision{value: stale.Int64() - 1}, 5, 5, &tokens, mustTime(t, 6)); err == nil {
+	if _, err := store.SetProjectLimitsWithTokens(ctx, project.ID, Revision{value: stale.Int64() - 1}, 5, 5, &tokens, nil, nil, mustTime(t, 6)); err == nil {
 		t.Fatal("stale limits edit was accepted")
 	}
 	if got, _ := store.ProjectTokens(ctx, project.ID); got.TokenLimit != 100 {
@@ -69,6 +70,7 @@ func TestProjectTokenCeilingStopsAdmissionUntilTheAllowanceIsRaised(t *testing.T
 }
 
 func TestProjectAtItsTokenCeilingAdmitsNothing(t *testing.T) {
+	t.Parallel()
 	store, _, project, agent := newAdmissionStore(t, RoleOrchestrator, 1)
 	defer store.Close()
 	ctx := context.Background()

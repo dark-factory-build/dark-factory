@@ -27,7 +27,6 @@ const (
 	terminalPayloadCap          = 8 << 10
 	terminalPendingBytesCap     = 256 << 10
 	liveAttemptCredit           = 1 << 20
-	liveAttemptStoreTimeout     = 2 * time.Second
 	liveAttemptEffectLimit      = 4 * time.Second
 	stalledRunLivenessThreshold = 10 * time.Minute
 	// firstOutputBudget bounds a run that never started: no attempt API call
@@ -37,6 +36,9 @@ const (
 	// to running was 23 s at p99 over 3708 live runs; it is requeued once.
 	firstOutputBudget = 3 * time.Minute
 )
+
+// A variable only so tests can shrink the wait; production never changes it.
+var liveAttemptStoreTimeout = 2 * time.Second
 
 var (
 	ErrTerminalNotReady = errors.New("daemon: terminal is not ready")
@@ -297,10 +299,11 @@ type liveAttempt struct {
 	// recovered or replayed after this owner is gone.
 	pendingOutcome *kernel.Proposal
 	// usageLimit is a provider usage-limit or capacity report seen in live output and owed
-	// as a failed outcome; usageScan carries the tail across a frame boundary
+	// as a failed outcome with usageCode; usageScan carries the tail across a frame boundary
 	// and usageScanned is the stream offset scanned so far. All belong to the
 	// owner goroutine.
 	usageLimit   string
+	usageCode    kernel.FailureCode
 	usageScan    []byte
 	usageScanned uint64
 

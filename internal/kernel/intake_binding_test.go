@@ -60,6 +60,7 @@ func runningIntakeOverseer(t *testing.T) (*Store, Run, IntakeSource, IntakeAccep
 }
 
 func TestIntakeImportNeitherWakesNorAssignsTheOverseer(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	store, _, project, overseer := newAdmissionStore(t, RoleOrchestrator, 4)
 	defer store.Close()
@@ -94,6 +95,7 @@ func TestIntakeImportNeitherWakesNorAssignsTheOverseer(t *testing.T) {
 }
 
 func TestCancelledIntakeCanBeWithdrawnThenImported(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	store, _, project, _ := newAdmissionStore(t, RoleOrchestrator, 4)
 	defer store.Close()
@@ -127,46 +129,117 @@ func TestCancelledIntakeCanBeWithdrawnThenImported(t *testing.T) {
 	if _, err := store.writer.ExecContext(ctx, `UPDATE tasks SET status = 'cancelled', completed_at_ms = ?, updated_at_ms = ? WHERE id = ?`, 42, 42, task.ID.Bytes()); err != nil {
 		t.Fatal(err)
 	}
+	// It never ran, so it is queued again at its work revision, and the next
+	// validated write still finds the history consistent.
 	requeued, err := store.ImportIntakeAcceptance(ctx, accepted.ID, mustTime(t, 43), source)
-	if err != nil || requeued.Status != TaskQueued || requeued.WorkRevision.Int64() != task.WorkRevision.Int64()+1 {
+	if err != nil || requeued.Status != TaskQueued || requeued.WorkRevision != task.WorkRevision {
 		t.Fatalf("reimported intake task: %+v %v", requeued, err)
 	}
 	current, found, err := store.IntakeAcceptance(ctx, accepted.ID)
 	if err != nil || !found || current.WithdrawnAt != nil {
 		t.Fatalf("reimported acceptance: %+v %v %v", current, found, err)
 	}
+	priority := int64(3)
+	if _, err := store.UpdateTaskForOperator(ctx, requeued.ID, requeued.Revision, TaskPatch{Priority: &priority}, mustTime(t, 44)); err != nil {
+		t.Fatalf("next validated write after reimport: %v", err)
+	}
 }
 
+// An intake task wakes its configured overseer after an automatic end the
+// overseer could retry, and not after an operator's cancel or once its issue
+// is withdrawn.
 func TestFailedIntakeWakesItsConfiguredOverseer(t *testing.T) {
+	t.Parallel()
+	for _, test := range []struct {
+		name, status            string
+		expired, withdrawn, due bool
+	}{
+		{"failed", "failed", false, false, true},
+		{"expired", "cancelled", true, false, true},
+		{"operator cancel", "cancelled", false, false, false},
+		{"withdrawn", "failed", false, true, false},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			ctx := context.Background()
+			store, run, source, accepted := runningIntakeOverseer(t)
+			policy, after, instruction := IdleStandingInstruction, uint32(1), "Supervise."
+			overseer, found, err := store.Agent(ctx, run.AgentID)
+			if err != nil || !found {
+				t.Fatalf("overseer: %+v %v", overseer, err)
+			}
+			if _, err := store.UpdateAgent(ctx, run.AgentID, overseer.Revision, AgentPatch{IdlePolicy: &policy, IdleAfterSeconds: &after, IdleInstruction: &instruction}, mustTime(t, 40)); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := store.writer.ExecContext(ctx, `UPDATE tasks SET status = ?, completed_at_ms = ?, updated_at_ms = ? WHERE id = ?`, test.status, 1000, 1000, accepted.TaskID.Bytes()); err != nil {
+				t.Fatal(err)
+			}
+			if test.expired {
+				if _, err := store.writer.ExecContext(ctx, `INSERT INTO task_automatic_events(task_id, task_revision, kind, at_ms) SELECT id, revision, 'blocked_expired', 1000 FROM tasks WHERE id = ?`, accepted.TaskID.Bytes()); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if test.withdrawn {
+				if _, err := store.writer.ExecContext(ctx, `UPDATE intake_acceptances SET withdrawn_at_ms = 1000 WHERE id = ?`, accepted.ID.Bytes()); err != nil {
+					t.Fatal(err)
+				}
+			}
+			read, err := store.beginRead(ctx)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer read.Close()
+			overseer, found, err = agentByID(ctx, read.connection, source.OverseerAgentID)
+			if err != nil || !found {
+				t.Fatalf("overseer: %+v %v", overseer, err)
+			}
+			body, due, err := overseerWake(ctx, read.connection, overseer, 1000+overseerWakeSettle.Milliseconds(), nil)
+			if err != nil || due != test.due || due && !strings.Contains(body, accepted.TaskID.String()) {
+				t.Fatalf("intake wake: due=%v body=%q err=%v, want due=%v", due, body, err, test.due)
+			}
+		})
+	}
+}
+
+// Re-importing a withdrawn receipt reinstates only the latest content: once
+// the issue was accepted again with new content, the old receipt stays
+// withdrawn and its task stays cancelled.
+func TestWithdrawnOlderIntakeContentIsNotReinstated(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
-	store, run, source, accepted := runningIntakeOverseer(t)
-	policy, after, instruction := IdleStandingInstruction, uint32(1), "Supervise."
-	overseer, found, err := store.Agent(ctx, run.AgentID)
-	if err != nil || !found {
-		t.Fatalf("overseer: %+v %v", overseer, err)
-	}
-	if _, err := store.UpdateAgent(ctx, run.AgentID, overseer.Revision, AgentPatch{IdlePolicy: &policy, IdleAfterSeconds: &after, IdleInstruction: &instruction}, mustTime(t, 40)); err != nil {
+	store, source := intakeExactRevisionStore(t)
+	if _, err := store.SetIntakeSourceEnabled(ctx, source.ID, source.Revision, true, mustTime(t, 6)); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := store.writer.ExecContext(ctx, `UPDATE tasks SET status = 'failed', completed_at_ms = ?, updated_at_ms = ? WHERE id = ?`, 1000, 1000, accepted.TaskID.Bytes()); err != nil {
-		t.Fatal(err)
-	}
-	read, err := store.beginRead(ctx)
+	older := intakeSnapshotForTest()
+	accepted, err := store.AcceptIntakeSnapshot(ctx, source.ID, older, mustTime(t, 7))
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer read.Close()
-	overseer, found, err = agentByID(ctx, read.connection, source.OverseerAgentID)
-	if err != nil || !found {
-		t.Fatalf("overseer: %+v %v", overseer, err)
+	task, err := store.ImportIntakeAcceptance(ctx, accepted.ID, mustTime(t, 8))
+	if err != nil {
+		t.Fatal(err)
 	}
-	body, due, err := overseerWake(ctx, read.connection, overseer, 1000+overseerWakeSettle.Milliseconds())
-	if err != nil || !due || !strings.Contains(body, accepted.TaskID.String()) {
-		t.Fatalf("failed intake wake: due=%v body=%q err=%v", due, body, err)
+	if _, err := store.WithdrawIntakeAcceptance(ctx, accepted.ID, mustTime(t, 9)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.UpdateTaskForOperator(ctx, task.ID, task.Revision, TaskPatch{Cancel: true}, mustTime(t, 10)); err != nil {
+		t.Fatal(err)
+	}
+	newer := older
+	newer.Body = "edited after withdrawal"
+	if _, err := store.AcceptIntakeSnapshot(ctx, source.ID, newer, mustTime(t, 11)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.ImportIntakeAcceptance(ctx, accepted.ID, mustTime(t, 12)); !errors.Is(err, ErrConflict) {
+		t.Fatalf("older withdrawn content reinstated: %v", err)
+	}
+	if current, _, err := store.IntakeAcceptance(ctx, accepted.ID); err != nil || current.WithdrawnAt == nil {
+		t.Fatalf("older receipt = %+v, %v", current, err)
 	}
 }
 
 func TestIntakeDescendantsRetainSourceAndDestinationAndCannotAdoptForeignReplay(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	store, run, source, accepted := runningIntakeOverseer(t)
 	other, err := store.AddProjectRepository(ctx, NewProjectRepository{ID: repositoryID(t, 221), ProjectID: run.ProjectID, Name: "other", Root: "/other-intake", BaseRef: "release"}, mustTime(t, 40))
@@ -235,6 +308,7 @@ func TestIntakeDescendantsRetainSourceAndDestinationAndCannotAdoptForeignReplay(
 }
 
 func TestIntakeWithdrawalBlocksDelegationAndAdmissionAndFindsChildren(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	store, run, source, accepted := runningIntakeOverseer(t)
 	worker, err := store.CreateAgent(ctx, NewAgent{ID: agentID(t, 230), ProjectID: run.ProjectID, Name: "worker", Role: RoleWorker, Provider: ProviderShell, ToolBudgetLimit: 10}, mustTime(t, 40))
@@ -291,6 +365,7 @@ func TestIntakeWithdrawalBlocksDelegationAndAdmissionAndFindsChildren(t *testing
 }
 
 func TestIntakeReplacementInheritsBinding(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	store, run, _, accepted := runningIntakeOverseer(t)
 	task, _, err := store.Task(ctx, run.TaskID)
@@ -319,6 +394,7 @@ func TestIntakeReplacementInheritsBinding(t *testing.T) {
 }
 
 func TestIntakeBindingCorruptionRefusedBeforeMutation(t *testing.T) {
+	t.Parallel()
 	for _, statement := range []string{
 		`DELETE FROM intake_task_bindings`,
 		`UPDATE task_repository_bindings SET repository_id = ? WHERE task_id = ?`,

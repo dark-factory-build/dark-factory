@@ -33,10 +33,12 @@ const (
 // durable Store and live attempt owners. It does not own an accept loop; the
 // caller accepts and hands one connection to HandleConnection.
 type Daemon struct {
-	log      io.Writer
-	intakeMu sync.Mutex
-	linear   *linear.Host
-	github   *maintainer.Host
+	log io.Writer
+	// statusOnly is set before the listener opens, so it needs no lock.
+	statusOnly bool
+	intakeMu   sync.Mutex
+	linear     *linear.Host
+	github     *maintainer.Host
 	// The scheduler's intake pass (tickIntake): per-source progress, guarded
 	// by intakeMu, and whether a pass is running.
 	intakePolls map[kernel.IntakeSourceID]*intakePoll
@@ -66,12 +68,27 @@ type Daemon struct {
 	publicRepoMu        sync.Mutex
 	publicRepos         map[string]*publicRepository
 	productionRefreshAt map[kernel.ProjectID]time.Time
+	// What factoryd knows of its health only in memory, for the overseer's
+	// wake (overseerHealth): each held condition, and the streak of
+	// Maintainer faults.
+	healthMu         sync.Mutex
+	heldHealth       map[string]kernel.OverseerHealth
+	maintainerFaults struct {
+		first, last time.Time
+		count       int
+		fault       string
+	}
 	// The scheduler's merge-pipeline pass (tickMergePipeline): the next pass
 	// time, read only by the scheduler loop, and whether a pass is running.
 	pipelineAt   atomic.Int64 // unix nanoseconds of the next merge-stage pass
 	pipelineBusy atomic.Bool
-	store        *kernel.Store
-	now          func() time.Time
+	// The scheduler's Change reclaim pass (tickChangeReclaim), alike, and the
+	// Changes it kept, each logged once; only the pass in flight touches it.
+	reclaimAt   atomic.Int64
+	reclaimBusy atomic.Bool
+	keptChanges map[kernel.ChangeID]bool
+	store       *kernel.Store
+	now         func() time.Time
 	// livenessClock is deliberately separate from now. The latter is also
 	// used by supervisor ordering tests and may be an injected, blocking
 	// clock; liveness telemetry must never enter that ordering boundary.
@@ -92,6 +109,9 @@ type Daemon struct {
 	browserLifecycleMu sync.Mutex
 	browsers           map[*BrowserRuntime]struct{}
 	browserClosing     bool
+	// console is the signed console bundle, its first 32 bytes the node
+	// public key (relayhost.SignConsole); nil without a home or a bundle.
+	console []byte
 	// relay is the optional outbound relay connector. It is a client of the
 	// browser listener above, not a second authority, so it shares that
 	// listener's lifecycle gate.
@@ -192,6 +212,10 @@ func (daemon *Daemon) livenessTimestamp() time.Time {
 	return time.Now()
 }
 
+// AnswerStatusOnly makes the daemon refuse every call but web_status: a
+// trial build must act on nothing while it proves itself.
+func (daemon *Daemon) AnswerStatusOnly() { daemon.statusOnly = true }
+
 // HandleConnection synchronously consumes exactly one authenticated request,
 // dispatches it, writes exactly one response, and closes the connection. The
 // API transport has already authenticated the domain and credential before a
@@ -204,6 +228,9 @@ func (daemon *Daemon) HandleConnection(ctx context.Context, connection *api.Conn
 	call, err := connection.Receive(ctx)
 	if err != nil {
 		return err
+	}
+	if daemon.statusOnly && call.Kind() != api.CallWebStatus {
+		return fmt.Errorf("%w: a trial build answers only web_status", kernel.ErrConflict)
 	}
 	// The overseer snapshot is observation, not provider work. Counting the
 	// request itself would make a snapshot unable to report the quiet interval
@@ -777,7 +804,7 @@ func (daemon *Daemon) attemptSource(ctx context.Context, call api.Call) api.Repl
 	}
 	// A shell provider has no read-only boundary for the receipt's paths.
 	if authority.Provider == kernel.ProviderShell {
-		return newErrorReply(api.RemoteUnavailable)
+		return newErrorReply(api.RemoteForbidden)
 	}
 	taskIDText, ok := call.AttemptSourceTaskID()
 	if !ok {
@@ -1293,7 +1320,7 @@ func (daemon *Daemon) setProjectLimits(ctx context.Context, call api.Call) api.R
 	if err != nil {
 		return newErrorReply(api.RemoteInternal)
 	}
-	project, err := daemon.store.SetProjectLimitsWithTokens(ctx, id, expected, input.RunBudget, input.MaxRunSeconds, input.TokenBudget, at)
+	project, err := daemon.store.SetProjectLimitsWithTokens(ctx, id, expected, input.RunBudget, input.MaxRunSeconds, input.TokenBudget, input.SpecialistRuns, input.SpecialistOpenProposals, at)
 	if err != nil {
 		return newErrorReply(remoteErrorCode(err))
 	}
@@ -1368,7 +1395,7 @@ func (daemon *Daemon) setAgentIdlePolicy(ctx context.Context, call api.Call) api
 	if err != nil {
 		return newErrorReply(api.RemoteInternal)
 	}
-	agent, err := daemon.store.UpdateAgent(ctx, id, expected, kernel.AgentPatch{IdlePolicy: &policy, IdleAfterSeconds: &input.AfterSeconds, IdleInstruction: &input.Instruction, IdleRunBudget: &budget}, at)
+	agent, err := daemon.store.UpdateAgent(ctx, id, expected, kernel.AgentPatch{IdlePolicy: &policy, IdleAfterSeconds: &input.AfterSeconds, IdleInstruction: &input.Instruction, IdleRunBudget: &budget, IdleWakeOn: &input.WakeOn}, at)
 	if err != nil {
 		return newErrorReply(remoteErrorCode(err))
 	}
@@ -1719,7 +1746,8 @@ func (daemon *Daemon) overseerDigest(ctx context.Context, call api.Call) (kernel
 		return kernel.AttemptAuthority{}, kernel.AttemptDigest{}, &failure
 	}
 	authority, err := daemon.store.AuthenticateAttempt(ctx, digest)
-	if err != nil || authority.Role != kernel.RoleOrchestrator {
+	// A specialist may read the overseer status, and nothing else here.
+	if err != nil || authority.Role != kernel.RoleOrchestrator && !(authority.Specialist && call.Kind() == api.CallOverseerSnapshot) {
 		if err == nil {
 			err = kernel.ErrUnauthorized
 		}

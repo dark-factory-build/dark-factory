@@ -396,3 +396,197 @@ func TestIntakePendingCursorPassesUnavailableReceiptAndRetriesOnWrap(t *testing.
 		}
 	}
 }
+
+// An operator's cancel sticks: the tick retries only automatic ends. The
+// operator's withdraw then import reinstates the receipt and retries the
+// cancelled task.
+func TestIntakeOperatorCancelSticksAndImportRetries(t *testing.T) {
+	fixture := newDispatchFixture(t)
+	ctx := context.Background()
+	project := mustProjectID(t, testID(190))
+	if _, err := fixture.store.CreateProject(ctx, kernel.NewProject{ID: project, Name: "liveness", Root: "/liveness"}, mustKernelTime(t, 101)); err != nil {
+		t.Fatal(err)
+	}
+	raw, _ := hex.DecodeString(testID(191))
+	id, _ := kernel.IntakeSourceIDFromBytes(raw)
+	source, err := fixture.store.CreateIntakeSource(ctx, kernel.NewIntakeSource{ID: id, ProjectID: project, TargetRepositoryID: kernel.RepositoryID(project), GitHubRepositoryID: 42, GitHubRepositoryName: "team/issues", LabelFilter: "factory:ready", Policy: kernel.IntakePolicyManual, PollSeconds: 60, AdmissionLimit: 1}, mustKernelTime(t, 102))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if source, err = fixture.store.SetIntakeSourceEnabled(ctx, id, source.Revision, true, mustKernelTime(t, 103)); err != nil {
+		t.Fatal(err)
+	}
+	issue := maintainer.Issue{ID: 81, NodeID: "I_liveness", Number: 7, Title: "Fix it", Body: "Exact instructions", State: "open", Labels: []string{"factory:ready"}}
+	issue.Author.Login, issue.Author.Type = "outsider", "User"
+	fixture.daemon.intakeIssues = func(context.Context, string, uint64, uint32, string, uint64) (maintainer.IssuePage, error) {
+		return maintainer.IssuePage{RepositoryID: 42, Issues: []maintainer.Issue{issue}}, nil
+	}
+	hash := intakeSnapshot(source, issue).ContentHash()
+	receipt := fixture.daemon.Intake(ctx, api.IntakeInput{Action: "accept", SourceID: id.String(), ExpectedRevision: uint64(source.Revision.Int64()), IssueNumber: issue.Number, ContentHash: hex.EncodeToString(hash[:])})
+	tick := api.IntakeInput{Action: "tick", SourceID: id.String(), Page: 1}
+	if got := fixture.daemon.Intake(ctx, tick); got.State != "ok" || len(got.ImportedTasks) != 1 || got.ImportedTasks[0] != receipt.TaskID {
+		t.Fatalf("import: %+v, receipt %+v", got, receipt)
+	}
+	taskID := mustTaskID(t, receipt.TaskID)
+	status := func(want kernel.TaskStatus) kernel.Task {
+		t.Helper()
+		task, found, err := fixture.store.Task(ctx, taskID)
+		if err != nil || !found || task.Status != want {
+			t.Fatalf("task = %+v, found=%v, err=%v, want %s", task, found, err, want)
+		}
+		return task
+	}
+	cancel := func() {
+		t.Helper()
+		task := status(kernel.TaskQueued)
+		at, err := fixture.daemon.timestamp()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := fixture.store.UpdateTaskForOperator(ctx, task.ID, task.Revision, kernel.TaskPatch{Cancel: true}, at); err != nil {
+			t.Fatal(err)
+		}
+	}
+	cancel()
+	fixture.daemon.Intake(ctx, tick)
+	status(kernel.TaskCancelled)
+
+	if got := fixture.daemon.Intake(ctx, api.IntakeInput{Action: "withdraw", AcceptanceID: receipt.AcceptanceID}); got.State != "withdrawn" {
+		t.Fatalf("withdraw: %+v", got)
+	}
+	fixture.daemon.Intake(ctx, tick)
+	status(kernel.TaskCancelled)
+	if got := fixture.daemon.Intake(ctx, api.IntakeInput{Action: "import", AcceptanceID: receipt.AcceptanceID}); got.State != "imported" || got.TaskID != receipt.TaskID {
+		t.Fatalf("import after withdraw: %+v", got)
+	}
+	status(kernel.TaskQueued)
+}
+
+// The headline: an open, labelled issue retries its own task after an
+// automatic end. Here the task's run fails (its runner vanished before any
+// session), and the next tick queues the task again.
+func TestIntakeTickRetriesAnAutomaticEnd(t *testing.T) {
+	fixture := newDispatchFixture(t)
+	ctx := context.Background()
+	project := mustProjectID(t, testID(192))
+	if _, err := fixture.store.CreateProject(ctx, kernel.NewProject{ID: project, Name: "automatic", Root: "/automatic"}, mustKernelTime(t, 101)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := fixture.store.CreateAgent(ctx, kernel.NewAgent{ID: mustAgentID(t, testID(193)), ProjectID: project, Name: "worker", Role: kernel.RoleWorker, Provider: kernel.ProviderCodex, ToolBudgetLimit: 2}, mustKernelTime(t, 102)); err != nil {
+		t.Fatal(err)
+	}
+	raw, _ := hex.DecodeString(testID(194))
+	id, _ := kernel.IntakeSourceIDFromBytes(raw)
+	source, err := fixture.store.CreateIntakeSource(ctx, kernel.NewIntakeSource{ID: id, ProjectID: project, TargetRepositoryID: kernel.RepositoryID(project), GitHubRepositoryID: 42, GitHubRepositoryName: "team/issues", LabelFilter: "factory:ready", Policy: kernel.IntakePolicyManual, PollSeconds: 60, AdmissionLimit: 1}, mustKernelTime(t, 103))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if source, err = fixture.store.SetIntakeSourceEnabled(ctx, id, source.Revision, true, mustKernelTime(t, 104)); err != nil {
+		t.Fatal(err)
+	}
+	issue := maintainer.Issue{ID: 82, NodeID: "I_automatic", Number: 8, Title: "Fix it", Body: "Exact instructions", State: "open", Labels: []string{"factory:ready"}}
+	issue.Author.Login, issue.Author.Type = "outsider", "User"
+	exactReads := 0
+	fixture.daemon.intakeIssues = func(_ context.Context, _ string, _ uint64, _ uint32, _ string, number uint64) (maintainer.IssuePage, error) {
+		if number != 0 {
+			exactReads++
+		}
+		return maintainer.IssuePage{RepositoryID: 42, Issues: []maintainer.Issue{issue}}, nil
+	}
+	hash := intakeSnapshot(source, issue).ContentHash()
+	receipt := fixture.daemon.Intake(ctx, api.IntakeInput{Action: "accept", SourceID: id.String(), ExpectedRevision: uint64(source.Revision.Int64()), IssueNumber: issue.Number, ContentHash: hex.EncodeToString(hash[:])})
+	tick := api.IntakeInput{Action: "tick", SourceID: id.String(), Page: 1}
+	if got := fixture.daemon.Intake(ctx, tick); len(got.ImportedTasks) != 1 {
+		t.Fatalf("import: %+v, receipt %+v", got, receipt)
+	}
+	failIntakeRun(t, fixture)
+	task, _, err := fixture.store.Task(ctx, mustTaskID(t, receipt.TaskID))
+	if err != nil || task.Status != kernel.TaskFailed {
+		t.Fatalf("settled task = %+v, %v", task, err)
+	}
+	fixture.daemon.now = func() time.Time { return time.Unix(2000, 0) }
+	exactReads = 0
+	fixture.daemon.Intake(ctx, tick)
+	if task, _, err = fixture.store.Task(ctx, task.ID); err != nil || task.Status != kernel.TaskQueued || task.WorkRevision.Int64() != 2 {
+		t.Fatalf("automatic end not retried: %+v, %v", task, err)
+	}
+	// The tick reuses the issue it listed; one read per accepted issue per
+	// tick spent the connection's GitHub quota.
+	if exactReads != 0 {
+		t.Fatalf("tick re-read the listed issue %d times", exactReads)
+	}
+}
+
+// failIntakeRun admits the queued worker task and fails its run as recovery
+// does when the runner vanished before a session, abandoning its Change.
+func failIntakeRun(t *testing.T, fixture *dispatchFixture) {
+	t.Helper()
+	ctx := context.Background()
+	at, err := fixture.daemon.timestamp()
+	if err != nil {
+		t.Fatal(err)
+	}
+	base := at.Int64()
+	factory, err := fixture.store.Factory(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := fixture.store.SetDispatch(ctx, factory.Revision, true, mustKernelTime(t, base)); err != nil {
+		t.Fatal(err)
+	}
+	id := func(value byte) []byte { return mustIDBytes(t, testID(value)) }
+	keys := kernel.AdmissionKeys{RuntimeRoot: "/runtime/intake"}
+	keys.RunID, _ = kernel.RunIDFromBytes(id(230))
+	keys.TerminalSessionID, _ = kernel.TerminalSessionIDFromBytes(id(231))
+	keys.CandidateChangeID, _ = kernel.ChangeIDFromBytes(id(234))
+	keys.Resources.RuntimeRoot, _ = kernel.ResourceIDFromBytes(id(235))
+	keys.Resources.RunnerProcess, _ = kernel.ResourceIDFromBytes(id(236))
+	keys.Resources.ProviderProcess, _ = kernel.ResourceIDFromBytes(id(237))
+	keys.Resources.ProviderGroup, _ = kernel.ResourceIDFromBytes(id(238))
+	if keys.AttemptDigest, err = kernel.AttemptDigestFromBytes([]byte(strings.Repeat("c", kernel.DigestBytes))); err != nil {
+		t.Fatal(err)
+	}
+	if keys.ResultProofDigest, err = kernel.ResultProofDigestFromBytes([]byte(strings.Repeat("d", kernel.DigestBytes))); err != nil {
+		t.Fatal(err)
+	}
+	admission, err := fixture.store.AdmitNext(ctx, keys, mustKernelTime(t, base+1))
+	if err != nil || !admission.Admitted() {
+		t.Fatalf("admission = %+v, %v", admission, err)
+	}
+	run := *admission.Run
+	one, _ := kernel.NewRevision(1)
+	runtimeIdentity, _ := kernel.NewPathResourceIdentity(1, 2)
+	birth, _ := kernel.BirthDigestFromBytes([]byte(strings.Repeat("a", kernel.DigestBytes)))
+	processIdentity, _ := kernel.NewProcessResourceIdentity(300, 301, birth)
+	runtime, err := fixture.store.ActivateResource(ctx, run.ID, keys.Resources.RuntimeRoot, one, runtimeIdentity, mustKernelTime(t, base+2))
+	if err != nil {
+		t.Fatal(err)
+	}
+	started, runner, err := fixture.store.BeginRunnerStart(ctx, run.ID, keys.Resources.RunnerProcess, run.Revision, one, mustKernelTime(t, base+3))
+	if err != nil {
+		t.Fatal(err)
+	}
+	active, runner, err := fixture.store.ActivateRunner(ctx, started.ID, runner.ID, started.Revision, runner.Revision, processIdentity, mustKernelTime(t, base+4))
+	if err != nil {
+		t.Fatal(err)
+	}
+	finalizing, err := fixture.store.RecordRecoveredPreSessionRunnerAbsence(ctx, active.ID, runner.ID, active.Revision, runner.Revision, processIdentity, mustKernelTime(t, base+5))
+	if err != nil {
+		t.Fatal(err)
+	}
+	releasing, _ := kernel.NewRevision(runtime.Revision.Int64() + 1)
+	if _, err := fixture.store.ReleaseResource(ctx, finalizing.ID, runtime.ID, releasing, runtimeIdentity, mustKernelTime(t, base+6)); err != nil {
+		t.Fatal(err)
+	}
+	change, _, err := fixture.store.Change(ctx, *finalizing.ChangeID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	settlement, err := kernel.NewAbandonedChangeSettlement(change.Revision)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := fixture.store.FinalizeWorkerRun(ctx, finalizing.ID, finalizing.Revision, settlement, mustKernelTime(t, base+7)); err != nil {
+		t.Fatal(err)
+	}
+}

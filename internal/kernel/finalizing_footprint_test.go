@@ -7,6 +7,7 @@ import (
 )
 
 func TestFinalizingRequiresExactResourceFootprint(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name   string
 		invoke func(*Store, Run, AdmissionKeys) error
@@ -61,6 +62,7 @@ func TestFinalizingRequiresExactResourceFootprint(t *testing.T) {
 }
 
 func TestFailRunAcceptsOnlyInfrastructureFailureCodes(t *testing.T) {
+	t.Parallel()
 	for _, code := range []FailureCode{FailureAttempt, FailureProviderExit} {
 		t.Run(code.String(), func(t *testing.T) {
 			store, run, keys := runningOrchestratorRun(t)

@@ -9,6 +9,7 @@ import (
 )
 
 func TestTaskAttachmentsAtomicReplayAndReopen(t *testing.T) {
+	t.Parallel()
 	store, path, _, agent := newAdmissionStore(t, RoleOrchestrator, 2)
 	ctx := context.Background()
 	client := terminalTargetClient(t, store, browserTestID(t, 180), BrowserCapabilityObserve|BrowserCapabilityHumanActions)
@@ -58,6 +59,7 @@ func TestTaskAttachmentsAtomicReplayAndReopen(t *testing.T) {
 }
 
 func TestTaskAttachmentBoundsAndSafeNames(t *testing.T) {
+	t.Parallel()
 	for _, item := range []TaskAttachment{{Name: "a\n.png", Data: []byte("x")}, {Name: "x", Data: make([]byte, MaxTaskAttachmentBytes+1)}} {
 		if _, err := TaskAttachmentInstruction("text", []TaskAttachment{item}); !errors.Is(err, ErrInvalidValue) {
 			t.Fatalf("bad attachment accepted: %v", err)
@@ -69,6 +71,7 @@ func TestTaskAttachmentBoundsAndSafeNames(t *testing.T) {
 }
 
 func TestAttachmentCleanupAndCompactionPreserveHistory(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	store, path, _, agent := newAdmissionStore(t, RoleWorker, 1)
 	client := terminalTargetClient(t, store, browserTestID(t, 180), BrowserCapabilityHumanActions|BrowserCapabilityObserve)
@@ -162,6 +165,7 @@ func TestAttachmentCleanupAndCompactionPreserveHistory(t *testing.T) {
 }
 
 func TestAutomaticAttachmentRetention(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	store, path, _, agent := newAdmissionStore(t, RoleWorker, 1)
 	client := terminalTargetClient(t, store, browserTestID(t, 180), BrowserCapabilityHumanActions|BrowserCapabilityObserve)

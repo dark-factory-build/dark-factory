@@ -111,6 +111,16 @@ the overseer. Its durable sequence cursor advances with enqueue; events arriving
 while it is busy stay pending. Cursor lag behind the retained journal wakes a
 conservative inspection. No model runs merely to poll an idle project.
 
+A specialist is a worker with a standing instruction. The same wake tick gives
+it one carrier task at a time (priority -100) when `specialistSchedule` says it
+is due: at once, then its cadence after each review, doubled per quiet review
+up to 8x, or a quarter cadence after one when its `idle_wake_on` classes
+(`failures`, `merges`) saw an event. Its carrier never claims shared work,
+waits while it would take the last free worker slot or exceed the project's
+`specialist_runs`, and has the overseer's 30-minute backstop. It may read the
+overseer status and observe its project's worker terminals; archiving it stops
+its live review and cancels its queued carriers in one transaction.
+
 ## Browser state
 
 The browser reads one bounded, transactionally pinned active-state snapshot
@@ -391,8 +401,29 @@ treat an unimplemented verifier as proof of success.
 Regenerable runtime data may be reclaimed only through exact registered,
 unleased identity. A writer makes status incomplete; after exact effect absence
 the daemon remeasures before cleanup. A live or reused process/group identity
-keeps finalization pending. Unique retained Changes are never automatic cleanup
-targets, and the daemon does not claim an instantaneous filesystem byte ceiling.
+keeps finalization pending. The daemon does not claim an instantaneous
+filesystem byte ceiling.
+
+A retained Change is reclaimed once nothing of value can be lost: its task
+has ended (succeeded, failed or cancelled), and its head equals its base, or
+its work is given up: its pull request merged after the Change last changed
+(the App publishes its own commit, so a merged head never equals the
+Change's), its task
+failed or was cancelled at least 14 days ago with no open pull request, or
+succeeded unpublished at least 30 days ago. A worktree must verify on its own
+branch at the recorded head and have no uncommitted work. The scheduler
+removes it without force with `git worktree remove`, which also deletes its
+ignored files, and deletes that Change's private administration while its
+branch is still at the recorded head. Given-up work alone also reclaims a
+legacy worktree on the project's shared administration, whose branch is then
+deleted only at the recorded head, and a Git-free copy from before managed
+worktrees. One short transaction that rechecks the rule then records the
+Change abandoned, as one whose worktree is gone: the task's retry makes a
+fresh worktree on the same branch. A pass inspects at most a few Changes a
+minute and skips one a retry reopened since the rule was read. Anything in
+doubt is kept and logged once. A crash after the removal converges on the
+next pass, which finds nothing left on disk and only records it. The shared
+repository is never pruned.
 
 ## Clients and integrations
 

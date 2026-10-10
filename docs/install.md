@@ -26,43 +26,13 @@ side of setup: an install that starts a fresh service loads the launchd job,
 waits for the daemon to answer, mints a one-shot pairing link with the home's
 operator token, and opens it in this machine's default browser, which pairs that
 browser. The link is never printed. A repeated install returns the service it
-found and opens nothing. `service start` is the
-explicit command to use after a later stop:
+found and opens nothing. After a later stop, [`service
+start`](#stop-start-and-upgrade-the-service) is the explicit command:
 
 ```sh
 factoryctl init --home "$HOME/.dark-factory"
 factoryctl service install --home "$HOME/.dark-factory"
 ```
-
-To upgrade a running installation to a new build, run `factoryctl service
-uninstall --home "$HOME/.dark-factory"` with the new `factoryctl`, then
-`factoryctl service install --home "$HOME/.dark-factory"`. Only the service's
-binaries, plist, and receipt are replaced; the data home is untouched. An
-installation that used `--relay-origin` must repeat that flag on the install
-after the uninstall, or the new job comes back loopback-only.
-
-Settings → Updates in the console shows the same two commands beside the
-running version and the latest published release. To find that release the
-daemon reads the public GitHub releases endpoint for this repository at most
-once every six hours, and only while a paired console is open. That bound
-holds whether the read succeeds or not: a refused read leaves the previously
-cached release, or none, in place until the next six-hourly attempt, so an
-offline or rate-limited host neither retries more often than a healthy one nor
-claims that this build is current. Nothing in the console installs an update.
-
-Before upgrading across a schema change, copy the database to a directory
-outside the home. Never into the home itself, and add nothing else there
-either: the daemon refuses to open a home holding anything it did not put
-there.
-
-```sh
-mkdir -p "$HOME/.dark-factory-backups/$(date +%F)"
-sqlite3 "$HOME/.dark-factory/factory.sqlite3" \
-  ".backup $HOME/.dark-factory-backups/$(date +%F)/factory.sqlite3"
-```
-
-That copy is the only way back: the new build migrates the home on its first
-start, the migration is one way, and an older build refuses the migrated home.
 
 To reach the factory from the hosted PWA rather than only from this machine's
 loopback, install with `factoryctl service install --home "$HOME/.dark-factory"
@@ -101,13 +71,63 @@ factoryctl remote status
 The CLI cannot delete origin-scoped browser storage; pairing afresh with
 `factoryctl web pair` makes that manual browser action unnecessary.
 
-## Start your first worker
+## Stop, start and upgrade the service
+
+`factoryctl service stop` stops the managed daemon without removing the
+installation; restart it with `factoryctl service start --home
+"$HOME/.dark-factory"`. `factoryctl service uninstall` is the evidence-first
+removal path for that exact home and label. Homebrew does not own the running
+service; do not use `brew services` for Dark Factory.
+
+To upgrade a running installation to a new build, run `factoryctl service
+uninstall --home "$HOME/.dark-factory"` with the new `factoryctl`, then
+`factoryctl service install --home "$HOME/.dark-factory"`. Only the service's
+binaries, plist, and receipt are replaced; the data home is untouched. An
+installation that used `--relay-origin` must repeat that flag on the install
+after the uninstall, or the new job comes back loopback-only.
+
+Settings → Updates in the console shows the same two commands beside the
+running version and the latest published release. To find that release the
+daemon reads the public GitHub releases endpoint for this repository at most
+once every six hours, and only while a paired console is open. That bound
+holds whether the read succeeds or not: a refused read leaves the previously
+cached release, or none, in place until the next six-hourly attempt, so an
+offline or rate-limited host neither retries more often than a healthy one nor
+claims that this build is current. Nothing in the console installs an update.
+
+Before upgrading across a schema change, copy the database to a directory
+outside the home. Never into the home itself, and add nothing else there
+either: the daemon refuses to open a home holding anything it did not put
+there.
+
+```sh
+mkdir -p "$HOME/.dark-factory-backups/$(date +%F)"
+sqlite3 "$HOME/.dark-factory/factory.sqlite3" \
+  ".backup $HOME/.dark-factory-backups/$(date +%F)/factory.sqlite3"
+```
+
+That copy is the only way back: the new build migrates the home on its first
+start, the migration is one way, and an older build refuses the migrated home.
+
+## Set up a provider and start your first worker
+
+Create each agent with an explicit provider. `shell` needs no external tool;
+`claude_code` and `codex` require the corresponding `claude` or `codex` CLI to
+be installed and already signed in through its normal account workflow:
+
+```sh
+factoryctl agent create --project PROJECT_ID --name worker --provider shell --tool-budget 100
+factoryctl agent create --project PROJECT_ID --name worker --provider claude_code --reasoning-effort medium --tool-budget 100
+```
+
+The managed daemon finds native tools on its fixed path and reuses the
+operator's existing signed-in Claude or Codex account without copying a
+credential into the Dark Factory home. See the [provider
+contract](providers.md) for discovery, model, effort, and task-delivery details.
 
 After pairing the browser, follow [Your first task](../README.md#your-first-task)
-from an existing committed Git checkout. A signed-in `codex` CLI must be
-installed where the managed daemon can find it; see [provider
-discovery](providers.md). Creating the project also registers its checkout as
-the initial repository. `factoryctl account discover` and `factoryctl account
+from an existing committed Git checkout. Creating the project also registers
+its checkout as the initial repository. `factoryctl account discover` and `factoryctl account
 list` help inspect a missing Codex login. Settings → Repositories also supports
 project creation and additional checkouts; worker creation currently uses the
 CLI.
@@ -190,10 +210,17 @@ GitHub connection publishes it.
 
 A failed task keeps its history: a worker that exits without reporting an
 outcome settles `failed` with the outcome `provider exited before an attempt
-outcome`. Retry it with `factoryctl task update --task TASK_ID --revision
-REVISION --retry`, or send a completed model result back with
+outcome`. Retry it, or a cancelled task, with `factoryctl task update --task
+TASK_ID --revision REVISION --retry`, or send a completed model result back with
 `factoryctl task send-back --task TASK_ID --note TEXT` (shell tasks take no
 note, so send-back refuses them).
+
+When factoryd cannot publish a finished Change, it records the failure and
+escalates it to the project's overseer once. A Maintainer refusal, conflict or
+unavailability, or a repository disabled for new work, is retried for the same
+Change revision about hourly, so a cause fixed outside factoryd heals itself.
+Any other rejection, such as invalid input caused by the Change, is final for
+that Change revision: send the task back so a corrected revision can publish.
 
 ## Try a task without a model
 
@@ -252,26 +279,6 @@ copyable text when a report is too long for a prefilled URL.
 and truncation indicator. It needs no running daemon, GitHub connection or local
 execution subscription. Use the issue's native GitHub thumbs-up reaction to
 endorse it. Reports and votes do not accept work or start a local agent.
-
-Create each agent with an explicit provider. `shell` needs no external tool;
-`claude_code` and `codex` require the corresponding `claude` or `codex` CLI to
-be installed and already signed in through its normal account workflow:
-
-```sh
-factoryctl agent create --project PROJECT_ID --name worker --provider shell --tool-budget 100
-factoryctl agent create --project PROJECT_ID --name worker --provider claude_code --reasoning-effort medium --tool-budget 100
-```
-
-The managed daemon finds native tools on its fixed path and reuses the
-operator's existing signed-in Claude or Codex account without copying a
-credential into the Dark Factory home. See the [provider
-contract](providers.md) for discovery, model, effort, and task-delivery details.
-
-`factoryctl service stop` stops the managed daemon without removing the
-installation; restart it with `factoryctl service start --home
-"$HOME/.dark-factory"`. `factoryctl service uninstall` is the evidence-first
-removal path for that exact home and label. Homebrew does not own the running
-service; do not use `brew services` for Dark Factory.
 
 ## GitHub connection (v0.4.0+)
 
@@ -338,6 +345,17 @@ Use `factoryctl project repository github --id REPOSITORY_ID` to bind its
 configured publication repository to the live GitHub connection. Fetch readiness
 and publication binding are separate checks. A verified publication binding
 still requires live write permission for every publication operation.
+
+Once a repository is bound to a project, factoryd reviews the pull requests it
+publishes there. It does not review other pull requests on its own: start one
+with `factoryctl review --project PROJECT_ID --repository OWNER/REPO --pull N
+--head HEAD_SHA --base BASE_SHA --base-ref BRANCH`. A blocking verdict or
+merge-queue ejection on a head that has not moved goes back to the task that
+published the pull request. For a same-repository pull request factoryd did
+not publish, it first creates one `Repair OWNER/REPO#N` worker task and
+publishes its result to that pull request's own branch. Each send-back after the second repair round
+is also escalated to the project's overseer; it does not stop further repair.
+A pull request from a fork only receives the verdict on GitHub.
 
 ## Project repositories (v0.4.0+)
 
@@ -418,8 +436,10 @@ SOURCE_ID --revision REVISION --issue NUMBER --hash CONTENT_HASH`. The daemon
 checks the current GitHub content again before recording acceptance. The
 daemon imports accepted work into the existing queue; comments and reactions
 do not create work. A later title/body edit needs fresh acceptance, including
-when the original issue author is trusted. Existing failed or completed work is
-not automatically retried.
+when the original issue author is trusted. While the issue stays open and
+labelled, its task is queued again up to three times after an automatic end (a
+failure, a run-limit cancel, a 24-hour blocked expiry); an operator's cancel
+sticks and completed work is not retried.
 
 factoryd polls each enabled source when its `--poll-seconds` interval is due,
 while the GitHub connection (or Linear) is configured. Poll progress is kept in
@@ -433,5 +453,7 @@ imports, not existing work. `factoryctl intake withdraw --acceptance ID`
 withdraws that approval, cancels linked queued work and requests the existing
 stop mechanism for running work. `withdrawal_pending` requires reconciliation;
 it does not promise that an offline host or running process has stopped.
+`factoryctl intake import --acceptance ID` reverses a withdrawal while the
+issue still matches, and retries its failed or cancelled task.
 
 Priority mappings support at most 25 labels and 2 KiB of JSON after escaping.

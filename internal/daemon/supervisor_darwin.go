@@ -416,19 +416,37 @@ func (daemon *Daemon) runNext(ctx context.Context, spec SupervisorSpec) (resultR
 			return daemon.failRunBeforeRuntime(daemon.cleanupCtx, run, keys.resources.RuntimeRoot, kernel.FailureInternal, kernel.ErrCorruptState)
 		}
 	}
+	// A fresh Change for a task published on an open pull request (a repair,
+	// or work whose Change was reclaimed) starts at that pull request's exact
+	// observed head, never at the base it would otherwise revert to. An empty
+	// retained Change elsewhere is refused: its task's end lets reclaim free
+	// it, so the next run starts fresh at the head.
+	revision, pull := repository.BaseRef, kernel.ProductionPullRequest{}
+	if worker {
+		var found bool
+		if pull, found, err = daemon.store.TaskOpenPullRequest(ctx, run.TaskID); err != nil {
+			return daemon.failRunBeforeRuntime(daemon.cleanupCtx, run, keys.resources.RuntimeRoot, kernel.FailureInternal, err)
+		}
+		switch base := changeState.Selection; {
+		case found && retained == nil:
+			revision = fmt.Sprintf("refs/pull/%d/head", pull.Number)
+		case found && base != nil && changeState.HeadCommit != nil && kernelCommitEqual(*changeState.HeadCommit, base.Commit()) && !strings.EqualFold(fmt.Sprintf("%x", base.Commit().Bytes()), pull.Head):
+			return daemon.failRunBeforeRuntime(daemon.cleanupCtx, run, keys.resources.RuntimeRoot, kernel.FailureSource, fmt.Errorf("Change is empty at %x, not pull request #%d head %s", base.Commit().Bytes(), pull.Number, pull.Head))
+		default:
+			pull = kernel.ProductionPullRequest{}
+		}
+	}
 	var repositoryGitIdentity change.RepositoryIdentity
 	var repositoryOriginDigest [32]byte
-	if retained == nil {
-		source, sourceErr := inspectRegisteredRepository(ctx, repository.Root, "")
-		if sourceErr == nil {
-			sourceErr = daemon.store.BindRepositorySource(ctx, repository.ID, source)
-		}
-		if sourceErr != nil {
-			return daemon.failRunBeforeRuntime(daemon.cleanupCtx, run, keys.resources.RuntimeRoot, kernel.FailureSource, sourceErr)
-		}
-		repositoryGitIdentity, _ = change.NewRepositoryIdentity(source.GitDevice, source.GitInode)
-		repositoryOriginDigest = source.OriginDigest
+	source, sourceErr := inspectRegisteredRepository(ctx, repository.Root, "")
+	if sourceErr == nil && retained == nil {
+		sourceErr = daemon.store.BindRepositorySource(ctx, repository.ID, source)
 	}
+	if sourceErr != nil {
+		return daemon.failRunBeforeRuntime(daemon.cleanupCtx, run, keys.resources.RuntimeRoot, kernel.FailureSource, sourceErr)
+	}
+	repositoryGitIdentity, _ = change.NewRepositoryIdentity(source.GitDevice, source.GitInode)
+	repositoryOriginDigest = source.OriginDigest
 	// The repository's Git directory holds every Change worktree's refs and
 	// commits; a run that cannot resolve it has no source to work in. CI is an
 	// optional execution capability on top: an unavailable or unsafe lease
@@ -502,7 +520,7 @@ func (daemon *Daemon) runNext(ctx context.Context, spec SupervisorSpec) (resultR
 		AgentID: run.AgentID.String(), TaskIncarnationID: run.TaskIncarnationID.String(), PreviousWorkingDirectory: previousWorkingDirectory,
 		RuntimePath: gotRuntimePath, RuntimeIdentity: runtimeFileIdentity,
 		GitExecutable: spec.GitExecutable, FactoryctlExecutable: factoryctl.Path(), ToolPath: spec.ToolPath, ToolchainReadRoots: spec.ToolchainReadRoots, LocalCILeaseDir: localCILeaseDir, TraceReceiverPort: traceReceiverPort, RunID: telemetryRunID, AccountHome: spec.AccountHome, AccountConfigDir: accountConfigDir, RepositoryRoot: repository.Root, RepositoryIdentity: repositoryIdentity, RepositoryGitIdentity: repositoryGitIdentity, RepositoryOriginDigest: repositoryOriginDigest, GitCommonDir: gitCommonDir,
-		Revision: repository.BaseRef, ChangeParent: spec.ChangeParent, FinalName: finalName,
+		Revision: revision, ChangeParent: spec.ChangeParent, FinalName: finalName,
 		AttemptSocket: spec.AttemptSocket, Retained: retained, ProviderTask: providerTask,
 	}
 	workerConfig, err := changeworker.EncodeConfig(config)
@@ -696,6 +714,9 @@ func (daemon *Daemon) runNext(ctx context.Context, spec SupervisorSpec) (resultR
 		if selection, err = kernelSelectionCheckpoint(workerResult, repositoryIdentity); err != nil {
 			return daemon.failRun(run, kernel.FailureSource, err)
 		}
+		if pull.Number != 0 && !strings.EqualFold(workerResult.Base.Hex(), pull.Head) {
+			return daemon.failRun(run, kernel.FailureSource, fmt.Errorf("pull request #%d head is %s, not the observed %s", pull.Number, workerResult.Base.Hex(), pull.Head))
+		}
 		at, err = daemon.timestamp()
 		if err != nil {
 			return daemon.failRun(run, kernel.FailureInternal, err)
@@ -719,6 +740,19 @@ func (daemon *Daemon) runNext(ctx context.Context, spec SupervisorSpec) (resultR
 		return daemon.failRun(run, kernel.FailureSource, errInvalidContract)
 	}
 	if worker {
+		if retained != nil || pull.Number != 0 {
+			// The registered checkout is factoryd's fetch boundary. Refresh the
+			// current base there, then copy that exact commit into a retained
+			// or pull request Change before the worker can run a correction
+			// offline.
+			current, selectErr := change.SelectRegisteredGit(ctx, spec.GitExecutable, repository.Root, repository.BaseRef, change.RepositorySourceIdentity{Root: repositoryIdentity, Git: repositoryGitIdentity, OriginDigest: repositoryOriginDigest})
+			if selectErr != nil {
+				return daemon.failRun(run, kernel.FailureSource, selectErr)
+			}
+			if fetchErr := change.FetchBase(ctx, current, filepath.Join(spec.ChangeParent, finalName)); fetchErr != nil {
+				return daemon.failRun(run, kernel.FailureSource, fetchErr)
+			}
+		}
 		// The daemon reads the worktree itself: fresh Changes use private Git
 		// administration; retained worktrees keep their layout. Verify the branch
 		// at the base for a fresh or adopted Change and at the settled head for
