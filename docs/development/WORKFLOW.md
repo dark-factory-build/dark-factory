@@ -23,15 +23,13 @@ The routine source check is:
 
 It runs Go formatting, vetting, ordinary short tests, the TypeScript build and
 tests, and `git diff --check`. It does not acquire the process lease. During
-implementation, run this check plus the focused tests for the changed package
-that your environment can run. A factory worker reports a check its sandbox
-cannot run as "not run locally; required by the gate" instead of blocking on
-it.
+implementation, run the focused tests for the changed package.
 
-factoryd does not run the full gate before review: it reviews the exact head,
-and the protected merge queue's required CI is the full gate on the combined
-tree. A queue ejection comes back to the author naming the failing checks. Run
-the full local gate yourself when broad local integration proof is needed:
+factoryd reviews a published head only once its required pull-request check
+passes; a red head goes back to its author naming the failing tests, unreviewed.
+The protected merge queue's required CI is the full gate on the combined tree,
+and a queue ejection also comes back naming the failing checks. Run the full
+local gate yourself when broad local integration proof is needed:
 
 ```sh
 ./scripts/local-ci.sh

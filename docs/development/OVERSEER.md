@@ -25,8 +25,8 @@ rechecks blocked and failed tasks against current prerequisites and delivery
 proof. Preserve historical outcomes; reconsidering a task is not permission to
 blindly retry it or duplicate another owner's implementation.
 
-Workers should use `./scripts/go-check.sh` plus focused tests while implementing
-and record the exact head and checks before review. Process-sensitive checks use
+Workers run focused tests while implementing; factoryd sends a head whose
+pull-request check fails back before review. Process-sensitive checks use
 `./scripts/with-local-ci-lease.sh`; reviewers reproduce relevant risks instead
 of rerunning the full suite by default. The protected merge queue selects the
 appropriate fixed gates from its complete combined-tree diff and remains the
@@ -534,7 +534,8 @@ Write that body to a file; the review needs it.
 
 ## 5. After publication: factoryd reviews, merges and releases
 
-factoryd reviews every published PR head itself: it records one exact-head
+factoryd reviews every published PR head itself once its required pull-request
+check passes (a red head goes back unreviewed): it records one exact-head
 verdict through the App, enqueues an ALLOW, observes the merge and releases the
 runtime, and sends a REQUEST_CHANGES or a merge-queue ejection back to the
 original task with a pointer to the findings. The merge queue's required CI is

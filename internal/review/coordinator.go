@@ -99,6 +99,7 @@ type Pull struct {
 	Failing   []string  // required checks at the head that finished unsuccessfully
 	Pending   bool      // a required check at the head has not finished
 	Checks    []string  // stable name=conclusion values for every observed required check
+	Tests     []string  // failure annotations of the head's failed checks: the failing tests CI names
 	Group     *GroupRun // the newest completed merge-group run that built the head
 }
 
@@ -199,6 +200,9 @@ func (c Coordinator) Resume(ctx context.Context, op Operation) (Operation, error
 	if op.State == "submitting" {
 		return c.reconcileSubmitting(ctx, op, nil)
 	}
+	if op, err := c.awaitChecks(ctx, op); err != nil || op.State != "running" {
+		return op, err
+	}
 	checkout, cleanup, err := c.Backend.CloneReadOnly(ctx, op.Request)
 	if err != nil {
 		return c.failPreSubmit(ctx, op, err)
@@ -276,12 +280,10 @@ func (c Coordinator) Advance(ctx context.Context, op Operation) (Operation, erro
 	case pull.State == "merged" || pull.State == "closed":
 		op.State = pull.State
 	case pull.Mergeable != nil && !*pull.Mergeable:
-		op.State, op.RoutePending = "ejected", true
-		op.Detail = fmt.Sprintf("Exact head %s conflicts with %s. Rebase this Change onto origin/%s and resolve the conflict.", head, op.Request.BaseRef, op.Request.BaseRef)
+		op.State, op.RoutePending, op.Detail = "ejected", true, op.conflict()
 	case pull.Queued:
 	case len(pull.Failing) > 0:
-		op.State, op.RoutePending = "ejected", true
-		op.Detail = fmt.Sprintf("Exact head %s cannot merge. Failing checks: %s.", head, strings.Join(pull.Failing, ", "))
+		op.State, op.RoutePending, op.Detail = "ejected", true, pull.failing()
 	case pull.Pending:
 	case op.Enqueues >= 2:
 		// Queued, removed, re-queued once and removed again.
@@ -305,6 +307,59 @@ func (c Coordinator) Advance(ctx context.Context, op Operation) (Operation, erro
 	}
 	op.UpdatedAt = c.Now()
 	return op, c.Store.Update(ctx, op)
+}
+
+// checksPoll paces the read of a published head's checks before review;
+// checksGrace bounds the wait, so checks that never decide (none required, a
+// stuck runner, an unreadable pull) cannot hold the review forever.
+var checksPoll, checksGrace = time.Minute, 30 * time.Minute
+
+// awaitChecks holds review until the head's required checks finish (#1582).
+// A red or conflicting head goes back to its author unreviewed; a failed read
+// decides nothing.
+func (c Coordinator) awaitChecks(ctx context.Context, op Operation) (Operation, error) {
+	for {
+		pull, err := c.Backend.ObservePull(ctx, op)
+		switch {
+		case err != nil:
+		case !strings.EqualFold(pull.Head, op.Request.Head):
+			op.State = "superseded"
+		case pull.State != "open":
+			op.State = pull.State
+		case pull.Mergeable != nil && !*pull.Mergeable:
+			op.State, op.RoutePending, op.Detail = "ejected", true, op.conflict()
+		case len(pull.Failing) > 0:
+			op.State, op.RoutePending, op.Detail = "ejected", true, "Not reviewed: its checks failed. "+pull.failing()
+		case !pull.Pending && len(pull.Checks) > 0:
+			return op, nil
+		}
+		if op.State != "running" {
+			op.UpdatedAt = c.Now()
+			return op, c.Store.Update(ctx, op)
+		}
+		if c.Now().Sub(op.CreatedAt) >= checksGrace {
+			return op, nil
+		}
+		select {
+		case <-ctx.Done():
+			return op, ctx.Err()
+		case <-time.After(checksPoll):
+		}
+	}
+}
+
+func (op Operation) conflict() string {
+	return fmt.Sprintf("Exact head %s conflicts with %s. Rebase this Change onto origin/%s and resolve the conflict.", op.Request.Head, op.Request.BaseRef, op.Request.BaseRef)
+}
+
+// failing names the failed required checks at the head and the first ten
+// failing tests CI annotated.
+func (p Pull) failing() string {
+	note := fmt.Sprintf("Exact head %s cannot merge. Failing checks: %s.", p.Head, strings.Join(p.Failing, ", "))
+	for _, line := range p.Tests[:min(len(p.Tests), 10)] {
+		note += "\n- " + line
+	}
+	return note
 }
 
 func pullObservation(p Pull) string {
