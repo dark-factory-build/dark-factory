@@ -187,6 +187,48 @@ func TestOverseerPublishFailureWake(t *testing.T) {
 	}
 }
 
+// #1561: a failed self-release wakes the overseer once and becomes exactly one
+// NEEDS YOU card naming the release, its phase and its reason; a retry failing
+// for the same cause escalates nothing more, and a new cause wakes again.
+func TestOverseerFailedReleaseEscalatesOncePerCause(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	store, worker, _ := wakeFixture(t)
+	release := func(sha byte, state, phase, reason string, at int64) {
+		t.Helper()
+		delivery := ProductionDelivery{ID: "release:" + strings.Repeat(string(sha), 40), Kind: "runtime", Destination: "factoryd", Revision: strings.Repeat(string(sha), 40), State: state, Phase: phase, Reason: reason, PullRequests: []uint64{}}
+		if err := store.RecordDelivery(ctx, worker.ProjectID, "dark-factory-build/dark-factory", delivery, mustTime(t, at)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	rewake, settle := OverseerRewakeAfter.Milliseconds(), overseerWakeSettle.Milliseconds()
+	at := int64(1000)
+	release('a', "failed", "drain", "drain_timeout: run 1 is admitted", at)
+	at += settle
+	escalation := "Escalated: factoryd release:" + strings.Repeat("a", 40) + " failed in phase drain: drain_timeout: run 1 is admitted"
+	if bodies := wakeBodies(t, store, at); len(bodies) != 1 || !strings.Contains(bodies[0], escalation) {
+		t.Fatalf("wake = %q", bodies)
+	}
+	settleCarrier(t, store, at+1, 31, "ran")
+	// The retries fail the same way behind other runs: no wake, one card.
+	for round, sha := range []byte{'b', 'c'} {
+		at += rewake
+		release(sha, "running", "build", "", at)
+		release(sha, "failed", "drain", fmt.Sprintf("drain_timeout: run %d is admitted", round+2), at+1)
+		if bodies := wakeBodies(t, store, at+settle); len(bodies) != 0 {
+			t.Fatalf("retry %d re-woke = %q", round+1, bodies)
+		}
+	}
+	if requests, err := store.OperatorHumanRequests(ctx); err != nil || len(requests) != 1 || !strings.Contains(requests[0].QuestionText, " failed in phase drain: drain_timeout: run ") {
+		t.Fatalf("operator escalation = %+v, %v", requests, err)
+	}
+	at += rewake
+	release('d', "failed", "trial", "the new build was not promoted (answered false): it exited", at)
+	if bodies := wakeBodies(t, store, at+settle); len(bodies) != 1 || !strings.Contains(bodies[0], "factoryd release:"+strings.Repeat("d", 40)+" failed in phase trial") {
+		t.Fatalf("new cause wake = %q", bodies)
+	}
+}
+
 // A cancelled worker task is informational; a blocked one wakes the overseer
 // with one summary line and project counts.
 func TestOverseerWakeSummarisesTasks(t *testing.T) {

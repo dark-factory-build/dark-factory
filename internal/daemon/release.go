@@ -257,7 +257,11 @@ func (daemon *Daemon) FinishRelease(ctx context.Context, sha, state, reason stri
 	if err != nil || !found {
 		return err
 	}
-	delivery.State, delivery.Phase, delivery.Reason = state, "", reason
+	// A failed release keeps the phase it failed in (the trial).
+	delivery.State, delivery.Reason = state, reason
+	if state == "verified" {
+		delivery.Phase = ""
+	}
 	return daemon.writeRelease(ctx, project, &delivery)
 }
 
