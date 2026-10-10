@@ -210,7 +210,7 @@ func TestKnowledgeContextBoundsQuotingAndEmpty(t *testing.T) {
 	}
 }
 
-func TestKnowledgeFallbackDoesNotRecordOmittedSupplies(t *testing.T) {
+func TestKnowledgeLaunchKeepsExactTaskWithContext(t *testing.T) {
 	f := newDispatchFixture(t)
 	active := prepareActiveAttemptInProjectWithProvider(t, f, 81, testID(81), "orchestrator", "claude_code")
 	lesson := seedContextKnowledge(t, f, active.run.ProjectID, 201, kernel.ContentLesson, kernel.KnowledgeMetadata{Status: "tentative", Evidence: []string{"source"}}, "a useful lesson")
@@ -219,8 +219,8 @@ func TestKnowledgeFallbackDoesNotRecordOmittedSupplies(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if string(launch) != knowledgeTaskFetchInstruction {
-		t.Fatalf("oversized task lost fetch fallback: %q", knowledgeTextPrefix(string(launch), 100))
+	if !bytes.HasPrefix(launch, task) || bytes.Contains(launch, []byte(`argv ["attempt","task"]`)) {
+		t.Fatalf("launch lost exact task or used fetch pointer: %q", knowledgeTextPrefix(string(launch), 100))
 	}
 	accesses, err := contentAccesses(context.Background(), f.store, active.run.ProjectID, kernel.ContentAccess{ContentID: lesson.ID, ContentRevision: lesson.Revision})
 	if err != nil {
