@@ -244,6 +244,11 @@ func runSupervisorCodexFixture() error {
 		if err != nil || len(before.Handoffs) != 1 || before.Handoffs[0].TaskID != expected[0] || before.Handoffs[0].SourcePath != "" || before.Handoffs[0].GitDirectory != "" || before.Handoffs[0].HeadCommit == "" {
 			return fmt.Errorf("status before explicit request = %+v, %v", before.Handoffs, err)
 		}
+		// factoryd's own health rides the first page only; this fixture's
+		// own API calls are timed in it.
+		if first, err := client.OverseerSnapshotPage(ctx, api.OverseerSnapshotInput{}); err != nil || before.Factoryd != nil || first.Factoryd == nil || len(first.Factoryd.Calls) == 0 || first.Factoryd.WindowMs != uint64(runtimeWindow.Milliseconds()) {
+			return fmt.Errorf("factoryd health = %+v on a task page %+v, %v", first.Factoryd, before.Factoryd, err)
+		}
 		handoff, err := client.Source(ctx, expected[0])
 		if err != nil {
 			return err

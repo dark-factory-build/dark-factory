@@ -695,6 +695,33 @@ type OverseerSnapshot struct {
 	PeerQuestions  []PeerQuestion          `json:"peer_questions"`
 	History        []OverseerIntervention  `json:"history"`
 	Handoffs       []RetainedChangeHandoff `json:"retained_change_handoffs"`
+	// Factoryd is the daemon's own recent health, on the first page only. It
+	// is in memory and empties when factoryd restarts.
+	Factoryd *FactorydHealth `json:"factoryd,omitempty"`
+}
+
+// FactorydHealth is factoryd's self-timing over WindowMs (scheduler ticks,
+// local API methods, browser routes; slowest first) and the distinct lines it
+// logged, normalised and redacted, most recent first. Max is the slowest
+// single call: factoryd keeps per-minute maxima, not distributions.
+type FactorydHealth struct {
+	WindowMs uint64          `json:"window_ms"`
+	Calls    []FactorydCalls `json:"calls"`
+	Log      []FactorydLog   `json:"log"`
+}
+
+type FactorydCalls struct {
+	Name   string `json:"name"`
+	Count  uint64 `json:"count"`
+	Failed uint64 `json:"failed"`
+	MaxMs  uint64 `json:"max_ms"`
+}
+
+type FactorydLog struct {
+	Signature string `json:"signature"`
+	Count     uint64 `json:"count"`
+	FirstMs   int64  `json:"first_ms"`
+	LastMs    int64  `json:"last_ms"`
 }
 
 // RetainedChangeHandoff identifies one settled worker Change by its Git
