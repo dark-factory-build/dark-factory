@@ -56,7 +56,8 @@ ORDER BY version LIMIT 33`
 const overseerStalledItems = overseerItems + `SELECT last, CASE WHEN id IS NULL THEN detail || ' ' || item_key ELSE (` + overseerWakeLine + `) END,
 	named_at + ?6 <= ?3 FROM counted AS due WHERE wakes > rewakes AND ?7 + ?8 >= 0 ORDER BY last, version`
 
-const overseerItems = `WITH carrier AS (SELECT t.id AS task, t.created_at_ms AS at, t.body,
+const overseerItems = `WITH carrier AS MATERIALIZED (SELECT t.id AS task, t.created_at_ms AS at, substr(t.body, instr(t.body, 'Factory causal wake: ')) AS names,
+	instr(t.body, 'wake: mode=targeted;') > 0 AS targeted,
 	EXISTS (SELECT 1 FROM runs AS r WHERE r.task_id = t.id AND r.terminal_detail IS NOT ?9 AND r.terminal_detail IS NOT ?10) AS started
 	FROM tasks AS t WHERE t.assigned_agent_id = ?4 AND t.title = ?5),
 item AS (
@@ -92,17 +93,19 @@ item AS (
 	UNION ALL SELECT NULL, c.created_at_ms, 3, 'Proposal ' || lower(hex(c.id)) || ' from ' || COALESCE((SELECT name FROM agents WHERE id = ` + authorAgentSQL + `), 'the operator') || ': '
 		|| replace(substr(c.title, 1, 100), char(10), ' '), '[proposal:' || lower(hex(c.id)) || ']'
 	FROM project_content_revisions AS c WHERE c.project_id = ?1 AND ` + openProposalSQL + `),
-counted AS (SELECT item.*, (SELECT count(*) FROM carrier WHERE ` + overseerWakeNames + `) AS named,
-	(SELECT MAX(at) FROM carrier WHERE ` + overseerWakeNames + `) AS named_at,
-	(SELECT count(*) FROM carrier WHERE started AND ` + overseerWakeNames + `) AS wakes,
-	(SELECT task FROM carrier WHERE started AND ` + overseerWakeNames + ` ORDER BY at DESC LIMIT 1) AS last FROM item)
+numbered AS (SELECT *, row_number() OVER () AS n FROM item),
+counted AS (SELECT numbered.*, count(at) AS named, MAX(at) AS named_at, count(CASE WHEN started THEN 1 END) AS wakes,
+	unhex(substr(MAX(CASE WHEN started THEN printf('%020d', at) || hex(task) END), 21)) AS last
+	FROM numbered LEFT JOIN carrier ON ` + overseerWakeNames + ` GROUP BY n)
 `
 
 // overseerWakeNames is a carrier since the item's version that named it, by
 // its key (a task identity, or an escalation's reviewer record), or that named
 // no item at all (a full reconciliation, or a bare instruction when the causal
-// record overflowed).
-const overseerWakeNames = `at > version AND (NOT instr(body, 'wake: mode=targeted;') OR instr(body, item_key))`
+// record overflowed). Keys are searched only in the causal record (names),
+// never the standing instruction: scanning every carrier's whole body for
+// every item made each wake tick hold the writer for tens of seconds.
+const overseerWakeNames = `at > version AND (NOT targeted OR instr(names, item_key))`
 
 // EnqueueOverseerWakeups applies one level-triggered rule to each standing
 // overseer: while it has no unfinished wake carrier and some item is due, it
