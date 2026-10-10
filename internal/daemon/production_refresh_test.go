@@ -20,6 +20,22 @@ func TestRefreshRereadsOnlyPullsLastSeenOpen(t *testing.T) {
 	}
 }
 
+// #1669: site #126 stayed red at one head with no review, so no repair task.
+// #1 reviewed its head; #2 is that unmoved, unreviewed head; #3 moved past
+// its review; #4 is new; #5 is closed.
+func TestRefreshReviewsEveryUnreviewedOpenHead(t *testing.T) {
+	a, b := strings.Repeat("a", 40), strings.Repeat("b", 40)
+	known := []kernel.ProductionPullRequest{{Number: 1, Head: a, State: "open"}, {Number: 2, Head: a, State: "open"}, {Number: 3, Head: a, State: "open"}, {Number: 5, Head: a, State: "open"}}
+	observed := []kernel.ProductionPullRequest{{Number: 1, Head: strings.ToUpper(a), State: "open"}, {Number: 2, Head: a, State: "open"}, {Number: 3, Head: b, State: "open"}, {Number: 4, Head: b, State: "open"}, {Number: 5, Head: a, State: "closed"}}
+	var numbers []uint64
+	for _, pull := range unreviewedProductionHeads(known, map[uint64]bool{1: true, 3: true}, observed) {
+		numbers = append(numbers, pull.Number)
+	}
+	if fmt.Sprint(numbers) != "[2 3 4]" {
+		t.Fatalf("reviewed %v, want [2 3 4]", numbers)
+	}
+}
+
 // #1404: the refresh read pull requests but never their checks, so no check
 // record was stored once the host controller was deleted. It reads checks
 // only while they can change: #7's head settled, #8's stored checks are

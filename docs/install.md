@@ -359,8 +359,8 @@ and publication binding are separate checks. A verified publication binding
 still requires live write permission for every publication operation.
 
 Once a repository is bound to a project, factoryd reviews the pull requests it
-publishes there and changed pull requests it observes there. To review an
-unchanged pull request manually, use `factoryctl review --project PROJECT_ID
+publishes there and every open pull request head it observes there without a
+review, once per head. To review a head again manually, use `factoryctl review --project PROJECT_ID
 --repository OWNER/REPO --pull N --head HEAD_SHA --base BASE_SHA --base-ref
 BRANCH`. A blocking verdict or
 merge-queue ejection on a head that has not moved goes back to the task that

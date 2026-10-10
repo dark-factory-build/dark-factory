@@ -713,8 +713,9 @@ func (store *Store) RecordPublicationWithReviewOperation(ctx context.Context, pr
 }
 
 // KnownProductionPulls reads the repository's pull requests last seen open,
-// and which of them have publication tasks, in one query: a refresh paging the
-// UI-ordered Production view cost a sorted UNION per eight rows.
+// and which of them have a review operation for their recorded head, in one
+// query: a refresh paging the UI-ordered Production view cost a sorted UNION
+// per eight rows.
 func (store *Store) KnownProductionPulls(ctx context.Context, project ProjectID, repo string, limit int) ([]ProductionPullRequest, map[uint64]bool, error) {
 	if project.zero() || limit < 1 {
 		return nil, nil, ErrInvalidValue
@@ -724,18 +725,19 @@ func (store *Store) KnownProductionPulls(ctx context.Context, project ProjectID,
 		return nil, nil, err
 	}
 	defer tx.Close()
-	rows, err := tx.connection.QueryContext(ctx, `SELECT r.document, EXISTS (SELECT 1 FROM publication_tasks p WHERE p.project_id = r.project_id AND p.repository = r.repository AND p.pull_number = CAST(r.identity AS INTEGER))
+	rows, err := tx.connection.QueryContext(ctx, `SELECT r.document, EXISTS (SELECT 1 FROM production_records o WHERE o.project_id = r.project_id AND o.repository = r.repository AND o.kind = 'reviewer'
+			AND json_extract(o.document, '$.request.PullNumber') = CAST(r.identity AS INTEGER) AND lower(json_extract(o.document, '$.request.Head')) = lower(json_extract(r.document, '$.head')))
 		FROM production_records r WHERE r.project_id = ? AND r.repository = ? AND r.kind = 'pull_request' AND json_extract(r.document, '$.state') = 'open'
 		ORDER BY CAST(r.identity AS INTEGER) LIMIT ?`, project.Bytes(), strings.ToLower(repo), limit)
 	if err != nil {
 		return nil, nil, err
 	}
 	defer rows.Close()
-	pulls, published := []ProductionPullRequest{}, map[uint64]bool{}
+	pulls, reviewed := []ProductionPullRequest{}, map[uint64]bool{}
 	for rows.Next() {
 		var body string
-		var tasks bool
-		if err := rows.Scan(&body, &tasks); err != nil {
+		var operation bool
+		if err := rows.Scan(&body, &operation); err != nil {
 			return nil, nil, err
 		}
 		var pull ProductionPullRequest
@@ -743,11 +745,11 @@ func (store *Store) KnownProductionPulls(ctx context.Context, project ProjectID,
 			continue
 		}
 		pulls = append(pulls, pull)
-		if tasks {
-			published[pull.Number] = true
+		if operation {
+			reviewed[pull.Number] = true
 		}
 	}
-	return pulls, published, rows.Err()
+	return pulls, reviewed, rows.Err()
 }
 
 // ProductionHead is one pull request at one head commit.

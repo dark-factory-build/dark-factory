@@ -691,10 +691,6 @@ func TestKnownProductionPullsIsOneBoundedQuery(t *testing.T) {
 	store, _, project, _ := newAdmissionStore(t, RoleOrchestrator, 2)
 	defer store.Close()
 	ctx := context.Background()
-	task, err := store.EnqueueTask(ctx, NewTask{ID: taskID(t, 131), ProjectID: project.ID, IncarnationID: incarnationID(t, 132), Title: "publisher"}, mustTime(t, 1))
-	if err != nil {
-		t.Fatal(err)
-	}
 	store.readers.SetMaxOpenConns(1)
 	connection, err := store.readers.Conn(ctx)
 	if err != nil {
@@ -743,12 +739,20 @@ func TestKnownProductionPullsIsOneBoundedQuery(t *testing.T) {
 	for batch := uint64(0); batch < 6; batch++ {
 		observe(int64(11+batch), 3+batch*200, 200)
 	}
-	if _, err := store.writer.ExecContext(ctx, `INSERT INTO publication_tasks (project_id, repository, pull_number, task_id, created_at_ms) VALUES (?, 'example/factory', 3, ?, 20)`, project.ID.Bytes(), task.ID.Bytes()); err != nil {
-		t.Fatal(err)
+	// Only a review operation for the pull's recorded head counts.
+	for id, head := range map[string]string{"op-3": strings.Repeat("A", 40), "op-5": strings.Repeat("b", 40)} {
+		pull := uint64(3)
+		if id == "op-5" {
+			pull = 5
+		}
+		operation := map[string]any{"id": id, "state": "ejected", "request": map[string]any{"PullNumber": pull, "Head": head}}
+		if err := store.RecordReviewOperation(ctx, project.ID, "example/factory", id, operation, mustTime(t, 20)); err != nil {
+			t.Fatal(err)
+		}
 	}
-	many, published := read(100)
-	if few == 0 || many != few || len(published) != 1 || !published[3] {
-		t.Fatalf("statements few=%d many=%d published=%v", few, many, published)
+	many, reviewed := read(100)
+	if few == 0 || many != few || len(reviewed) != 1 || !reviewed[3] {
+		t.Fatalf("statements few=%d many=%d reviewed=%v", few, many, reviewed)
 	}
 }
 

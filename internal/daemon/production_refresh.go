@@ -52,7 +52,7 @@ func (daemon *Daemon) refreshProduction(ctx context.Context, project kernel.Proj
 		if !verified || !pinned || identity.PublicationRepository == "" {
 			continue
 		}
-		known, _, err := daemon.store.KnownProductionPulls(ctx, project, identity.PublicationRepository, productionRefreshPRLimit)
+		known, reviewed, err := daemon.store.KnownProductionPulls(ctx, project, identity.PublicationRepository, productionRefreshPRLimit)
 		var settled map[kernel.ProductionHead]bool
 		if err == nil {
 			settled, err = daemon.store.SettledProductionChecks(ctx, project, identity.PublicationRepository)
@@ -65,7 +65,7 @@ func (daemon *Daemon) refreshProduction(ctx context.Context, project kernel.Proj
 			LogFactoryd(daemon.log, "factoryd: refresh %s: %v\n", identity.PublicationRepository, err)
 			continue
 		}
-		corrections := changedProductionHeads(known, observation.PullRequests)
+		corrections := unreviewedProductionHeads(known, reviewed, observation.PullRequests)
 		at, err := daemon.timestamp()
 		if err != nil {
 			return err
@@ -125,19 +125,23 @@ func (daemon *Daemon) refreshProductionDetached(project kernel.ProjectID) {
 	}()
 }
 
-func changedProductionHeads(known []kernel.ProductionPullRequest, observed []kernel.ProductionPullRequest) []kernel.ProductionPullRequest {
-	prior := make(map[uint64]kernel.ProductionPullRequest, len(known))
+// unreviewedProductionHeads are the open pulls whose observed head has no
+// review operation: a new head, and a head already open (and perhaps red)
+// before factoryd reviewed changed pulls in every bound repository (#1669).
+func unreviewedProductionHeads(known []kernel.ProductionPullRequest, reviewed map[uint64]bool, observed []kernel.ProductionPullRequest) []kernel.ProductionPullRequest {
+	prior := make(map[uint64]string, len(known))
 	for _, pull := range known {
-		prior[pull.Number] = pull
-	}
-	changed := make([]kernel.ProductionPullRequest, 0)
-	for _, pull := range observed {
-		old, ok := prior[pull.Number]
-		if ok && old.Head != "" && !strings.EqualFold(old.Head, pull.Head) && pull.State == "open" {
-			changed = append(changed, pull)
+		if reviewed[pull.Number] {
+			prior[pull.Number] = pull.Head
 		}
 	}
-	return changed
+	unreviewed := make([]kernel.ProductionPullRequest, 0)
+	for _, pull := range observed {
+		if pull.State == "open" && !strings.EqualFold(prior[pull.Number], pull.Head) {
+			unreviewed = append(unreviewed, pull)
+		}
+	}
+	return unreviewed
 }
 
 // githubQuotaLow holds back non-urgent GitHub polling (pull request refresh,
