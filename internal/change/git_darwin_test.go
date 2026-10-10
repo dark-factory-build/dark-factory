@@ -987,7 +987,7 @@ func TestFreshSelectionFetchesConfiguredUpstreamWithoutMovingCheckout(t *testing
 			t.Fatalf("parallel fresh selection: %v", err)
 		}
 	}
-	for _, policy := range []string{"HEAD", "refs/remotes/upstream/" + strings.TrimPrefix(branch, "refs/heads/")} {
+	for _, policy := range []string{"HEAD", localBranch, "refs/heads/" + localBranch, "refs/remotes/upstream/" + strings.TrimPrefix(branch, "refs/heads/")} {
 		selected, err := SelectGit(context.Background(), fixture.git, fixture.repository, policy, fixture.identity)
 		if err != nil || selected.Base().Hex() != want {
 			t.Fatalf("policy=%s source=%s want=%s err=%v", policy, selected.Base().Hex(), want, err)
