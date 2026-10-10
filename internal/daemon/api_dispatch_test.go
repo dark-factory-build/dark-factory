@@ -314,16 +314,13 @@ func TestDaemonDispatchesOperatorCallsAndBoundsProjection(t *testing.T) {
 	waitDispatch(t, done)
 	assertNoSchedulerWake(t, fixture.daemon)
 
-	done = fixture.serve(t)
 	_, err = client.EnqueueTask(ctx, api.EnqueueTaskInput{
 		ID: testID(3), ProjectID: projectInput.ID, AssignedAgentID: testID(2), IncarnationID: testID(4),
 		Title: "oversized", Body: strings.Repeat("x", runner.MaxProviderTaskBytes+1), Priority: 7,
 	})
-	var oversized *api.RemoteError
-	if !errors.As(err, &oversized) || oversized.Code() != api.RemoteInvalidRequest {
-		t.Fatalf("oversized Codex task must be refused before admission: %v", err)
+	if !errors.Is(err, api.ErrInvalidInput) {
+		t.Fatalf("oversized Codex task must be refused by the API boundary: %v", err)
 	}
-	waitDispatch(t, done)
 	assertNoSchedulerWake(t, fixture.daemon)
 	if _, found, err := fixture.store.Task(ctx, mustTaskID(t, testID(3))); err != nil || found {
 		t.Fatalf("refused task was persisted: found=%v, err=%v", found, err)
@@ -332,7 +329,7 @@ func TestDaemonDispatchesOperatorCallsAndBoundsProjection(t *testing.T) {
 	done = fixture.serve(t)
 	taskResult, err := client.EnqueueTask(ctx, api.EnqueueTaskInput{
 		ID: testID(3), ProjectID: projectInput.ID, AssignedAgentID: testID(2), IncarnationID: testID(4),
-		Title: "public title", Body: "private task body sentinel", Priority: 7,
+		Title: "public title", Body: strings.Repeat("x", runner.MaxProviderTaskBytes), Priority: 7,
 	})
 	if err != nil || taskResult.Revision != 1 || taskResult.Head != 6 {
 		t.Fatalf("enqueue task = %+v, %v", taskResult, err)
@@ -599,12 +596,12 @@ func TestDaemonDispatchesSendBackThroughBothDomains(t *testing.T) {
 	}
 	waitDispatch(t, done)
 	done = fixture.serve(t)
-	if _, err := operator.EnqueueTask(ctx, api.EnqueueTaskInput{ID: claudeTask, ProjectID: active.run.ProjectID.String(), AssignedAgentID: claude, IncarnationID: testID(63), Title: "typed", Body: strings.Repeat("x", 7000)}); err != nil {
+	if _, err := operator.EnqueueTask(ctx, api.EnqueueTaskInput{ID: claudeTask, ProjectID: active.run.ProjectID.String(), AssignedAgentID: claude, IncarnationID: testID(63), Title: "typed", Body: strings.Repeat("x", runner.MaxProviderTaskBytes)}); err != nil {
 		t.Fatal(err)
 	}
 	waitDispatch(t, done)
 	done = fixture.serve(t)
-	if _, err := operator.SendBackTask(ctx, api.SendBackInput{TaskID: claudeTask, Note: strings.Repeat("&", runner.MaxProviderTaskBytes)}); !errors.As(err, &remote) || remote.Code() != api.RemoteTooLarge {
+	if _, err := operator.SendBackTask(ctx, api.SendBackInput{TaskID: claudeTask, Note: strings.Repeat("&", 8192)}); !errors.As(err, &remote) || remote.Code() != api.RemoteTooLarge {
 		t.Fatalf("a note past the provider's prompt = %v", err)
 	}
 	waitDispatch(t, done)
@@ -633,7 +630,7 @@ func TestDaemonDispatchesSendBackThroughBothDomains(t *testing.T) {
 	}
 	waitDispatch(t, done)
 	done = fixture.serve(t)
-	if _, err := active.client.SendBack(ctx, api.SendBackInput{TaskID: foreign, Note: strings.Repeat("&", runner.MaxProviderTaskBytes)}); !errors.As(err, &remote) || remote.Code() != api.RemoteUnauthorized {
+	if _, err := active.client.SendBack(ctx, api.SendBackInput{TaskID: foreign, Note: strings.Repeat("&", 8192)}); !errors.As(err, &remote) || remote.Code() != api.RemoteUnauthorized {
 		t.Fatalf("another project's task with an oversized note = %v", err)
 	}
 	waitDispatch(t, done)
@@ -1737,7 +1734,7 @@ func TestTaskEnqueuePreflightPreservesReplayAndOverseerAuthority(t *testing.T) {
 	}
 	for _, target := range []string{testID(250), testID(221), active.run.AgentID.String()} {
 		done = fixture.serve(t)
-		_, err := active.client.OverseerEnqueueTask(ctx, api.OverseerTaskCreateInput{ID: testID(213), AssignedAgentID: target, IncarnationID: testID(214), Title: "not authorized", Body: strings.Repeat("x", runner.MaxProviderTaskBytes+1)})
+		_, err := active.client.OverseerEnqueueTask(ctx, api.OverseerTaskCreateInput{ID: testID(213), AssignedAgentID: target, IncarnationID: testID(214), Title: "not authorized", Body: strings.Repeat("x", runner.MaxProviderTaskBytes)})
 		waitDispatch(t, done)
 		var remote *api.RemoteError
 		if !errors.As(err, &remote) || remote.Code() != api.RemoteUnauthorized {
