@@ -4,7 +4,9 @@ package review
 import (
 	"context"
 	"crypto/rand"
+	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"regexp"
@@ -26,21 +28,23 @@ type Request struct {
 }
 
 type Operation struct {
-	ID           string    `json:"id"`
-	Request      Request   `json:"request"`
-	State        string    `json:"state"`
-	Retryable    bool      `json:"retryable"`
-	RetryOf      string    `json:"retry_of,omitempty"`
-	Verdict      string    `json:"verdict,omitempty"`
-	Detail       string    `json:"detail,omitempty"`
-	Submitted    bool      `json:"submitted,omitempty"`
-	RoutePending bool      `json:"route_pending,omitempty"`
-	Escalation   string    `json:"escalation,omitempty"` // why factoryd cannot advance it: due to the overseer
-	Handled      bool      `json:"handled,omitempty"`    // a failure already retried or escalated
-	Enqueues     int       `json:"enqueues,omitempty"`   // times factoryd put this head in the merge queue
-	Failures     int       `json:"failures,omitempty"`   // consecutive merge-stage passes that failed
-	CreatedAt    time.Time `json:"created_at"`
-	UpdatedAt    time.Time `json:"updated_at"`
+	ID                 string    `json:"id"`
+	Request            Request   `json:"request"`
+	State              string    `json:"state"`
+	Retryable          bool      `json:"retryable"`
+	RetryOf            string    `json:"retry_of,omitempty"`
+	Verdict            string    `json:"verdict,omitempty"`
+	Detail             string    `json:"detail,omitempty"`
+	Submitted          bool      `json:"submitted,omitempty"`
+	RoutePending       bool      `json:"route_pending,omitempty"`
+	Escalation         string    `json:"escalation,omitempty"` // why factoryd cannot advance it: due to the overseer
+	Handled            bool      `json:"handled,omitempty"`    // a failure already retried or escalated
+	Enqueues           int       `json:"enqueues,omitempty"`   // times factoryd put this head in the merge queue
+	Failures           int       `json:"failures,omitempty"`   // consecutive merge-stage passes that failed
+	Refused            bool      `json:"refused,omitempty"`    // the last enqueue was refused; wait for its observation to change
+	RefusedObservation string    `json:"refused_observation,omitempty"`
+	CreatedAt          time.Time `json:"created_at"`
+	UpdatedAt          time.Time `json:"updated_at"`
 }
 
 type Verdict struct {
@@ -89,6 +93,7 @@ type Backend interface {
 type Pull struct {
 	Head      string
 	State     string // open, closed or merged
+	Review    string // current review state at this head
 	Mergeable *bool  // nil while GitHub computes it
 	Queued    bool
 	Failing   []string  // required checks at the head that finished unsuccessfully
@@ -128,10 +133,10 @@ func (g *GroupRun) note(head string) string {
 	return note
 }
 
-// ErrRefused marks an enqueue GitHub refused as UNPROCESSABLE: a head the
-// queue will not take, such as one whose required check never ran. The same
-// request at the same head gets the same answer, so it is not repeated.
-var ErrRefused = errors.New("the merge queue refuses this exact head, so factoryd will not enqueue it again; a new head is reviewed afresh")
+// ErrRefused marks an enqueue GitHub refused as UNPROCESSABLE. The operation
+// stays attached to the exact head and waits for the pull observation to
+// change before trying the existing enqueue operation again.
+var ErrRefused = errors.New("the merge queue refuses this exact head; factoryd will wait for its checks or review state to change")
 
 // FailuresBeforeEscalation is how many consecutive merge-stage passes may
 // fail before the overseer is told: 30 minutes at the 5-minute merge tick.
@@ -253,7 +258,14 @@ func (c Coordinator) Advance(ctx context.Context, op Operation) (Operation, erro
 	if err != nil {
 		return c.failedPass(ctx, op, err)
 	}
-	// A pass that observes resets the failure count and any escalation.
+	observation := pullObservation(pull)
+	if op.Refused {
+		if observation == op.RefusedObservation {
+			return op, nil
+		}
+		op.Refused, op.RefusedObservation = false, ""
+	}
+	// A pass that observes a changed pull resets the failure count and any escalation.
 	failures, escalation, enqueues := op.Failures, op.Escalation, op.Enqueues
 	op.Failures, op.Escalation = 0, ""
 	head := op.Request.Head
@@ -275,8 +287,12 @@ func (c Coordinator) Advance(ctx context.Context, op Operation) (Operation, erro
 		op.State, op.RoutePending, op.Detail = "ejected", true, pull.Group.note(head)
 	default:
 		if err := c.Backend.Enqueue(ctx, op); errors.Is(err, ErrRefused) {
-			// Terminal for this head: failed, it is escalated once and never re-enqueued.
-			return c.fail(ctx, op, err, false)
+			// Keep the operation live. A changed check or review observation is
+			// the existing refresh trigger that permits the same enqueue again.
+			op.Refused, op.RefusedObservation = true, observation
+			op.Escalate(fmt.Sprintf("the merge queue refused this exact head: %v", err))
+			op.UpdatedAt = c.Now()
+			return op, errors.Join(err, c.Store.Update(ctx, op))
 		} else if err != nil {
 			op.Failures, op.Escalation = failures, escalation
 			return c.failedPass(ctx, op, err)
@@ -288,6 +304,12 @@ func (c Coordinator) Advance(ctx context.Context, op Operation) (Operation, erro
 	}
 	op.UpdatedAt = c.Now()
 	return op, c.Store.Update(ctx, op)
+}
+
+func pullObservation(p Pull) string {
+	value, _ := json.Marshal(p)
+	hash := sha256.Sum256(value)
+	return hex.EncodeToString(hash[:])
 }
 
 // failedPass records a pass that could not observe the pull request or

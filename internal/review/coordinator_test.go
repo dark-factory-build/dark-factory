@@ -303,22 +303,23 @@ func TestIndeterminateEnqueueIsSettledByTheNextObservation(t *testing.T) {
 	}
 }
 
-// A refusal the same request cannot change (#1510: UNPROCESSABLE, a required
-// check that never ran) fails the head at once, not retryable, so it is
-// escalated once and never enqueued again.
-func TestRefusedEnqueueIsTerminalForTheHead(t *testing.T) {
+// A refusal keeps the exact-head operation live, escalates once, and waits for
+// checks or review state to change before retrying the same enqueue.
+func TestRefusedEnqueueWaitsForHeadObservationChange(t *testing.T) {
 	store := &memoryStore{}
-	backend := &fakeBackend{enqueueErr: fmt.Errorf("%w (rejected before execution as UNPROCESSABLE)", ErrRefused)}
+	backend := &fakeBackend{pull: &Pull{Head: reviewRequest().Head, State: "open"}, enqueueErr: fmt.Errorf("%w (rejected before execution as UNPROCESSABLE)", ErrRefused)}
 	c := Coordinator{Store: store, Backend: backend, Now: func() time.Time { return time.Unix(20, 0) }}
 	op, err := c.Advance(context.Background(), Operation{ID: "op", Request: reviewRequest(), State: "enqueued", Verdict: "allow", Submitted: true})
-	if !errors.Is(err, ErrRefused) || op.State != "failed" || op.Retryable || !strings.Contains(op.Detail, "UNPROCESSABLE") || store.values[len(store.values)-1].State != "failed" {
+	if !errors.Is(err, ErrRefused) || op.State != "enqueued" || !op.Refused || op.Escalation == "" || len(store.values) != 1 {
 		t.Fatalf("operation=%+v err=%v", op, err)
 	}
-	if _, err := c.Advance(context.Background(), op); err == nil {
-		t.Fatal("a failed head was advanced again")
+	backend.pull = &Pull{Head: op.Request.Head, State: "open"}
+	if waited, err := c.Advance(context.Background(), op); err != nil || waited.Refused != op.Refused || backend.enqueues != 0 {
+		t.Fatalf("unchanged refusal advanced: operation=%+v err=%v enqueues=%d", waited, err, backend.enqueues)
 	}
-	if _, err := c.ReserveRetry(context.Background(), op); err == nil {
-		t.Fatal("a refused head was retried")
+	backend.pull, backend.enqueueErr = &Pull{Head: op.Request.Head, State: "open", Review: "allow"}, nil
+	if queued, err := c.Advance(context.Background(), op); err != nil || queued.State != "enqueued" || queued.Refused || queued.Escalation != "" || queued.Enqueues != 1 || backend.enqueues != 1 {
+		t.Fatalf("changed refusal did not retry: operation=%+v err=%v enqueues=%d", queued, err, backend.enqueues)
 	}
 }
 
