@@ -11,7 +11,10 @@ import (
 // bindMissionDecision carries the mission context from a driver's proposal to
 // the task accepted by the overseer. The decision remains the authority edge;
 // this is only the durable association used by mission progress views.
-func bindMissionDecision(ctx context.Context, c *sql.Conn, project ProjectID, raw string, at UnixMillis) error {
+func bindMissionDecision(ctx context.Context, c *sql.Conn, project ProjectID, kind ContentKind, raw string, at UnixMillis) error {
+	if kind != ContentDecision {
+		return nil
+	}
 	if !strings.HasPrefix(strings.TrimSpace(raw), "{") {
 		return nil
 	}
@@ -164,7 +167,7 @@ func createContentTx(ctx context.Context, tx *writeTx, spec NewContent, at UnixM
 	if _, err := tx.connection.ExecContext(ctx, `INSERT INTO content_repository_bindings(content_id, content_revision, repository_id) VALUES(?, 1, ?)`, spec.ID.Bytes(), repository.ID.Bytes()); err != nil {
 		return ContentRevision{}, tx.Rollback(err)
 	}
-	if err := bindMissionDecision(ctx, tx.connection, spec.ProjectID, spec.SourceReferences, at); err != nil {
+	if err := bindMissionDecision(ctx, tx.connection, spec.ProjectID, spec.Kind, spec.SourceReferences, at); err != nil {
 		return ContentRevision{}, tx.Rollback(err)
 	}
 	result, err := contentByRevision(ctx, tx.connection, spec.ID, 1)
@@ -245,7 +248,7 @@ func reviseContentTx(ctx context.Context, tx *writeTx, expected Revision, spec N
 	if _, err := tx.connection.ExecContext(ctx, `INSERT INTO content_repository_bindings(content_id, content_revision, repository_id) VALUES(?, ?, ?)`, spec.ID.Bytes(), next, repositoryID); err != nil {
 		return ContentRevision{}, tx.Rollback(err)
 	}
-	if err := bindMissionDecision(ctx, tx.connection, spec.ProjectID, spec.SourceReferences, at); err != nil {
+	if err := bindMissionDecision(ctx, tx.connection, spec.ProjectID, spec.Kind, spec.SourceReferences, at); err != nil {
 		return ContentRevision{}, tx.Rollback(err)
 	}
 	result, err := contentByRevision(ctx, tx.connection, spec.ID, next)
