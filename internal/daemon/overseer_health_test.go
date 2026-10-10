@@ -94,23 +94,41 @@ func TestFailingIntakeSyncWakesTheOverseer(t *testing.T) {
 	}
 }
 
-// Repeated Maintainer faults, a 503 or an answer outside its contract (here a
-// malformed pull request page the refresh reads), wake the overseer with the
-// logged signature; one or two, or other errors, do not.
+// Repeated Maintainer faults, an answer outside its contract or a 503, wake
+// the overseer with the logged signature, whichever refresh read met them:
+// checks and deployments a best-effort refresh skips past count too. One or
+// two, or other errors, do not.
 func TestRepeatedMaintainerFaultsWakeTheOverseer(t *testing.T) {
 	fixture := newIntakePollFixture(t, 120)
-	fixture.daemon.noteMaintainerFault(errors.New("review: no such pull request"))
-	fixture.daemon.noteMaintainerFault(fmt.Errorf("%w: the Maintainer answered 503", maintainer.ErrUnavailable))
-	fixture.daemon.noteMaintainerFault(fmt.Errorf("%w: the Maintainer answered 503", maintainer.ErrUnavailable))
+	ctx, fault, unavailable := context.Background(), fixture.daemon.noteMaintainerFault, false
+	call := func(_ context.Context, request json.RawMessage, _ map[string]uint64) (json.RawMessage, error) {
+		content := `{"pull_requests":[{"number":7,"head_sha":"` + strings.Repeat("a", 40) + `","state":"open"}]}`
+		switch {
+		case unavailable:
+			return nil, fmt.Errorf("%w: the Maintainer answered 503", maintainer.ErrUnavailable)
+		case strings.Contains(string(request), "observe_pull_request_checks"):
+			content = `{"checks":"malformed"}`
+		case strings.Contains(string(request), "list_deployments"):
+			content = `{"deployments":"malformed"}`
+		}
+		return json.RawMessage(`{"jsonrpc":"2.0","id":1,"result":{"structuredContent":` + content + `}}`), nil
+	}
+	fault(errors.New("review: no such pull request"))
+	if observation, err := pullRequestObservation(ctx, call, "o/r", 1, nil, nil, fault); err != nil || observation.Unavailable != "checks" {
+		t.Fatalf("best-effort refresh = %+v, %v", observation, err)
+	}
+	if _, _, err := recordDeployments(ctx, call, "o/r", 1, nil, nil, nil, 0, fault); err == nil {
+		t.Fatal("malformed deployments read")
+	}
 	if health := fixture.daemon.overseerHealth(); len(health) != 0 {
 		t.Fatalf("two faults held: %+v", health)
 	}
-	malformed := func(context.Context, json.RawMessage, map[string]uint64) (json.RawMessage, error) {
-		return json.RawMessage(`{"jsonrpc":"2.0","id":1,"result":{"structuredContent":{"pull_requests":[{"number":7,"head_sha":"short"}]}}}`), nil
+	unavailable = true
+	if _, err := pullRequestObservation(ctx, call, "o/r", 1, nil, nil, fault); err == nil {
+		t.Fatal("unavailable refresh read")
 	}
-	_, err := pullRequestObservation(context.Background(), malformed, "o/r", 1, nil, nil)
-	fixture.daemon.noteMaintainerFault(err)
-	if body := healthWake(t, fixture); !strings.Contains(body, "\nHealth since 1970-01-01T00:16:40Z: 3 Maintainer faults in factoryd.stderr.log, last at 1970-01-01T00:16:40Z: Maintainer returned an invalid pull request head [health:maintainer]") {
+	if body := healthWake(t, fixture); !strings.Contains(body, "\nHealth since 1970-01-01T00:16:40Z: 3 Maintainer faults in factoryd.stderr.log, last at 1970-01-01T00:16:40Z: ") ||
+		!strings.Contains(body, "the Maintainer answered 503 [health:maintainer]") {
 		t.Fatalf("wake = %q", body)
 	}
 	fixture.now = fixture.now.Add(time.Hour)

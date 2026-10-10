@@ -59,10 +59,9 @@ func (daemon *Daemon) refreshProduction(ctx context.Context, project kernel.Proj
 		}
 		var observation kernel.ProductionObservation
 		if err == nil {
-			observation, err = pullRequestObservation(ctx, daemon.github.MCP, identity.PublicationRepository, githubID, known, settled)
+			observation, err = pullRequestObservation(ctx, daemon.github.MCP, identity.PublicationRepository, githubID, known, settled, daemon.noteMaintainerFault)
 		}
 		if err != nil {
-			daemon.noteMaintainerFault(err)
 			LogFactoryd(daemon.log, "factoryd: refresh %s: %v\n", identity.PublicationRepository, err)
 			continue
 		}
@@ -74,7 +73,7 @@ func (daemon *Daemon) refreshProduction(ctx context.Context, project kernel.Proj
 		observation.ObservedAt = at.Int64()
 		if units := daemon.deployedUnits(project, repository.ID.String()); len(units) > 0 {
 			var hosts map[string][]string
-			if observation.DeployedAt, hosts, err = recordDeployments(ctx, daemon.github.MCP, identity.PublicationRepository, githubID, units, daemon.observeSources(), daemon.runtimeStore(), at.Int64()); err != nil {
+			if observation.DeployedAt, hosts, err = recordDeployments(ctx, daemon.github.MCP, identity.PublicationRepository, githubID, units, daemon.observeSources(), daemon.runtimeStore(), at.Int64(), daemon.noteMaintainerFault); err != nil {
 				LogFactoryd(daemon.log, "factoryd: refresh %s deployments: %v\n", identity.PublicationRepository, err)
 			} else {
 				daemon.setHosts("github\x00"+identity.PublicationRepository, hosts)
@@ -254,7 +253,14 @@ type maintainerPullRequest struct {
 // maintainerMCP is the broker call, daemon.github.MCP in production.
 type maintainerMCP func(ctx context.Context, request json.RawMessage, repositories map[string]uint64) (json.RawMessage, error)
 
-func pullRequestObservation(ctx context.Context, call maintainerMCP, repository string, githubID uint64, known []kernel.ProductionPullRequest, settled map[kernel.ProductionHead]bool) (kernel.ProductionObservation, error) {
+// pullRequestObservation and recordDeployments report every Maintainer fault
+// they meet to fault, the ones a best-effort refresh skips past included.
+func pullRequestObservation(ctx context.Context, call maintainerMCP, repository string, githubID uint64, known []kernel.ProductionPullRequest, settled map[kernel.ProductionHead]bool, fault func(error)) (_ kernel.ProductionObservation, err error) {
+	defer func() {
+		if err != nil {
+			fault(err)
+		}
+	}()
 	page, err := readMaintainerPullRequests(ctx, call, repository, githubID, map[string]any{"repository": repository, "page": 1, "per_page": productionRefreshPRLimit})
 	if err != nil {
 		return kernel.ProductionObservation{}, err
@@ -266,7 +272,9 @@ func pullRequestObservation(ctx context.Context, call maintainerMCP, repository 
 	}
 	for _, prior := range rereadPulls(known, seen) {
 		exact, err := readMaintainerPullRequests(ctx, call, repository, githubID, map[string]any{"repository": repository, "page": 1, "per_page": 1, "pull_number": prior.Number})
-		if err == nil {
+		if err != nil {
+			fault(err)
+		} else {
 			open = append(open, exact.PullRequests...)
 		}
 	}
@@ -297,6 +305,7 @@ func pullRequestObservation(ctx context.Context, call maintainerMCP, repository 
 		}
 		checks, err := readMaintainerChecks(ctx, call, repository, githubID, pr)
 		if err != nil {
+			fault(err)
 			result.Unavailable = "checks"
 			continue
 		}
@@ -358,7 +367,12 @@ func (daemon *Daemon) deployedUnits(project kernel.ProjectID, repository string)
 // successful production deployment's creation time (0 when production has
 // none), nil when GitHub records no production deployment, and the hosts
 // each unit's successful deployments serve at.
-func recordDeployments(ctx context.Context, call maintainerMCP, repository string, githubID uint64, units []string, sources []observeSource, store *opgraph.Runtime, now int64) (*int64, map[string][]string, error) {
+func recordDeployments(ctx context.Context, call maintainerMCP, repository string, githubID uint64, units []string, sources []observeSource, store *opgraph.Runtime, now int64, fault func(error)) (_ *int64, _ map[string][]string, err error) {
+	defer func() {
+		if err != nil {
+			fault(err)
+		}
+	}()
 	content, err := maintainerTool(ctx, call, repository, githubID, "list_deployments", map[string]any{"repository": repository, "per_page": 30})
 	if err != nil {
 		return nil, nil, err
