@@ -1230,7 +1230,7 @@ func AccountEnvironment(kind kernel.Provider, accountHome, accountConfig string)
 }
 
 // goModuleCachePath is the one shared-cache path native workers may see. It
-// matches local-ci-environment.sh's trusted cache layout and deliberately
+// matches local-ci.sh's trusted cache layout and deliberately
 // leaves the rest of the account home outside the provider grant.
 func goModuleCachePath(accountHome string) string {
 	return filepath.Join(accountHome, "Library", "Caches", "dark-factory", "local-ci", "trusted", "go-mod")
