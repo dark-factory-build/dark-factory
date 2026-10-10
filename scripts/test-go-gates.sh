@@ -504,7 +504,8 @@ run_local_mode() {
     local_output=$(CDPATH= cd -- "$local_fixture" && DARK_FACTORY_LOCAL_CI_LEASE_HELD=1 \
         PATH="$local_fixture/configured:/usr/bin:/bin" \
         /bin/sh ./scripts/local-ci.sh "$selected_mode" ${selected_base:+"$selected_base"} 2>&1)
-    printf '%s\n' "$local_output" | /usr/bin/grep -F "local-ci: PASS (${selected_mode#--})" >/dev/null \
+    expected_pass="local-ci: PASS (${selected_mode#--}${selected_base:+ since $selected_base})"
+    printf '%s\n' "$local_output" | /usr/bin/grep -F "$expected_pass" >/dev/null \
         || fail "$selected_mode did not report its selected scope: $local_output"
     if printf '%s\n' "$local_output" | /usr/bin/grep -F 'repository contract fixtures' >/dev/null; then
         fail "$selected_mode unexpectedly ran the full repository fixtures"
