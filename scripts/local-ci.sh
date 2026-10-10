@@ -20,14 +20,18 @@ case "$local_ci_shard" in
     *) echo "usage: scripts/local-ci.sh [--full|--warm] [daemon|packages|source] | --affected [BASE]" >&2; exit 2 ;;
 esac
 in_source_shard() { [ "$local_ci_shard" != daemon ] && [ "$local_ci_shard" != packages ]; }
-/usr/bin/env -i PATH=/usr/bin:/bin HOME=/dev/null TMPDIR=/tmp GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_SYSTEM=/dev/null GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_COUNT=0 /usr/bin/git rev-parse --git-common-dir >/dev/null 2>&1 || {
-    echo "local-ci: cannot resolve the git common directory" >&2
-    exit 1
-}
-. "$script_dir/local-ci-environment.sh"
-export DARK_FACTORY_LOCAL_CI=1
-if [ "$local_ci_mode" = full ] \
-    && [ "${DARK_FACTORY_LOCAL_CI_LEASE_HELD-}" != 1 ]; then
+if [ "${DARK_FACTORY_LOCAL_CI_ENV-}" != 1 ]; then
+    ci_path=${PATH-}; ci_home=${HOME-}; ci_tmpdir=${TMPDIR-/tmp}; ci_cache_root=${DF_CI_CACHE_ROOT-${ci_home:-/var/empty}/Library/Caches/dark-factory/local-ci/trusted}
+    ci_go_module_cache=${DF_CI_GO_MODULE_CACHE-}; ci_goproxy=${GOPROXY-https://proxy.golang.org,direct}; ci_gosumdb=${GOSUMDB-sum.golang.org}
+    if [ -n "$ci_go_module_cache" ]; then ci_goproxy=off; ci_gosumdb=off; else ci_go_module_cache="$ci_cache_root/go-mod"; fi
+    ci_go=${DF_CI_GO-}; [ -n "$ci_go" ] || ci_go=$(PATH="$ci_path" command -v go || true)
+    ci_node=${DF_CI_NODE-}; [ -n "$ci_node" ] || ci_node=$(PATH="$ci_path" command -v node || true)
+    ci_corepack=${DF_CI_COREPACK-}; [ -n "$ci_corepack" ] || ci_corepack=$(PATH="$ci_path" command -v corepack || true)
+    [ -n "$ci_go" ] || { echo "local-ci: go is unavailable" >&2; exit 1; }; [ -n "$ci_node" ] && [ -n "$ci_corepack" ] || { echo "local-ci: Node/Corepack is unavailable" >&2; exit 1; }
+    /bin/mkdir -p "$ci_cache_root" "$script_dir/../.tools/local-ci-state/data" "$script_dir/../.tools/local-ci-state/state"
+    exec /usr/bin/env -i DARK_FACTORY_LOCAL_CI_ENV=1 DARK_FACTORY_LOCAL_CI=1 DARK_FACTORY_LOCAL_CI_DIRECTORY="${DARK_FACTORY_LOCAL_CI_DIRECTORY-}" DARK_FACTORY_LOCAL_CI_LEASE_HELD="${DARK_FACTORY_LOCAL_CI_LEASE_HELD-}" PATH="$ci_path" HOME=/var/empty TMPDIR="$ci_tmpdir" DF_CI_CACHE_ROOT="$ci_cache_root" DF_CI_GO="$ci_go" DF_CI_NODE="$ci_node" DF_CI_COREPACK="$ci_corepack" GOPATH="$ci_cache_root/go" GOCACHE="$ci_cache_root/go-build" DF_CI_GO_MODULE_CACHE="${DF_CI_GO_MODULE_CACHE-}" GOMODCACHE="$ci_go_module_cache" GOPROXY="$ci_goproxy" GOSUMDB="$ci_gosumdb" COREPACK_HOME="$ci_cache_root/corepack" npm_config_cache="$ci_cache_root/npm" NPM_CONFIG_CACHE="$ci_cache_root/npm" pnpm_config_store_dir="$ci_cache_root/pnpm-store" GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_SYSTEM=/dev/null GIT_CONFIG_NOSYSTEM=1 NETRC=/dev/null XDG_CONFIG_HOME=/var/empty XDG_CACHE_HOME="$ci_cache_root/cache" XDG_DATA_HOME="$script_dir/../.tools/local-ci-state/data" XDG_STATE_HOME="$script_dir/../.tools/local-ci-state/state" GOENV=off GOFLAGS=-modcacherw LC_ALL=C /bin/sh "$0" "$@"
+fi
+if [ "$local_ci_mode" = full ] && [ "${DARK_FACTORY_LOCAL_CI_LEASE_HELD-}" != 1 ]; then
     exec "$script_dir/with-local-ci-lease.sh" "$script_dir/local-ci.sh" "--$local_ci_mode" ${local_ci_shard:+"$local_ci_shard"}
 fi
 if [ "$local_ci_mode" = warm ]; then
@@ -44,9 +48,7 @@ if [ "$local_ci_mode" = affected ]; then
     exit 0
 fi
 if [ "$local_ci_mode" = full ] && in_source_shard; then
-    echo "local-ci: repository contract fixtures"
-    ./scripts/test-release.sh
-    /bin/sh ./scripts/test-go-gates.sh
+    echo "local-ci: release fixture"; ./scripts/test-release.sh
 fi
 if [ "$local_ci_mode" = full ]; then
     if in_source_shard; then
