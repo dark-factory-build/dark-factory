@@ -1499,6 +1499,24 @@ func TestAttemptCallWaitsOutDaemonRestart(t *testing.T) {
 	t.Logf("call waited %v across a %v outage; bound %v", time.Since(started), outage, RestartRetryWindow)
 }
 
+// A caller's deadline still ends a call that is waiting out a restart, and
+// the call reports the deadline rather than the outage.
+func TestAttemptRestartRetryHonorsDeadline(t *testing.T) {
+	directory := privateTestDirectory(t)
+	token := filepath.Join(directory, "token")
+	writeTestToken(t, token, testCredential('D'))
+	t.Setenv(attemptTokenFileEnv, token)
+	client, err := NewAttemptClientFromEnvironment(filepath.Join(directory, "api.sock"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 3*restartRetryInterval/2)
+	defer cancel()
+	if _, err := client.Task(ctx); !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("deadline during restart = %v", err)
+	}
+}
+
 func TestInputBoundsFailBeforeConnection(t *testing.T) {
 	bearer := testCredential('B')
 	directory := privateTestDirectory(t)

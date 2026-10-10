@@ -709,7 +709,7 @@ func (client client) call(ctx context.Context, method string, params, output any
 		}
 		select {
 		case <-ctx.Done():
-			return err
+			return ctx.Err()
 		case <-time.After(restartRetryInterval):
 		}
 	}
