@@ -447,6 +447,40 @@ func TestSpecialistReadsOverseerStatusOnly(t *testing.T) {
 	}
 }
 
+func TestSpecialistCarrierTitleCannotBeForgedByOverseerOrTaskUpdate(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	store, run, keys := runningOrchestratorRun(t)
+	defer store.Close()
+	worker, err := store.CreateAgent(ctx, NewAgent{ID: agentID(t, 126), ProjectID: run.ProjectID, Name: "specialist", Role: RoleWorker, Provider: ProviderShell, ToolBudgetLimit: 1}, mustTime(t, 40))
+	if err != nil {
+		t.Fatal(err)
+	}
+	worker = makeSpecialist(t, store, worker, "", 41)
+	if _, err := store.EnqueueTaskForOverseer(ctx, keys.AttemptDigest, NewTask{ID: taskID(t, 121), ProjectID: run.ProjectID, AssignedAgentID: worker.ID, IncarnationID: incarnationID(t, 122), Title: overseerWakeTitle}, mustTime(t, 42)); !errors.Is(err, ErrInvalidValue) {
+		t.Fatalf("overseer carrier forge = %v", err)
+	}
+	task, err := store.EnqueueTask(ctx, NewTask{ID: taskID(t, 123), ProjectID: run.ProjectID, AssignedAgentID: worker.ID, IncarnationID: incarnationID(t, 124), Title: "ordinary"}, mustTime(t, 43))
+	if err != nil {
+		t.Fatal(err)
+	}
+	title := overseerWakeTitle
+	if _, err := store.UpdateTask(ctx, task.ID, task.Revision, TaskPatch{Title: &title}, mustTime(t, 44)); !errors.Is(err, ErrInvalidValue) {
+		t.Fatalf("task update carrier forge = %v", err)
+	}
+	plainStore, plainRun, _ := runningWorkerRun(t)
+	defer plainStore.Close()
+	plainAgent, _, err := plainStore.Agent(ctx, plainRun.AgentID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	makeSpecialist(t, plainStore, plainAgent, "", 40)
+	authority, err := plainStore.AuthenticateAttempt(ctx, plainRun.CredentialDigest)
+	if err != nil || authority.Specialist {
+		t.Fatalf("ordinary specialist authority = %+v, %v", authority, err)
+	}
+}
+
 // Archiving a specialist mid-review stops it as an operator stop would: the
 // run is finalizing with its credential revoked, so it can record nothing
 // more; its queued carriers are cancelled and other work is untouched. Other
