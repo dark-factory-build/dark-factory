@@ -314,11 +314,26 @@ func (daemon *Daemon) release(project kernel.ProjectID, root string, source chan
 	}
 	delivery.Phase = "stage"
 	_ = daemon.writeRelease(ctx, project, &delivery)
-	running := ""
-	if current := buildinfo.Current(); current.Release() {
-		running = current.Source()
+	// The worker record names the commit whose Worker is live. A release
+	// whose factoryd later fails keeps its Worker, so the record, not the
+	// running build, decides; any record but a verified one deploys again.
+	_, worker, found, err := daemon.store.Delivery(ctx, "worker")
+	live := ""
+	if err == nil && found && worker.State == "verified" {
+		live = worker.Revision
 	}
-	if err := releaseWorker(ctx, daemon, filepath.Join(directory, "tree"), running, delivery.Revision); err != nil {
+	worker = kernel.ProductionDelivery{ID: "worker", Kind: "worker", Destination: "control-plane", Revision: delivery.Revision, State: "running", PullRequests: []uint64{}}
+	if err := daemon.writeRelease(ctx, project, &worker); err != nil {
+		fail("worker: " + err.Error())
+		return
+	}
+	err = releaseWorker(ctx, daemon, filepath.Join(directory, "tree"), live, delivery.Revision)
+	worker.State = "verified"
+	if err != nil {
+		worker.State, worker.Reason = "failed", err.Error()
+	}
+	_ = daemon.writeRelease(context.WithoutCancel(ctx), project, &worker)
+	if err != nil {
 		fail("worker: " + err.Error())
 		return
 	}
@@ -391,15 +406,13 @@ func buildRelease(ctx context.Context, daemon *Daemon, root string, source chang
 
 // deployWorker deploys the control-plane Worker at sha with the release
 // checkout's scripts/release.sh, which rolls back a Worker that does not come
-// up, whenever control-plane/ differs from the running build's (any change
+// up, whenever control-plane/ differs from the live Worker's commit (always
 // when that is unknown). It runs before factoryd is staged, so factoryd and
 // the Worker it calls are released together (#1512).
-func deployWorker(ctx context.Context, daemon *Daemon, tree, running, sha string) error {
-	if running != "" {
-		_, err := gitOutput(ctx, filepath.Join(tree, ".git"), "diff", "--quiet", running, sha, "--", "control-plane")
-		var exit *exec.ExitError
-		if err == nil || !errors.As(err, &exit) || exit.ExitCode() != 1 {
-			return err
+func deployWorker(ctx context.Context, daemon *Daemon, tree, live, sha string) error {
+	if live != "" {
+		if _, err := gitOutput(ctx, filepath.Join(tree, ".git"), "diff", "--quiet", live, sha, "--", "control-plane"); err == nil {
+			return nil
 		}
 	}
 	command := exec.CommandContext(ctx, filepath.Join(tree, "scripts", "release.sh"), sha)

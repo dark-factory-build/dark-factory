@@ -236,7 +236,7 @@ runs the local gate, deploys a version tagged `cp-<control-plane tree>`, and
 runs `wrangler rollback` if `/healthz` or the headless `/readyz` label does not
 come up. factoryd's release lane is its only caller, one release at a time: it
 runs the script from its release clone before staging factoryd whenever
-`control-plane/` changed since the running build.
+`control-plane/` changed since the Worker its `worker` delivery record names.
 
 ## Local proof
 

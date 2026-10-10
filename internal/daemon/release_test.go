@@ -286,6 +286,45 @@ func TestReleaseRecordsAFailedWorkerAndNeverStagesFactoryd(t *testing.T) {
 	if <-events != "build /self-repository" || len(events) != 0 {
 		t.Fatal("a failed Worker deploy went on to stage factoryd")
 	}
+	if _, worker, found, err := fixture.store.Delivery(context.Background(), "worker"); err != nil || !found || worker.State != "failed" || worker.Revision != sha {
+		t.Fatalf("failed worker record = %+v, %t, %v", worker, found, err)
+	}
+}
+
+// A release whose factoryd trial fails keeps the Worker it deployed, so the
+// next release compares with that Worker, not with the running build.
+func TestReleaseComparesWithTheLiveWorkerNotTheRunningBuild(t *testing.T) {
+	fixture, settle, events := releaseFixture(t)
+	settle()
+	lives := make(chan string, 2)
+	releaseWorker = func(_ context.Context, _ *Daemon, _, live, _ string) error {
+		lives <- live
+		return nil
+	}
+	ctx := context.Background()
+	failed, next := strings.Repeat("b", 40), strings.Repeat("c", 40)
+	if _, err := fixture.daemon.Release(ctx, failed, true); err != nil {
+		t.Fatal(err)
+	}
+	awaitRelease(t, fixture.daemon, failed, func(value kernel.ProductionDelivery) bool { return value.Phase == "trial" })
+	if err := fixture.daemon.FinishRelease(ctx, failed, "failed", "trial"); err != nil {
+		t.Fatal(err)
+	}
+	for range 3 {
+		<-events
+	}
+	fixture.daemon.releaseHold.Store(false)
+	fixture.daemon.releaseBusy.Store(false)
+	if _, err := fixture.daemon.Release(ctx, next, true); err != nil {
+		t.Fatal(err)
+	}
+	awaitRelease(t, fixture.daemon, next, func(value kernel.ProductionDelivery) bool { return value.Phase == "trial" })
+	if first, second := <-lives, <-lives; first != "" || second != failed {
+		t.Fatalf("live Workers = %q, %q", first, second)
+	}
+	if _, worker, found, err := fixture.store.Delivery(ctx, "worker"); err != nil || !found || worker.State != "verified" || worker.Revision != next {
+		t.Fatalf("worker record = %+v, %t, %v", worker, found, err)
+	}
 }
 
 // #1512: a release whose range touches control-plane/ deploys the Worker with
@@ -313,8 +352,8 @@ func TestDeployWorkerRunsOnlyWhenTheControlPlaneChanged(t *testing.T) {
 	write("control-plane/worker.rs", "one\n", 0o644)
 	write(".gitignore", "deployed\nfail\n", 0o644)
 	git("add", "-A")
-	git("commit", "--quiet", "-m", "running")
-	running := git("rev-parse", "HEAD")
+	git("commit", "--quiet", "-m", "live")
+	live := git("rev-parse", "HEAD")
 	write("README.md", "docs\n", 0o644)
 	git("add", "-A")
 	git("commit", "--quiet", "-m", "factoryd only")
@@ -331,18 +370,20 @@ func TestDeployWorkerRunsOnlyWhenTheControlPlaneChanged(t *testing.T) {
 		_ = os.Remove(filepath.Join(tree, "deployed"))
 		return string(data)
 	}
-	if err := deployWorker(ctx, daemon, tree, running, unchanged); err != nil || deployed() != "" {
+	if err := deployWorker(ctx, daemon, tree, live, unchanged); err != nil || deployed() != "" {
 		t.Fatalf("unchanged control plane deployed: %v", err)
 	}
-	if err := deployWorker(ctx, daemon, tree, running, changed); err != nil || deployed() != changed+"\n" {
+	if err := deployWorker(ctx, daemon, tree, live, changed); err != nil || deployed() != changed+"\n" {
 		t.Fatalf("changed control plane not deployed: %v", err)
 	}
-	// A build that is not a release cannot say which Worker is live.
-	if err := deployWorker(ctx, daemon, tree, "", unchanged); err != nil || deployed() != unchanged+"\n" {
-		t.Fatalf("unknown running build not deployed: %v", err)
+	// An unknown live Worker, or one the tree cannot compare, is deployed.
+	for _, unknown := range []string{"", strings.Repeat("1", 40)} {
+		if err := deployWorker(ctx, daemon, tree, unknown, unchanged); err != nil || deployed() != unchanged+"\n" {
+			t.Fatalf("unknown live Worker %q not deployed: %v", unknown, err)
+		}
 	}
 	write("fail", "1", 0o644)
-	if err := deployWorker(ctx, daemon, tree, running, changed); err == nil || !strings.HasSuffix(err.Error(), ": release: control-plane deploy_failed") {
+	if err := deployWorker(ctx, daemon, tree, live, changed); err == nil || !strings.HasSuffix(err.Error(), ": release: control-plane deploy_failed") {
 		t.Fatalf("failed deploy = %v", err)
 	}
 }
