@@ -330,13 +330,6 @@ func (daemon *Daemon) resumeReview(ctx context.Context, project kernel.ProjectID
 	if err != nil {
 		return op, err
 	}
-	// Resume is the fresh-verdict boundary; routing retries below stay paced.
-	defer func() {
-		if op.Submitted && (op.State == "enqueued" || op.State == "completed" || op.State == "ejected") {
-			daemon.pipelineAt.Store(0)
-			daemon.tickMergePipeline(ctx)
-		}
-	}()
 	op, err = coordinator.Resume(ctx, op)
 	return op, errors.Join(err, daemon.finishReviewRouting(ctx, project, repository, op))
 }

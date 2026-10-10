@@ -90,8 +90,7 @@ type Config struct {
 	// Retained is the Change to reopen instead of making a fresh worktree.
 	Retained *Result
 	// ProviderTask selects and verifies the provider's closed delivery path.
-	// Shell seals it on fd 11 and Claude receives a terminal-safe prompt. It is
-	// empty for Codex, whose task remains in the daemon behind the attempt API.
+	// Shell seals it on fd 11; native providers write it to runtime home.
 	ProviderTask []byte
 }
 
@@ -282,10 +281,8 @@ func validateConfig(config Config) error {
 
 func prepareProviderTask(kind kernel.Provider, task []byte) (provider.TaskDelivery, []byte, error) {
 	if kind != kernel.ProviderShell {
-		if len(task) != 0 {
-			return 0, nil, provider.ErrInvalid
-		}
-		return provider.TaskDeliveryAttemptAPI, nil, nil
+		delivery, _, err := provider.PrepareTask(kind, task)
+		return delivery, nil, err
 	}
 	return provider.PrepareTask(kind, task)
 }

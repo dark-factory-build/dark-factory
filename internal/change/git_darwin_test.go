@@ -695,13 +695,6 @@ func TestGitPublicFailuresNeverExposePrivateBoundaryData(t *testing.T) {
 	}
 }
 
-func TestGitErrorNamesOperationWithoutExposingArguments(t *testing.T) {
-	err := reviewCheckoutGitError("fetch", newGitError(gitFailureProcess))
-	if got := err.Error(); got != "review checkout fetch: Git process failed" {
-		t.Fatalf("error = %q", got)
-	}
-}
-
 func TestReadGitCapturePreservesBoundedReaderContract(t *testing.T) {
 	wrappedEOF := fmt.Errorf("wrapped: %w", io.EOF)
 	tests := []struct {

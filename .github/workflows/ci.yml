@@ -71,13 +71,12 @@ jobs:
   checks:
     needs: scope
     if: needs.scope.result == 'success' && needs.scope.outputs.macos == 'true'
-    runs-on: ${{ matrix.shard == 'linux' && 'ubuntu-24.04' || github.event_name != 'workflow_dispatch' && 'macos-latest' || inputs.runner || 'dark-factory-mac' }}
+    runs-on: ${{ github.event_name != 'workflow_dispatch' && 'macos-latest' || inputs.runner || 'dark-factory-mac' }}
     timeout-minutes: 30
     strategy:
       fail-fast: false
       matrix:
-        # The linux leg gates only packages proved in scripts/linux-coverage.
-        shard: ${{ fromJSON(needs.scope.outputs.macos_mode == 'full' && '["daemon","packages","source","linux"]' || '["source","linux"]') }}
+        shard: ${{ fromJSON(needs.scope.outputs.macos_mode == 'full' && '["daemon","packages","source"]' || '["source"]') }}
     steps:
       - name: Check out $GITHUB_SHA
         env:
@@ -94,11 +93,11 @@ jobs:
         run: |
           set -euo pipefail
           case $(uname -m) in
-            arm64|aarch64) go_arch=arm64 ;;
+            arm64) go_arch=arm64 ;;
             x86_64) go_arch=amd64 ;;
-            *) echo "unsupported architecture" >&2; exit 1 ;;
+            *) echo "unsupported macOS architecture" >&2; exit 1 ;;
           esac
-          go_archive=go1.27.2.$(uname -s | tr '[:upper:]' '[:lower:]')-$go_arch.tar.gz
+          go_archive=go1.27.2.darwin-$go_arch.tar.gz
           curl --fail --silent --show-error --location "https://dl.google.com/go/$go_archive" -o "$RUNNER_TEMP/$go_archive"
           checksum=$(curl --fail --silent --show-error --location "https://dl.google.com/go/$go_archive.sha256")
           printf '%s  %s\n' "$checksum" "$RUNNER_TEMP/$go_archive" | shasum -a 256 -c -
@@ -110,11 +109,11 @@ jobs:
         run: |
           set -euo pipefail
           case $(uname -m) in
-            arm64|aarch64) node_arch=arm64 ;;
+            arm64) node_arch=arm64 ;;
             x86_64) node_arch=x64 ;;
-            *) echo "unsupported architecture" >&2; exit 1 ;;
+            *) echo "unsupported macOS architecture" >&2; exit 1 ;;
           esac
-          node_release=node-v22.20.0-$(uname -s | tr '[:upper:]' '[:lower:]')-$node_arch
+          node_release=node-v22.20.0-darwin-$node_arch
           node_archive=$node_release.tar.gz
           node_url=https://nodejs.org/dist/v22.20.0
           curl --fail --silent --show-error --location "$node_url/$node_archive" -o "$RUNNER_TEMP/$node_archive"
@@ -144,7 +143,7 @@ jobs:
           key: ci-v2-${{ runner.os }}-${{ runner.arch }}-${{ steps.cache-toolchain.outputs.go }}-node22.20.0-${{ hashFiles('go.sum', 'web/pnpm-lock.yaml', 'web/package.json') }}-${{ github.sha }}
           restore-keys: |
             ci-v2-${{ runner.os }}-${{ runner.arch }}-${{ steps.cache-toolchain.outputs.go }}-node22.20.0-${{ hashFiles('go.sum', 'web/pnpm-lock.yaml', 'web/package.json') }}-
-      - name: Run the source gate
+      - name: Run the macOS source gate
         env:
           MACOS_MODE: ${{ needs.scope.outputs.macos_mode }}
           AFFECTED_BASE: ${{ needs.scope.outputs.base }}
@@ -154,7 +153,7 @@ jobs:
           case "$MACOS_MODE" in
             warm) ./scripts/local-ci.sh --warm ;;
             affected) ./scripts/local-ci.sh --affected "$AFFECTED_BASE" ;;
-            full) ./scripts/local-ci.sh --full "${SHARD/linux/packages}" ;;
+            full) ./scripts/local-ci.sh --full "$SHARD" ;;
             *) echo "unknown macOS gate mode: $MACOS_MODE" >&2; exit 1 ;;
           esac 2>&1 | tee "$RUNNER_TEMP/macos-gate.log"
       # Reported beside a failing gate rather than hidden behind it.

@@ -392,6 +392,7 @@ func (daemon *Daemon) runNext(ctx context.Context, spec SupervisorSpec) (resultR
 		if len(preparedTask) != 0 {
 			return daemon.failRunBeforeRuntime(daemon.cleanupCtx, run, keys.resources.RuntimeRoot, kernel.FailureSpawn, provider.ErrInvalid)
 		}
+		providerTask = rawProviderTask
 	default:
 		return daemon.failRunBeforeRuntime(daemon.cleanupCtx, run, keys.resources.RuntimeRoot, kernel.FailureSpawn, provider.ErrInvalid)
 	}

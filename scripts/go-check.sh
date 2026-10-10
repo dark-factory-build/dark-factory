@@ -54,12 +54,8 @@ if [ "$go_check_mode" = source ]; then
         exit 1
     }
 
-    # Linux vets only the packages scripts/linux-coverage marks proved.
-    vet_packages=./...
-    [ "$(uname -s)" != Linux ] || vet_packages=$(awk '$1 == "package" && $3 == "proved" { print "./" $2 }' scripts/linux-coverage)
-    echo "go-check: go vet" $vet_packages
-    # shellcheck disable=SC2086
-    "$go" vet $vet_packages
+    echo "go-check: go vet ./..."
+    "$go" vet ./...
 
     # Keep one small cacheable package in the ordinary source gate for fast
     # feedback; the owned Go gate runs the complete package classification.

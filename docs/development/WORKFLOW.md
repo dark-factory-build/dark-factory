@@ -183,16 +183,6 @@ ID. Inspect the returned `human_reply.state`; `delivery_unknown` means input
 may have been delivered and must not be replayed. Operator credentials are
 required; a worker attempt token does not grant this authority.
 
-Cancel a settled or unwanted open request without resuming its run:
-
-```sh
-factoryctl human cancel --request ID --revision REVISION --run-revision RUN_REVISION
-```
-
-Both revisions come from `human list`. This is the browser card's cancel: a
-live run is cancelled and revoked, a yielded overseer's continuation is
-dropped. A stale or repeated cancel is refused with a revision conflict.
-
 For CLI supervision, `factoryctl status` includes agent model, reasoning,
 standing-instruction policy and counters, and tool-budget counters. Read a
 revision-bound task with `factoryctl task read --task ID --revision REVISION
@@ -279,7 +269,7 @@ cache for subsequent merge-queue refs. The default manual runner remains
 `dark-factory-mac`; its Go patch version may differ. Queue caches alone do not
 establish reuse across different queue refs.
 
-Process-sensitive checks take one blocking `lockf` (Linux: `flock`) lock from the common Git
+Process-sensitive checks take one blocking `lockf` lock from the common Git
 directory, so linked worktrees cannot stack process-heavy Go runs. A contender
 waits; the kernel releases the lock when its holder exits. The routine
 `go-check.sh` remains outside that lease.
