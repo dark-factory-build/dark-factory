@@ -22,9 +22,8 @@ When fixing a defect or a flaky test, look first for the shared root cause
 across related issues and fix the whole class once, with the least code and
 product surface; never weaken a test to make it pass.
 
-Agent-posted issue or pull-request comments must use `./scripts/gh-comment.sh`;
-pass the comment body through `--body-file` or stdin, never as a command-line
-argument.
+Pass agent-posted issue and pull-request comment bodies with `--body-file`,
+never as a command-line argument.
 
 ## Agent check loop
 

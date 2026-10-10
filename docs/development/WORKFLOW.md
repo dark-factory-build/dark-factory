@@ -4,15 +4,7 @@ This is a reference for local development, checks, releases, and installation.
 
 ## Local development
 
-The worktree helper fetches the configured origin default branch before creating
-the branch and checkout:
-
-```sh
-./scripts/new-worktree.sh <slug>
-cd .worktrees/<slug>
-```
-
-Prefer deleting obsolete behavior and duplicated machinery over compatibility
+Create a worktree as [CONTRIBUTING.md](../../CONTRIBUTING.md) shows. Prefer deleting obsolete behavior and duplicated machinery over compatibility
 code, feature flags, or speculative abstractions.
 
 The routine source check is:
@@ -43,7 +35,7 @@ and `--release` runs the source check plus release and packaging fixtures. The s
 protected CI workflow chooses these modes from the complete merge-queue diff;
 uncertain or mixed paths use the full gate.
 
-For CI edits, run the affected gate fixtures and source checks, adding a full
+For CI edits, run the affected source checks, adding a full
 local run where that resolves a concrete risk. Authors and reviewers do not
 repeat the entire suite merely because a PR is about to enter the queue.
 
@@ -223,8 +215,11 @@ Factory-owned Change worktrees live under the daemon home's `changes`
 directory on `factory/<12 hex>` branches. New Changes use their own bare Git
 administration under the project's `.git/dark-factory-changes/<Change ID>/.git`;
 legacy retained Changes may still use the project's canonical administration.
-Use the exact settled source receipt's `git_directory`, not an assumed canonical
-branch. Remove one only after the same
+factoryd reclaims them itself by the rule in ARCHITECTURE.md (Verification
+and storage), with these same proofs, so manual removal is now the exception:
+a Change factoryd kept and logged. Its removal also deletes the worktree's
+ignored files (build output, tool caches): they are not committed work. Use the exact settled source receipt's `git_directory`, not an assumed
+canonical branch. Remove one only after the same
 proof: its task is terminal and not queued for correction, no run owns it,
 its branch tip is merged into freshly fetched `origin/main` (or its squash
 merge is verified as above), and the worktree has no uncommitted work. Then

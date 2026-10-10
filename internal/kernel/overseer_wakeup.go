@@ -30,7 +30,8 @@ const (
 // question, finished work not yet published or corrected behind its open pull
 // request, a pull request factoryd escalated while it stays open at the
 // escalated head); a succeeded worker task needs one look. An accepted intake
-// task that succeeded with a diff needs none: factoryd publishes it, and the
+// task that succeeded with a diff (or whose published Change was since
+// reclaimed) needs none: factoryd publishes it, and the
 // Change item covers a publication that never happens. While factoryd records
 // that Change revision's publication refused, the item is that refusal, at the
 // Change's version however often the hourly retry repeats it. An intake task the
@@ -65,7 +66,7 @@ item AS (
 	FROM tasks AS t JOIN agents AS a ON a.id = t.assigned_agent_id
 	WHERE t.project_id = ?1 AND a.role = 'worker' AND t.status IN ('succeeded', 'blocked', 'failed') AND NOT ` + taskIssueWithdrawn + ` AND NOT ` + specialistCarrierSQL + `
 	  AND NOT (t.status = 'succeeded' AND EXISTS (SELECT 1 FROM intake_task_bindings AS b WHERE b.task_id = t.id)
-	      AND EXISTS (SELECT 1 FROM changes AS c WHERE c.task_id = t.id AND c.head_commit <> c.base_commit))
+	      AND EXISTS (SELECT 1 FROM changes AS c WHERE c.task_id = t.id AND (c.head_commit <> c.base_commit OR c.phase = 'abandoned' AND EXISTS (SELECT 1 FROM publication_tasks p WHERE p.task_id = t.id))))
 	UNION ALL SELECT r.task_id, h.created_at_ms, 3, '', lower(hex(r.task_id)) FROM human_requests AS h JOIN runs AS r ON r.id = h.run_id
 	WHERE r.project_id = ?1 AND r.role = 'worker' AND h.status IN ('open', 'delivering', 'delivery_unknown')
 	UNION ALL SELECT CASE WHEN f.identity IS NULL THEN c.task_id END, c.updated_at_ms, CASE WHEN f.identity IS NULL THEN 3 ELSE 0 END,
@@ -91,13 +92,24 @@ item AS (
 	  AND COALESCE(json_extract(e.document, '$.route_pending'), 0) = 0 AND json_extract(p.document, '$.state') = 'open'
 	  AND lower(json_extract(p.document, '$.head')) = lower(json_extract(e.document, '$.request.Head'))
 	UNION ALL SELECT NULL, c.created_at_ms, 3, 'Proposal ' || lower(hex(c.id)) || ' from ' || COALESCE((SELECT name FROM agents WHERE id = ` + authorAgentSQL + `), 'the operator') || ': '
-		|| replace(substr(c.title, 1, 100), char(10), ' '), '[proposal:' || lower(hex(c.id)) || ']'
+		|| replace(substr(c.title, 1, 100), char(10), ' ') || ` + proposalNotesSQL + `, '[proposal:' || lower(hex(c.id)) || ']'
 	FROM project_content_revisions AS c WHERE c.project_id = ?1 AND ` + openProposalSQL + `),
 numbered AS (SELECT *, row_number() OVER () AS n FROM item),
 counted AS (SELECT numbered.*, count(at) AS named, MAX(at) AS named_at, count(CASE WHEN started THEN 1 END) AS wakes,
 	unhex(substr(MAX(CASE WHEN started THEN printf('%020d', at) || hex(task) END), 21)) AS last
 	FROM numbered LEFT JOIN carrier ON ` + overseerWakeNames + ` GROUP BY n)
 `
+
+// proposalNotesSQL names, after proposal c's title, the contributions and
+// challenges other records attach to it by record_id, and who wrote them, so
+// the overseer weighs them when it decides and prioritises.
+const proposalNotesSQL = `COALESCE((SELECT ' (' || count(*) || ' notes from ' || group_concat(DISTINCT COALESCE(a.name, 'the operator')) || ')'
+		FROM project_content_revisions AS n LEFT JOIN agents AS a ON a.id = unhex(substr(n.author, instr(n.author, ' agent:') + 7, 32))
+		WHERE n.project_id = c.project_id AND n.kind = 'observation' AND n.deprecated = 0
+		  AND n.revision = (SELECT MAX(revision) FROM project_content_revisions WHERE id = n.id)
+		  AND json_extract(CASE WHEN json_valid(n.source_references) THEN n.source_references ELSE '{}' END, '$.record_type') = 'contribution'
+		  AND lower(json_extract(CASE WHEN json_valid(n.source_references) THEN n.source_references ELSE '{}' END, '$.record_id')) = lower(hex(c.id))
+		HAVING count(*) > 0), '')`
 
 // overseerWakeNames is a carrier since the item's version that named it, by
 // its key (a task identity, or an escalation's reviewer record), or that named
