@@ -128,6 +128,7 @@ func (daemon *Daemon) refreshProduction(ctx context.Context, project kernel.Proj
 				daemon.launchReview(project, op)
 			}
 		}
+		daemon.advanceReviewOperations(ctx, false)
 		recordCIObservations(daemon.runtimeStore(), repository.ID.String(), observation, at.Int64())
 	}
 	return nil
@@ -396,8 +397,7 @@ func readMaintainerMergeQueue(ctx context.Context, call maintainerMCP, repositor
 	return "none", nil
 }
 
-// recordCIObservations is the github adapter: the checks a refresh read
-// light the jobs of the repository's CI unit, and fail them on a failed
+// recordCIObservations is the github adapter: the checks a refresh read light the jobs of the repository's CI unit, and fail them on a failed
 // conclusion. A refresh reads only heads whose checks can still change, so a
 // job lights while it runs and once when it settles. Silence is claimed only
 // when no read failed and the pull page was complete.

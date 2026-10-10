@@ -19,6 +19,7 @@ import (
 type publicReviewBackend struct {
 	killed, submitAmbiguous, requestChanges bool
 	queued                                  bool
+	checks                                  []string
 	enqueueRefusal                          string // the broker's refusal class, if any
 	leaveUnqueued                           int
 	reviews, submits, enqueues              int
@@ -77,7 +78,11 @@ func (b *publicReviewBackend) ObservePull(_ context.Context, operation review.Op
 	if b.pull != nil {
 		return *b.pull, nil
 	}
-	return review.Pull{Head: operation.Request.Head, State: "open", Queued: b.queued, Checks: []string{"required=success"}}, nil
+	checks := b.checks
+	if checks == nil {
+		checks = []string{"required=success"}
+	}
+	return review.Pull{Head: operation.Request.Head, State: "open", Queued: b.queued, Checks: checks}, nil
 }
 
 func (b *publicReviewBackend) Observe(_ context.Context, operationID string) (review.Receipt, error) {
@@ -851,7 +856,7 @@ func TestRefusedEnqueueResendsEachTickAndEndsFromThePull(t *testing.T) {
 	settle()
 	customerMode(t, fixture)
 	ctx := context.Background()
-	backend := &publicReviewBackend{enqueueRefusal: "RATE_LIMITED"}
+	backend := &publicReviewBackend{enqueueRefusal: "RATE_LIMITED", checks: []string{"checks=success", "review=skipped"}}
 	fixture.daemon.reviewBackend = func(string, uint64) review.Backend { return backend }
 	if _, err := reviewNow(ctx, fixture.daemon, project, publishedReviewRequest()); err == nil {
 		t.Fatalf("refused enqueue err=%v enqueues=%d", err, backend.enqueues)
@@ -868,11 +873,11 @@ func TestRefusedEnqueueResendsEachTickAndEndsFromThePull(t *testing.T) {
 		}
 		return lastDurableReview(t, fixture.store, project)
 	}
-	if op := tick(); op.State != "enqueued" || op.Escalation != "" || op.Failures != 3 || backend.enqueues != 3 {
+	if op := tick(); op.State != "enqueued" || op.Escalation != "" || op.Failures != 3 || backend.enqueues != 3 || backend.reviews != 1 {
 		t.Fatalf("refused again: %+v (enqueues %d)", op, backend.enqueues)
 	}
 	backend.enqueueRefusal = ""
-	if op := tick(); op.State != "enqueued" || op.Failures != 0 || op.Enqueues != 1 || backend.enqueues != 4 {
+	if op := tick(); op.State != "enqueued" || op.Failures != 0 || op.Enqueues != 1 || backend.enqueues != 4 || backend.reviews != 1 {
 		t.Fatalf("accepted: %+v (enqueues %d)", op, backend.enqueues)
 	}
 	backend.pull = &review.Pull{Head: publishedReviewRequest().Head, State: "closed"}
