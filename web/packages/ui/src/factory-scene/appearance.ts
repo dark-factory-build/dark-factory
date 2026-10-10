@@ -98,11 +98,20 @@ export function workerFrames(worker: SceneWorker, motion?: WorkerMotion, seat?: 
   const scribble = at !== undefined && at % 2600 < 1300 ? Math.floor(at / 325) % 2 : 0;
   // At the bench a wrench, tablet or clipboard is worked with: the carrying arm
   // reaches forward and back. Empty hands, or a mug, leave the keyboard.
-  const wielding = motion?.action === "interacting" && ["clipboard", "wrench", "tablet"].includes(spriteOptions.tool[appearance.tool]?.name ?? "");
+  const tool = spriteOptions.tool[appearance.tool]?.name ?? "";
+  const wielding = motion?.action === "interacting" && ["clipboard", "wrench", "tablet"].includes(tool);
+  // A specialist's running review is inspection, at a machine or at the planning table: it reads its
+  // board for a while, then lowers it to look past it.
+  const inspecting = worker.specialist !== undefined && worker.activity === "busy" && (motion?.action === "interacting" || seat === "planning");
+  // Empty hands at a machine work it: most reach up to its controls, facing it; some type at it.
+  // Which is fixed per worker and machine, so a floor is mixed but nobody flickers between them.
+  const operating = motion?.action === "interacting" && hash(`${worker.id}:${worker.observedBayId ?? worker.nodeId ?? ""}`) % 3 !== 0;
   const pose = walking ? `walk.${motion.frame}`
     // A raised hand interrupts whatever the hands were doing, at the bench, the table or the shelf.
     : hailing !== undefined ? `wave.${hailing}`
+    : inspecting ? `inspect.${at !== undefined && at % 3600 >= 2400 ? 1 : 0}`
     : wielding ? motion.frame === 1 ? "walk.1" : "idle"
+    : operating ? `operate.${at === undefined ? 0 : Math.floor(at / 800) % 2}`
     : motion?.action === "interacting" ? `type.${motion.frame}`
     // Standing at the shelf with a book, the coffee station with a cup, or any other implement with a clipboard.
     : errand !== undefined ? "hold"
@@ -114,17 +123,19 @@ export function workerFrames(worker: SceneWorker, motion?: WorkerMotion, seat?: 
     : worker.activity === "waiting" ? "waiting" : "idle";
   const cloth = appearance.outfit === 1 ? appearance.clothes_colour : "plain";
   const alert = worker.activity === "needs-you" ? ["person.alert"] : [];
-  // Walking away shows a back, walking across a profile (the scene mirrors east
-  // for west). Only the front has a face to blink or a chest to badge.
-  if (walking && motion.direction === "north") return [
+  const step = walking ? pose : "stand";
+  // Walking away, or working the machine in front of them, shows a back; walking
+  // across a profile (the scene mirrors east for west). Only the front has a face
+  // to blink or a chest to badge.
+  if (walking && motion.direction === "north" || pose.startsWith("operate")) return [
     `person.skin.${appearance.skin}.back.${pose}`,
-    `person.legs.${cloth}.${pose}`,
+    `person.legs.${cloth}.${step}`,
     `person.outfit.${appearance.outfit}.${appearance.clothes_colour}.back.${pose}`,
     `person.hair.${appearance.hair}.${appearance.hair_colour}.back`,
-    `person.shoes.${appearance.shoes}.${pose}`,
+    `person.shoes.${appearance.shoes}.${step}`,
     `person.headwear.${appearance.headwear}.back`,
-    // Seen from behind the carrying arm is on the other side, and so is its step.
-    `person.tool.${appearance.tool}.back.${pose === "walk.0" ? "high" : "low"}`,
+    // Seen from behind the carrying arm is on the other side, and so is its step. Working hands put it down.
+    ...(walking ? [`person.tool.${appearance.tool}.back.${pose === "walk.0" ? "high" : "low"}`] : []),
     ...alert,
   ];
   if (walking && (motion.direction === "east" || motion.direction === "west")) return [
@@ -139,10 +150,10 @@ export function workerFrames(worker: SceneWorker, motion?: WorkerMotion, seat?: 
     `person.system.${role}.${provider}`,
     ...alert,
   ];
-  const step = walking ? pose : "stand";
   const blinking = at !== undefined && at % (3000 + hash(worker.id) % 4000) < 200;
   const glasses = spriteOptions.face[appearance.face]?.name === "glasses";
-  const held = errand !== undefined && pose === "hold" ? [`person.held.${errand === "shelf" ? "book" : errand === "coffee" ? "cup" : "clipboard"}.chest`]
+  const held = pose.startsWith("inspect") ? [`person.held.${tool === "tablet" ? "tablet" : "clipboard"}.${pose === "inspect.0" ? "chest" : "low"}`]
+    : errand !== undefined && pose === "hold" ? [`person.held.${errand === "shelf" ? "book" : errand === "coffee" ? "cup" : "clipboard"}.chest`]
     : pose === "sip" || pose === "hold" ? [`person.held.${rest.item}.${rest.where}`]
     : seat === "planning" && pose.startsWith("type") ? [`person.held.pencil.${scribble}`]
     : pose.startsWith("type") ? ["person.held.keyboard"]

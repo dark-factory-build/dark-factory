@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"context"
 	"crypto/sha256"
-	"encoding/hex"
 	"errors"
 	"fmt"
 	"os"
@@ -238,6 +237,7 @@ func TestParseExactAttemptCommands(t *testing.T) {
 		{name: "peer ask", args: []string{"attempt", "peer", "ask", "--task", "0123456789abcdef0123456789abcdef", "--idempotency-key", "fedcba9876543210fedcba9876543210", "--question", "need context"}, command: attemptCommand{kind: commandPeerAsk, id: "0123456789abcdef0123456789abcdef", idempotencyKey: "fedcba9876543210fedcba9876543210", text: "need context"}},
 		{name: "peer answer", args: []string{"attempt", "peer", "answer", "--question", "0123456789abcdef0123456789abcdef", "--revision", "7", "--idempotency-key", "fedcba9876543210fedcba9876543210", "--answer", "context"}, command: attemptCommand{kind: commandPeerAnswer, id: "0123456789abcdef0123456789abcdef", expectedRevision: 7, idempotencyKey: "fedcba9876543210fedcba9876543210", text: "context"}},
 		{name: "send back", args: []string{"attempt", "send-back", "--task", "0123456789abcdef0123456789abcdef", "--note", "five findings"}, command: attemptCommand{kind: commandSendBack, id: "0123456789abcdef0123456789abcdef", text: "five findings"}},
+		{name: "send back at head", args: []string{"attempt", "send-back", "--task", "0123456789abcdef0123456789abcdef", "--head", "abababababababababababababababababababab", "--note", "five findings"}, command: attemptCommand{kind: commandSendBack, id: "0123456789abcdef0123456789abcdef", sourceCommit: "abababababababababababababababababababab", text: "five findings"}},
 		{name: "send back maximum note", args: []string{"attempt", "send-back", "--task", "ffffffffffffffffffffffffffffffff", "--note", strings.Repeat("n", 8192)}, command: attemptCommand{kind: commandSendBack, id: "ffffffffffffffffffffffffffffffff", text: strings.Repeat("n", 8192)}},
 		{name: "human request maximum question", args: []string{"attempt", "request-human", "--idempotency-key", "ffffffffffffffffffffffffffffffff", "--question", strings.Repeat("q", 8192)}, command: attemptCommand{kind: commandRequestHuman, idempotencyKey: "ffffffffffffffffffffffffffffffff", text: strings.Repeat("q", 8192)}},
 	}
@@ -248,19 +248,6 @@ func TestParseExactAttemptCommands(t *testing.T) {
 				t.Fatalf("parse = %+v, help=%t ok=%t", command, help, ok)
 			}
 		})
-	}
-}
-
-func TestParseCodexTurnCompleteNotification(t *testing.T) {
-	notification := `{"type":"agent-turn-complete","thread-id":"thread-1","turn-id":"turn-1","cwd":"/private/runtime"}`
-	command, help, ok := parse([]string{"attempt", "turn-complete", notification})
-	digest := sha256.Sum256([]byte("thread-1\x00turn-1\x00/private/runtime"))
-	if !ok || help || command.kind != commandTurnComplete || command.idempotencyKey != hex.EncodeToString(digest[:16]) || command.text == "" {
-		t.Fatalf("parse notification = %+v, help=%t ok=%t", command, help, ok)
-	}
-	invalid, help, ok := parse([]string{"attempt", "turn-complete", `{"type":"other","thread-id":"thread-1","turn-id":"turn-1","cwd":"/private/runtime"}`})
-	if ok || help || invalid.kind != 0 {
-		t.Fatalf("parse invalid notification = %+v, help=%t ok=%t", invalid, help, ok)
 	}
 }
 
@@ -439,6 +426,7 @@ func TestInvalidSyntaxStopsBeforeEnvironmentOrConnection(t *testing.T) {
 		{"attempt", "send-back", "--task", "0123456789abcdef0123456789abcdef", "--note", ""},
 		{"attempt", "send-back", "--task", "0123456789abcdef", "--note", "short id"},
 		{"attempt", "send-back", "--note", "reordered", "--task", "0123456789abcdef0123456789abcdef"},
+		{"attempt", "send-back", "--task", "0123456789abcdef0123456789abcdef", "--note", "n", "--head", "abababababababababababababababababababab"},
 		{"attempt", "send-back", "--task", "0123456789abcdef0123456789abcdef", "--note", strings.Repeat("n", 8193)},
 		{"attempt", "request-human", "--idempotency-key", "0123456789abcdef0123456789abcdef", "--question"},
 		{"attempt", "request-human", "--idempotency-key=0123456789abcdef0123456789abcdef", "--question", "private-question"},
@@ -506,10 +494,10 @@ func TestUsageFailureNamesTheSubcommandUsageLine(t *testing.T) {
 		{[]string{"intake", "create", "--project", id, "--configuration", "{"}, "factoryctl intake create: invalid arguments\nusage: factoryctl intake create --project ID --repository OWNER/REPO|--linear-team TEAM_ID --target-repository ID [--overseer ID] [--label LABEL] [--policy manual|trusted-authors] [--trusted-author LOGIN ...] [--poll-seconds N] [--admission-limit N] [--priority N] [--source ID] [--configuration JSON]\n"},
 		{[]string{"overseer", "status", "--task", id, "--text-offset", "0", "--head", "1"}, "factoryctl overseer status: invalid arguments\nusage: factoryctl overseer status [--task ID] [--offset N --head HEAD] [--text-offset RUNES --head HEAD]\n"},
 		{[]string{"overseer", "task", "add", "--agent", "any", "--title", "t", "--prerequisite", id + ":1", "--priority", "1000001"}, "factoryctl overseer task add: invalid arguments\nusage: factoryctl overseer task add --agent ID|any --title TEXT [--body TEXT] [--priority N] [--prerequisite TASK_ID:WORK_REVISION ...] [--conflict-path PATH ...] [--task-id ID --incarnation-id ID]\n"},
-		{[]string{"task", "add", "--project", id, "--agent", "any", "--title", "t", "--priority", "-1000001"}, "factoryctl task add: invalid arguments\nusage: factoryctl task add --project ID [--repository ID] --agent ID|any --title TEXT [--body TEXT] [--priority N] [--task-id ID --incarnation-id ID]\n"},
+		{[]string{"task", "add", "--project", id, "--agent", "any", "--title", "t", "--priority", "-1000001"}, "factoryctl task add: invalid arguments\nusage: factoryctl task add --project ID [--repository ID] --agent ID|any --title TEXT [--body TEXT] [--priority N] [--content ID:REVISION[,ID:REVISION...]] [--task-id ID --incarnation-id ID]\n"},
 		{[]string{"web", "revoke", id, "--revision", "9223372036854775808"}, "factoryctl web revoke: invalid arguments\nusage: factoryctl web revoke CLIENT_ID --revision REVISION\n"},
 		{[]string{"web", "revoke", id, "--revision", "0"}, "factoryctl web revoke: invalid arguments\nusage: factoryctl web revoke CLIENT_ID --revision REVISION\n"},
-		{[]string{"task", "add", "--project", id, "--agent", "any", "--title", "t", "--priority", "99999999999999999999"}, "factoryctl task add: invalid arguments\nusage: factoryctl task add --project ID [--repository ID] --agent ID|any --title TEXT [--body TEXT] [--priority N] [--task-id ID --incarnation-id ID]\n"},
+		{[]string{"task", "add", "--project", id, "--agent", "any", "--title", "t", "--priority", "99999999999999999999"}, "factoryctl task add: invalid arguments\nusage: factoryctl task add --project ID [--repository ID] --agent ID|any --title TEXT [--body TEXT] [--priority N] [--content ID:REVISION[,ID:REVISION...]] [--task-id ID --incarnation-id ID]\n"},
 		{[]string{"web", "revoke", "private", "--revision", "1"}, "factoryctl web revoke: invalid arguments\nusage: factoryctl web revoke CLIENT_ID --revision REVISION\n"},
 		{[]string{"attempt", "content", "read", "--id", id}, "factoryctl attempt content read: invalid arguments\nusage: factoryctl content read --id ID --revision REVISION\n"},
 		{[]string{"release", "a", "b"}, "factoryctl release: invalid arguments\nusage: factoryctl release SHA [--start] [--wait]\n"},
@@ -536,7 +524,6 @@ func TestHelpIsExactAndHasNoClientEffect(t *testing.T) {
 }
 
 func TestAttemptCommandsUseExactTypedCalls(t *testing.T) {
-	turnDigest := sha256.Sum256([]byte("thread-1\x00turn-1\x00/private/runtime"))
 	tests := []struct {
 		name string
 		args []string
@@ -551,7 +538,6 @@ func TestAttemptCommandsUseExactTypedCalls(t *testing.T) {
 		{name: "fail detail", args: []string{"attempt", "fail", "--detail", "private-fail-sentinel"}, kind: api.CallFail, text: "private-fail-sentinel"},
 		{name: "send back", args: []string{"attempt", "send-back", "--task", "fedcba9876543210fedcba9876543210", "--note", "private-note-sentinel"}, kind: api.CallSendBack, key: "fedcba9876543210fedcba9876543210", text: "private-note-sentinel"},
 		{name: "human request", args: []string{"attempt", "request-human", "--idempotency-key", "0123456789abcdef0123456789abcdef", "--question", "private-question-sentinel"}, kind: api.CallRequestHuman, key: "0123456789abcdef0123456789abcdef", text: "private-question-sentinel"},
-		{name: "Codex turn complete", args: []string{"attempt", "turn-complete", `{"type":"agent-turn-complete","thread-id":"thread-1","turn-id":"turn-1","cwd":"/private/runtime"}`}, kind: api.CallRequestHuman, key: hex.EncodeToString(turnDigest[:16]), text: "Codex turn completed without a durable attempt outcome; resume this session and record succeed, block, or fail."},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
@@ -952,10 +938,10 @@ func TestAttemptSourceUnauthorizedTellsWorkerToUseCheckout(t *testing.T) {
 	}
 }
 
-// Claude's Stop hook: a live run that ends a turn without an outcome is
-// reminded once, failed on the next stop, and left alone once an outcome or
+// A native provider Stop hook: a live run that ends a turn without an outcome
+// is reminded once, failed on the next stop, and left alone once an outcome or
 // yield has revoked its credential.
-func TestClaudeTurnCompleteRemindsThenFails(t *testing.T) {
+func TestTurnCompleteRemindsThenFails(t *testing.T) {
 	if command, help, ok := parse([]string{"attempt", "turn-complete"}); !ok || help || command.kind != commandTurnComplete || command.text != "" {
 		t.Fatalf("parse = %+v, %t, %t", command, help, ok)
 	}

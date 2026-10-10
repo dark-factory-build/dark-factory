@@ -20,6 +20,57 @@ func TestRefreshRereadsOnlyPullsLastSeenOpen(t *testing.T) {
 	}
 }
 
+func TestRefreshRepairsAnUnqueuedPullThatBecomesConflicting(t *testing.T) {
+	mergeable := true
+	conflicting := false
+	head := strings.Repeat("a", 40)
+	known := []kernel.ProductionPullRequest{{Number: 7, Head: head, State: "open", Mergeable: &mergeable}}
+	observed := []kernel.ProductionPullRequest{{Number: 7, Head: head, State: "open", Mergeable: &conflicting, Base: "main"}}
+	got := newProductionConflicts(known, observed)
+	if len(got) != 1 || got[0].Number != 7 || !strings.Contains(productionConflictDetail(got[0]), "Rebase this Change") {
+		t.Fatalf("conflict transition = %+v", got)
+	}
+	if got = newProductionConflicts(observed, observed); len(got) != 0 {
+		t.Fatalf("repeated conflict retriggered: %+v", got)
+	}
+}
+
+func TestRefreshReadsQueueStateForApprovedPulls(t *testing.T) {
+	head := strings.Repeat("a", 40)
+	pull := kernel.ProductionPullRequest{Number: 7, Head: head, Base: "main"}
+	for _, test := range []struct {
+		state, want string
+	}{
+		{"ACTIVE_QUEUE", "active"},
+		{"NOT_QUEUED", "none"},
+	} {
+		t.Run(test.state, func(t *testing.T) {
+			call := func(_ context.Context, request json.RawMessage, _ map[string]uint64) (json.RawMessage, error) {
+				if !strings.Contains(string(request), "observe_pull_request_merge") {
+					t.Fatalf("unexpected request %s", request)
+				}
+				content := fmt.Sprintf(`{"pull_number":7,"head_sha":"%s","state":"%s"}`, head, test.state)
+				return json.RawMessage(`{"jsonrpc":"2.0","id":1,"result":{"structuredContent":` + content + `}}`), nil
+			}
+			got, err := readMaintainerMergeQueue(context.Background(), call, "o/r", 1, pull)
+			if err != nil || got != test.want {
+				t.Fatalf("queue=%q err=%v, want %q", got, err, test.want)
+			}
+		})
+	}
+}
+
+func TestRefreshRejectsStaleQueueObservation(t *testing.T) {
+	head := strings.Repeat("a", 40)
+	pull := kernel.ProductionPullRequest{Number: 7, Head: head, Base: "main"}
+	call := func(_ context.Context, _ json.RawMessage, _ map[string]uint64) (json.RawMessage, error) {
+		return json.RawMessage(`{"jsonrpc":"2.0","id":1,"result":{"structuredContent":{"pull_number":7,"head_sha":"` + strings.Repeat("b", 40) + `","state":"NOT_QUEUED"}}}`), nil
+	}
+	if _, err := readMaintainerMergeQueue(context.Background(), call, "o/r", 1, pull); err == nil {
+		t.Fatal("stale merge observation accepted")
+	}
+}
+
 // #1404: the refresh read pull requests but never their checks, so no check
 // record was stored once the host controller was deleted. It reads checks
 // only while they can change: #7's head settled, #8's stored checks are
@@ -54,7 +105,7 @@ func TestRefreshObservesCurrentHeadChecks(t *testing.T) {
 		return json.RawMessage(`{"jsonrpc":"2.0","id":1,"result":{"structuredContent":` + content + `}}`), nil
 	}
 	settled := map[kernel.ProductionHead]bool{{Number: 7, Head: heads[7]}: true, {Number: 9, Head: head("d")}: true}
-	got, err := pullRequestObservation(context.Background(), call, "o/r", 1, nil, settled)
+	got, err := pullRequestObservation(context.Background(), call, "o/r", 1, nil, settled, func(error) {})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -96,7 +147,7 @@ func TestRefreshStopsAtTheObservationsCheckBound(t *testing.T) {
 		}
 		return json.RawMessage(`{"jsonrpc":"2.0","id":1,"result":{"structuredContent":` + content + `}}`), nil
 	}
-	got, err := pullRequestObservation(context.Background(), call, "o/r", 1, nil, nil)
+	got, err := pullRequestObservation(context.Background(), call, "o/r", 1, nil, nil, func(error) {})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -196,7 +247,7 @@ func TestDeploymentsChangeOverTheDeployedUnit(t *testing.T) {
 		return json.RawMessage(`{"jsonrpc":"2.0","id":1,"result":{"structuredContent":{"deployments":[` + list + `]}}}`), nil
 	}
 	store := opgraph.NewRuntime(time.Hour)
-	deployedAt, hosts, err := recordDeployments(context.Background(), call, "o/r", 1, units, nil, store, now.UnixMilli())
+	deployedAt, hosts, err := recordDeployments(context.Background(), call, "o/r", 1, units, nil, store, now.UnixMilli(), func(error) {})
 	if err != nil || deployedAt == nil || *deployedAt != now.Add(-10*time.Minute).UnixMilli() {
 		t.Fatalf("deployed at %v, %v", deployedAt, err)
 	}
@@ -221,7 +272,7 @@ func TestDeploymentsChangeOverTheDeployedUnit(t *testing.T) {
 		}
 		// Several deployed units and no services mapping: nothing lands.
 		quiet := opgraph.NewRuntime(time.Hour)
-		if _, _, err := recordDeployments(context.Background(), call, "o/r", 1, []string{"web", "worker"}, nil, quiet, now.UnixMilli()); err != nil {
+		if _, _, err := recordDeployments(context.Background(), call, "o/r", 1, []string{"web", "worker"}, nil, quiet, now.UnixMilli(), func(error) {}); err != nil {
 			t.Fatal(err)
 		}
 		if held, _ := quiet.Snapshot(now.UnixMilli()); len(held) != 0 {

@@ -22,6 +22,15 @@ body:
     attributes:
       label: Evidence
       description: "The exact command or browser action, its bounded JSON/error, `factoryctl --version`, and relevant daemon log lines. Do not paste provider output, credentials, pairing fragments, source, or private provider configuration."
+    validations:
+      required: true
+  - type: textarea
+    id: live_signal
+    attributes:
+      label: Live acceptance signal
+      description: How will we know this worked on the live factory? Name an observable signal.
+    validations:
+      required: true
   - type: input
     id: version
     attributes:

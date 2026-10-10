@@ -9,35 +9,50 @@ import (
 	"strings"
 )
 
-// Open migrates the two earlier versions. v39 names the retryable failure
-// code 'transient' where v38 named 'runner_exit', which nothing ever wrote;
-// v38 added the specialist columns (agents.idle_wake_on,
-// projects.specialist_runs and projects.specialist_open_proposals) to v37
-// and changed nothing else.
+// Open migrates the three earlier versions. v40 drops browser_security_events,
+// a log nothing read; v39 names the retryable failure code 'transient' where
+// v38 named 'runner_exit', which nothing ever wrote; v38 added the specialist
+// columns (agents.idle_wake_on, projects.specialist_runs and
+// projects.specialist_open_proposals) to v37 and changed nothing else.
 const (
 	v37UserVersion = 37
 	v38UserVersion = 38
+	v39UserVersion = 39
 )
 
+var browserSecurityEventStatements = []string{
+	`CREATE TABLE browser_security_events (
+    sequence INTEGER PRIMARY KEY AUTOINCREMENT CHECK (sequence >= 1),
+    kind TEXT NOT NULL CHECK (kind IN ('challenge_minted', 'challenge_abandoned', 'client_paired', 'duplicate_fingerprint', 'client_revoked')),
+    client_id BLOB CHECK (client_id IS NULL OR (length(client_id) = 16 AND client_id <> zeroblob(16))) REFERENCES browser_clients(id),
+    occurred_at_ms INTEGER NOT NULL CHECK (occurred_at_ms >= 0),
+    CHECK ((kind IN ('challenge_minted', 'challenge_abandoned') AND client_id IS NULL) OR (kind NOT IN ('challenge_minted', 'challenge_abandoned') AND client_id IS NOT NULL))
+) STRICT`,
+	`CREATE INDEX browser_security_events_client ON browser_security_events(client_id, sequence)`,
+}
+
 func legacySchemaStatements(version int) []string {
-	replacer := strings.NewReplacer("'transient'", "'runner_exit'")
-	if version == v37UserVersion {
+	replacer := strings.NewReplacer()
+	if version == v38UserVersion {
+		replacer = strings.NewReplacer("'transient'", "'runner_exit'")
+	} else if version == v37UserVersion {
 		replacer = strings.NewReplacer("'transient'", "'runner_exit'", agentWakeOnColumn, "", projectSpecialistColumns, "")
 	}
-	statements := slices.Clone(schemaStatements)
+	at := slices.IndexFunc(schemaStatements, func(statement string) bool { return strings.HasPrefix(statement, "CREATE TABLE browser_clients ") }) + 1
+	statements := slices.Insert(slices.Clone(schemaStatements), at, browserSecurityEventStatements...)
 	for index, statement := range statements {
 		statements[index] = replacer.Replace(statement)
 	}
 	return statements
 }
 
-// validateOpenableSnapshot accepts a current database or an exact v37 or v38
-// one, whose durable controls are checked inside the migration before it
+// validateOpenableSnapshot accepts a current database or an exact v37, v38 or
+// v39 one, whose durable controls are checked inside the migration before it
 // commits.
 func validateOpenableSnapshot(ctx context.Context, connection *sql.Conn) error {
 	if _, version, err := inspectIdentity(ctx, connection); err != nil {
 		return err
-	} else if version == v37UserVersion || version == v38UserVersion {
+	} else if version >= v37UserVersion && version <= v39UserVersion {
 		if err := validateSchemaVersion(ctx, connection, version, legacySchemaStatements(version)); err != nil {
 			return err
 		}
@@ -60,9 +75,9 @@ func validateContentGitPins(ctx context.Context, connection *sql.Conn) error {
 	return nil
 }
 
-// migrateLegacy takes an exact v37 or v38 home to the current schema in one
-// transaction, or leaves it byte-untouched and refuses; it refuses any other
-// earlier version. Open calls it with the writer before the store is
+// migrateLegacy takes an exact v37, v38 or v39 home to the current schema in
+// one transaction, or leaves it byte-untouched and refuses; it refuses any
+// other earlier version. Open calls it with the writer before the store is
 // published, and before refreshing its pinned sidecar facts, which the
 // sidecar binding relies on. The migration is one way: the rollback plan for
 // an operator home is the pre-upgrade copy docs/install.md tells them to take.
@@ -79,7 +94,7 @@ func (store *Store) migrateLegacy(ctx context.Context) error {
 	switch version {
 	case userVersion:
 		return connection.Close()
-	case v37UserVersion, v38UserVersion:
+	case v37UserVersion, v38UserVersion, v39UserVersion:
 	default:
 		cause := ErrForeignDatabase
 		if appID == applicationID && version > userVersion {
@@ -96,10 +111,11 @@ func (store *Store) migrateLegacy(ctx context.Context) error {
 	return connection.Close()
 }
 
-// migrateFrom rewrites the runs table's failure-code checks in place: the
-// value it replaces was never written, so no row can violate the new text.
-// Bumping schema_version makes every connection, this one and the open
-// readers, load the new text, as SQLite's own ALTER TABLE procedure does.
+// migrateFrom drops the security event log and rewrites the runs table's
+// failure-code checks in place, a no-op from v39: the value it replaces was
+// never written, so no row can violate the new text. Bumping schema_version
+// makes every connection, this one and the open readers, load the new text,
+// as SQLite's own ALTER TABLE procedure does.
 func migrateFrom(ctx context.Context, connection *sql.Conn, version int) error {
 	if err := validateSchemaVersion(ctx, connection, version, legacySchemaStatements(version)); err != nil {
 		return err
@@ -115,6 +131,9 @@ func migrateFrom(ctx context.Context, connection *sql.Conn, version int) error {
 				return err
 			}
 		}
+	}
+	if _, err := connection.ExecContext(ctx, "DROP TABLE browser_security_events"); err != nil {
+		return err
 	}
 	var schemaVersion int
 	if err := connection.QueryRowContext(ctx, "PRAGMA schema_version").Scan(&schemaVersion); err != nil {

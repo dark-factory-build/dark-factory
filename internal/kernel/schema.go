@@ -9,7 +9,7 @@ import (
 
 const (
 	applicationID = 0x4446474f
-	userVersion   = 39
+	userVersion   = 40
 
 	// SQLite reserves the exact lower-case "sqlite_" prefix. Use a literal,
 	// binary prefix test: LIKE would treat '_' as a wildcard and hide names
@@ -497,14 +497,6 @@ var schemaStatements = []string{
     updated_at_ms INTEGER NOT NULL CHECK (updated_at_ms >= created_at_ms),
     revoked_at_ms INTEGER CHECK (revoked_at_ms IS NULL OR (revoked_at_ms >= created_at_ms AND revoked_at_ms <= updated_at_ms AND revoked_at_ms >= 0))
 ) STRICT, WITHOUT ROWID`,
-	`CREATE TABLE browser_security_events (
-    sequence INTEGER PRIMARY KEY AUTOINCREMENT CHECK (sequence >= 1),
-    kind TEXT NOT NULL CHECK (kind IN ('challenge_minted', 'challenge_abandoned', 'client_paired', 'duplicate_fingerprint', 'client_revoked')),
-    client_id BLOB CHECK (client_id IS NULL OR (length(client_id) = 16 AND client_id <> zeroblob(16))) REFERENCES browser_clients(id),
-    occurred_at_ms INTEGER NOT NULL CHECK (occurred_at_ms >= 0),
-    CHECK ((kind IN ('challenge_minted', 'challenge_abandoned') AND client_id IS NULL) OR (kind NOT IN ('challenge_minted', 'challenge_abandoned') AND client_id IS NOT NULL))
-) STRICT`,
-	`CREATE INDEX browser_security_events_client ON browser_security_events(client_id, sequence)`,
 	`CREATE TABLE human_requests (
     id BLOB PRIMARY KEY CHECK (length(id) = 16 AND id <> zeroblob(16)),
     run_id BLOB NOT NULL CHECK (length(run_id) = 16) REFERENCES runs(id),

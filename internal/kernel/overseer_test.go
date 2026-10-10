@@ -260,7 +260,7 @@ func TestRetainedChangeHandoffsInspectCurrentSettledOutcomes(t *testing.T) {
 				if err != nil || !found {
 					t.Fatalf("task = %+v, found=%v, err=%v", task, found, err)
 				}
-				if _, err := store.SendBackTask(context.Background(), task.ID, task.Revision, "repair this", mustTime(t, 80)); err != nil {
+				if _, err := store.SendBackTask(context.Background(), task.ID, task.Revision, changeHead(t, store, task.ID), "repair this", mustTime(t, 80)); err != nil {
 					t.Fatal(err)
 				}
 			}

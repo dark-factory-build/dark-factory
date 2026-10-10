@@ -12,8 +12,15 @@ body:
   - type: textarea
     id: proposal
     attributes:
-      label: Proposed shape
-      description: "Shared operation first: what local-API operation owns runtime behavior, or what shared Go operation under internal/install works while the daemon is absent? How do the web console and factoryctl reach the same request path?"
+      label: Hypothesis (optional)
+      description: "A guess to verify, not a specification. If useful, describe the shared operation you think could own runtime behavior, or the shared Go operation under internal/install that could work while the daemon is absent."
+  - type: textarea
+    id: live_signal
+    attributes:
+      label: Live acceptance signal
+      description: How will we know this worked on the live factory? Name an observable signal.
+    validations:
+      required: true
   - type: textarea
     id: smaller
     attributes:

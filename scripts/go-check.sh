@@ -9,13 +9,16 @@ esac
 script_dir=$(CDPATH= cd -- "$(/usr/bin/dirname "$0")" && pwd -P)
 repository_root=$(CDPATH= cd -- "$script_dir/.." && pwd)
 CDPATH= cd -- "$repository_root"
-. "$script_dir/local-ci-environment.sh"
-
 go=${DF_CI_GO-}
+[ -n "$go" ] || go=$(command -v go 2>/dev/null || true)
 [ -n "$go" ] || {
     echo "go-check: Go is unavailable; add Go's bin directory to factoryd --tool-path (and its install root to --toolchain-read-roots)" >&2
     exit 1
 }
+export DF_CI_GO="$go"
+DF_CI_NODE=${DF_CI_NODE-}; [ -n "$DF_CI_NODE" ] || DF_CI_NODE=$(command -v node 2>/dev/null || true)
+DF_CI_COREPACK=${DF_CI_COREPACK-}; [ -n "$DF_CI_COREPACK" ] || DF_CI_COREPACK=$(command -v corepack 2>/dev/null || true)
+export DF_CI_NODE DF_CI_COREPACK
 
 export GOTOOLCHAIN=local
 required_go_series=$(awk '
@@ -51,8 +54,12 @@ if [ "$go_check_mode" = source ]; then
         exit 1
     }
 
-    echo "go-check: go vet ./..."
-    "$go" vet ./...
+    # Linux vets only the packages scripts/linux-coverage marks proved.
+    vet_packages=./...
+    [ "$(uname -s)" != Linux ] || vet_packages=$(awk '$1 == "package" && $3 == "proved" { print "./" $2 }' scripts/linux-coverage)
+    echo "go-check: go vet" $vet_packages
+    # shellcheck disable=SC2086
+    "$go" vet $vet_packages
 
     # Keep one small cacheable package in the ordinary source gate for fast
     # feedback; the owned Go gate runs the complete package classification.

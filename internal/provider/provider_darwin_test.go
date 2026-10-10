@@ -422,9 +422,8 @@ func TestBuildNativeReturnsExactArgvEnvironmentAndSafeStartupTask(t *testing.T) 
 			kind: kernel.ProviderClaudeCode, model: "claude-model", effort: "max", wantDelivery: TaskDeliveryAttemptAPI,
 			wantArgv: []string{"/usr/bin/true", "--permission-mode", "dontAsk", "--setting-sources", "", "--model", "claude-model", "--effort", "max", "--strict-mcp-config"},
 		},
-		{
-			kind: kernel.ProviderCodex, model: "codex-model", effort: "xhigh", wantDelivery: TaskDeliveryAttemptAPI,
-			wantArgv: []string{"/usr/bin/true", "-c", `notify=["<factoryctl>", "attempt", "turn-complete"]`, "--strict-config", "--no-alt-screen", "-c", `tui.resume_cwd="current"`, "-c", "check_for_update_on_startup=false", "-c", "tool_output_token_limit=32768", "-c", "projects=<working-directory>", "--model", "codex-model", "-c", `model_reasoning_effort="xhigh"`, bootstrapPrompt},
+		{kind: kernel.ProviderCodex, model: "codex-model", effort: "xhigh", wantDelivery: TaskDeliveryAttemptAPI,
+			wantArgv: []string{"/usr/bin/true", "-c", `hooks.Stop=[{hooks=[{type="command",command="<factoryctl>"}]}]`, "--strict-config", "--dangerously-bypass-hook-trust", "--no-alt-screen", "-c", `tui.resume_cwd="current"`, "-c", "check_for_update_on_startup=false", "-c", "tool_output_token_limit=32768", "-c", "projects=<working-directory>", "--model", "codex-model", "-c", `model_reasoning_effort="xhigh"`, bootstrapPrompt},
 		},
 	}
 	for _, test := range tests {
@@ -446,12 +445,13 @@ func TestBuildNativeReturnsExactArgvEnvironmentAndSafeStartupTask(t *testing.T) 
 				wantArgv = append(wantArgv, "--settings", wantClaudeSettings(t, request, "factory_attempt"), "--mcp-config", wantClaudeServers(t, request, nil), "--", bootstrapPrompt)
 			}
 			if test.kind == kernel.ProviderCodex {
-				wantArgv[2] = "notify=[" + tomlBasicString(runtime.factoryctl) + ", \"attempt\", \"turn-complete\"]"
+				stop := "'" + strings.ReplaceAll(runtime.factoryctl, "'", `'\''`) + "' attempt turn-complete"
+				wantArgv[2] = "hooks.Stop=[{hooks=[{type=\"command\",command=" + tomlBasicString(stop) + "}]}]"
 				permissions, err := codexPermissions(request)
 				if err != nil {
 					t.Fatal(err)
 				}
-				wantArgv = slices.Replace(wantArgv, 12, 13, codexUntrustedProjectConfig(request.workingDirectory), "-c", "default_permissions="+tomlBasicString(codexPermissionName(request.runtime)), "-c", `approval_policy="never"`, "-c", permissions, "--disable", "computer_use", "--disable", "browser_use", "--disable", "plugins", "-c", "mcp_servers."+codexAttemptServerName(request.runtime)+"={command="+tomlBasicString(runtime.factoryctl)+`,args=["attempt","mcp"],env_vars=["DARK_FACTORY_SOCKET","DARK_FACTORY_ATTEMPT_TOKEN_FILE"],enabled=true,required=true,tools={factory={approval_mode="approve"}}}`)
+				wantArgv = slices.Replace(wantArgv, 12, 14, "-c", codexUntrustedProjectConfig(request.workingDirectory), "-c", "default_permissions="+tomlBasicString(codexPermissionName(request.runtime)), "-c", `approval_policy="never"`, "-c", permissions, "--disable", "computer_use", "--disable", "browser_use", "--disable", "plugins", "-c", "mcp_servers."+codexAttemptServerName(request.runtime)+"={command="+tomlBasicString(runtime.factoryctl)+`,args=["attempt","mcp"],env_vars=["DARK_FACTORY_SOCKET","DARK_FACTORY_ATTEMPT_TOKEN_FILE"],enabled=true,required=true,tools={factory={approval_mode="approve"}}}`)
 				wantArgv[len(wantArgv)-1] = bootstrapPromptFor(request, codexAttemptServerName(request.runtime))
 			}
 			if got := launch.Argv(); !slices.Equal(got, wantArgv) {
@@ -1425,23 +1425,27 @@ func TestCodexToolchainRootsAndCachesStaySeparateFromAccount(t *testing.T) {
 	}
 }
 
-func TestClaudeLocalCICacheStaysInRuntimeHome(t *testing.T) {
-	installation, runtime, _ := nativeFixture(t, kernel.ProviderClaudeCode)
-	request := requestFor(t, kernel.ProviderClaudeCode, installation, runtime, "", "")
-	request.workingDirectory = t.TempDir()
-	launch, err := Build(request)
-	if err != nil {
-		t.Fatal(err)
-	}
-	wantCacheRoot := "DF_CI_CACHE_ROOT=" + filepath.Join(runtime.home, ".cache", "dark-factory", "local-ci", "trusted")
-	if !slices.Contains(launch.Environment(), wantCacheRoot) {
-		t.Fatalf("Claude local-CI cache root = %q, want %q", launch.Environment(), wantCacheRoot)
-	}
-	if !slices.Contains(launch.Environment(), "DF_CI_GO_MODULE_CACHE="+goModuleCachePath(runtime.accountHome)) {
-		t.Fatalf("Claude lost the trusted shared Go module cache: %q", launch.Environment())
-	}
-	if _, err := runner.PrepareCommittedExecSpec(launch.Executable(), launch.Argv(), launch.Environment(), request.workingDirectory); err != nil {
-		t.Fatalf("generated Claude environment rejected by runner: %v", err)
+func TestNativeLocalCICacheStaysInRuntimeHome(t *testing.T) {
+	for _, kind := range []kernel.Provider{kernel.ProviderCodex, kernel.ProviderClaudeCode} {
+		t.Run(kind.String(), func(t *testing.T) {
+			installation, runtime, _ := nativeFixture(t, kind)
+			request := requestFor(t, kind, installation, runtime, "", "")
+			request.workingDirectory = t.TempDir()
+			launch, err := Build(request)
+			if err != nil {
+				t.Fatal(err)
+			}
+			wantCacheRoot := "DF_CI_CACHE_ROOT=" + filepath.Join(runtime.home, ".cache", "dark-factory", "local-ci", "trusted")
+			if !slices.Contains(launch.Environment(), wantCacheRoot) {
+				t.Fatalf("local-CI cache root = %q, want %q", launch.Environment(), wantCacheRoot)
+			}
+			if !slices.Contains(launch.Environment(), "DF_CI_GO_MODULE_CACHE="+goModuleCachePath(runtime.accountHome)) {
+				t.Fatalf("lost the trusted shared Go module cache: %q", launch.Environment())
+			}
+			if _, err := runner.PrepareCommittedExecSpec(launch.Executable(), launch.Argv(), launch.Environment(), request.workingDirectory); err != nil {
+				t.Fatalf("generated environment rejected by runner: %v", err)
+			}
+		})
 	}
 }
 
@@ -1695,17 +1699,23 @@ func TestCodexLocalCILeaseGrantExcludesGitMetadata(t *testing.T) {
 }
 
 // The one shared thing a Change worktree needs is the repository's Git
-// directory: a worker writes it, an orchestrator reads it, and nothing
-// else of the repository or the Changes parent is granted.
+// directory: a worker writes it, an orchestrator reads it and each other
+// project repository's, and nothing else of the repository or the Changes
+// parent is granted.
 func TestCodexLaunchGrantsTheRepositoryGitDirectoryByRole(t *testing.T) {
 	installation, runtime, _ := nativeFixture(t, kernel.ProviderCodex)
+	site := "/private/site/.git"
 	for _, writable := range []bool{true, false} {
 		request := requestFor(t, kernel.ProviderCodex, installation, runtime, "", "")
 		// A fresh Change's private Git, and its registration Git names after
 		// the worktree: Codex 0.160 makes it read-only unless granted itself.
 		gitDirectory := change.GitDirectoryForChange("/private/project", request.workingDirectory)
 		registration := filepath.Join(gitDirectory, "worktrees", filepath.Base(request.workingDirectory))
-		granted, err := runtime.WithGitCommonDirectory(gitDirectory, writable)
+		var project []string
+		if !writable {
+			project = []string{site}
+		}
+		granted, err := runtime.WithGitCommonDirectory(gitDirectory, writable, project...)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -1731,6 +1741,17 @@ func TestCodexLaunchGrantsTheRepositoryGitDirectoryByRole(t *testing.T) {
 		if strings.Contains(policy, tomlBasicString(registration)+`="write"`) != writable {
 			t.Fatalf("worktree registration write grant = %v, want %v: %q", !writable, writable, policy)
 		}
+		if strings.Contains(policy, tomlBasicString(site)+`="read"`) == writable || strings.Contains(policy, tomlBasicString(site)+`="write"`) {
+			t.Fatalf("other project repository grant wrong for writable=%v: %q", writable, policy)
+		}
+		// Claude renders the same grants.
+		settings, err := claudeSettings(request, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if strings.Contains(settings, `"Read(/`+site+`/**)"`) == writable || strings.Contains(settings, `"Edit(/`+site+`/**)"`) {
+			t.Fatalf("Claude other project repository grant wrong for writable=%v: %s", writable, settings)
+		}
 		if strings.Contains(policy, tomlBasicString("/private/project")+`="`) || strings.Contains(policy, tomlBasicString("/private/factory/changes")+`="`) {
 			t.Fatalf("Git directory grant widened: %q", policy)
 		}
@@ -1743,6 +1764,9 @@ func TestCodexLaunchGrantsTheRepositoryGitDirectoryByRole(t *testing.T) {
 	for _, bad := range []string{"relative", "/private/project", "/private/project/.git/", runtime.home} {
 		if _, err := runtime.WithGitCommonDirectory(bad, true); !errors.Is(err, ErrInvalid) {
 			t.Fatalf("Git directory %q = %v, want ErrInvalid", bad, err)
+		}
+		if _, err := runtime.WithGitCommonDirectory(site, false, bad); !errors.Is(err, ErrInvalid) {
+			t.Fatalf("project Git directory %q = %v, want ErrInvalid", bad, err)
 		}
 	}
 }
