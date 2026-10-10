@@ -20,6 +20,24 @@ func TestRefreshRereadsOnlyPullsLastSeenOpen(t *testing.T) {
 	}
 }
 
+func TestRefreshExactReadsNewOrChangedPulls(t *testing.T) {
+	head := strings.Repeat("a", 40)
+	base := strings.Repeat("b", 40)
+	if pullRequestNeedsExactRead(maintainerPullRequest{Number: 1, Head: head, Base: "main", BaseSHA: base}, map[uint64]kernel.ProductionPullRequest{
+		1: {Number: 1, Head: head, Base: "main", BaseSHA: base},
+	}) {
+		t.Fatal("unchanged pull needs an exact read")
+	}
+	if !pullRequestNeedsExactRead(maintainerPullRequest{Number: 1, Head: strings.Repeat("c", 40), Base: "main", BaseSHA: base}, map[uint64]kernel.ProductionPullRequest{
+		1: {Number: 1, Head: head, Base: "main", BaseSHA: base},
+	}) {
+		t.Fatal("changed head was not selected for an exact read")
+	}
+	if !pullRequestNeedsExactRead(maintainerPullRequest{Number: 2, Head: head, Base: "main", BaseSHA: base}, map[uint64]kernel.ProductionPullRequest{}) {
+		t.Fatal("new pull was not selected for an exact read")
+	}
+}
+
 func TestRefreshRepairsAnUnqueuedPullThatBecomesConflicting(t *testing.T) {
 	mergeable := true
 	conflicting := false
@@ -30,8 +48,8 @@ func TestRefreshRepairsAnUnqueuedPullThatBecomesConflicting(t *testing.T) {
 	if len(got) != 1 || got[0].Number != 7 || !strings.Contains(productionConflictDetail(got[0]), "Rebase this Change") {
 		t.Fatalf("conflict transition = %+v", got)
 	}
-	if got = newProductionConflicts(observed, observed); len(got) != 0 {
-		t.Fatalf("repeated conflict retriggered: %+v", got)
+	if got = newProductionConflicts(observed, observed); len(got) != 1 {
+		t.Fatalf("existing conflict was not retained: %+v", got)
 	}
 }
 

@@ -167,13 +167,9 @@ func changedProductionHeads(known []kernel.ProductionPullRequest, observed []ker
 }
 
 func newProductionConflicts(known, observed []kernel.ProductionPullRequest) []kernel.ProductionPullRequest {
-	prior := make(map[uint64]kernel.ProductionPullRequest, len(known))
-	for _, pull := range known {
-		prior[pull.Number] = pull
-	}
 	conflicts := make([]kernel.ProductionPullRequest, 0)
 	for _, pull := range observed {
-		if pull.State == "open" && productionPullConflict(pull) && !productionPullConflict(prior[pull.Number]) {
+		if pull.State == "open" && productionPullConflict(pull) {
 			conflicts = append(conflicts, pull)
 		}
 	}
@@ -322,6 +318,21 @@ func pullRequestObservation(ctx context.Context, call maintainerMCP, repository 
 	for _, pull := range open {
 		seen[pull.Number] = true
 	}
+	knownByNumber := make(map[uint64]kernel.ProductionPullRequest, len(known))
+	for _, pull := range known {
+		knownByNumber[pull.Number] = pull
+	}
+	for i, pull := range open {
+		if !pullRequestNeedsExactRead(pull, knownByNumber) {
+			continue
+		}
+		exact, err := readMaintainerPullRequests(ctx, call, repository, githubID, map[string]any{"repository": repository, "page": 1, "per_page": 1, "pull_number": pull.Number})
+		if err != nil {
+			fault(err)
+		} else if len(exact.PullRequests) == 1 {
+			open[i] = exact.PullRequests[0]
+		}
+	}
 	for _, prior := range rereadPulls(known, seen) {
 		exact, err := readMaintainerPullRequests(ctx, call, repository, githubID, map[string]any{"repository": repository, "page": 1, "per_page": 1, "pull_number": prior.Number})
 		if err != nil {
@@ -380,6 +391,11 @@ func pullRequestObservation(ctx context.Context, call maintainerMCP, repository 
 		result.Checks = append(result.Checks, checks...)
 	}
 	return result, nil
+}
+
+func pullRequestNeedsExactRead(pull maintainerPullRequest, known map[uint64]kernel.ProductionPullRequest) bool {
+	prior, ok := known[pull.Number]
+	return !ok || !strings.EqualFold(prior.Head, pull.Head) || !strings.EqualFold(prior.Base, pull.Base) || !strings.EqualFold(prior.BaseSHA, pull.BaseSHA)
 }
 
 func readMaintainerMergeQueue(ctx context.Context, call maintainerMCP, repository string, githubID uint64, pr kernel.ProductionPullRequest) (string, error) {
