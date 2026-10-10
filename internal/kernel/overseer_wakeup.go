@@ -545,8 +545,23 @@ const overseerWakeLine = `SELECT printf('- %s "%s" %s rev=%d', lower(hex(t.id)),
 		WHERE u.task_id = t.id AND h.status IN ('open', 'delivering', 'delivery_unknown') LIMIT 1)), 1, 120), char(10), ' '), '')
 FROM tasks AS t WHERE t.id = due.id`
 
-const overseerWakeCounts = `SELECT printf('worker tasks queued=%d running=%d; open PRs=%d', COALESCE(SUM(t.status = 'queued'), 0), COALESCE(SUM(t.status = 'running'), 0),
-	(SELECT count(*) FROM production_records WHERE project_id = ?1 AND kind = 'pull_request' AND json_extract(document, '$.state') = 'open'))
+const overseerWakeCounts = `WITH open_pr AS (SELECT p.repository, CAST(json_extract(p.document, '$.number') AS INTEGER) AS number, json_extract(p.document, '$.head') AS head,
+	json_extract(p.document, '$.mergeable') AS mergeable, lower(COALESCE(json_extract(p.document, '$.merge_state'), '')) AS merge_state,
+	lower(COALESCE(json_extract(p.document, '$.merge_queue'), '')) AS merge_queue,
+	lower(COALESCE(json_extract(p.document, '$.review.state'), '')) AS review
+	FROM production_records AS p WHERE p.project_id = ?1 AND p.kind = 'pull_request' AND json_extract(p.document, '$.state') = 'open'
+	AND EXISTS (SELECT 1 FROM publication_tasks AS pt WHERE pt.project_id = p.project_id AND pt.repository = p.repository
+		AND pt.pull_number = CAST(json_extract(p.document, '$.number') AS INTEGER))),
+	classified AS (SELECT open_pr.*,
+	EXISTS (SELECT 1 FROM production_records AS c, json_each(c.document, '$.pull_requests') AS n
+		WHERE c.project_id = ?1 AND c.repository = open_pr.repository AND c.kind = 'check' AND json_extract(c.document, '$.scope') = 'head'
+		  AND lower(json_extract(c.document, '$.revision')) = lower(open_pr.head) AND CAST(n.value AS INTEGER) = open_pr.number
+		  AND json_extract(c.document, '$.conclusion') IN ('failure', 'timed_out', 'action_required', 'cancelled', 'startup_failure')) AS failing
+	FROM open_pr)
+SELECT printf('worker tasks queued=%d running=%d; open factory PRs conflicting=%d failing=%d approved-not-queued=%d', COALESCE(SUM(t.status = 'queued'), 0), COALESCE(SUM(t.status = 'running'), 0),
+	(SELECT COALESCE(SUM(merge_state = 'dirty' OR COALESCE(mergeable = 0, 0)), 0) FROM classified),
+	(SELECT COALESCE(SUM(failing), 0) FROM classified),
+	(SELECT COALESCE(SUM(review = 'allow' AND NOT failing AND merge_state <> 'dirty' AND COALESCE(mergeable, 1) <> 0 AND merge_queue = 'none'), 0) FROM classified))
 FROM tasks AS t LEFT JOIN agents AS a ON a.id = t.assigned_agent_id
 WHERE t.project_id = ?1 AND t.status IN ('queued', 'running') AND COALESCE(a.role, 'worker') = 'worker'`
 
