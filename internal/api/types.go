@@ -1144,9 +1144,11 @@ func validPeerAvailability(value string) bool {
 
 // SendBackInput returns a finished task to its worker's queue with a note.
 // An orchestrator's attempt names a task of its own project; the operator
-// names any task.
+// names any task. Head is the Change head the note was observed at; once the
+// task has a Change head, a note about any other head is refused.
 type SendBackInput struct {
 	TaskID string `json:"task_id"`
+	Head   string `json:"head,omitempty"`
 	Note   string `json:"note"`
 }
 

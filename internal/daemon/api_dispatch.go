@@ -1740,15 +1740,18 @@ func (daemon *Daemon) sendBack(ctx context.Context, call api.Call) api.Reply {
 	}
 	var task kernel.Task
 	if attempt {
-		task, err = daemon.store.SendBackTaskForAttempt(ctx, digest, taskID, input.Note, at)
-		if err != nil {
-			return newErrorReply(remoteErrorCode(err))
-		}
+		task, err = daemon.store.SendBackTaskForAttempt(ctx, digest, taskID, input.Head, input.Note, at)
 	} else {
-		task, err = daemon.store.SendBackTask(ctx, taskID, current.Revision, input.Note, at)
-		if err != nil {
-			return newErrorReply(remoteErrorCode(err))
+		task, err = daemon.store.SendBackTask(ctx, taskID, current.Revision, input.Head, input.Note, at)
+	}
+	if err != nil {
+		// A stale head names the Change head to observe instead.
+		if errors.Is(err, kernel.ErrSuperseded) {
+			if reply, replyErr := api.NewErrorDetailReply(api.RemoteConflict, boundedDetail(err)); replyErr == nil {
+				return reply
+			}
 		}
+		return newErrorReply(remoteErrorCode(err))
 	}
 	// The task is queued again; the scheduler should not wait for its tick.
 	daemon.notifyScheduler()

@@ -355,7 +355,7 @@ func (client *OperatorClient) SetAgentIdlePolicy(ctx context.Context, input Agen
 
 // SendBackTask returns a finished task to its queue with a note.
 func (client *OperatorClient) SendBackTask(ctx context.Context, input SendBackInput) (MutationResult, error) {
-	if !validID(input.TaskID) || !validText(input.Note, 1, 8192) {
+	if !validID(input.TaskID) || input.Head != "" && !validCommitHex(input.Head) || !validText(input.Note, 1, 8192) {
 		return MutationResult{}, ErrInvalidInput
 	}
 	return client.client.mutate(ctx, "send_back_task", input)
@@ -584,7 +584,7 @@ func (client *AttemptClient) TerminalObserve(ctx context.Context, input Terminal
 // SendBack returns a finished task of the attempt's project to its queue
 // with a note; only an orchestrator's attempt is allowed to.
 func (client *AttemptClient) SendBack(ctx context.Context, input SendBackInput) (MutationResult, error) {
-	if !validID(input.TaskID) || !validText(input.Note, 1, 8192) {
+	if !validID(input.TaskID) || input.Head != "" && !validCommitHex(input.Head) || !validText(input.Note, 1, 8192) {
 		return MutationResult{}, ErrInvalidInput
 	}
 	return client.client.mutate(ctx, "send_back", input)

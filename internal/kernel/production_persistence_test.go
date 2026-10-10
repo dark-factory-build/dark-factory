@@ -152,9 +152,19 @@ func TestPublishedReviewChangesAreSentBackToOriginExactlyOnce(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	head := strings.Repeat("a", 40)
-	pr := ProductionPullRequest{Number: 77, Title: "Review me", URL: "https://github.com/example/factory/pull/77", Head: head, Branch: "factory/review", Base: "main", State: "open", Review: ProductionReview{Head: head, State: "unknown"}}
-	if err := store.RecordPublication(ctx, finalizing.ProjectID, finalizing.TaskID, "example/factory", pr, mustTime(t, 81)); err != nil {
+	// A production record that still shows a head the Change has moved off
+	// sends nothing back: the worker could not reproduce its premise (#1673).
+	stale := strings.Repeat("a", 40)
+	pr := ProductionPullRequest{Number: 77, Title: "Review me", URL: "https://github.com/example/factory/pull/77", Head: stale, Branch: "factory/review", Base: "main", State: "open", Review: ProductionReview{Head: stale, State: "unknown"}}
+	if err := store.RecordPublication(ctx, finalizing.ProjectID, finalizing.TaskID, "example/factory", pr, mustTime(t, 80)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.SendBackPublishedReview(ctx, finalizing.ProjectID, "example/factory", 77, "review-op-0", stale, "fix the findings", mustTime(t, 80)); !errors.Is(err, ErrSuperseded) {
+		t.Fatalf("stale review send-back err=%v", err)
+	}
+	head := changeHead(t, store, finalizing.TaskID)
+	pr.Head, pr.Review.Head = head, head
+	if err := store.RecordProductionObservation(ctx, finalizing.ProjectID, ProductionObservation{Repository: "example/factory", ObservedAt: 81, PullRequests: []ProductionPullRequest{pr}}, mustTime(t, 81)); err != nil {
 		t.Fatal(err)
 	}
 	first, err := store.SendBackPublishedReview(ctx, finalizing.ProjectID, "example/factory", 77, "review-op-1", head, "fix the findings", mustTime(t, 82))
@@ -766,7 +776,7 @@ func TestPublishableIntakeChangeIsFactorydsUntilPublishedOrFailed(t *testing.T) 
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := store.SendBackTask(ctx, task.ID, task.Revision, "fix the finding", mustTime(t, 72)); err != nil {
+	if _, err := store.SendBackTask(ctx, task.ID, task.Revision, changeHead(t, store, task.ID), "fix the finding", mustTime(t, 72)); err != nil {
 		t.Fatal(err)
 	}
 	// The settlement keeps the Change revision here, so drop that revision's

@@ -317,9 +317,9 @@ func TestServerDecodesClosedMethodMatrix(t *testing.T) {
 				t.Fatalf("failure detail = %q, %t", detail, ok)
 			}
 		}},
-		{name: "send back", domain: attemptDomain, bearer: attemptBearer, body: `{"method":"send_back","params":{"task_id":"0123456789abcdef0123456789abcdef","note":"private-note-sentinel"}}`, kind: CallSendBack, check: func(t *testing.T, call Call) {
+		{name: "send back", domain: attemptDomain, bearer: attemptBearer, body: `{"method":"send_back","params":{"task_id":"0123456789abcdef0123456789abcdef","head":"0123456789abcdef0123456789abcdef01234567","note":"private-note-sentinel"}}`, kind: CallSendBack, check: func(t *testing.T, call Call) {
 			input, ok := call.SendBackInput()
-			if !ok || input.TaskID != "0123456789abcdef0123456789abcdef" || input.Note != "private-note-sentinel" {
+			if !ok || input.TaskID != "0123456789abcdef0123456789abcdef" || input.Head != "0123456789abcdef0123456789abcdef01234567" || input.Note != "private-note-sentinel" {
 				t.Fatalf("send-back input = %+v, %t", input, ok)
 			}
 			if _, ok := call.AttemptDigest(); !ok {
@@ -509,6 +509,7 @@ func TestServerRejectsDomainFallbackAndInvalidRequests(t *testing.T) {
 		{name: "send back task attempt domain", domain: attemptDomain, bearer: attemptBearer, body: []byte(`{"method":"send_back_task","params":{"task_id":"0123456789abcdef0123456789abcdef","note":"n"}}`), code: RemoteForbidden},
 		{name: "send back short task", domain: attemptDomain, bearer: attemptBearer, body: []byte(`{"method":"send_back","params":{"task_id":"0123456789abcdef","note":"n"}}`), code: RemoteInvalidRequest},
 		{name: "send back empty note", domain: attemptDomain, bearer: attemptBearer, body: []byte(`{"method":"send_back","params":{"task_id":"0123456789abcdef0123456789abcdef","note":""}}`), code: RemoteInvalidRequest},
+		{name: "send back short head", domain: attemptDomain, bearer: attemptBearer, body: []byte(`{"method":"send_back","params":{"task_id":"0123456789abcdef0123456789abcdef","head":"0123abc","note":"n"}}`), code: RemoteInvalidRequest},
 		{name: "send back oversized note", domain: attemptDomain, bearer: attemptBearer, body: []byte(`{"method":"send_back","params":{"task_id":"0123456789abcdef0123456789abcdef","note":"` + strings.Repeat("x", 8193) + `"}}`), code: RemoteInvalidRequest},
 		{name: "request human zero key", domain: attemptDomain, bearer: attemptBearer, body: []byte(`{"method":"request_human","params":{"idempotency_key":"00000000000000000000000000000000","question":"question"}}`), code: RemoteInvalidRequest},
 		{name: "request human uppercase key", domain: attemptDomain, bearer: attemptBearer, body: []byte(`{"method":"request_human","params":{"idempotency_key":"0123456789ABCDEF0123456789abcdef","question":"question"}}`), code: RemoteInvalidRequest},
