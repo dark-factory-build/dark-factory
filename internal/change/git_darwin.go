@@ -154,7 +154,8 @@ func selectGitWithTrust(ctx context.Context, gitExecutable, repositoryRoot, revi
 // Retained Changes refresh their current base in factoryd before the worker
 // runs (FetchBase). HEAD means the origin's default branch, never the
 // registered checkout's own HEAD; only a checkout without an origin follows
-// its local HEAD and upstream. Explicit local revisions never refresh source.
+// its local HEAD and upstream. refs/pull/N/head is the origin's pull request
+// head. Explicit local revisions never refresh source.
 func refreshTrackingRevision(ctx context.Context, spec gitCommandSpec, revision string, verify func() error) (string, error) {
 	run := func(arguments ...string) ([]byte, error) {
 		spec.arguments = append([]string{"-C", spec.repository}, arguments...)
@@ -203,11 +204,13 @@ func refreshTrackingRevision(ctx context.Context, spec gitCommandSpec, revision 
 			return "", &ValidationError{Reason: "configured remote source is invalid"}
 		}
 		branch = "refs/heads/" + branch
+	} else if strings.HasPrefix(revision, "refs/pull/") {
+		remote, branch = "origin", revision
 	}
 	if remote == "" || remote == "." {
 		return revision, nil
 	}
-	if strings.HasPrefix(remote, "-") || !strings.HasPrefix(branch, "refs/heads/") {
+	if strings.HasPrefix(remote, "-") || !strings.HasPrefix(branch, "refs/heads/") && !strings.HasPrefix(branch, "refs/pull/") {
 		return "", &ValidationError{Reason: "configured remote source is invalid"}
 	}
 	// The base lands in a factory-owned ref, never a branch, tracking ref or
