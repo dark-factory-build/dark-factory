@@ -95,7 +95,7 @@ jobs:
             exit 0
           fi
           if [ "$GITHUB_EVENT_NAME" = push ]; then
-            printf '%s\n' macos=true macos_mode=warm control_plane=false relay=false >>"$GITHUB_OUTPUT"
+            printf '%s\n' macos=true macos_mode=warm control_plane=true relay=false >>"$GITHUB_OUTPUT"
             exit 0
           fi
           case "$GITHUB_SHA" in
@@ -528,11 +528,36 @@ jobs:
       - name: Install the pinned toolchain
         run: rustup toolchain install 1.88.0 --profile minimal --component clippy,rustfmt --no-self-update
 
+      # Restore only: queue and PR refs are disposable, so their cache writes
+      # cannot warm a later run. The push-to-main run saves this cache below.
+      - name: Restore control-plane Rust and tool caches
+        uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            control-plane/target
+            control-plane/.tools
+          key: control-plane-v1-${{ runner.os }}-${{ runner.arch }}-rust1.88.0-worker-build0.8.5-wasm-bindgen0.2.125-${{ hashFiles('control-plane/Cargo.lock', 'control-plane/Cargo.toml') }}-${{ github.sha }}
+          restore-keys: |
+            control-plane-v1-${{ runner.os }}-${{ runner.arch }}-rust1.88.0-worker-build0.8.5-wasm-bindgen0.2.125-${{ hashFiles('control-plane/Cargo.lock', 'control-plane/Cargo.toml') }}-
+
       - name: Verify the supported Node runtime
         run: node -e "if (Number(process.versions.node.split('.')[0]) < 22) process.exit(1)"
 
       - name: Run the control-plane authoritative gate
         run: ./control-plane/scripts/local-ci.sh
+
+      - name: Save the warm main-branch control-plane cache
+        if: github.event_name == 'push'
+        uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            control-plane/target
+            control-plane/.tools
+          key: control-plane-v1-${{ runner.os }}-${{ runner.arch }}-rust1.88.0-worker-build0.8.5-wasm-bindgen0.2.125-${{ hashFiles('control-plane/Cargo.lock', 'control-plane/Cargo.toml') }}-${{ github.sha }}
 
   relay:
     needs: scope

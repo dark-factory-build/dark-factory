@@ -289,7 +289,7 @@ require_job checks './scripts/local-ci.sh --affected "$AFFECTED_BASE"'
 # A push to main only warms the cache that queue runs restore.
 run_scope push '' false
 [ "$(sort "$temporary/scope-output" | tr '\n' ' ')" = \
-    'control_plane=false macos=true macos_mode=warm relay=false ' ]
+    'control_plane=true macos=true macos_mode=warm relay=false ' ]
 require_job checks './scripts/local-ci.sh --warm'
 require_job checks 'actions/cache/restore@'
 require_job checks 'fail-fast: false'
