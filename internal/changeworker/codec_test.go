@@ -99,7 +99,7 @@ func TestOrchestratorConfigCarriesNoChange(t *testing.T) {
 	}
 }
 
-func TestCodexConfigCarriesNoTaskBytes(t *testing.T) {
+func TestCodexConfigCarriesTaskBytes(t *testing.T) {
 	config := configFixture(t)
 	config.Provider = kernel.ProviderCodex
 	config.ProviderTask = nil
@@ -115,8 +115,13 @@ func TestCodexConfigCarriesNoTaskBytes(t *testing.T) {
 		t.Fatalf("Codex config round trip = provider %s task %d bytes, err %v", got.Provider, len(got.ProviderTask), err)
 	}
 	config.ProviderTask = []byte("private task")
-	if _, err := EncodeConfig(config); !errors.Is(err, ErrInvalidContract) {
-		t.Fatalf("Codex worker accepted task bytes: %v", err)
+	encoded, err = EncodeConfig(config)
+	if err != nil {
+		t.Fatalf("Codex worker task bytes rejected: %v", err)
+	}
+	got, err = DecodeConfig(encoded)
+	if err != nil || string(got.ProviderTask) != "private task" {
+		t.Fatalf("Codex task round trip = %q, err %v", got.ProviderTask, err)
 	}
 }
 

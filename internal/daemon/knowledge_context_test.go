@@ -210,17 +210,14 @@ func TestKnowledgeContextBoundsQuotingAndEmpty(t *testing.T) {
 	}
 }
 
-func TestKnowledgeFallbackDoesNotRecordOmittedSupplies(t *testing.T) {
+func TestKnowledgeTaskRejectsOversizedLaunch(t *testing.T) {
 	f := newDispatchFixture(t)
 	active := prepareActiveAttemptInProjectWithProvider(t, f, 81, testID(81), "orchestrator", "claude_code")
 	lesson := seedContextKnowledge(t, f, active.run.ProjectID, 201, kernel.ContentLesson, kernel.KnowledgeMetadata{Status: "tentative", Evidence: []string{"source"}}, "a useful lesson")
 	task := bytes.Repeat([]byte{'t'}, runner.MaxProviderTaskBytes)
 	launch, _, err := f.daemon.prepareKnowledgeTask(context.Background(), active.run, task, true)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if string(launch) != knowledgeTaskFetchInstruction {
-		t.Fatalf("oversized task lost fetch fallback: %q", knowledgeTextPrefix(string(launch), 100))
+	if err == nil || launch != nil {
+		t.Fatalf("oversized task launch = %q, want error", knowledgeTextPrefix(string(launch), 100))
 	}
 	accesses, err := contentAccesses(context.Background(), f.store, active.run.ProjectID, kernel.ContentAccess{ContentID: lesson.ID, ContentRevision: lesson.Revision})
 	if err != nil {

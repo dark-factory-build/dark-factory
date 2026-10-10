@@ -389,9 +389,7 @@ func (daemon *Daemon) runNext(ctx context.Context, spec SupervisorSpec) (resultR
 	case provider.TaskDeliveryFD11:
 		providerTask = preparedTask
 	case provider.TaskDeliveryAttemptAPI:
-		if len(preparedTask) != 0 {
-			return daemon.failRunBeforeRuntime(daemon.cleanupCtx, run, keys.resources.RuntimeRoot, kernel.FailureSpawn, provider.ErrInvalid)
-		}
+		providerTask = preparedTask
 	default:
 		return daemon.failRunBeforeRuntime(daemon.cleanupCtx, run, keys.resources.RuntimeRoot, kernel.FailureSpawn, provider.ErrInvalid)
 	}
@@ -779,7 +777,6 @@ func (daemon *Daemon) runNext(ctx context.Context, spec SupervisorSpec) (resultR
 	// until it observes TerminalReady, but it already owns the controller and
 	// will synchronously converge it if any later step fails.
 	live := newLiveAttempt(daemon, run.ID, session.ID, controller)
-	live.callFirst = run.Provider != kernel.ProviderShell
 	if worker && changeState.AvailableAt != nil && run.RunningAt != nil {
 		live.agentID, live.changeID = run.AgentID, changeState.ID
 		live.pathsSince = *changeState.AvailableAt

@@ -11,8 +11,6 @@ import (
 	"github.com/dark-factory-build/dark-factory/internal/runner"
 )
 
-const continuationTaskFetchInstruction = `This is resumed work. Run "$DARK_FACTORY_FACTORYCTL" attempt task before doing anything else to read the complete original task and Factory continuation context.`
-
 func providerTaskWithContinuationContext(kind kernel.Provider, task []byte, contexts []kernel.ContinuationContext) ([]byte, error) {
 	limit := runner.MaxProviderTaskBytes
 	if kind != kernel.ProviderShell {
@@ -67,12 +65,6 @@ func providerTaskForContinuationLaunch(kind kernel.Provider, task []byte, contex
 	if frameErr == nil {
 		if _, _, err := provider.PrepareTask(kind, framed); err == nil {
 			return framed, nil
-		}
-	}
-	if len(contexts) != 0 && kind != kernel.ProviderShell {
-		fallback := []byte(continuationTaskFetchInstruction)
-		if _, _, err := provider.PrepareTask(kind, fallback); err == nil {
-			return fallback, nil
 		}
 	}
 	if frameErr != nil {

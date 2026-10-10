@@ -133,12 +133,24 @@ func runProvider(ctx context.Context) (resultErr error) {
 		_ = cwd.Close()
 		return err
 	}
+	delivery, program, err := prepareProviderTask(config.Provider, config.ProviderTask)
+	if err != nil {
+		_ = cwd.Close()
+		return err
+	}
 	// Keep the one verified publication path as the authority for both Codex's
 	// project policy and the runner's process cwd below.
 	request, err := provider.NewRequest(config.Provider, installation, config.Model, config.ReasoningEffort, runtimePaths, publishedPath, config.Role, config.AgentID, config.TaskIncarnationID)
 	if err != nil {
 		_ = cwd.Close()
 		return err
+	}
+	if delivery == provider.TaskDeliveryAttemptAPI {
+		request, err = request.WithTask(program)
+		if err != nil {
+			_ = cwd.Close()
+			return err
+		}
 	}
 	if config.PreviousWorkingDirectory != "" {
 		request, err = request.WithPreviousWorkingDirectory(config.PreviousWorkingDirectory)
@@ -148,11 +160,6 @@ func runProvider(ctx context.Context) (resultErr error) {
 		}
 	}
 	launch, err := provider.Build(request)
-	if err != nil {
-		_ = cwd.Close()
-		return err
-	}
-	delivery, program, err := prepareProviderTask(config.Provider, config.ProviderTask)
 	if err != nil {
 		_ = cwd.Close()
 		return err

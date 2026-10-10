@@ -12,12 +12,10 @@ import (
 	"github.com/dark-factory-build/dark-factory/internal/change"
 	"github.com/dark-factory-build/dark-factory/internal/kernel"
 	"github.com/dark-factory-build/dark-factory/internal/opgraph"
-	"github.com/dark-factory-build/dark-factory/internal/provider"
 	"github.com/dark-factory-build/dark-factory/internal/runner"
 )
 
 const knowledgeContextBytes = 3072
-const knowledgeTaskFetchInstruction = `Before doing anything else, use the Factory attempt tool with argv ["attempt","task"] to read the complete task and its pinned project knowledge.`
 
 // Knowledge is quoted data. It cannot alter the run's capabilities, task,
 // review source receipt, or standing instructions.
@@ -419,14 +417,6 @@ func (daemon *Daemon) prepareKnowledgeTask(ctx context.Context, run kernel.Run, 
 		}
 	}
 	combined := append(append(append([]byte(nil), task...), manifest...), knowledge...)
-	if launch && run.Provider != kernel.ProviderShell && (len(items) > 0 || len(manifest) > 0) {
-		// Both coding providers retrieve the frozen context through the same
-		// authenticated response boundary; a launch pointer is not a supply receipt.
-		if _, _, err := provider.PrepareTask(run.Provider, []byte(knowledgeTaskFetchInstruction)); err != nil {
-			return nil, nil, err
-		}
-		return []byte(knowledgeTaskFetchInstruction), nil, nil
-	}
 	if launch {
 		framed, e := providerTaskForContinuationLaunch(run.Provider, combined, run.ContinuationContexts)
 		if e != nil && len(items) == 0 {

@@ -105,9 +105,9 @@ func TestRunLivenessFailsAttemptThatNeverBecomesReady(t *testing.T) {
 	}
 }
 
-// A Claude or Codex run must call the attempt API first, so a TUI that paints
-// without one is stuck and is requeued as never started at the short budget.
-func TestRunLivenessFailsCallFirstAttemptThatPaintsWithoutACall(t *testing.T) {
+// Terminal output proves that a native run started even before its first
+// durable attempt operation.
+func TestRunLivenessKeepsAttemptThatHasTerminalOutput(t *testing.T) {
 	fixture := newDispatchFixture(t)
 	active := prepareActiveAttempt(t, fixture, 211)
 	ctx := context.Background()
@@ -117,7 +117,6 @@ func TestRunLivenessFailsCallFirstAttemptThatPaintsWithoutACall(t *testing.T) {
 	}
 	started := time.UnixMilli(10_000)
 	attempt := newLiveAttempt(fixture.daemon, active.run.ID, session.ID, nil)
-	attempt.callFirst = true
 	attempt.markStarted(started)
 	attempt.markTerminalOutput(started.Add(firstOutputBudget-time.Second), 900_000)
 	if err := fixture.daemon.registerLiveAttempt(attempt); err != nil {
@@ -129,8 +128,8 @@ func TestRunLivenessFailsCallFirstAttemptThatPaintsWithoutACall(t *testing.T) {
 		t.Fatal(err)
 	}
 	run, _, _ := fixture.store.Run(ctx, active.run.ID)
-	if run.Phase != kernel.RunFinalizing || run.Proposal == nil || run.Proposal.Detail() != kernel.NeverStartedRunDetail {
-		t.Fatalf("painting run without an attempt call = %+v", run)
+	if run.Phase != kernel.RunRunning {
+		t.Fatalf("terminal output kept run alive = %+v", run)
 	}
 }
 
