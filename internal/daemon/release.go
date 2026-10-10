@@ -122,8 +122,10 @@ var (
 	// releaseDrainLimit bounds how long admission stays held (#1121).
 	releaseDrainLimit = 10 * time.Minute
 	releaseDrainPoll  = time.Second
-	// releaseBuild, releaseUpgrade and releaseExit are package-test seams.
+	// releaseBuild, releaseWorker, releaseUpgrade and releaseExit are
+	// package-test seams.
 	releaseBuild   = buildRelease
+	releaseWorker  = deployWorker
 	releaseUpgrade = install.ServiceUpgrade
 	// SIGTERM shuts down cleanly; factoryd then supervises the staged build's
 	// trial because the upgrade marker names another build.
@@ -312,6 +314,14 @@ func (daemon *Daemon) release(project kernel.ProjectID, root string, source chan
 	}
 	delivery.Phase = "stage"
 	_ = daemon.writeRelease(ctx, project, &delivery)
+	running := ""
+	if current := buildinfo.Current(); current.Release() {
+		running = current.Source()
+	}
+	if err := releaseWorker(ctx, daemon, filepath.Join(directory, "tree"), running, delivery.Revision); err != nil {
+		fail("worker: " + err.Error())
+		return
+	}
 	backup := install.UpgradeBackupPath(daemon.home)
 	_ = os.Remove(backup) // BackupTo refuses whatever this could not remove.
 	if err := daemon.store.BackupTo(ctx, backup); err != nil {
@@ -377,6 +387,31 @@ func buildRelease(ctx context.Context, daemon *Daemon, root string, source chang
 		command.Cancel = func() error { return syscall.Kill(-command.Process.Pid, syscall.SIGKILL) }
 		command.WaitDelay = 5 * time.Second
 	})
+}
+
+// deployWorker deploys the control-plane Worker at sha with the release
+// checkout's scripts/release.sh, which rolls back a Worker that does not come
+// up, whenever control-plane/ differs from the running build's (any change
+// when that is unknown). It runs before factoryd is staged, so factoryd and
+// the Worker it calls are released together (#1512).
+func deployWorker(ctx context.Context, daemon *Daemon, tree, running, sha string) error {
+	if running != "" {
+		_, err := gitOutput(ctx, filepath.Join(tree, ".git"), "diff", "--quiet", running, sha, "--", "control-plane")
+		var exit *exec.ExitError
+		if err == nil || !errors.As(err, &exit) || exit.ExitCode() != 1 {
+			return err
+		}
+	}
+	command := exec.CommandContext(ctx, filepath.Join(tree, "scripts", "release.sh"), sha)
+	command.Dir, command.Env = tree, daemon.toolEnvironment()
+	command.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	command.Cancel = func() error { return syscall.Kill(-command.Process.Pid, syscall.SIGKILL) }
+	command.WaitDelay = 5 * time.Second
+	if output, err := command.CombinedOutput(); err != nil {
+		lines := strings.Split(strings.TrimSpace(string(output)), "\n")
+		return fmt.Errorf("%w: %s", err, lines[len(lines)-1])
+	}
+	return nil
 }
 
 // releaseDescends refuses a commit that is not the running build or one of
