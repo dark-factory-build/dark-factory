@@ -29,7 +29,7 @@ type Operation struct {
 	ID           string    `json:"id"`
 	Request      Request   `json:"request"`
 	State        string    `json:"state"`
-	Retryable    bool      `json:"retryable,omitempty"`
+	Retryable    bool      `json:"retryable"`
 	RetryOf      string    `json:"retry_of,omitempty"`
 	Verdict      string    `json:"verdict,omitempty"`
 	Detail       string    `json:"detail,omitempty"`

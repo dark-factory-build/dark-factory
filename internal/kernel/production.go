@@ -572,7 +572,10 @@ func (store *Store) PublishableChanges(ctx context.Context, at UnixMillis) ([]Pu
 		  AND ((a.id IS NOT NULL AND `+factorydPublishesAcceptance+`) OR (a.id IS NULL AND EXISTS (SELECT 1 FROM publication_tasks repair WHERE repair.project_id = c.project_id AND repair.task_id = c.task_id)))
 		  AND (p.pull_number IS NOT NULL OR NOT EXISTS (SELECT 1 FROM publication_tasks q WHERE q.change_id = c.id OR q.task_id = c.task_id))
 		  AND NOT EXISTS (SELECT 1 FROM production_records r WHERE r.project_id = c.project_id AND r.kind = 'reviewer'
-		      AND r.identity = 'publish-' || lower(hex(c.id)) || '-' || c.revision AND r.observed_at_ms + ? > ?)
+		      AND r.identity = 'publish-' || lower(hex(c.id)) || '-' || c.revision
+		      AND (json_extract(r.document, '$.retryable') = 0 OR
+		          ((json_extract(r.document, '$.retryable') = 1 OR json_extract(r.document, '$.retryable') IS NULL)
+		              AND r.observed_at_ms + ? > ?)))
 		ORDER BY c.updated_at_ms`, PublishRetryAfter.Milliseconds(), at.Int64())
 	if err != nil {
 		return nil, err
