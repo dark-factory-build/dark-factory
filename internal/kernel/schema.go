@@ -92,7 +92,7 @@ var schemaStatements = []string{
     daemon_id BLOB NOT NULL CHECK (length(daemon_id) = 16 AND daemon_id <> zeroblob(16)),
     dispatch_enabled INTEGER NOT NULL CHECK (dispatch_enabled IN (0, 1)),
     capacity INTEGER NOT NULL CHECK (capacity BETWEEN 1 AND 1024),
-    revision INTEGER NOT NULL CHECK (revision >= 1),
+	revision INTEGER NOT NULL CHECK (revision >= 1),
     next_invalidation_sequence INTEGER NOT NULL CHECK (next_invalidation_sequence >= 1),
     invalidation_floor INTEGER NOT NULL CHECK (invalidation_floor >= 1 AND invalidation_floor <= next_invalidation_sequence),
     updated_at_ms INTEGER NOT NULL CHECK (updated_at_ms >= 0)
@@ -102,8 +102,8 @@ var schemaStatements = []string{
 	    name TEXT NOT NULL CHECK (length(CAST(name AS BLOB)) BETWEEN 1 AND 128),
 	    root TEXT NOT NULL CHECK (length(CAST(root AS BLOB)) BETWEEN 1 AND 4096 AND substr(root, 1, 1) = '/'),
 	    verification_policy TEXT NOT NULL CHECK (verification_policy IN ('none', 'rust_workspace_test', 'go_workspace_test')),
-	    runs_used INTEGER NOT NULL DEFAULT 0 CHECK (runs_used >= 0),
-    revision INTEGER NOT NULL CHECK (revision >= 1),
+    runs_used INTEGER NOT NULL DEFAULT 0 CHECK (runs_used >= 0),
+	revision INTEGER NOT NULL CHECK (revision >= 1),
     created_at_ms INTEGER NOT NULL CHECK (created_at_ms >= 0),
     updated_at_ms INTEGER NOT NULL CHECK (updated_at_ms >= created_at_ms)
 ` + projectSpecialistColumns + `) STRICT, WITHOUT ROWID`,

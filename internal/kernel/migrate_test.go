@@ -70,7 +70,7 @@ func downgradeHome(t *testing.T, store *Store, version int) {
 	if version == v37UserVersion {
 		statements = append(statements, "ALTER TABLE agents DROP COLUMN idle_wake_on", "ALTER TABLE projects DROP COLUMN specialist_open_proposals", "ALTER TABLE projects DROP COLUMN specialist_runs")
 	}
-	if version == v37UserVersion || version == v38UserVersion {
+	if version == v37UserVersion || version == v38UserVersion || version == v39UserVersion {
 		statements = append(statements,
 			"ALTER TABLE projects ADD COLUMN run_budget_limit INTEGER NOT NULL DEFAULT 0 CHECK (run_budget_limit >= 0)",
 			"ALTER TABLE projects ADD COLUMN max_run_seconds INTEGER NOT NULL DEFAULT 0 CHECK (max_run_seconds BETWEEN 0 AND 86400)",
@@ -102,7 +102,7 @@ func TestLegacyRetryableFailuresMigrate(t *testing.T) {
 	for _, test := range []struct {
 		version  int
 		terminal bool
-	}{{v38UserVersion, false}, {v38UserVersion, true}, {v37UserVersion, false}, {v37UserVersion, true}} {
+	}{{v39UserVersion, false}, {v39UserVersion, true}, {v38UserVersion, false}, {v38UserVersion, true}, {v37UserVersion, false}, {v37UserVersion, true}} {
 		version, terminal := test.version, test.terminal
 		t.Run(fmt.Sprintf("v%d/terminal=%v", version, terminal), func(t *testing.T) {
 			t.Parallel()
@@ -182,15 +182,15 @@ func snapshotRows(t *testing.T, ctx context.Context, connection *sql.Conn) map[s
 func TestSchemaDigestsArePinned(t *testing.T) {
 	t.Parallel()
 	sum := sha256.Sum256([]byte(strings.Join(schemaStatements, "\n")))
-	if got := hex.EncodeToString(sum[:]); got != "6985bf991c091fccffe066b70f516840837116f81d4ed256c7b4c810c281d7d7" {
+	if got := hex.EncodeToString(sum[:]); got != "1aa093bec3d9cd38c5101aeb12a217617f9d204fb42ed7267443404a6150722b" {
 		t.Errorf("current schema digest = %s", got)
 	}
 	sum = sha256.Sum256([]byte(strings.Join(legacySchemaStatements(v38UserVersion), "\n")))
-	if got := hex.EncodeToString(sum[:]); got != "29c9a3043f03be927336f6331f7c7ce24bcab875fb4607fc55003b688739fc2e" {
+	if got := hex.EncodeToString(sum[:]); got != "0f66bcf8bef0c49c347cceffed05fb22ebe3c79ea759f3d1d19a7b3360b4f997" {
 		t.Errorf("v38 schema digest = %s", got)
 	}
 	sum = sha256.Sum256([]byte(strings.Join(legacySchemaStatements(v37UserVersion), "\n")))
-	if got := hex.EncodeToString(sum[:]); got != "819c191d4e411ad35a2f7cf19db739d0492d0f8cf1c9c5fe0bd50a5197b5bb6c" {
+	if got := hex.EncodeToString(sum[:]); got != "dfe6e12d0f586585951f06f24bcd2b75e19adaa94b442e0f0e16c4786b401f8d" {
 		t.Errorf("v37 schema digest = %s", got)
 	}
 }
