@@ -31,18 +31,20 @@ in_source_shard() { [ "$local_ci_shard" != daemon ] && [ "$local_ci_shard" != pa
 # Establish the small, credential-free gate environment once. The caller's
 # tool path and cache root are the only host-specific values that cross in.
 if [ "${DARK_FACTORY_LOCAL_CI_ENV-}" != 1 ]; then
-    git_common=$(/usr/bin/env -i PATH=/usr/bin:/bin HOME=/dev/null \
-        /usr/bin/git rev-parse --git-common-dir 2>/dev/null) || {
-        echo "local-ci: cannot resolve the git common directory" >&2
-        exit 1
-    }
     ci_path=${PATH-}
     ci_home=${HOME-}
     ci_tmpdir=${TMPDIR-/tmp}
     ci_cache_root=${DF_CI_CACHE_ROOT-}
     [ -n "$ci_cache_root" ] || ci_cache_root=${ci_home:-/var/empty}/Library/Caches/dark-factory/local-ci/trusted
     ci_go_module_cache=${DF_CI_GO_MODULE_CACHE-}
-    [ -n "$ci_go_module_cache" ] || ci_go_module_cache="$ci_cache_root/go-mod"
+    ci_goproxy=${GOPROXY-https://proxy.golang.org,direct}
+    ci_gosumdb=${GOSUMDB-sum.golang.org}
+    if [ -n "$ci_go_module_cache" ]; then
+        ci_goproxy=off
+        ci_gosumdb=off
+    else
+        ci_go_module_cache="$ci_cache_root/go-mod"
+    fi
     ci_go=${DF_CI_GO-}; [ -n "$ci_go" ] || ci_go=$(PATH="$ci_path" command -v go || true)
     ci_node=${DF_CI_NODE-}; [ -n "$ci_node" ] || ci_node=$(PATH="$ci_path" command -v node || true)
     ci_corepack=${DF_CI_COREPACK-}; [ -n "$ci_corepack" ] || ci_corepack=$(PATH="$ci_path" command -v corepack || true)
@@ -57,7 +59,7 @@ if [ "${DARK_FACTORY_LOCAL_CI_ENV-}" != 1 ]; then
         DF_CI_CACHE_ROOT="$ci_cache_root" DF_CI_GO="$ci_go" \
         DF_CI_NODE="$ci_node" DF_CI_COREPACK="$ci_corepack" \
         GOPATH="$ci_cache_root/go" GOCACHE="$ci_cache_root/go-build" \
-        DF_CI_GO_MODULE_CACHE="$ci_go_module_cache" GOMODCACHE="$ci_go_module_cache" GOPROXY=off GOSUMDB=off \
+        DF_CI_GO_MODULE_CACHE="${DF_CI_GO_MODULE_CACHE-}" GOMODCACHE="$ci_go_module_cache" GOPROXY="$ci_goproxy" GOSUMDB="$ci_gosumdb" \
         COREPACK_HOME="$ci_cache_root/corepack" \
         npm_config_cache="$ci_cache_root/npm" NPM_CONFIG_CACHE="$ci_cache_root/npm" \
         pnpm_config_store_dir="$ci_cache_root/pnpm-store" \
