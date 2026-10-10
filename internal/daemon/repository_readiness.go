@@ -41,16 +41,25 @@ func (daemon *Daemon) RepositoryReadiness(ctx context.Context, id kernel.Reposit
 	result.ReadinessMessage = "Check the registered checkout, configured base and repository-local Git authentication, then retry. GitHub delegation does not configure Git fetch credentials."
 	bounded, cancel := context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()
+	current, inspectErr := inspectRegisteredRepository(bounded, repository.Root, "")
 	if !verified {
 		// Explicit operator verification also materializes the legacy first
 		// claim. Passive listing never learns or changes checkout identity.
-		source, err = inspectRegisteredRepository(bounded, repository.Root, "")
-		if err != nil {
+		if inspectErr != nil {
 			return result, nil
 		}
-		if err := daemon.store.BindRepositorySource(ctx, id, source); err != nil {
+		if err := daemon.store.BindRepositorySource(ctx, id, current); err != nil {
 			return api.ProjectRepository{}, err
 		}
+		source = current
+	}
+	// Only this explicit check re-pins a deliberately changed origin of the
+	// same checkout, once a sealed fetch succeeds through it. Selection,
+	// review and workers keep refusing a changed origin.
+	known, moved := source, source
+	moved.OriginDigest, moved.PublicationRepository = current.OriginDigest, current.PublicationRepository
+	if inspectErr == nil && moved == current {
+		source = current
 	}
 	root, rootErr := change.NewRepositoryIdentity(source.RootDevice, source.RootInode)
 	git, gitErr := change.NewRepositoryIdentity(source.GitDevice, source.GitInode)
@@ -58,13 +67,24 @@ func (daemon *Daemon) RepositoryReadiness(ctx context.Context, id kernel.Reposit
 		return api.ProjectRepository{}, kernel.ErrCorruptState
 	}
 	expected := change.RepositorySourceIdentity{Root: root, Git: git, OriginDigest: source.OriginDigest, PublicationRepository: source.PublicationRepository}
-	if _, err := change.SelectRegisteredGit(bounded, change.TrustedGitExecutable, repository.Root, repository.BaseRef, expected); err != nil {
+	_, err = change.SelectRegisteredGit(bounded, change.TrustedGitExecutable, repository.Root, repository.BaseRef, expected)
+	if err == nil && source != known {
+		// The base may be a commit, a local branch or another remote, so only a
+		// fetch through origin itself proves the changed origin.
+		err = change.ProbeOrigin(bounded, change.TrustedGitExecutable, repository.Root, expected)
+	}
+	if err != nil {
 		// A validation reason is closed and path-safe; Git's own stderr never
 		// leaves selection.
 		if invalid := (*change.ValidationError)(nil); errors.As(err, &invalid) {
 			result.ReadinessMessage = "Fetch check failed: " + invalid.Reason + ". " + result.ReadinessMessage
 		}
 		return result, nil
+	}
+	if source != known {
+		if err := daemon.store.RepinRepositoryOrigin(ctx, id, known, source); err != nil {
+			return api.ProjectRepository{}, err
+		}
 	}
 	result.FetchState, result.ReadinessMessage = "ready", "The configured source is available through this checkout's Git setup."
 	return result, nil
