@@ -91,13 +91,24 @@ item AS (
 	  AND COALESCE(json_extract(e.document, '$.route_pending'), 0) = 0 AND json_extract(p.document, '$.state') = 'open'
 	  AND lower(json_extract(p.document, '$.head')) = lower(json_extract(e.document, '$.request.Head'))
 	UNION ALL SELECT NULL, c.created_at_ms, 3, 'Proposal ' || lower(hex(c.id)) || ' from ' || COALESCE((SELECT name FROM agents WHERE id = ` + authorAgentSQL + `), 'the operator') || ': '
-		|| replace(substr(c.title, 1, 100), char(10), ' '), '[proposal:' || lower(hex(c.id)) || ']'
+		|| replace(substr(c.title, 1, 100), char(10), ' ') || ` + proposalNotesSQL + `, '[proposal:' || lower(hex(c.id)) || ']'
 	FROM project_content_revisions AS c WHERE c.project_id = ?1 AND ` + openProposalSQL + `),
 numbered AS (SELECT *, row_number() OVER () AS n FROM item),
 counted AS (SELECT numbered.*, count(at) AS named, MAX(at) AS named_at, count(CASE WHEN started THEN 1 END) AS wakes,
 	unhex(substr(MAX(CASE WHEN started THEN printf('%020d', at) || hex(task) END), 21)) AS last
 	FROM numbered LEFT JOIN carrier ON ` + overseerWakeNames + ` GROUP BY n)
 `
+
+// proposalNotesSQL names, after proposal c's title, the contributions and
+// challenges other records attach to it by record_id, and who wrote them, so
+// the overseer weighs them when it decides and prioritises.
+const proposalNotesSQL = `COALESCE((SELECT ' (' || count(*) || ' notes from ' || group_concat(DISTINCT COALESCE(a.name, 'the operator')) || ')'
+		FROM project_content_revisions AS n LEFT JOIN agents AS a ON a.id = unhex(substr(n.author, instr(n.author, ' agent:') + 7, 32))
+		WHERE n.project_id = c.project_id AND n.kind = 'observation' AND n.deprecated = 0
+		  AND n.revision = (SELECT MAX(revision) FROM project_content_revisions WHERE id = n.id)
+		  AND json_extract(CASE WHEN json_valid(n.source_references) THEN n.source_references ELSE '{}' END, '$.record_type') = 'contribution'
+		  AND lower(json_extract(CASE WHEN json_valid(n.source_references) THEN n.source_references ELSE '{}' END, '$.record_id')) = lower(hex(c.id))
+		HAVING count(*) > 0), '')`
 
 // overseerWakeNames is a carrier since the item's version that named it, by
 // its key (a task identity, or an escalation's reviewer record), or that named

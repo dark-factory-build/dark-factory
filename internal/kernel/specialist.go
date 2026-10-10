@@ -196,7 +196,7 @@ func specialistEvents(ctx context.Context, c *sql.Conn, agent Agent, since int64
 // specialistWake is the body of a due specialist's next carrier: its
 // instruction, the schedule, the prior carrier's checkpoint, its proposals'
 // follow-ups and the events since. What does not fit the provider's bound is
-// dropped in order (events, follow-ups, then the checkpoint); never the
+// dropped in order (events, follow-ups, other specialists, then the checkpoint); never the
 // instruction, which was checked against the bound when it was set.
 func specialistWake(ctx context.Context, c *sql.Conn, agent Agent, state SpecialistState, prior specialistPrior, events []string) (string, error) {
 	rows, err := c.QueryContext(ctx, `SELECT printf('- proposal %s "%s": %s', lower(hex(c.id)), replace(substr(c.title, 1, 80), char(10), ' '),
@@ -220,6 +220,28 @@ func specialistWake(ctx context.Context, c *sql.Conn, agent Agent, state Special
 	if err := errors.Join(rows.Err(), rows.Close()); err != nil {
 		return "", err
 	}
+	peerRows, err := c.QueryContext(ctx, `SELECT name, idle_instruction, paused FROM agents WHERE project_id = ? AND id <> ? AND role = 'worker' AND idle_policy = 'standing_instruction' AND archived = 0 ORDER BY name, id LIMIT 12`,
+		agent.ProjectID.Bytes(), agent.ID.Bytes())
+	if err != nil {
+		return "", err
+	}
+	var peers []string
+	for peerRows.Next() {
+		var name, instruction string
+		var paused bool
+		if err := peerRows.Scan(&name, &instruction, &paused); err != nil {
+			return "", errors.Join(err, peerRows.Close())
+		}
+		line, _, _ := strings.Cut(instruction, "\n")
+		line = "- " + name + ": " + strings.ToValidUTF8(line[:min(len(line), 120)], "")
+		if paused {
+			line += " (paused)"
+		}
+		peers = append(peers, line)
+	}
+	if err := errors.Join(peerRows.Err(), peerRows.Close()); err != nil {
+		return "", err
+	}
 	budget := "unlimited"
 	if agent.Idle.RunBudget > 0 {
 		budget = strconv.FormatUint(uint64(agent.Idle.RunBudget), 10)
@@ -228,7 +250,11 @@ func specialistWake(ctx context.Context, c *sql.Conn, agent Agent, state Special
 		state.NextReason, prior.task, prior.base, state.QuietReviews, state.OpenProposals, state.OpenProposalLimit, agent.Idle.RunsUsed+1, budget)
 	checkpoint := strings.ToValidUTF8(prior.checkpoint[:min(len(prior.checkpoint), 2048)], "")
 	for {
-		body := agent.Idle.Instruction + "\n\n" + header + "\nPrior checkpoint:\n" + checkpoint
+		body := agent.Idle.Instruction + "\n\n" + header
+		if len(peers) != 0 {
+			body += "\nOther specialists:\n" + strings.Join(peers, "\n")
+		}
+		body += "\nPrior checkpoint:\n" + checkpoint
 		if checkpoint == "" {
 			body += "none"
 		}
@@ -245,6 +271,8 @@ func specialistWake(ctx context.Context, c *sql.Conn, agent Agent, state Special
 			events = nil
 		case len(followUps) != 0:
 			followUps = nil
+		case len(peers) != 0:
+			peers = nil
 		case len(checkpoint) > 256:
 			checkpoint = strings.ToValidUTF8(checkpoint[:256], "")
 		case checkpoint != "":

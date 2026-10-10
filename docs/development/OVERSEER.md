@@ -183,6 +183,13 @@ description. Only you or the operator resolve a proposal, and an acceptance is
 refused while another accepted proposal's task is still queued, running or
 blocked: one self-generated implementation is active at a time.
 
+Specialists may contribute to or challenge each other's proposals; the wake
+line counts those notes and names their authors (`(2 notes from security,
+architecture)`). Read them (`content search`, `content body`) before deciding.
+You decide what the factory works on: accept, decline, defer, or accept at a
+lower or higher task priority (`overseer task add --priority N`, or `task update
+--priority` later), and say in the decision which notes moved you.
+
 Read this runbook from that clone or the task-provided checkout. If neither
 is available, report the missing checkout. Scope searches to that checkout
 and the private runtime home; never search the operator’s home or personal
