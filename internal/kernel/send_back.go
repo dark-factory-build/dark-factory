@@ -114,6 +114,12 @@ func (store *Store) SendBackPublishedReview(ctx context.Context, project Project
 	if strings.Contains(TaskFeedback(task), marker) {
 		return task, tx.Rollback(nil)
 	}
+	// An operator cancellation is final. The review operation may still have
+	// route_pending set, but retrying its send-back only produces a durable
+	// conflict on every scheduler pass.
+	if task.Status == TaskCancelled {
+		return Task{}, tx.Rollback(ErrNotFound)
+	}
 	updated, err := sendBackTask(ctx, tx.connection, task, marker+note, at)
 	if err != nil {
 		return Task{}, tx.Rollback(err)

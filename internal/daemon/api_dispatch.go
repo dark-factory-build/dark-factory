@@ -1802,6 +1802,7 @@ func (daemon *Daemon) overseerSnapshot(ctx context.Context, call api.Call) api.R
 	if err != nil {
 		return newErrorReply(api.RemoteUnavailable)
 	}
+	projected.Factoryd = daemon.factorydHealth()
 	reply, err := api.NewOverseerSnapshotReply(projected)
 	if err != nil {
 		return newErrorReply(api.RemoteInternal)

@@ -695,6 +695,19 @@ type OverseerSnapshot struct {
 	PeerQuestions  []PeerQuestion          `json:"peer_questions"`
 	History        []OverseerIntervention  `json:"history"`
 	Handoffs       []RetainedChangeHandoff `json:"retained_change_handoffs"`
+	Factoryd       FactorydHealth          `json:"factoryd"`
+}
+
+// FactorydHealth is the daemon's bounded, in-memory health view.
+type FactorydHealth struct {
+	Calls []FactorydCall `json:"calls"`
+}
+
+type FactorydCall struct {
+	Name         string  `json:"name"`
+	Count        uint64  `json:"count"`
+	Errors       uint64  `json:"errors,omitempty"`
+	LatencyP95MS float64 `json:"latency_p95_ms,omitempty"`
 }
 
 // RetainedChangeHandoff identifies one settled worker Change by its Git
