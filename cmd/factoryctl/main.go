@@ -115,7 +115,10 @@ const (
   factoryctl task add --project ID [--repository ID] --agent ID|any --title TEXT [--body TEXT] [--priority N] [--content ID:REVISION[,ID:REVISION...]] [--task-id ID --incarnation-id ID]
     --agent any queues the task for any eligible worker in the project; the first worker admitted keeps it.
     --content pins up to eight project content revisions before any worker can admit the task.
-  factoryctl status
+  factoryctl status [--project ID]
+    --project prints what factoryd waits on there instead: held health conditions,
+    the overseers' due and stalled items, Changes reclaim keeps by reason, and
+    each repository's readiness (running the project repository fetch check).
   factoryctl task send-back --task ID --note TEXT
   factoryctl task update --task ID --revision REVISION [--title TEXT] [--body TEXT] [--priority N] [--agent ID] [--cancel] [--retry]
   factoryctl task update --task ID --revision REVISION --remove-attachments
@@ -1545,6 +1548,9 @@ func parseOperator(args []string) (attemptCommand, bool, bool) {
 	if len(args) == 1 && args[0] == "status" {
 		return attemptCommand{kind: commandStatus}, false, true
 	}
+	if len(args) == 3 && args[0] == "status" && args[1] == "--project" && validHumanRequestKey(args[2]) {
+		return attemptCommand{kind: commandStatus, project: args[2]}, false, true
+	}
 	if len(args) == 2 && helpFlag(args[1]) {
 		return attemptCommand{}, true, true
 	}
@@ -2185,7 +2191,7 @@ func runOperator(ctx context.Context, command attemptCommand, getenv func(string
 		return exitFailure
 	}
 	timeout := attemptRequestTimeout
-	if command.kind == commandIntake {
+	if command.kind == commandIntake || command.kind == commandStatus && command.project != "" {
 		timeout = 120 * time.Second
 	}
 	if command.kind == commandCompactStorage || command.kind == commandBackupCreate || command.kind == commandBackupVerify {
@@ -2225,6 +2231,13 @@ func runOperator(ctx context.Context, command attemptCommand, getenv func(string
 		}
 		return writeJSON(stdout, result)
 	case commandStatus:
+		if command.project != "" {
+			health, callErr := client.Health(callContext, command.project)
+			if callErr != nil {
+				return writeWebFailure(stderr, "status", callErr)
+			}
+			return writeJSON(stdout, health)
+		}
 		snapshot, callErr := client.Snapshot(callContext)
 		if callErr != nil {
 			return writeWebFailure(stderr, "status", callErr)

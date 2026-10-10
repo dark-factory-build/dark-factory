@@ -184,6 +184,15 @@ func (client *OperatorClient) RemoteStatus(ctx context.Context) (RemoteStatus, e
 	return result, nil
 }
 
+// Health is factoryd's readiness, with project's oversight when project is set.
+func (client *OperatorClient) Health(ctx context.Context, project string) (HealthStatus, error) {
+	var result HealthStatus
+	err := client.client.call(ctx, "health", struct {
+		ProjectID string `json:"project_id,omitempty"`
+	}{project}, &result)
+	return result, err
+}
+
 func (client *OperatorClient) Snapshot(ctx context.Context) (DashboardSnapshot, error) {
 	var result DashboardSnapshot
 	if err := client.client.call(ctx, "snapshot", struct{}{}, &result); err != nil {

@@ -816,7 +816,15 @@ func decodeCall(domain byte, bearer credential, encoded []byte) (Call, RemoteErr
 		if err := decodeExact(request.Params, &call.githubConnection); err != nil || !ValidGitHubConnectionInput(call.githubConnection) {
 			return Call{}, RemoteInvalidRequest
 		}
-	case CallHealth, CallSnapshot, CallAttemptTask, CallWebStatus, CallWebPair, CallRemoteStatus, CallHumanRequests:
+	case CallHealth:
+		var input struct {
+			ProjectID string `json:"project_id,omitempty"`
+		}
+		if err := decodeExact(request.Params, &input); err != nil || input.ProjectID != "" && !validID(input.ProjectID) {
+			return Call{}, RemoteInvalidRequest
+		}
+		call.text = input.ProjectID
+	case CallSnapshot, CallAttemptTask, CallWebStatus, CallWebPair, CallRemoteStatus, CallHumanRequests:
 		if err := decodeExact(request.Params, &struct{}{}); err != nil {
 			return Call{}, RemoteInvalidRequest
 		}
@@ -1483,6 +1491,11 @@ func (connection *Connection) Close() error {
 
 func (call Call) AgentModelSelectInput() (AgentModelSelectInput, bool) {
 	return call.modelSelection, call.kind == CallAgentSelectModel
+}
+
+// HealthProject is the project a health call asks oversight of, if any.
+func (call Call) HealthProject() (string, bool) {
+	return call.text, call.kind == CallHealth
 }
 
 func (call Call) AccountsOffset() (uint32, bool) {

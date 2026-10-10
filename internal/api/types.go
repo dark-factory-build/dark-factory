@@ -99,8 +99,30 @@ func validRemoteDetail(value string) bool {
 	return true
 }
 
+// HealthStatus is factoryd's readiness and, for a project, what it waits on:
+// the held health conditions, the overseers' due and stalled items, the
+// Changes reclaim keeps by reason, and each repository's readiness.
 type HealthStatus struct {
-	Ready bool `json:"ready"`
+	Ready         bool                `json:"ready"`
+	Conditions    []HealthCondition   `json:"conditions,omitempty"`
+	OverseerItems []OverseerItem      `json:"overseer_items,omitempty"`
+	KeptChanges   map[string]int      `json:"kept_changes,omitempty"`
+	Repositories  []ProjectRepository `json:"repositories,omitempty"`
+}
+
+type HealthCondition struct {
+	Key     string `json:"key"`
+	Detail  string `json:"detail"`
+	SinceMS int64  `json:"since_ms"`
+}
+
+// OverseerItem is due in its overseer's next wake, or stalled since the
+// carrier task that last named it.
+type OverseerItem struct {
+	AgentID       string `json:"agent_id"`
+	State         string `json:"state"`
+	Line          string `json:"line"`
+	CarrierTaskID string `json:"carrier_task_id,omitempty"`
 }
 
 // AgentPaths is the live worker's sampled modified-directory view. Paths are
