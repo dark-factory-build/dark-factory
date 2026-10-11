@@ -131,7 +131,7 @@ func TestProductionPersistsFinalizedConstructionPublicationAndRebase(t *testing.
 	}
 }
 
-func TestPublishedReviewChangesAreSentBackToOriginExactlyOnce(t *testing.T) {
+func TestPublishedPullSendBackIsBoundToThePullHead(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
 	proposal, err := NewSuccessProposal("published")
@@ -163,25 +163,23 @@ func TestPublishedReviewChangesAreSentBackToOriginExactlyOnce(t *testing.T) {
 	if head := changeHead(t, store, finalizing.TaskID); head == "" || head == published {
 		t.Fatalf("change head %q must differ from the published head", head)
 	}
-	if _, err := store.SendBackPublishedReview(ctx, finalizing.ProjectID, "example/factory", 77, "review-op-0", strings.Repeat("b", 40), "fix the findings", mustTime(t, 80)); !errors.Is(err, ErrSuperseded) {
+	task, _, err := store.Task(ctx, finalizing.TaskID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.SendBackTask(ctx, nil, task.ID, task.Revision, strings.Repeat("b", 40), "fix the findings", mustTime(t, 80)); !errors.Is(err, ErrSuperseded) {
 		t.Fatalf("stale review send-back err=%v", err)
 	}
-	head := published
-	first, err := store.SendBackPublishedReview(ctx, finalizing.ProjectID, "example/factory", 77, "review-op-1", head, "fix the findings", mustTime(t, 82))
-	if err != nil || !strings.Contains(TaskFeedback(first), "review-operation: review-op-1") {
-		t.Fatalf("first review send-back=%+v err=%v", first, err)
-	}
-	second, err := store.SendBackPublishedReview(ctx, finalizing.ProjectID, "example/factory", 77, "review-op-1", head, "fix the findings", mustTime(t, 83))
-	if err != nil || second.Revision != first.Revision || !strings.Contains(TaskFeedback(second), "fix the findings") {
-		t.Fatalf("replayed review send-back=%+v first=%+v err=%v", second, first, err)
+	sent, err := store.SendBackTask(ctx, nil, task.ID, task.Revision, published, "fix the findings", mustTime(t, 82))
+	if err != nil || TaskFeedback(sent) == "" || sent.WorkRevision.Int64() != 2 {
+		t.Fatalf("pull head send-back=%+v err=%v", sent, err)
 	}
 }
 
 // The overseer publishes a worker's Change, so the pull request has two
-// publication rows. A review send-back must reach the worker, even when the
-// overseer's row is the newer one, and the sent-back branch is no longer
-// publishable.
-func TestPublishedReviewSendBackReachesTheWorkerNotThePublisher(t *testing.T) {
+// publication rows. Its task is the worker's, even when the overseer's row is
+// the newer one, and the sent-back branch is no longer publishable.
+func TestOpenPullsTaskIsTheWorkerNotThePublisher(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
 	proposal, err := NewSuccessProposal("published")
@@ -221,12 +219,19 @@ func TestPublishedReviewSendBackReachesTheWorkerNotThePublisher(t *testing.T) {
 	if _, inWork, err := store.ChangeBranchClosedToOverseer(ctx, worker.ProjectID, pr.Branch); err != nil || inWork {
 		t.Fatalf("settled branch: inWork=%v err=%v", inWork, err)
 	}
-	routed, err := store.SendBackPublishedReview(ctx, worker.ProjectID, "example/factory", 7, "review-op", head, "fix the finding", mustTime(t, 91))
-	if err != nil || routed.ID != worker.TaskID || !strings.Contains(TaskFeedback(routed), "review-operation: review-op\n") || routed.WorkRevision.Int64() != 2 {
-		t.Fatalf("send-back reached %v (worker %v), err=%v", routed.ID, worker.TaskID, err)
+	open, err := store.OpenPulls(ctx)
+	if err != nil || len(open) != 1 || open[0].Task != worker.TaskID || open[0].Pull.Number != 7 || len(open[0].Operations) != 0 {
+		t.Fatalf("open pulls = %+v, want #7 of worker %v, err=%v", open, worker.TaskID, err)
 	}
-	if _, err := store.SendBackPublishedReview(ctx, worker.ProjectID, "example/factory", 7, "stale-op", strings.Repeat("c", 40), "an older head", mustTime(t, 92)); !errors.Is(err, ErrSuperseded) {
+	task, _, err := store.Task(ctx, worker.TaskID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.SendBackTask(ctx, nil, task.ID, task.Revision, strings.Repeat("c", 40), "an older head", mustTime(t, 91)); !errors.Is(err, ErrSuperseded) {
 		t.Fatalf("a superseded head err=%v, want ErrSuperseded", err)
+	}
+	if routed, err := store.SendBackTask(ctx, nil, task.ID, task.Revision, head, "fix the finding", mustTime(t, 91)); err != nil || routed.WorkRevision.Int64() != 2 {
+		t.Fatalf("send-back = %+v, err=%v", routed, err)
 	}
 	// The sent-back Change is in work again: its branch is not publishable.
 	if _, inWork, err := store.ChangeBranchClosedToOverseer(ctx, worker.ProjectID, pr.Branch); err != nil || !inWork {
@@ -742,8 +747,8 @@ func TestPublishableIntakeChangeIsFactorydsUntilPublishedOrFailed(t *testing.T) 
 	if found, err := store.PublishableChanges(ctx, mustTime(t, 90+PublishRetryAfter.Milliseconds())); err != nil || len(found) != 0 {
 		t.Fatalf("a permanent publish failure was retried: %+v %v", found, err)
 	}
-	if pending, err := store.InFlightReviewOperations(ctx); err != nil || len(pending) != 0 {
-		t.Fatalf("publish failure in flight: %+v %v", pending, err)
+	if open, err := store.OpenPulls(ctx); err != nil || len(open) != 0 {
+		t.Fatalf("publish failure in flight: %+v %v", open, err)
 	}
 	// Published under the worker task, it is linked to its Change and stays
 	// factoryd's: it publishes the corrections too.
@@ -776,7 +781,7 @@ func TestPublishableIntakeChangeIsFactorydsUntilPublishedOrFailed(t *testing.T) 
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := store.SendBackTask(ctx, task.ID, task.Revision, changeHead(t, store, task.ID), "fix the finding", mustTime(t, 72)); err != nil {
+	if _, err := store.SendBackTask(ctx, nil, task.ID, task.Revision, changeHead(t, store, task.ID), "fix the finding", mustTime(t, 72)); err != nil {
 		t.Fatal(err)
 	}
 	// The settlement keeps the Change revision here, so drop that revision's
@@ -833,7 +838,10 @@ func TestHostPullRequestRepairTaskNamesTheReviewedHead(t *testing.T) {
 	if err := store.RecordProductionReview(ctx, worker.ProjectID, "example/factory", 9, ProductionReview{Head: head, State: "block"}, mustTime(t, 70)); err != nil {
 		t.Fatal(err)
 	}
-	repair, err := store.SendBackPublishedReview(ctx, worker.ProjectID, "example/factory", 9, "review-op", head, "fix the finding", mustTime(t, 71))
+	if _, err := store.CreateRepairTask(ctx, worker.ProjectID, "example/factory", 9, strings.Repeat("c", 40), "an older head", mustTime(t, 71)); !errors.Is(err, ErrSuperseded) {
+		t.Fatalf("a superseded head err=%v, want ErrSuperseded", err)
+	}
+	repair, err := store.CreateRepairTask(ctx, worker.ProjectID, "example/factory", 9, head, "fix the finding", mustTime(t, 71))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -885,10 +893,10 @@ func TestSendBackAcceptsTheHeadOfTheChangeBranchPullRequest(t *testing.T) {
 	if err != nil || !found {
 		t.Fatalf("task=%+v found=%v err=%v", task, found, err)
 	}
-	if _, err := store.SendBackTask(ctx, task.ID, task.Revision, strings.Repeat("e", 40), "an older head", mustTime(t, 62)); !errors.Is(err, ErrSuperseded) {
+	if _, err := store.SendBackTask(ctx, nil, task.ID, task.Revision, strings.Repeat("e", 40), "an older head", mustTime(t, 62)); !errors.Is(err, ErrSuperseded) {
 		t.Fatalf("other head err=%v, want ErrSuperseded", err)
 	}
-	sent, err := store.SendBackTask(ctx, task.ID, task.Revision, published, "fix the finding", mustTime(t, 62))
+	sent, err := store.SendBackTask(ctx, nil, task.ID, task.Revision, published, "fix the finding", mustTime(t, 62))
 	if err != nil || sent.WorkRevision.Int64() != 2 {
 		t.Fatalf("published head send-back=%+v err=%v", sent, err)
 	}

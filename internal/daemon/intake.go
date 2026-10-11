@@ -365,10 +365,12 @@ func (daemon *Daemon) importAcceptedIntake(ctx context.Context, accepted kernel.
 		task, err := daemon.store.ImportIntakeAcceptanceWithPriority(ctx, accepted.ID, at, source, priority)
 		if err == nil && (task.Status == kernel.TaskFailed || task.Status == kernel.TaskCancelled) {
 			retried, retryErr := task, prepareTaskRetry(ctx, daemon.store, task.ID, task.Revision, kernel.AgentID{})
-			if retryErr == nil && operator {
-				retried, retryErr = daemon.store.RetryTaskForOperator(ctx, task.ID, task.Revision, kernel.AgentID{}, at)
-			} else if retryErr == nil {
-				retried, retryErr = daemon.store.RetryIntakeTask(ctx, task.ID, task.Revision, at)
+			if retryErr == nil {
+				limit := int64(kernel.IntakeRetryLimit)
+				if operator {
+					limit = 0
+				}
+				retried, retryErr = daemon.store.RetryTask(ctx, nil, task.ID, task.Revision, kernel.AgentID{}, at, limit)
 			}
 			// A tick that cannot retry (an operator's cancel, the bound, a race)
 			// is not an intake failure; the task stays as it is.

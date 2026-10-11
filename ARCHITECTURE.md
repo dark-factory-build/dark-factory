@@ -96,10 +96,13 @@ unsupported before a provider runs.
 8. A long-running operation stops only on a failure the same request meets
    again, and that is escalated once; anything else is retried, and escalated
    once if it outlasts its bound (#1558). Publication retries hourly and
-   escalates on its first failure. A merge-stage pass (observe, enqueue)
-   retries every 5 minutes and escalates after 30; an enqueue refusal is
-   escalated at once and retried three times, then on each changed
-   observation of the pull request. Run settlement retries a
+   escalates on its first failure. Each open pull request has one
+   level-triggered reconciler: every 5-minute merge-stage pass reads the exact
+   pull request, its task and the review at its head, and takes the one action
+   they call for (bring the Change up to main, send back bound to the head,
+   review, retry, enqueue or escalate). An action that keeps failing is retried
+   for 30 minutes, then escalated once and left until the pull request changes;
+   a CODEOWNERS refusal is escalated at once. Run settlement retries a
    repository, Git or I/O fault and refuses a worktree that fails its own
    validation; a release drain waits 10 minutes, then fails naming the run. An
    attempt call waits out a 30-second daemon restart before its run sees the
@@ -127,7 +130,7 @@ conservative inspection. No model runs merely to poll an idle project.
 A specialist is a worker with a standing instruction. The same wake tick gives
 it one carrier task at a time (priority -100) when `specialistSchedule` says it
 is due: at once, then its cadence after each review, doubled per quiet review
-(finished, with no proposal or amendment) up to 8x, or a quarter cadence after one when its `idle_wake_on` classes
+up to 8x, or a quarter cadence after one when its `idle_wake_on` classes
 (`failures`, `merges`) saw an event. Its carrier never claims shared work,
 waits while it would take the last free worker slot or exceed the project's
 `specialist_runs`, and has the overseer's 30-minute backstop. It may read the

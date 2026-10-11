@@ -10,7 +10,9 @@ import (
 	"github.com/dark-factory-build/dark-factory/internal/api"
 )
 
-func runReview(ctx context.Context, args []string, getenv func(string) string, stdout, stderr io.Writer) int {
+// parseReview reads review's flags into the one intake call that claims a
+// fresh exact-head review, for the operator and the overseer alike.
+func parseReview(args []string, stderr io.Writer) (api.IntakeInput, bool) {
 	flags := flag.NewFlagSet("review", flag.ContinueOnError)
 	flags.SetOutput(stderr)
 	var request api.ReviewRequest
@@ -24,10 +26,18 @@ func runReview(ctx context.Context, args []string, getenv func(string) string, s
 	flags.StringVar(&request.Provider, "provider", "codex", "codex or claude")
 	flags.StringVar(&request.RetryOperation, "retry-operation", "", "retry a failed daemon review operation")
 	if flags.Parse(args) != nil || flags.NArg() != 0 || project == "" {
-		return exitUsage
+		return api.IntakeInput{}, false
 	}
 	if request.RetryOperation != "" {
 		request = api.ReviewRequest{RetryOperation: request.RetryOperation}
+	}
+	return api.IntakeInput{Action: "review_pr", ProjectID: project, ReviewRequest: &request}, true
+}
+
+func runReview(ctx context.Context, args []string, getenv func(string) string, stdout, stderr io.Writer) int {
+	input, ok := parseReview(args, stderr)
+	if !ok {
+		return exitUsage
 	}
 	if getenv("DARK_FACTORY_ATTEMPT_TOKEN_FILE") != "" {
 		return exitFailure
@@ -38,7 +48,7 @@ func runReview(ctx context.Context, args []string, getenv func(string) string, s
 	}
 	callContext, cancel := context.WithTimeout(ctx, 30*time.Minute)
 	defer cancel()
-	result, err := client.Intake(callContext, api.IntakeInput{Action: "review_pr", ProjectID: project, ReviewRequest: &request})
+	result, err := client.Intake(callContext, input)
 	if err != nil {
 		return writeWebFailure(stderr, "review", err)
 	}
