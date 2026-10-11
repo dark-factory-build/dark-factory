@@ -301,7 +301,7 @@ func (daemon *Daemon) publishPull(ctx context.Context, c kernel.PublishableChang
 		externalSourceURL = c.Accepted.Snapshot.URL
 	}
 	createdIssue := false
-	if issueNumber == 0 && externalSourceURL == "" {
+	if !c.Repair && issueNumber == 0 && externalSourceURL == "" {
 		issue := struct {
 			Number uint64 `json:"number"`
 		}{}

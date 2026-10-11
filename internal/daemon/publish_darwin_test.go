@@ -448,6 +448,36 @@ func TestFactorydPublishesACorrectionOnItsPullRequest(t *testing.T) {
 	}
 }
 
+// A repair of a host-owned pull request has no intake acceptance or synthetic
+// issue operation. It publishes the correction directly onto the existing PR.
+func TestFactorydPublishesARepairWithoutSyntheticIssue(t *testing.T) {
+	fixture, c, source, app, checkout := publishFixture(t, 2, false)
+	ctx := context.Background()
+	root, git := filepath.Dir(source), change.TrustedGitExecutable
+	app.tip = c.Head
+	if err := os.WriteFile(filepath.Join(root, "f00.txt"), []byte("repaired\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	supervisorGit(t, git, "-C", root, "-c", "user.name=fixture", "-c", "user.email=fixture@example.invalid", "commit", "-q", "-am", "repair")
+	c.Head, c.Pull = strings.TrimSpace(supervisorGitOutput(t, git, "-C", root, "rev-parse", "HEAD")), 31
+	c.Accepted = kernel.IntakeAcceptance{}
+	c.Repair, c.Branch = true, "factory/"+c.Change.String()[:12]
+	tip := app.tip
+	withTip := func(ctx context.Context, ref, head string) (string, func(), error) {
+		gitDir, cleanup, err := checkout(ctx, ref, head)
+		if err == nil {
+			_, err = gitOutput(ctx, gitDir, "-c", "protocol.file.allow=always", "fetch", "--quiet", source, tip)
+		}
+		return gitDir, cleanup, err
+	}
+	if err := fixture.daemon.publishChange(ctx, c, "team/repo", source, app.call, withTip); err != nil {
+		t.Fatal(err)
+	}
+	if len(app.writes) != 1 || app.writes[0]["name"] != "publish_commit" {
+		t.Fatalf("writes = %+v", app.writes)
+	}
+}
+
 // A worker answering a verdict with evidence and no file change (#1706)
 // moves no head: its answer replaces the body, instead of publication
 // refusing "nothing to publish". The reconciler reviews the head once more.
