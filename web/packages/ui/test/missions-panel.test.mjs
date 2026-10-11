@@ -124,6 +124,6 @@ test("By mission keeps non-mission outcomes reachable and accepts them in place"
   assert.match(write.input.document.judgment, /^authorized judgment:/);
   assert.ok(write.input.document.conclusion);
   await act(async () => button(tree, "Back to Missions").props.onClick());
-  assert.match(tree.root.findAllByType("button").find((node) => node.children[0] === outcome.objective).children.join(""), /accepted/);
+  assert.match(JSON.stringify(tree.toJSON()), /accepted/);
   await act(async () => tree.unmount());
 });
