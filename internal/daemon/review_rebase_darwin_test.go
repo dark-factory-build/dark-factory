@@ -12,15 +12,14 @@ import (
 
 	"github.com/dark-factory-build/dark-factory/internal/change"
 	"github.com/dark-factory-build/dark-factory/internal/kernel"
-	"github.com/dark-factory-build/dark-factory/internal/review"
 	"github.com/dark-factory-build/dark-factory/internal/runner"
 )
 
 // #1520, #1637: the App publishes its own commit of a Change, so a conflict
 // names a pull request head the retained Change never has. factoryd rebases
-// that Change itself, without a worker turn; a conflict observed at a head the
-// pull request has since left rebases nothing.
-func TestConflictRepairRebasesAnAppPublishedPullOnlyAtItsCurrentHead(t *testing.T) {
+// that Change itself, without a worker turn, and only once: a Change already
+// on main has nothing to move.
+func TestConflictRepairRebasesAnAppPublishedPullsChangeOnce(t *testing.T) {
 	fixture := newRecoveryFixtureWithRole(t, 0x9c, kernel.RoleWorker)
 	ctx := context.Background()
 	fixture.stageRuntime(t)
@@ -90,7 +89,7 @@ func TestConflictRepairRebasesAnAppPublishedPullOnlyAtItsCurrentHead(t *testing.
 	if err := fixture.store.RecordPublication(ctx, changeState.ProjectID, changeState.TaskID, "team/repo", pr, mustKernelTime(t, 510)); err != nil {
 		t.Fatal(err)
 	}
-	published, newer := strings.Repeat("d", 40), strings.Repeat("c", 40)
+	published := strings.Repeat("d", 40)
 	pr.Head, pr.Review.Head = published, published
 	if err := fixture.store.RecordProductionObservation(ctx, changeState.ProjectID, kernel.ProductionObservation{Repository: "team/repo", ObservedAt: 520, PullRequests: []kernel.ProductionPullRequest{pr}}, mustKernelTime(t, 520)); err != nil {
 		t.Fatal(err)
@@ -100,9 +99,7 @@ func TestConflictRepairRebasesAnAppPublishedPullOnlyAtItsCurrentHead(t *testing.
 		t.Fatal(err)
 	}
 	fixture.daemon.now = func() time.Time { return time.UnixMilli(10_000) }
-	conflict := func(head string) review.Operation {
-		return review.Operation{State: "ejected", RoutePending: true, Detail: "Exact head " + head + " conflicts with main.", Request: review.Request{Repository: "team/repo", PullNumber: 12, Head: head}}
-	}
+	open := kernel.OpenPull{Project: changeState.ProjectID, Repository: "team/repo", Pull: pr, Task: changeState.TaskID}
 	retainedHead := func() string {
 		state, _, err := fixture.store.Change(ctx, changeState.ID)
 		if err != nil || state.HeadCommit == nil {
@@ -111,11 +108,8 @@ func TestConflictRepairRebasesAnAppPublishedPullOnlyAtItsCurrentHead(t *testing.
 		return hex.EncodeToString(state.HeadCommit.Bytes())
 	}
 
-	if rebased, err := fixture.daemon.tryAutoRebase(ctx, changeState.ProjectID, "team/repo", conflict(newer)); err != nil || rebased || retainedHead() != local || strings.TrimSpace(settlementGit(t, git, path, "rev-parse", "HEAD")) != local {
-		t.Fatalf("stale conflict rebased=%v err=%v head=%s, want %s untouched", rebased, err, retainedHead(), local)
-	}
-	if rebased, err := fixture.daemon.tryAutoRebase(ctx, changeState.ProjectID, "team/repo", conflict(published)); err != nil || !rebased {
-		t.Fatalf("published conflict rebased=%v err=%v", rebased, err)
+	if moved, err := fixture.daemon.rebaseChange(ctx, open); err != nil || !moved {
+		t.Fatalf("published conflict rebased=%v err=%v", moved, err)
 	}
 	head := retainedHead()
 	main := strings.TrimSpace(settlementGit(t, git, repository, "rev-parse", "HEAD"))
@@ -124,5 +118,8 @@ func TestConflictRepairRebasesAnAppPublishedPullOnlyAtItsCurrentHead(t *testing.
 	}
 	if after, _, err := fixture.store.Task(ctx, task.ID); err != nil || after.WorkRevision != task.WorkRevision || after.Status != task.Status {
 		t.Fatalf("task after repair=%+v err=%v, want unchanged %+v", after, err, task)
+	}
+	if moved, err := fixture.daemon.rebaseChange(ctx, open); err != nil || moved || retainedHead() != head {
+		t.Fatalf("a Change already on main rebased=%v err=%v head=%s, want %s", moved, err, retainedHead(), head)
 	}
 }

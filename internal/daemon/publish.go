@@ -14,7 +14,6 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/dark-factory-build/dark-factory/internal/api"
 	"github.com/dark-factory-build/dark-factory/internal/change"
 	"github.com/dark-factory-build/dark-factory/internal/kernel"
 	"github.com/dark-factory-build/dark-factory/internal/maintainer"
@@ -36,8 +35,8 @@ var errPublishLater, errRepositoryDisabled = errors.New("publication waits for t
 // publishSettledChanges publishes each succeeded intake worker's settled
 // Change as one pull request through the project's Maintainer connection,
 // records it against the worker task and launches factoryd's review; a
-// corrected Change goes onto that pull request, whose refresh reviews it, or,
-// changing nothing, is an answer reviewed once more at the same head. A
+// corrected Change goes onto that pull request, whose reconciler reviews it,
+// or, changing nothing, is an answer reviewed once more at the same head. A
 // Change it cannot publish is escalated to the overseer once and retried at
 // that revision only after kernel.PublishRetryAfter; an unreachable
 // connection waits for the next pass.
@@ -319,17 +318,8 @@ func (daemon *Daemon) publishPull(ctx context.Context, c kernel.PublishableChang
 				return err
 			}
 		}
-		// A worker that answers a verdict with evidence and no change moves
-		// no head, so it gets one fresh review of the same head, which reads
-		// that answer in the body. ponytail: a crash before the record below
-		// claims a second review on replay; bind its id to the step if it bites.
-		if len(changes) == 0 {
-			op, err := daemon.claimReview(ctx, c.Task.ProjectID, api.ReviewRequest{Repository: repo, PullNumber: c.Pull, Head: head, Base: main, BaseRef: "main", Provider: "codex"})
-			if err != nil {
-				return err
-			}
-			daemon.launchReview(c.Task.ProjectID, op)
-		}
+		// A correction changing nothing is the worker's answer: the
+		// reconciler reviews the same head once more (review.Decide).
 		at, err := daemon.timestamp()
 		if err != nil {
 			return err

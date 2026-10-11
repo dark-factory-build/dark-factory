@@ -18,22 +18,22 @@ func TestMaintainerRejectionCarriesTheBrokerReason(t *testing.T) {
 	}
 }
 
-// The broker's typed UNPROCESSABLE refusal (control-plane mcp.rs
-// operation_error) is terminal for the head; a rate limit or any other
-// failure is not (#1510).
-func TestOnlyAnUnprocessableEnqueueRefusalIsTerminal(t *testing.T) {
-	for text, terminal := range map[string]bool{
-		"refused: The request was refused: rejected before execution as UNPROCESSABLE.":                                                        true,
-		"refused: The request was refused: rejected before execution as UNPROCESSABLE: Pull request head no longer matches the expected head.": true,
-		"refused: The request was refused: rejected before execution as UNPROCESSABLE+RATE_LIMITED.":                                           false,
-		"refused: The request was refused: rejected before execution as RATE_LIMITED.":                                                         false,
-		"refused: The request was refused: the queue read found no merge queue on the base branch.":                                            false,
-		"indeterminate: The operation outcome is indeterminate and was not repeated.":                                                          false,
+// An enqueue refusal (control-plane mcp.rs operation_error), UNPROCESSABLE
+// included, can come to hold, so the reconciler retries it within its bound
+// (#1510, #1531).
+func TestEnqueueRefusalsAreRetriedWithGitHubsReason(t *testing.T) {
+	for _, text := range []string{
+		"refused: The request was refused: rejected before execution as UNPROCESSABLE.",
+		"refused: The request was refused: rejected before execution as UNPROCESSABLE: Pull request head no longer matches the expected head.",
+		"refused: The request was refused: rejected before execution as UNPROCESSABLE+RATE_LIMITED.",
+		"refused: The request was refused: rejected before execution as RATE_LIMITED.",
+		"refused: The request was refused: the queue read found no merge queue on the base branch.",
+		"indeterminate: The operation outcome is indeterminate and was not repeated.",
 	} {
 		response, _ := json.Marshal(map[string]any{"jsonrpc": "2.0", "id": 1, "result": map[string]any{"isError": true, "content": []any{map[string]string{"type": "text", "text": text}}}})
 		_, err := reviewResponseStructuredContent(maintainerRequest{JSONRPC: "2.0", ID: json.RawMessage(`1`)}, response)
 		// GitHub's own reason rides into the text the overseer is shown (#1614).
-		if err == nil || errors.Is(err, review.ErrRefused) != terminal || !strings.Contains(err.Error(), text) {
+		if err == nil || errors.Is(err, review.ErrPermanent) || errors.Is(err, review.ErrOwnerApproval) || !strings.Contains(err.Error(), text) {
 			t.Errorf("%q: err=%v", text, err)
 		}
 	}

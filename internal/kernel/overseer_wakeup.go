@@ -97,7 +97,7 @@ item AS (
 	JOIN production_records AS p ON p.project_id = e.project_id AND p.repository = e.repository AND p.kind = 'pull_request'
 	  AND p.identity = CAST(json_extract(e.document, '$.request.PullNumber') AS TEXT)
 	WHERE e.project_id = ?1 AND e.kind = 'reviewer' AND COALESCE(json_extract(e.document, '$.escalation'), '') <> ''
-	  AND COALESCE(json_extract(e.document, '$.route_pending'), 0) = 0 AND json_extract(p.document, '$.state') = 'open'
+	  AND json_extract(p.document, '$.state') = 'open'
 	  AND lower(json_extract(p.document, '$.head')) = lower(json_extract(e.document, '$.request.Head'))
 	UNION ALL SELECT NULL, COALESCE(json_extract(d.document, '$.failed_at'), d.observed_at_ms), 0, CASE json_extract(d.document, '$.state')
 	  WHEN 'failed' THEN printf('Escalated: factoryd %s failed in phase %s: %s', d.identity, json_extract(d.document, '$.phase'), replace(json_extract(d.document, '$.reason'), char(10), ' '))

@@ -289,8 +289,8 @@ func TestFirstPublicationOfAnAlreadyPublishedTreeOpensItsPullRequest(t *testing.
 	if len(app.writes) != 1 || app.writes[0]["name"] != "create_pull_request" || app.writes[0]["arguments"].(map[string]any)["head_sha"] != c.Head {
 		t.Fatalf("writes = %+v", app.writes)
 	}
-	if pending, err := fixture.store.InFlightReviewOperations(ctx); err != nil || len(pending) != 1 {
-		t.Fatalf("publication did not schedule one review: pending=%v err=%v", pending, err)
+	if open, err := fixture.store.OpenPulls(ctx); err != nil || len(open) != 1 || len(open[0].Operations) != 1 {
+		t.Fatalf("publication did not claim one review: open=%+v err=%v", open, err)
 	}
 }
 
@@ -397,9 +397,9 @@ func TestCorrectionKeepsWorkerCommitsAndMainChanges(t *testing.T) {
 }
 
 // A worker answering a verdict with evidence and no file change (#1706)
-// moves no head: its answer replaces the body and one fresh review of the
-// same head is claimed, instead of publication refusing "nothing to publish".
-func TestAnEvidenceOnlyCorrectionIsReviewedAgainAtTheSameHead(t *testing.T) {
+// moves no head: its answer replaces the body, instead of publication
+// refusing "nothing to publish". The reconciler reviews the head once more.
+func TestAnEvidenceOnlyCorrectionReplacesOnlyTheBody(t *testing.T) {
 	fixture, c, source, app, checkout := publishFixture(t, 1, false)
 	ctx := context.Background()
 	app.tip, c.Pull = c.Head, 31 // the branch already carries the worker's tree
@@ -416,9 +416,6 @@ func TestAnEvidenceOnlyCorrectionIsReviewedAgainAtTheSameHead(t *testing.T) {
 	}
 	if len(app.writes) != 1 || app.writes[0]["name"] != "update_pull_request_body" || !strings.Contains(app.writes[0]["arguments"].(map[string]any)["body"].(string), "Premise not reproduced") {
 		t.Fatalf("writes = %+v", app.writes)
-	}
-	if op := waitForDurableReview(t, fixture.store, c.Task.ProjectID, func(op review.Operation) bool { return op.State == "enqueued" }); op.Request.PullNumber != 31 || op.Request.Head != c.Head {
-		t.Fatalf("review = %+v", op)
 	}
 }
 
@@ -437,8 +434,8 @@ func TestRefusedPublicationEscalatesOnce(t *testing.T) {
 		!strings.HasPrefix(op.Escalation, "factoryd cannot publish change "+c.Change.String()+" for task "+c.Task.ID.String()+": ") || !strings.Contains(op.Escalation, "refused: .github/workflows") {
 		t.Fatalf("failure record = %s %v %v", document, found, err)
 	}
-	if pending, err := fixture.store.InFlightReviewOperations(ctx); err != nil || len(pending) != 0 {
-		t.Fatalf("in flight = %+v %v", pending, err)
+	if open, err := fixture.store.OpenPulls(ctx); err != nil || len(open) != 0 {
+		t.Fatalf("in flight = %+v %v", open, err)
 	}
 	if len(app.writes) != 1 {
 		t.Fatalf("writes = %d", len(app.writes))
