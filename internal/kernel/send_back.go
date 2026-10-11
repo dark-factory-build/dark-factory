@@ -178,6 +178,60 @@ func TaskBodyWithInstruction(task Task, instruction string) (string, *int64) {
 	return instruction + feedback, &offset
 }
 
+// AppendRunningTaskInstruction records a supervisor instruction after worker
+// admission without changing the task's work revision. It is used for
+// provider instructions discovered at the retained-worktree boundary.
+func (store *Store) AppendRunningTaskInstruction(ctx context.Context, id TaskID, work Revision, addition string, at UnixMillis) (Task, error) {
+	if id.zero() || work.Int64() < 1 || byteLen(addition) < 1 {
+		return Task{}, fmt.Errorf("%w: invalid running task instruction", ErrInvalidValue)
+	}
+	tx, err := store.beginValidatedWrite(ctx)
+	if err != nil {
+		return Task{}, err
+	}
+	defer tx.Close()
+	task, found, err := taskByID(ctx, tx.connection, id)
+	if err != nil || !found {
+		if err == nil {
+			err = ErrNotFound
+		}
+		return Task{}, tx.Rollback(err)
+	}
+	if task.Status != TaskRunning || task.WorkRevision != work || at.Int64() < task.UpdatedAt.Int64() {
+		return Task{}, tx.Rollback(ErrRevisionConflict)
+	}
+	instruction := TaskInstruction(task)
+	if strings.HasSuffix(instruction, addition) {
+		return task, tx.Rollback(nil)
+	}
+	body, sentBack := TaskBodyWithInstruction(task, instruction+addition)
+	if byteLen(body) > 131072 {
+		return Task{}, tx.Rollback(fmt.Errorf("%w: running task instruction is too large", ErrInvalidValue))
+	}
+	var sentBackValue any
+	if sentBack != nil {
+		sentBackValue = *sentBack
+	}
+	result, err := tx.connection.ExecContext(ctx, `UPDATE tasks SET body = ?, sent_back_instruction_bytes = ?, revision = revision + 1, updated_at_ms = ? WHERE id = ? AND status = 'running' AND work_revision = ? AND revision = ?`, body, sentBackValue, at.Int64(), id.Bytes(), work.Int64(), task.Revision.Int64())
+	if err := requireOneRow(result, err); err != nil {
+		return Task{}, tx.Rollback(err)
+	}
+	if err := appendInvalidations(ctx, tx.connection, at, []pendingInvalidation{{kind: EntityTask, id: id.Bytes(), revision: task.Revision.Int64() + 1}}); err != nil {
+		return Task{}, tx.Rollback(err)
+	}
+	updated, found, err := taskByID(ctx, tx.connection, id)
+	if err != nil || !found {
+		if err == nil {
+			err = ErrCorruptState
+		}
+		return Task{}, tx.Rollback(err)
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return Task{}, err
+	}
+	return updated, nil
+}
+
 // SendBackTask returns a finished task to its queue at the next work revision
 // with the note at the end of its body, so the worker's next run reopens the
 // retained Change and continues from the tree it left. Any terminal outcome

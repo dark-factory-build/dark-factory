@@ -35,6 +35,8 @@ type supervisorKeys struct {
 	proof     [32]byte
 }
 
+const retainedRebaseConflictInstruction = "The retained Change could not be rebased cleanly onto current main. Resolve the rebase conflict in the existing worktree before continuing."
+
 // supervisorAttemptOwner owns the outer runner until the live attempt is
 // registered. After registration, the per-attempt owner loop owns all
 // controller operations; this outer owner only joins that loop and then
@@ -445,10 +447,23 @@ func (daemon *Daemon) runNext(ctx context.Context, spec SupervisorSpec) (resultR
 				}
 				return daemon.failRunBeforeRuntime(daemon.cleanupCtx, run, keys.resources.RuntimeRoot, kernel.FailureInternal, err)
 			}
+			retained, _, err = retainedWorkerCheckpoint(changeState)
+			if err != nil {
+				return daemon.failRunBeforeRuntime(daemon.cleanupCtx, run, keys.resources.RuntimeRoot, kernel.FailureSource, err)
+			}
 		}
 	}
 	if retainedRebaseConflict {
-		rawProviderTask = append(rawProviderTask, []byte("\n\nThe retained Change could not be rebased cleanly onto current main. Resolve the rebase conflict in the existing worktree before continuing.")...)
+		if run.Provider != kernel.ProviderShell {
+			at, timestampErr := daemon.timestamp()
+			if timestampErr != nil {
+				return daemon.failRunBeforeRuntime(daemon.cleanupCtx, run, keys.resources.RuntimeRoot, kernel.FailureInternal, timestampErr)
+			}
+			if _, instructionErr := daemon.store.AppendRunningTaskInstruction(ctx, run.TaskID, run.AdmittedTaskWorkRevision, "\n\n"+retainedRebaseConflictInstruction, at); instructionErr != nil {
+				return daemon.failRunBeforeRuntime(daemon.cleanupCtx, run, keys.resources.RuntimeRoot, kernel.FailureSource, instructionErr)
+			}
+		}
+		rawProviderTask = append(rawProviderTask, []byte("\n\n"+retainedRebaseConflictInstruction)...)
 	}
 	delivery, preparedTask, err := provider.PrepareTask(run.Provider, rawProviderTask)
 	if err != nil {
