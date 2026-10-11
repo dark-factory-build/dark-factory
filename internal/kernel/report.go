@@ -114,10 +114,12 @@ func (store *Store) Why(ctx context.Context, project *ProjectID, pull uint64, ta
 		return nil, err
 	}
 	defer read.Close()
-	return why(ctx, read.connection, project, pull, task)
+	return why(ctx, read.connection, project, "", pull, task)
 }
 
-func why(ctx context.Context, c *sql.Conn, project *ProjectID, pull uint64, taskID TaskID) ([]string, error) {
+// why reads pull in repository, or in any repository of the project when it is
+// empty.
+func why(ctx context.Context, c *sql.Conn, project *ProjectID, repository string, pull uint64, taskID TaskID) ([]string, error) {
 	var scope []byte
 	if project != nil {
 		scope = project.Bytes()
@@ -146,8 +148,8 @@ func why(ctx context.Context, c *sql.Conn, project *ProjectID, pull uint64, task
 	}
 	// The pull request: the one asked for, or the newest the task published.
 	var projectBytes []byte
-	var repository, document string
-	query, args := `SELECT r.project_id, r.repository, r.document FROM production_records AS r WHERE (?1 IS NULL OR r.project_id = ?1) AND r.kind = 'pull_request' AND r.identity = ?2 ORDER BY r.observed_at_ms DESC LIMIT 1`, []any{scope, strconv.FormatUint(pull, 10)}
+	var document string
+	query, args := `SELECT r.project_id, r.repository, r.document FROM production_records AS r WHERE (?1 IS NULL OR r.project_id = ?1) AND r.kind = 'pull_request' AND r.identity = ?2 AND (?3 = '' OR r.repository = ?3) ORDER BY r.observed_at_ms DESC LIMIT 1`, []any{scope, strconv.FormatUint(pull, 10), repository}
 	if pull == 0 {
 		query, args = `SELECT r.project_id, r.repository, r.document FROM publication_tasks AS p JOIN production_records AS r ON r.project_id = p.project_id AND r.repository = p.repository AND r.kind = 'pull_request' AND r.identity = CAST(p.pull_number AS TEXT)
 			WHERE p.task_id = ? ORDER BY p.created_at_ms DESC LIMIT 1`, []any{taskID.Bytes()}
@@ -267,13 +269,17 @@ func whyPullWaits(pr ProductionPullRequest, hasTask bool, task Task, op *review.
 		return "operator: factoryd escalated it to the overseer"
 	case hasTask && (task.Status == TaskBlocked || task.Status == TaskFailed):
 		return "operator: its task is " + task.Status.String()
+	case failed > 0:
+		// review.Decide (and a review's wait for checks) acts on a failing check
+		// before a pending one or a missing verdict.
+		return "factoryd: failing checks send it back on its next pass"
 	case op == nil || op.State == "running" || op.State == "submitting":
 		return "reviewer: no verdict at this head yet"
 	case pending > 0:
 		return "CI: checks at the head are pending"
 	case pr.MergeQueue != "" && pr.MergeQueue != "none" && pr.MergeQueue != "unknown":
 		return "CI: it is in the merge queue (" + pr.MergeQueue + ")"
-	case failed > 0 || op.Verdict == "request_changes":
+	case op.Verdict == "request_changes":
 		return "factoryd: its next pass sends it back"
 	}
 	return "factoryd: its next pass acts (every 5 minutes)"
@@ -310,12 +316,13 @@ func oneLine(value string, limit int) string {
 // escalation it follows is the reconciler's last action, so it is left out.
 func escalationWhy(ctx context.Context, c *sql.Conn, project ProjectID, key string) string {
 	id, ok := strings.CutPrefix(key, "[reviewer:")
+	var repository string
 	var pull int64
-	if !ok || c.QueryRowContext(ctx, `SELECT json_extract(document, '$.request.PullNumber') FROM production_records WHERE project_id = ? AND kind = 'reviewer' AND identity = ?`,
-		project.Bytes(), strings.TrimSuffix(id, "]")).Scan(&pull) != nil || pull <= 0 {
+	if !ok || c.QueryRowContext(ctx, `SELECT repository, json_extract(document, '$.request.PullNumber') FROM production_records WHERE project_id = ? AND kind = 'reviewer' AND identity = ?`,
+		project.Bytes(), strings.TrimSuffix(id, "]")).Scan(&repository, &pull) != nil || pull <= 0 {
 		return ""
 	}
-	lines, err := why(ctx, c, &project, uint64(pull), TaskID{})
+	lines, err := why(ctx, c, &project, repository, uint64(pull), TaskID{})
 	if err != nil {
 		return ""
 	}

@@ -51,4 +51,23 @@ func TestReportAndWhyReadTheReconcilersState(t *testing.T) {
 	if _, err := store.Why(ctx, &project.ID, 8, TaskID{}); err != ErrNotFound {
 		t.Fatalf("why of an unknown pull = %v", err)
 	}
+	// An escalation names its own repository's pull request, not a newer one
+	// with the same number elsewhere in the project.
+	other := strings.Repeat("d", 40)
+	if _, err := store.writer.ExecContext(ctx, `INSERT INTO production_records (project_id, repository, kind, identity, visual_id, document, observed_at_ms) VALUES (?, 'example/other', 'pull_request', '7', '', ?, 99)`, project.ID.Bytes(), `{"number":7,"state":"open","head":"`+other+`"}`); err != nil {
+		t.Fatal(err)
+	}
+	read, err := store.beginRead(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	line := escalationWhy(ctx, read.connection, project.ID, "[reviewer:op7]")
+	read.Close()
+	if !strings.Contains(line, "pull: example/factory#7") || !strings.Contains(line, "head: "+head) {
+		t.Fatalf("escalation why = %q", line)
+	}
+	// A failing check outranks a pending one and a missing verdict, as in review.Decide.
+	if waits := whyPullWaits(ProductionPullRequest{State: "open"}, false, Task{}, nil, 1, 1); waits != "factoryd: failing checks send it back on its next pass" {
+		t.Fatalf("failing and pending checks wait on %q", waits)
+	}
 }
