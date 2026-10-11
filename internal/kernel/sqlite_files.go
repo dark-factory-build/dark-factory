@@ -35,6 +35,10 @@ var sqliteActivationHook func(string) error
 // Production activation has no hook.
 var sqlitePostPoolHook func(string) error
 
+// sqliteOpenableSnapshotHook is package-local deterministic fault
+// instrumentation for the one fresh-snapshot retry during inspection.
+var sqliteOpenableSnapshotHook func() error
+
 // OpenOperational validates and activates one canonical absolute database
 // path bound to the supplied retained home and main-database descriptors. It
 // takes ownership of both descriptors and retains the exact path/file
@@ -170,7 +174,27 @@ func inspectOperationalSnapshot(ctx context.Context, path string, files *databas
 	if err := tx.connection.QueryRowContext(inspectionCtx, "PRAGMA user_version").Scan(&schemaVersion); err != nil {
 		return errors.Join(fmt.Errorf("pin operational SQLite snapshot: %w", err), tx.Close())
 	}
-	if err := validateOpenableSnapshot(inspectionCtx, tx.connection); err != nil {
+	if err := validateOperationalSnapshot(inspectionCtx, tx.connection); err != nil {
+		if errors.Is(err, ErrCorruptState) {
+			_ = tx.Close()
+			connection, err = pool.Conn(inspectionCtx)
+			if err != nil {
+				return fmt.Errorf("refresh operational SQLite inspection: %w", err)
+			}
+			tx, err = beginPinnedRead(inspectionCtx, connection)
+			if err != nil {
+				return err
+			}
+			if err = validateOperationalSnapshot(inspectionCtx, tx.connection); err == nil {
+				if err := tx.Close(); err != nil {
+					return err
+				}
+				if err := files.recheckPaths(); err != nil {
+					return err
+				}
+				return nil
+			}
+		}
 		return errors.Join(fmt.Errorf("validate operational SQLite snapshot: %w", err), tx.Close())
 	}
 	if err := tx.Close(); err != nil {
@@ -180,6 +204,15 @@ func inspectOperationalSnapshot(ctx context.Context, path string, files *databas
 		return err
 	}
 	return nil
+}
+
+func validateOperationalSnapshot(ctx context.Context, connection *sql.Conn) error {
+	if sqliteOpenableSnapshotHook != nil {
+		if err := sqliteOpenableSnapshotHook(); err != nil {
+			return err
+		}
+	}
+	return validateOpenableSnapshot(ctx, connection)
 }
 
 func closeRejectedOpen(store *Store, files *databaseFiles, cause error) (*Store, error) {
