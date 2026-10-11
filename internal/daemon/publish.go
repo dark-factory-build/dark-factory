@@ -249,13 +249,15 @@ func (daemon *Daemon) publishPull(ctx context.Context, c kernel.PublishableChang
 		return err
 	}
 	if c.Pull != 0 && tip != "" && tip != c.Head {
-		workerChanges, err := publicationEntries(ctx, gitDir, from, c.Head)
+		listing, err := gitOutput(ctx, gitDir, "log", "--format=", "--name-only", "-z", "--no-merges", from+".."+c.Head)
 		if err != nil {
 			return err
 		}
-		workerPaths := make(map[string]bool, len(workerChanges))
-		for _, change := range workerChanges {
-			workerPaths[change["path"].(string)] = true
+		workerPaths := make(map[string]bool)
+		for _, path := range strings.Split(string(listing), "\x00") {
+			if path = strings.Trim(path, "\n"); path != "" {
+				workerPaths[path] = true
+			}
 		}
 		changes = slices.DeleteFunc(changes, func(change map[string]any) bool { return !workerPaths[change["path"].(string)] })
 	}

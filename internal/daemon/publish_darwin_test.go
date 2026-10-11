@@ -376,7 +376,11 @@ func TestCorrectionKeepsWorkerCommitsAndMainChanges(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(root, "f00.txt"), []byte("correction A\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	supervisorGit(t, git, "-C", root, "-c", "user.name=fixture", "-c", "user.email=fixture@example.invalid", "commit", "-q", "-am", "correction A")
+	if err := os.WriteFile(filepath.Join(root, "gone.txt"), []byte("restored\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	supervisorGit(t, git, "-C", root, "-c", "user.name=fixture", "-c", "user.email=fixture@example.invalid", "add", "f00.txt", "gone.txt")
+	supervisorGit(t, git, "-C", root, "-c", "user.name=fixture", "-c", "user.email=fixture@example.invalid", "commit", "-q", "-m", "correction A")
 	if err := os.WriteFile(filepath.Join(root, "f01.txt"), []byte("correction B\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
@@ -391,7 +395,7 @@ func TestCorrectionKeepsWorkerCommitsAndMainChanges(t *testing.T) {
 	for _, entry := range changes {
 		paths[entry["path"].(string)] = true
 	}
-	if len(paths) != 2 || !paths["f00.txt"] || !paths["f01.txt"] || paths["main-only.txt"] {
+	if len(paths) != 3 || !paths["f00.txt"] || !paths["f01.txt"] || !paths["gone.txt"] || paths["main-only.txt"] {
 		t.Fatalf("correction paths = %v", paths)
 	}
 }
