@@ -387,9 +387,10 @@ func (store *Store) Close() error {
 			return
 		}
 		defer store.releaseWriter()
+		store.waitForCheckedOutConnections()
+		store.closeErr = errors.Join(store.closeErr, store.checkpointWAL(context.Background(), "TRUNCATE"))
 		store.bindingMu.Lock()
 		defer store.bindingMu.Unlock()
-		store.waitForCheckedOutConnections()
 		poolErr := errors.Join(closeSQLitePool("reader", store.readers), closeSQLitePool("writer", store.writer))
 		if poolErr != nil {
 			store.closeErr = fmt.Errorf("%w: close retained sqlite pools: %w", ErrCorruptState, poolErr)
@@ -403,6 +404,54 @@ func (store *Store) Close() error {
 		}
 	})
 	return store.closeErr
+}
+
+// CheckpointWAL bounds the live WAL without changing durable application
+// state. It shares the writer gate with normal mutations so checkpointing
+// cannot race a commit or a close.
+func (store *Store) CheckpointWAL(ctx context.Context, mode string) error {
+	if err := store.acquireWriter(ctx); err != nil {
+		return err
+	}
+	defer store.releaseWriter()
+	return store.checkpointWAL(ctx, mode)
+}
+
+func (store *Store) checkpointWAL(ctx context.Context, mode string) error {
+	if store.writer == nil {
+		return nil
+	}
+	connection, err := store.writer.Conn(ctx)
+	if err != nil {
+		return fmt.Errorf("checkout writer connection: %w", err)
+	}
+	defer connection.Close()
+	var busy, pages, checkpointed int
+	if err := connection.QueryRowContext(ctx, "PRAGMA wal_checkpoint("+mode+")").Scan(&busy, &pages, &checkpointed); err != nil {
+		return err
+	}
+	if busy != 0 {
+		return ErrBusy
+	}
+	return nil
+}
+
+// WALSize returns the currently retained WAL size for health and maintenance
+// decisions. A missing WAL is the normal zero-size state.
+func (store *Store) WALSize() int64 {
+	if store == nil {
+		return 0
+	}
+	store.bindingMu.RLock()
+	defer store.bindingMu.RUnlock()
+	if store.pathBinding == nil || store.pathBinding.wal == nil {
+		return 0
+	}
+	info, err := store.pathBinding.wal.file.Stat()
+	if err != nil {
+		return 0
+	}
+	return info.Size()
 }
 
 func (store *Store) retainCloseUncertainty(cause error) {

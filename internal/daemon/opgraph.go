@@ -353,7 +353,7 @@ func (daemon *Daemon) factorydHealth() api.FactorydHealth {
 	if len(calls) > 32 {
 		calls = calls[:32]
 	}
-	return api.FactorydHealth{Calls: calls}
+	return api.FactorydHealth{Calls: calls, WALBytes: daemon.store.WALSize()}
 }
 
 // Self-observation claims exactly what factoryd instruments: its browser

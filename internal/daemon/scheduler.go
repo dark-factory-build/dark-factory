@@ -15,6 +15,8 @@ import (
 const (
 	schedulerPollInterval   = time.Second
 	storeValidationInterval = time.Minute
+	walCheckpointInterval   = 30 * time.Second
+	walCheckpointLimit      = 16 << 20
 	// schedulerMaxBackoff is the most polls a failure pauses the scheduler.
 	schedulerMaxBackoff = 64
 )
@@ -77,6 +79,7 @@ func (daemon *Daemon) RunScheduler(ctx context.Context, spec SupervisorSpec) err
 	owners := make(map[uint64]*scheduledOwner, kernel.MaxFactoryCapacity+1)
 	var nextID, probeID uint64
 	var nextAttachmentCleanup time.Time
+	nextWALCheckpoint := time.Now().Add(walCheckpointInterval)
 	stopping := false
 	var resultErr error
 	var backoff, paused int
@@ -162,6 +165,14 @@ func (daemon *Daemon) RunScheduler(ctx context.Context, spec SupervisorSpec) err
 				continue
 			}
 			tick := time.Now()
+			if !stopping && !tick.Before(nextWALCheckpoint) {
+				nextWALCheckpoint = tick.Add(walCheckpointInterval)
+				if daemon.store.WALSize() >= walCheckpointLimit {
+					if err := daemon.store.CheckpointWAL(ownedCtx, "RESTART"); err != nil {
+						LogFactoryd(daemon.log, "factoryd: WAL checkpoint: %v\n", err)
+					}
+				}
+			}
 			if !stopping {
 				if !tick.Before(daemon.validationDue) {
 					daemon.validationDue = tick.Add(storeValidationInterval)
