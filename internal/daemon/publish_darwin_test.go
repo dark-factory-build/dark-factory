@@ -356,6 +356,46 @@ func TestFactorydPublishesACorrectionOnItsPullRequest(t *testing.T) {
 	}
 }
 
+// A correction keeps every worker change since the settled head, but excludes
+// a file main changed after the first publication even when the App branch has
+// a different, App-authored commit SHA.
+func TestCorrectionKeepsWorkerCommitsAndMainChanges(t *testing.T) {
+	fixture, c, source, app, checkout := publishFixture(t, 2, false)
+	ctx := context.Background()
+	root, git := filepath.Dir(source), change.TrustedGitExecutable
+	registered := strings.TrimSpace(supervisorGitOutput(t, git, "-C", root, "remote", "get-url", "origin"))
+	supervisorGit(t, git, "-C", registered, "fetch", "-q", "--update-head-ok", root, "HEAD:worker")
+	if err := os.WriteFile(filepath.Join(registered, "main-only.txt"), []byte("main\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	supervisorGit(t, git, "-C", registered, "-c", "user.name=fixture", "-c", "user.email=fixture@example.invalid", "add", "main-only.txt")
+	supervisorGit(t, git, "-C", registered, "-c", "user.name=fixture", "-c", "user.email=fixture@example.invalid", "commit", "-q", "-m", "main")
+	app.main = strings.TrimSpace(supervisorGitOutput(t, git, "-C", registered, "rev-parse", "HEAD"))
+	supervisorGit(t, git, "-C", registered, "-c", "user.name=fixture", "-c", "user.email=fixture@example.invalid", "merge", "-q", "--no-ff", "worker", "-m", "published")
+	app.tip = strings.TrimSpace(supervisorGitOutput(t, git, "-C", registered, "rev-parse", "HEAD"))
+	if err := os.WriteFile(filepath.Join(root, "f00.txt"), []byte("correction A\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	supervisorGit(t, git, "-C", root, "-c", "user.name=fixture", "-c", "user.email=fixture@example.invalid", "commit", "-q", "-am", "correction A")
+	if err := os.WriteFile(filepath.Join(root, "f01.txt"), []byte("correction B\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	supervisorGit(t, git, "-C", root, "-c", "user.name=fixture", "-c", "user.email=fixture@example.invalid", "commit", "-q", "-am", "correction B")
+	c.Head = strings.TrimSpace(supervisorGitOutput(t, git, "-C", root, "rev-parse", "HEAD"))
+	c.Pull = 31
+	if err := fixture.daemon.publishChange(ctx, c, "team/repo", source, app.call, checkout); err != nil {
+		t.Fatal(err)
+	}
+	changes := app.writes[0]["arguments"].(map[string]any)["changes"].([]map[string]any)
+	paths := map[string]bool{}
+	for _, entry := range changes {
+		paths[entry["path"].(string)] = true
+	}
+	if len(paths) != 2 || !paths["f00.txt"] || !paths["f01.txt"] || paths["main-only.txt"] {
+		t.Fatalf("correction paths = %v", paths)
+	}
+}
+
 // A worker answering a verdict with evidence and no file change (#1706)
 // moves no head: its answer replaces the body and one fresh review of the
 // same head is claimed, instead of publication refusing "nothing to publish".
