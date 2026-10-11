@@ -20,24 +20,32 @@ var testStragglerPass func(pass int) (bool, error)
 // PrivateTemp is the short TMPDIR the Change worker gives a run, named from its
 // runtime directory. Worker sandboxes deny the shared /private/tmp (a grant
 // beneath it still applies), and the runtime's own tmp is too deep for a test
-// fixture's Unix socket to fit the sun_path budget.
+// fixture's Unix socket to fit the sun_path budget. A runtime not named by a
+// run id (a test's) has none, so unrelated runtimes never share one.
 // ponytail: two live runs whose ids share 8 hex characters (about one in four
 // billion) share this name, and the later run's sweep would reach the earlier
 // run's processes; widen the name if run counts ever make that plausible.
 func PrivateTemp(runtime string) string {
 	name := filepath.Base(runtime)
-	return "/private/tmp/df-" + name[:min(8, len(name))]
+	if len(name) != 32 || strings.Trim(name, "0123456789abcdef") != "" {
+		return ""
+	}
+	return "/private/tmp/df-" + name[:8]
 }
 
 // killRunStragglers kills every process of this user whose TMPDIR is inside
 // the run's private runtime root or PrivateTemp, then removes the latter:
 // descendants that left the provider's group and session (setsid, double
-// fork) and now live on under launchd (#1403). Only the run's own processes are given those paths.
-// ARCHITECTURE.md records why this numeric-PID sweep stays Darwin-only. Every
+// fork) and now live on under launchd (#1403). Only the run's own processes
+// are given those paths. ARCHITECTURE.md records why this numeric-PID sweep stays Darwin-only. Every
 // error is unresolved: cleanup was not proved, so no result may be published.
 func killRunStragglers(runtime *os.File) error {
 	root, err := fdPath(runtime)
-	roots := []string{root, PrivateTemp(root)}
+	short := PrivateTemp(root)
+	roots := []string{root}
+	if short != "" {
+		roots = append(roots, short)
+	}
 	for pass := 0; err == nil && pass < 100; pass++ {
 		var processes []unix.KinfoProc
 		found := false
@@ -56,7 +64,9 @@ func killRunStragglers(runtime *os.File) error {
 		if err == nil && !found {
 			// Best effort: what a failed removal leaves is the system's
 			// periodic temporary-file cleanup's.
-			_ = os.RemoveAll(roots[1])
+			if short != "" {
+				_ = os.RemoveAll(short)
+			}
 			return nil
 		}
 		time.Sleep(10 * time.Millisecond)

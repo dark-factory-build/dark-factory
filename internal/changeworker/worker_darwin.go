@@ -95,7 +95,7 @@ func runProvider(ctx context.Context) (resultErr error) {
 	temp := filepath.Join(config.RuntimePath, TempName)
 	// A short TMPDIR, so the provider's tests can bind Unix sockets beneath
 	// it; the runner removes it when the run ends. A taken name keeps tmp.
-	if short := runner.PrivateTemp(config.RuntimePath); os.Mkdir(short, 0o700) == nil {
+	if short := runner.PrivateTemp(config.RuntimePath); short != "" && os.Mkdir(short, 0o700) == nil {
 		temp = short
 	}
 	token := filepath.Join(config.RuntimePath, AttemptTokenName)
