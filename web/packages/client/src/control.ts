@@ -156,7 +156,7 @@ export type GraphLocation = Readonly<{ repository_id: string; path: string; line
 export type OperationalNodeBody = Readonly<{ project_id: string; node_id: string; selectors: Readonly<Record<string, string>>; evidence: readonly Readonly<{ origin: typeof GRAPH_ORIGINS[number]; source: string; detail?: string; confidence: string }>[]; sources: readonly GraphLocation[]; modules: readonly GraphLocation[]; observers: readonly string[] }>;
 export type RunPathsGetBody = { agent_id: string };
 /** One run's recorded agent effort and spend: counts and cost, never content. */
-export type RunTelemetry = { tokens_in: number; tokens_out: number; cost_micro_usd: number; tool_calls: number; api_requests: number; subagents?: number; quiet_seconds?: number };
+export type RunTelemetry = { tokens_in: number; tokens_out: number; cost_micro_usd: number; tool_calls: number; api_requests: number; quiet_seconds?: number };
 export type RunPathsBody = { agent_id: string; run_id: string; paths: string[]; telemetry?: RunTelemetry };
 export type AccountsDiscoverBody = { offset?: number };
 export type DiscoveredAccount = { provider: "claude_code" | "codex"; home: string; label: string; email: string; organization: string; default_model: string; default_reasoning_effort: string; linked_id: string; unavailable_reason?: string };
@@ -1014,9 +1014,9 @@ function isObject(value: unknown): value is Record<string, unknown> { return typ
 function runTelemetry(value: unknown, wire: boolean): RunTelemetry {
   if (typeof value !== "object" || value === null || Array.isArray(value)) malformed();
   const item = value as Record<string, unknown>;
-  requireKeys(item, ["tokens_in", "tokens_out", "cost_micro_usd", "tool_calls", "api_requests"], wire, ["subagents", "quiet_seconds"]);
+  requireKeys(item, ["tokens_in", "tokens_out", "cost_micro_usd", "tool_calls", "api_requests"], wire, ["quiet_seconds"]);
   const count = (key: string) => integer(item[key], 0, Number.MAX_SAFE_INTEGER);
-  return { tokens_in: count("tokens_in"), tokens_out: count("tokens_out"), cost_micro_usd: count("cost_micro_usd"), tool_calls: count("tool_calls"), api_requests: count("api_requests"), ...(present(item, "subagents") ? { subagents: count("subagents") } : {}), ...(present(item, "quiet_seconds") ? { quiet_seconds: count("quiet_seconds") } : {}) };
+  return { tokens_in: count("tokens_in"), tokens_out: count("tokens_out"), cost_micro_usd: count("cost_micro_usd"), tool_calls: count("tool_calls"), api_requests: count("api_requests"), ...(present(item, "quiet_seconds") ? { quiet_seconds: count("quiet_seconds") } : {}) };
 }
 function present(value: Record<string, unknown>, key: string): boolean { return Object.prototype.hasOwnProperty.call(value, key); }
 /**

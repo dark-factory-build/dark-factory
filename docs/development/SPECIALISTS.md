@@ -91,14 +91,10 @@ Every record carries `status` (`tentative` unless verified), `evidence`
 - Your checkout. Run tests or builds only if your question needs them.
 - Measures, offline (Architecture and Operations, at least weekly):
   `scripts/hotspots.sh --since=PRIOR_DATE -- internal cmd ':!*_test.go'`
-  (most-changed files, churn times maximum function cognitive complexity, and
-  pairs that change together). Architecture leads each review with the
-  churn-times-complexity top five, naming the function, and coupling pairs
-  above 50%; turn the strongest result into one consolidation or deletion
-  proposal. Dead code and duplication are secondary: use `go tool deadcode
+  (most-changed files and pairs that change together), `go tool deadcode
   ./...` (Go unreachable outside tests) and `go tool dupl -t 100 ./internal
-  ./cmd` (duplicated blocks) only after those two views. Cite the numbers, and
-  name what goes in every proposal.
+  ./cmd` (duplicated blocks). Cite the numbers, and turn each finding into a
+  deletion or consolidation proposal naming what goes.
 - GitHub, unauthenticated only (60 requests an hour shared by this machine;
   never use a token; use few): issues, PRs, Actions runs, e.g.
   `curl -s https://api.github.com/repos/OWNER/REPO/actions/runs?per_page=30`.

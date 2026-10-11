@@ -30,7 +30,7 @@ import {
 } from "./scene.js";
 import { IconButton } from "../icons.js";
 import { DEFAULT_FLOOR_APPEARANCE, type FloorAppearance } from "../floor-appearance.js";
-import { breakRoomHabit, offDuty, restingItem, workerFrames, workerPhase } from "./appearance.js";
+import { breakRoomHabit, restingItem, workerFrames, workerPhase } from "./appearance.js";
 import { catAt, catBed, chats, gossip, type Seat } from "./idle-life.js";
 import { endsAt, fromTray, isPaper, messageAt, observe, send, type FloorMessage, type Seen } from "./messages.js";
 import { beltRoutes, type BeltStub, directionBetween, findRoute, pointOnRoute, samePoint, type WorkerMotion } from "./movement.js";
@@ -380,8 +380,7 @@ function SceneWorkers({ knowledgeCues, nook, onOpenBoard, errands, peerQuestions
   // Idle life belongs to people sitting still beside a machine with nothing to ask of anyone.
   const rows = seatRows(seated.filter((seat) => seat.area === "resting").map((seat) => {
     const id = placements.find((placement) => placement.id === seat.id && samePoint(placement, seat))?.id;
-    const worker = id === undefined ? undefined : workerById.get(id);
-    return { x: seat.x, y: seat.y, stationId: seat.stationId, id, free: worker !== undefined && positions.get(worker.id)?.motion.action === "still" && worker.activity !== "needs-you" && offDuty(worker) === undefined };
+    return { x: seat.x, y: seat.y, stationId: seat.stationId, id, free: id !== undefined && positions.get(id)?.motion.action === "still" && workerById.get(id)?.activity !== "needs-you" };
   }));
   // The cat keeps to the first place two sit side by side; every such row has its talk.
   const table = tableOf(rows), bed = errands && table !== undefined ? catBed(table) : undefined;
@@ -445,14 +444,7 @@ function SceneWorkers({ knowledgeCues, nook, onOpenBoard, errands, peerQuestions
               <g data-seated={sitting ? placement.area === "resting" ? "coffee" : "planning" : undefined} data-active-pose={position.motion.action === "interacting" ? position.motion.frame : undefined}><g transform={`scale(${WORKER_SIZE / FRAME})${bob === 0 ? "" : ` translate(0 ${bob})`}${facingWest ? " scale(-1 1)" : ""}`}>{frames.map((frame) => <Frame key={frame} name={frame} x={-8} y={-8} />)}</g>
               </g>
             </g>
-            {/* Each running sub-agent works beside whoever started it, smaller, in the same poses. */}
-            {Array.from({ length: Math.min(worker.telemetry?.subagents ?? 0, 3) }, (_, index) => {
-              const helper: SceneWorker = { id: `${worker.id}:sub-agent:${index}`, name: "", role: "worker", ...(worker.provider === undefined ? {} : { provider: worker.provider }), activity: "busy" };
-              return <g key={helper.id} data-subagent-of={worker.id} role="img" className="dfFactoryScene__target" aria-label={`Sub-agent of ${worker.name}, read-only sweep`} data-tooltip={`Sub-agent of ${worker.name}\nRead-only sweep; its tokens count against ${worker.name}`} transform={`translate(${14 + 9 * index} 6) scale(${0.6 * WORKER_SIZE / FRAME})`}>
-                {workerFrames(helper, { action: "interacting", frame: position.motion.frame, ...(position.motion.at === undefined ? {} : { at: position.motion.at }) }).map((frame) => <Frame key={frame} name={frame} x={-8} y={-8} />)}
-              </g>;
-            })}
-            <g role="img" className="dfFactoryScene__target" data-tooltip={`${worker.name} · ${worker.specialist === undefined ? worker.activity : `${worker.specialist.title} · ${worker.specialist.text}${worker.specialist.next === "" ? "" : `\n${worker.specialist.next}`}`}${worker.review ? `\nReview assignment: ${worker.review.scope}; representative visit, not exact file inspection` : ""}\n${placement.area === "work" ? `Working at ${worker.locationLabel ?? at ?? "observed changes"}` : placement.errand !== undefined ? `${placement.errandKey?.startsWith("use ") ? "Recorded use" : "Taking a break"} · at the ${IMPLEMENT_NAMES[placement.errand]}` : placement.area === "resting" ? `${offDuty(worker) === "asleep" ? "Asleep in the break room until its next review" : offDuty(worker) === "off shift" ? "Off shift" : worker.paused ? "Paused · taking a break" : "Taking a break"}${stroking === undefined ? "" : " · fussing the cat"}${said}` : worker.location === "unobserved" ? "Planning · location not yet observed" : "Planning · work outside the machines shown"}${worker.telemetry === undefined ? "" : recordedEffort(worker.telemetry)}${[...new Set(asking)].join("")}`} aria-label={`${worker.name}, ${worker.review ? "reviewer" : worker.specialist?.title ?? worker.role}, ${worker.specialist?.text ?? worker.activity}, ${worker.review?.scope ?? location}`} {...sceneAction(worker.review && onSelectProposal ? () => onSelectProposal(worker.review!.proposalId) : onSelectWorker === undefined ? undefined : () => onSelectWorker(worker.id))}>
+            <g role="img" className="dfFactoryScene__target" data-tooltip={`${worker.name} · ${worker.specialist === undefined ? worker.activity : `${worker.specialist.title} · ${worker.specialist.text}${worker.specialist.next === "" ? "" : `\n${worker.specialist.next}`}`}${worker.review ? `\nReview assignment: ${worker.review.scope}; representative visit, not exact file inspection` : ""}\n${placement.area === "work" ? `Working at ${worker.locationLabel ?? at ?? "observed changes"}` : placement.errand !== undefined ? `${placement.errandKey?.startsWith("use ") ? "Recorded use" : "Taking a break"} · at the ${IMPLEMENT_NAMES[placement.errand]}` : placement.area === "resting" ? `${worker.paused ? "Paused · taking a break" : "Taking a break"}${stroking === undefined ? "" : " · fussing the cat"}${said}` : worker.location === "unobserved" ? "Planning · location not yet observed" : "Planning · work outside the machines shown"}${worker.telemetry === undefined ? "" : recordedEffort(worker.telemetry)}${[...new Set(asking)].join("")}`} aria-label={`${worker.name}, ${worker.review ? "reviewer" : worker.specialist?.title ?? worker.role}, ${worker.specialist?.text ?? worker.activity}, ${worker.review?.scope ?? location}`} {...sceneAction(worker.review && onSelectProposal ? () => onSelectProposal(worker.review!.proposalId) : onSelectWorker === undefined ? undefined : () => onSelectWorker(worker.id))}>
                 <rect className="dfFactoryScene__focus" x={-12} y={-12} width="24" height="24" rx="3" fill="transparent" />
             </g>
             {worker.review === undefined ? null : <g aria-hidden="true"><rect x="7" y="1" width="10" height="13" fill="#e1d1aa" stroke="#5c787b" /><text x="12" y="10" textAnchor="middle" fill="#203d46" fontSize="8">R</text></g>}
@@ -470,7 +462,7 @@ function SceneWorkers({ knowledgeCues, nook, onOpenBoard, errands, peerQuestions
         const worker = workerById.get(told.id), position = positions.get(told.id), placement = position?.placement ?? told;
         if (worker === undefined || placement.area === "work" || placement.errand !== undefined || position?.motion.action === "walking") return null;
         if (placement.area !== "resting") return !connected ? null : <g key={placement.id} data-planning-light="" aria-hidden="true" pointerEvents="none" transform={`translate(${position?.x ?? placement.x} ${(position?.y ?? placement.y) + TABLE_DROP})`}><circle cx="7" cy="-16" r="14" fill="url(#df-lamplight)" /><path d="M12 -18v-5h-5" fill="none" stroke="#788379" strokeWidth="2" /><path d="M4 -20h6" stroke="#dfc38f" strokeWidth="3" /></g>;
-        const rest = restingItem(worker, worker.activity === "needs-you" || offDuty(worker) !== undefined || cat?.pettedBy === worker.id || hailing.has(worker.id) ? undefined : position?.motion.at);
+        const rest = restingItem(worker, worker.activity === "needs-you" || cat?.pettedBy === worker.id || hailing.has(worker.id) ? undefined : position?.motion.at);
         return rest.where !== "table" ? null : <g key={placement.id} aria-hidden="true" pointerEvents="none" data-table-item={rest.item} transform={`translate(${position?.x ?? placement.x} ${position?.y ?? placement.y}) scale(${WORKER_SIZE / FRAME})`}>
           <Frame name={`person.held.${rest.item}.chest`} x={-8} y={-8 + SET_DOWN} />
         </g>;

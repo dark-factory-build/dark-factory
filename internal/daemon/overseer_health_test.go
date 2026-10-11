@@ -14,6 +14,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/dark-factory-build/dark-factory/internal/api"
 	"github.com/dark-factory-build/dark-factory/internal/kernel"
 	"github.com/dark-factory-build/dark-factory/internal/maintainer"
 )
@@ -86,9 +87,17 @@ func TestFailingIntakeSyncWakesTheOverseer(t *testing.T) {
 	if body := healthWake(t, fixture); !strings.Contains(body, want) || !strings.Contains(body, "[health:intake:"+fixture.source.ID.String()+"]") {
 		t.Fatalf("wake = %q", body)
 	}
+	failed := fixture.daemon.Intake(context.Background(), api.IntakeInput{Action: "list"})
+	if len(failed.Sources) != 1 || failed.Sources[0].Sync == nil || failed.Sources[0].Sync.State != "error" || failed.Sources[0].Sync.Error != "unavailable" || failed.Sources[0].Sync.LastSuccessAt != 0 {
+		t.Fatalf("failed sync = %+v", failed.Sources)
+	}
 	fixture.attach(fixture.daemon)
 	fixture.now = fixture.now.Add(time.Hour)
 	fixture.daemon.pollIntakeSource(context.Background(), fixture.source)
+	recovered := fixture.daemon.Intake(context.Background(), api.IntakeInput{Action: "list"})
+	if len(recovered.Sources) != 1 || recovered.Sources[0].Sync == nil || recovered.Sources[0].Sync.State != "ok" || recovered.Sources[0].Sync.Error != "" || recovered.Sources[0].Sync.LastSuccessAt == 0 {
+		t.Fatalf("recovered sync = %+v", recovered.Sources)
+	}
 	if health := fixture.daemon.overseerHealth(); len(health) != 0 {
 		t.Fatalf("recovered sync still held: %+v", health)
 	}

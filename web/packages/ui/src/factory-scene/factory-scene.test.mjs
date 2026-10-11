@@ -370,12 +370,8 @@ test("at a machine empty hands work it facing it or type, a reviewing specialist
   assert.deepEqual(reading({ ...specialist, appearance: appearance("tablet") }, 2500), ["person.skin.0.inspect.1", "person.legs.plain.stand", "person.held.tablet.low"], "a tablet is read in place of a clipboard");
   assert.deepEqual(reading(specialist, 0, "planning", "still"), ["person.skin.0.inspect.0", "person.legs.plain.sit", "person.held.clipboard.chest"], "and seated at the planning table");
   assert.deepEqual(reading(specialist, undefined), ["person.skin.0.inspect.0", "person.legs.plain.stand", "person.held.clipboard.chest"], "reduced motion rests on the first frame");
-  // Between reviews it sleeps in its seat, eyes shut and hands empty; paused, it sits awake off shift. Neither runs errands.
-  const resting = (worker) => workerFrames(worker, { action: "still", frame: 0, at: 1000 }, "resting").filter((name) => /skin|legs|held|blink/.test(name));
-  for (const activity of ["idle", "waiting"]) assert.deepEqual(resting({ ...specialist, activity }), ["person.skin.0.idle", "person.legs.plain.sit", "person.blink.0"], activity);
-  assert.deepEqual(resting({ ...specialist, activity: "idle", paused: true }), ["person.skin.0.idle", "person.legs.plain.sit"]);
-  assert.equal(breakRoomHabit({ ...specialist, activity: "waiting" }), undefined);
-  assert.ok(!resting({ ...operator, activity: "waiting" }).some((name) => name.includes("blink")), "an ordinary worker rests awake");
+  // Between reviews it is an ordinary worker.
+  for (const activity of ["idle", "waiting"]) assert.deepEqual(workerFrames({ ...specialist, activity }, { action: "still", frame: 0, at: 0 }, "resting"), workerFrames({ ...operator, activity }, { action: "still", frame: 0, at: 0 }, "resting"), activity);
 });
 
 test("a walk crosses the shared floor directly, around machines, never through one or by an imaginary door", () => {
