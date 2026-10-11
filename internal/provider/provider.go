@@ -661,6 +661,9 @@ func Build(request Request) (Launch, error) {
 		// are allowed; account configuration and Change-local .mcp.json cannot
 		// add servers.
 		argv = append(argv, "--strict-mcp-config")
+		if request.role == kernel.RoleWorker {
+			argv = append(argv, "--agents", claudeSweepAgent)
+		}
 		servers := map[string]any{
 			"factory_attempt": map[string]any{
 				"command": request.runtime.factoryctl,
@@ -880,8 +883,19 @@ func CodexReadOnly(paths ...string) []string {
 // ponytail: a home or volume mounted elsewhere needs its own entry.
 var claudeDeniedReads = []string{"//Users", "//Volumes", "//Network", "//private/tmp", "//private/var/folders", "//private/var/root"}
 
+// claudeSweepAgent is the one sub-agent a Claude worker may start: a bounded
+// sweep on a cheaper model that returns a short summary, so the worker keeps
+// the judgment and spends less of its own context. It is read-only by its tool
+// list: no Bash, edit tool or factory server, so it cannot write even where
+// the worker's sandbox could. The worker runs commands and hands it their output
+// files. Its transcript and telemetry count against the worker's run.
+const claudeSweepAgent = `{"sweep":{"description":"Read-only mechanical sweep on a cheaper model, with Read, Grep and Glob only: read CI logs, transcripts, or the saved output of scripts/hotspots.sh, deadcode, dupl or history greps (run those yourself into a file), and return a short structured summary. Use it for bulk reading; keep the judgment yourself.","prompt":"You run a bounded, read-only sweep for another agent with Read, Grep and Glob. Read only what you are asked to, then reply in at most 30 lines: each finding as path:line: result, then anything you could not check.","tools":["Read","Grep","Glob"],"model":"haiku"}}`
+
 func claudeSettings(request Request, servers []string) (string, error) {
 	allow := []string{"Bash", "WebFetch", "WebSearch"}
+	if request.role == kernel.RoleWorker {
+		allow = append(allow, "Agent(sweep)")
+	}
 	for _, server := range servers {
 		allow = append(allow, "mcp__"+server)
 	}

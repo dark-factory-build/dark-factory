@@ -62,6 +62,7 @@ func TestAgentTelemetryCountsOnlyTheLiveRunsItNames(t *testing.T) {
 		resource(run.ID.String()) + `"scopeLogs":[{"logRecords":[` +
 		event("tool_result", `,{"key":"tool_input","value":{"stringValue":"secret"}}`) + `,` +
 		event("codex.api_request", "") + `,` +
+		event("tool_decision", `,{"key":"tool_name","value":{"stringValue":"Agent"}},{"key":"decision","value":{"stringValue":"accept"}}`) + `,` +
 		event("user_prompt", `,{"key":"prompt","value":{"stringValue":"secret"}}`) + `]}]},` +
 		resource(unknown) + `"scopeLogs":[{"logRecords":[` + event("tool_result", "") + `]}]},` +
 		`{"resource":{},"scopeLogs":[{"logRecords":[` + event("tool_result", "") + `]}]}]}`
@@ -86,9 +87,9 @@ func TestAgentTelemetryCountsOnlyTheLiveRunsItNames(t *testing.T) {
 	at = at.Add(30 * time.Second)
 	got := read()
 	quiet := uint64(30)
-	want := browserprotocol.RunTelemetry{TokensIn: 12000, TokensOut: 400, CostMicroUSD: 310000, ToolCalls: 1, APIRequests: 1, QuietSeconds: &quiet}
+	want := browserprotocol.RunTelemetry{TokensIn: 12000, TokensOut: 400, CostMicroUSD: 310000, ToolCalls: 1, APIRequests: 1, Subagents: 1, QuietSeconds: &quiet}
 	if got == nil || got.QuietSeconds == nil || *got.QuietSeconds != quiet || got.TokensIn != want.TokensIn || got.TokensOut != want.TokensOut ||
-		got.CostMicroUSD != want.CostMicroUSD || got.ToolCalls != want.ToolCalls || got.APIRequests != want.APIRequests {
+		got.CostMicroUSD != want.CostMicroUSD || got.ToolCalls != want.ToolCalls || got.APIRequests != want.APIRequests || got.Subagents != want.Subagents {
 		t.Fatalf("telemetry %+v, want %+v", got, want)
 	}
 	if len(fixture.daemon.telemetry) != 1 {
