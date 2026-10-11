@@ -841,9 +841,6 @@ func codeOwned(codeowners string, paths []string) (owned []string) {
 	return owned
 }
 
-// enqueueRefused reports the broker's typed refusal "refused: ...
-// UNPROCESSABLE" as review.ErrRefused. One also RATE_LIMITED may pass later.
-// GitHub's "Waiting on code owner review" is review.ErrOwnerApproval.
 func enqueueRefused(err error) error {
 	if why := fmt.Sprint(err); strings.Contains(why, "rejected operation: refused:") && !strings.Contains(why, "RATE_LIMITED") {
 		if lower := strings.ToLower(why); strings.Contains(lower, "required codeowners approval") || strings.Contains(lower, "waiting on code owner review") || strings.Contains(why, "CODEOWNERS_APPROVAL") {
@@ -999,10 +996,12 @@ func reviewResponseStructuredContent(request maintainerRequest, response json.Ra
 		return nil, errors.New("review: Maintainer returned an invalid response")
 	}
 	if value.Result.IsError {
-		// The broker's reason is what an operator needs to act on.
 		reason := ""
 		if len(value.Result.Content) > 0 {
 			reason = ": " + strings.ToValidUTF8(value.Result.Content[0].Text[:min(len(value.Result.Content[0].Text), 300)], "")
+		}
+		if strings.Contains(strings.ToLower(reason), "invalid_input") {
+			return nil, fmt.Errorf("%w: review: Maintainer rejected operation%s", review.ErrPermanent, reason)
 		}
 		return nil, errors.New("review: Maintainer rejected operation" + reason)
 	}

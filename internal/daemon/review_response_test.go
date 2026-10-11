@@ -17,6 +17,14 @@ func TestMaintainerRejectionCarriesTheBrokerReason(t *testing.T) {
 	}
 }
 
+func TestMaintainerInvalidInputIsPermanent(t *testing.T) {
+	response := json.RawMessage(`{"jsonrpc":"2.0","id":1,"result":{"isError":true,"content":[{"type":"text","text":"invalid_input: base ref release+prod is invalid"}]}}`)
+	_, err := reviewResponseStructuredContent(maintainerRequest{JSONRPC: "2.0", ID: json.RawMessage(`1`)}, response)
+	if !errors.Is(err, review.ErrPermanent) || !strings.Contains(err.Error(), "invalid_input") {
+		t.Fatalf("err=%v", err)
+	}
+}
+
 // The broker's typed UNPROCESSABLE refusal (control-plane mcp.rs
 // operation_error) is terminal for the head; a rate limit or any other
 // failure is not (#1510).
