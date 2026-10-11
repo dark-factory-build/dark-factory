@@ -80,6 +80,8 @@ func (f *fakePublishMaintainer) call(_ context.Context, name string, arguments m
 		result, _ = json.Marshal(map[string]any{"branch": arguments["branch"], "commit_sha": f.tip, "parent_sha": arguments["expected_head_sha"]})
 	case "create_pull_request":
 		result, _ = json.Marshal(map[string]any{"number": 31, "url": "https://github.com/team/repo/pull/31", "head_sha": arguments["head_sha"], "base_sha": arguments["base_sha"]})
+	case "create_issue":
+		result, _ = json.Marshal(map[string]any{"number": 29, "url": "https://github.com/team/repo/issues/29"})
 	case "update_pull_request_body":
 		result, _ = json.Marshal(map[string]any{"number": arguments["pull_number"], "head_sha": f.tip})
 	default:
@@ -247,6 +249,48 @@ func TestIntakePublicationQualifiesCrossRepositoryAndSplitIssueLinks(t *testing.
 	body := app.writes[len(app.writes)-1]["arguments"].(map[string]any)["body"].(string)
 	if !strings.HasSuffix(body, "\n\nRefs owner/source#9") {
 		t.Fatalf("split correction body = %q", body)
+	}
+}
+
+func TestFactorydCreatesIssuesAndPreservesLinearProvenance(t *testing.T) {
+	fixture, c, source, app, checkout := publishFixture(t, 1, false)
+	ctx := context.Background()
+	c.Accepted = kernel.IntakeAcceptance{}
+	if err := fixture.daemon.publishChange(ctx, c, "owner/destination", source, app.call, checkout); err != nil {
+		t.Fatal(err)
+	}
+	var issue, pull map[string]any
+	for _, write := range app.writes {
+		if write["name"] == "create_issue" {
+			issue = write["arguments"].(map[string]any)
+		}
+		if write["name"] == "create_pull_request" {
+			pull = write["arguments"].(map[string]any)
+		}
+	}
+	if issue["title"] != c.Task.Title || pull["issue_number"] != uint64(29) || pull["close_on_merge"] != true {
+		t.Fatalf("non-intake publication = %+v", app.writes)
+	}
+
+	linearFixture, linear, linearSource, linearApp, linearCheckout := publishFixture(t, 1, false)
+	linear.Accepted = kernel.IntakeAcceptance{Snapshot: kernel.IntakeIssueSnapshot{LinearTeamID: "team", URL: "https://linear.app/acme/issue/ENG-7/intake"}, TaskID: linear.Task.ID}
+	if err := linearFixture.daemon.publishChange(ctx, linear, "owner/destination", linearSource, linearApp.call, linearCheckout); err != nil {
+		t.Fatal(err)
+	}
+	pull = linearApp.writes[len(linearApp.writes)-1]["arguments"].(map[string]any)
+	if pull["issue_number"] != uint64(0) || pull["external_source_url"] != "https://linear.app/acme/issue/ENG-7/intake" || pull["close_on_merge"] != false {
+		t.Fatalf("Linear publication = %+v", pull)
+	}
+	linearApp.writes = nil
+	linearApp.journal = map[string]json.RawMessage{}
+	linear.Pull = 31
+	linearApp.tip = linear.Head
+	if err := linearFixture.daemon.publishChange(ctx, linear, "owner/destination", linearSource, linearApp.call, linearCheckout); err != nil {
+		t.Fatal(err)
+	}
+	body := linearApp.writes[len(linearApp.writes)-1]["arguments"].(map[string]any)["body"].(string)
+	if !strings.HasSuffix(body, "\n\nRefs https://linear.app/acme/issue/ENG-7/intake") {
+		t.Fatalf("Linear correction body = %q", body)
 	}
 }
 

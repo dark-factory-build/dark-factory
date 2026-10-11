@@ -293,12 +293,49 @@ func (daemon *Daemon) publishPull(ctx context.Context, c kernel.PublishableChang
 	result := string(redactTerminalText([]byte(c.Task.Result)))
 	result = strings.ToValidUTF8(result[:min(len(result), 24000)], "")
 	body := fmt.Sprintf("%s\n\nPublished by factoryd from Change %s at %s: +%d -%d across %d files from %s.\n\nThe merge queue runs the gate.", result, c.Change, head, added, deleted, files, from)
-	closeOnMerge := c.Accepted.TaskID == c.Task.ID
+	linearSource := c.Accepted.Snapshot.LinearTeamID != ""
+	issueNumber := c.Accepted.Snapshot.IssueNumber
+	externalSourceURL := ""
+	if linearSource {
+		issueNumber = 0
+		externalSourceURL = c.Accepted.Snapshot.URL
+	}
+	createdIssue := false
+	if issueNumber == 0 && externalSourceURL == "" && c.Pull == 0 {
+		issue := struct {
+			Number uint64 `json:"number"`
+		}{}
+		step := "issue"
+		done, issueErr := completed(step, &issue)
+		if issueErr == nil && !done {
+			text := kernel.TaskInstruction(c.Task)
+			if text == "" {
+				text = c.Task.Title
+			}
+			text += fmt.Sprintf("\n\nFactory Change %s", c.Change)
+			response, callErr := call(ctx, "create_issue", map[string]any{"repository": repo, "operation_id": operation(step), "title": message, "body": text})
+			if callErr == nil {
+				callErr = json.Unmarshal(response, &issue)
+			}
+			issueErr = callErr
+		}
+		if issueErr != nil {
+			return issueErr
+		}
+		if issue.Number == 0 {
+			return errors.New("create_issue returned no issue")
+		}
+		issueNumber, createdIssue = issue.Number, true
+	}
+	closeOnMerge := createdIssue || (!linearSource && c.Accepted.TaskID == c.Task.ID)
 	issueReference := func() string {
-		if c.Accepted.Snapshot.IssueNumber == 0 {
+		if externalSourceURL != "" {
+			return "\n\nRefs " + externalSourceURL
+		}
+		if issueNumber == 0 {
 			return ""
 		}
-		issue := fmt.Sprintf("#%d", c.Accepted.Snapshot.IssueNumber)
+		issue := fmt.Sprintf("#%d", issueNumber)
 		if source := c.Accepted.SourceRepository; source != "" && !strings.EqualFold(source, repo) {
 			issue = source + issue
 		}
@@ -352,7 +389,10 @@ func (daemon *Daemon) publishPull(ctx context.Context, c kernel.PublishableChang
 	}
 	if err == nil && !done {
 		arguments := map[string]any{"repository": repo, "operation_id": operation(step), "head": branch, "head_sha": head, "base": "main", "base_sha": base, "title": message, "body": body, "draft": false,
-			"issue_number": c.Accepted.Snapshot.IssueNumber, "close_on_merge": closeOnMerge}
+			"issue_number": issueNumber, "close_on_merge": closeOnMerge}
+		if externalSourceURL != "" {
+			arguments["external_source_url"] = externalSourceURL
+		}
 		if c.Accepted.SourceRepository != "" {
 			arguments["source_repository"] = c.Accepted.SourceRepository
 		}
