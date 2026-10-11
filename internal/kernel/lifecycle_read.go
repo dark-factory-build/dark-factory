@@ -534,15 +534,18 @@ func (store *Store) RecoverableRun(ctx context.Context, id RunID) (RecoverableRu
 	return recovered, true, nil
 }
 
+// RecoverableRuns validates the live runs it returns; retained history is the
+// periodic validation's, whose hold it honours. The scheduler calls this every
+// tick, so a whole-store pass here kept factoryd saturated (#1780).
 func (store *Store) RecoverableRuns(ctx context.Context) ([]RecoverableRun, error) {
+	if err := store.heldCorruption(); err != nil {
+		return nil, err
+	}
 	tx, err := store.beginRead(ctx)
 	if err != nil {
 		return nil, err
 	}
 	defer tx.Close()
-	if err := validateDurableControls(ctx, tx.connection); err != nil {
-		return nil, err
-	}
 	rows, err := tx.connection.QueryContext(ctx, `SELECT `+runColumns+` FROM runs WHERE phase <> 'terminal' ORDER BY admitted_at_ms ASC, id ASC`)
 	if err != nil {
 		return nil, err

@@ -138,6 +138,11 @@ and install the previous binaries.
 `$HOME/.dark-factory.service/bin/current`, and launchd runs the service from
 there. The build directory is only the source of that copy.
 
+To attribute factoryd CPU, run `kill -USR1 $(pgrep -x factoryd)`: it writes a
+CPU profile of the next 10 seconds to `$HOME/.dark-factory/factoryd.cpu.pprof`
+for `go tool pprof`, and logs when it is done. An `attempt task` slower than 1
+second logs each step's duration (`slow attempt task`).
+
 Factory dispatch and capacity commands use strict revision guards. Every accepted
 command advances the revision, including an explicit `dispatch off` when already
 paused; this preserves an operator's stop intent against automatic restoration.
