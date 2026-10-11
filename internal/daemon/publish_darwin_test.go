@@ -502,6 +502,15 @@ func TestCorrectionPublishesMergeResolution(t *testing.T) {
 	app.main = m1
 	supervisorGit(t, git, "-C", registered, "merge", "-q", "--no-ff", "-s", "ours", "worker", "-m", "published")
 	app.tip = strings.TrimSpace(supervisorGitOutput(t, git, "-C", registered, "rev-parse", "HEAD"))
+	supervisorGit(t, git, "-C", root, "branch", "fix-side")
+	supervisorGit(t, git, "-C", root, "checkout", "-q", "fix-side")
+	if err := os.WriteFile(filepath.Join(root, "fix.txt"), []byte("fix\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	supervisorGit(t, git, "-C", root, "-c", "user.name=fixture", "-c", "user.email=fixture@example.invalid", "add", "fix.txt")
+	supervisorGit(t, git, "-C", root, "-c", "user.name=fixture", "-c", "user.email=fixture@example.invalid", "commit", "-q", "-m", "side fix")
+	supervisorGit(t, git, "-C", root, "checkout", "-q", "main")
+	supervisorGit(t, git, "-C", root, "merge", "-q", "--no-ff", "fix-side", "-m", "merge side fix")
 	supervisorGit(t, git, "-C", root, "fetch", "-q", "origin", "main")
 	supervisorGit(t, git, "-C", root, "merge", "-q", "--no-ff", "-s", "ours", m1, "-m", "integrate main")
 	if err := os.WriteFile(filepath.Join(root, "f00.txt"), []byte("resolved\n"), 0o644); err != nil {
@@ -519,7 +528,11 @@ func TestCorrectionPublishesMergeResolution(t *testing.T) {
 		t.Fatalf("merge resolution writes = %+v", app.writes)
 	}
 	changes := app.writes[0]["arguments"].(map[string]any)["changes"].([]map[string]any)
-	if len(changes) != 1 || changes[0]["path"] != "f00.txt" {
+	paths := map[string]bool{}
+	for _, entry := range changes {
+		paths[entry["path"].(string)] = true
+	}
+	if len(changes) != 2 || !paths["f00.txt"] || !paths["fix.txt"] {
 		t.Fatalf("merge resolution changes = %+v", changes)
 	}
 }
