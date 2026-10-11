@@ -94,3 +94,27 @@ func TestReportAndWhyReadTheReconcilersState(t *testing.T) {
 		t.Fatalf("a cancelled task's pull waits on %q", waits)
 	}
 }
+
+func TestReportLessonCountersUseLatestRevision(t *testing.T) {
+	t.Parallel()
+	store, _, project, _ := newAdmissionStore(t, RoleOrchestrator, 1)
+	defer store.Close()
+	ctx := context.Background()
+	spec := contentSpec(t, project.ID, 221, "lesson")
+	spec.Kind = ContentLesson
+	spec.Author = "operator:local"
+	spec.SourceReferences = `{"status":"needs_revalidation","evidence":["old source"],"verification":"go test ./internal/kernel"}`
+	lesson, err := store.CreateContent(ctx, spec, mustTime(t, 10))
+	if err != nil {
+		t.Fatal(err)
+	}
+	spec.Title = "revalidated"
+	spec.SourceReferences = `{"status":"current","evidence":["new source"],"verification":"go test ./internal/kernel"}`
+	if _, err := store.ReviseContent(ctx, lesson.Revision, spec, mustTime(t, 11)); err != nil {
+		t.Fatal(err)
+	}
+	lines, err := store.Report(ctx, &project.ID, 0, 3600000)
+	if err != nil || len(lines) != 1 || lines[0] != "lessons=1 reads=0 citations=1 stale=0" {
+		t.Fatalf("latest lesson report = %q, %v", lines, err)
+	}
+}
