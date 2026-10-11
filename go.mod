@@ -28,5 +28,6 @@ require (
 
 tool (
 	github.com/mibk/dupl
+	github.com/uudashr/gocognit/cmd/gocognit
 	golang.org/x/tools/cmd/deadcode
 )
