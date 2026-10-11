@@ -72,7 +72,7 @@ export function MissionsPanel({ production = [], onProduction, requestedMission,
     const value = await call!("outcome_write", { project_id: projectId, id: selected.id, expected_revision: Number(selected.revision), document: { ...document, state: nextState, reason: `${action[0]!.toUpperCase()}${action.slice(1)}d from Work → By mission.`, judgment: `authorized judgment: ${action} this outcome.`, ...(nextState === "accepted" && !text(document.conclusion) ? { conclusion: `Accepted from Work → By mission.` } : {}) } });
     if (current !== generation.current) return;
     lastObservedHead.current = state?.head;
-    setSelected(value); setItems((previous) => previous.map((item) => text(item.id) === text(value.id) ? { ...item, ...value } : item)); setNotice(`Outcome ${nextState}.`);
+    setSelected(value); setItems((previous) => previous.map((item) => text(item.id) === text(selected.id) ? { ...item, state: value.state, revision: value.revision, stale: value.stale } : item)); setNotice(`Outcome ${nextState}.`);
     if (value.kind === undefined || text(value.kind) === "mission") await loadTasks(text(value.id));
   };
   useEffect(() => { if (active && projectId !== undefined && call !== undefined && !loaded && !pending && error === "") void run(() => list()); }, [active, projectId, call, loaded, pending, error]);
