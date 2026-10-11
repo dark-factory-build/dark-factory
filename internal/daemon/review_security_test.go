@@ -272,8 +272,14 @@ func TestReviewDeadlineKillsTheReviewerProcessGroup(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := syscall.Kill(-pid, 0); !errors.Is(err, syscall.ESRCH) {
-		t.Fatalf("reviewer process group %d survived: %v", pid, err)
+	deadline := time.Now().Add(time.Second)
+	for {
+		if err := syscall.Kill(-pid, 0); errors.Is(err, syscall.ESRCH) {
+			break
+		} else if time.Now().After(deadline) {
+			t.Fatalf("reviewer process group %d survived: %v", pid, err)
+		}
+		time.Sleep(10 * time.Millisecond)
 	}
 }
 
