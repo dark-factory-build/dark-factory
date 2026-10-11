@@ -761,12 +761,20 @@ func (daemon *Daemon) runNext(ctx context.Context, spec SupervisorSpec) (resultR
 			// current base there, then copy that exact commit into a retained
 			// or pull request Change before the worker can run a correction
 			// offline.
-			current, selectErr := change.SelectRegisteredGit(ctx, spec.GitExecutable, repository.Root, repository.BaseRef, change.RepositorySourceIdentity{Root: repositoryIdentity, Git: repositoryGitIdentity, OriginDigest: repositoryOriginDigest})
-			if selectErr != nil {
-				return daemon.failRun(run, kernel.FailureSource, selectErr)
-			}
-			if fetchErr := change.FetchBase(ctx, current, filepath.Join(spec.ChangeParent, finalName)); fetchErr != nil {
-				return daemon.failRun(run, kernel.FailureSource, fetchErr)
+			path := filepath.Join(spec.ChangeParent, finalName)
+			if retained != nil && changeState.HeadCommit != nil {
+				changeState, _, err = daemon.rebaseRetainedChange(ctx, changeState, repository, repositoryIdentity, spec.GitExecutable, path, change.RepositorySourceIdentity{Root: repositoryIdentity, Git: repositoryGitIdentity, OriginDigest: repositoryOriginDigest})
+				if err != nil {
+					return daemon.failRun(run, kernel.FailureSource, err)
+				}
+			} else if retained != nil || pull.Number != 0 {
+				current, selectErr := change.SelectRegisteredGit(ctx, spec.GitExecutable, repository.Root, repository.BaseRef, change.RepositorySourceIdentity{Root: repositoryIdentity, Git: repositoryGitIdentity, OriginDigest: repositoryOriginDigest})
+				if selectErr != nil {
+					return daemon.failRun(run, kernel.FailureSource, selectErr)
+				}
+				if fetchErr := change.FetchBase(ctx, current, path); fetchErr != nil {
+					return daemon.failRun(run, kernel.FailureSource, fetchErr)
+				}
 			}
 		}
 		// The daemon reads the worktree itself: fresh Changes use private Git
