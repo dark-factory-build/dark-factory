@@ -70,6 +70,7 @@ test internal/daemon/recovered_runtime_darwin_test.go linux-equivalent L03
 test internal/daemon/recovery_darwin_test.go shared L08
 test internal/daemon/repository_darwin_test.go shared L08
 test internal/daemon/repository_readiness_darwin_test.go shared L08
+test internal/daemon/review_rebase_darwin_test.go shared L08
 test internal/daemon/runtime_darwin_test.go linux-equivalent L03
 test internal/daemon/scheduler_darwin_test.go shared L08
 test internal/daemon/settlement_darwin_test.go shared L08
