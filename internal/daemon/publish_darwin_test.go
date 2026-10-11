@@ -273,6 +273,8 @@ func TestAPlannedPullRequestCreateMovesToTheCurrentMain(t *testing.T) {
 func TestFirstPublicationOfAnAlreadyPublishedTreeOpensItsPullRequest(t *testing.T) {
 	fixture, c, source, app, checkout := publishFixture(t, 1, false)
 	ctx := context.Background()
+	backend := &publicReviewBackend{}
+	fixture.daemon.reviewBackend = func(string, uint64) review.Backend { return backend }
 	app.tip = c.Head // the earlier attempt's commit carries the same tree
 	withTip := func(ctx context.Context, ref, head string) (string, func(), error) {
 		gitDir, cleanup, err := checkout(ctx, ref, head)
@@ -286,6 +288,9 @@ func TestFirstPublicationOfAnAlreadyPublishedTreeOpensItsPullRequest(t *testing.
 	}
 	if len(app.writes) != 1 || app.writes[0]["name"] != "create_pull_request" || app.writes[0]["arguments"].(map[string]any)["head_sha"] != c.Head {
 		t.Fatalf("writes = %+v", app.writes)
+	}
+	if pending, err := fixture.store.InFlightReviewOperations(ctx); err != nil || len(pending) != 0 || backend.reviews != 0 {
+		t.Fatalf("no-op publication scheduled review: pending=%v err=%v reviews=%d", pending, err, backend.reviews)
 	}
 }
 
