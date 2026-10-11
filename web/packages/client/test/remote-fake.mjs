@@ -14,15 +14,21 @@ export const RELAY_ORIGIN = "wss://relay.example";
 export const PWA_ORIGIN = "https://app.darkfactory.build";
 
 export const tick = () => new Promise((resolve) => setTimeout(resolve, 0));
-// Real WebCrypto completes off the event loop, so no fixed number of turns or
-// sleep waits for it on a loaded runner: count its calls and settle only once
-// none is pending for a whole run of turns.
-let pendingCrypto = 0;
-for (const name of ["exportKey", "generateKey", "importKey", "sign", "verify"]) {
-  const real = crypto.subtle[name].bind(crypto.subtle);
-  crypto.subtle[name] = (...args) => { pendingCrypto++; return real(...args).finally(() => { pendingCrypto--; }); };
+// Key generation and signing run on crypto.subtle's thread pool, which no
+// fixed number of ticks outlasts on a loaded runner, so settle waits for every
+// call in flight and then for rounds quiet ticks.
+let subtleInFlight = 0;
+for (const name of ["generateKey", "importKey", "exportKey", "sign", "verify", "digest"]) {
+  const subtle = globalThis.crypto.subtle;
+  const call = subtle[name].bind(subtle);
+  subtle[name] = (...args) => {
+    subtleInFlight += 1;
+    return call(...args).finally(() => { subtleInFlight -= 1; });
+  };
 }
-export async function settle(rounds = 8) { for (let quiet = 0; quiet < rounds; quiet = pendingCrypto === 0 ? quiet + 1 : 0) await tick(); }
+export async function settle(rounds = 8) {
+  for (let quiet = 0; quiet < rounds; quiet = subtleInFlight > 0 ? 0 : quiet + 1) await tick();
+}
 
 export function nodeId(character = "a") { return character.repeat(32); }
 

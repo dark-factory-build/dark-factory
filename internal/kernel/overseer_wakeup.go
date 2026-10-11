@@ -506,7 +506,7 @@ func overseerWake(ctx context.Context, connection *sql.Conn, agent Agent, at int
 			break
 		}
 		if escalation {
-			escalations = append(escalations, strings.ToValidUTF8(detail[:min(len(detail), 256)], "")+" "+key)
+			escalations = append(escalations, strings.ToValidUTF8(detail[:min(len(detail), 256)], "")+" "+key+escalationWhy(ctx, connection, agent.ProjectID, key))
 		} else if !slices.Contains(lines, detail) {
 			lines = append(lines, detail)
 		}

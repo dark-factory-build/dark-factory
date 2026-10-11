@@ -747,7 +747,11 @@ func (client client) call(ctx context.Context, method string, params, output any
 	// wait for its bounded native terminal effect instead of being cut off at 5s.
 	cancel := func() {}
 	if _, bounded := ctx.Deadline(); !bounded {
-		ctx, cancel = context.WithTimeout(ctx, requestTimeout)
+		timeout := requestTimeout
+		if client.domain == attemptDomain {
+			timeout = RestartRetryWindow
+		}
+		ctx, cancel = context.WithTimeout(ctx, timeout)
 	}
 	defer cancel()
 	// An attempt outlives factoryd generations. A restart unbinds the socket
@@ -909,7 +913,7 @@ func unavailable(err error) bool {
 
 func readMethod(method string) bool {
 	switch method {
-	case "task", "source", "peer_status", "overseer_snapshot", "terminal_observe", "attempt_snapshot", "attempt_human_requests", "attempt_task_read", "attempt_intake", "attempt_content_list", "attempt_content_read", "attempt_content_body", "attempt_content_attachments", "attempt_outcome_read", "attempt_outcome_list":
+	case "task", "source", "peer_status", "overseer_snapshot", "terminal_observe", "attempt_snapshot", "attempt_human_requests", "attempt_task_read", "attempt_intake", "attempt_report", "attempt_content_list", "attempt_content_read", "attempt_content_body", "attempt_content_attachments", "attempt_outcome_read", "attempt_outcome_list":
 		return true
 	}
 	return false

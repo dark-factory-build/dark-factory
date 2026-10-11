@@ -14,7 +14,6 @@ import (
 	"slices"
 	"sort"
 	"strings"
-	"syscall"
 	"time"
 
 	"github.com/dark-factory-build/dark-factory/internal/api"
@@ -316,6 +315,12 @@ func (daemon *Daemon) reconcilePull(ctx context.Context, open kernel.OpenPull, u
 		}
 	case action != review.Wait && action != review.Escalate:
 		op.Failures, op.Escalation, op.OwnerApproval = 0, "", false
+	}
+	if err != nil {
+		op.LastAction = fmt.Sprintf("could not %s (attempt %d): %v", actionVerbs[action], op.Failures, err)
+	} else if action != review.Wait {
+		first, _, _ := strings.Cut(note, "\n")
+		op.LastAction = strings.TrimSuffix(actionVerbs[action]+": "+first, ": ")
 	}
 	if op != before {
 		op.UpdatedAt = daemon.now()
@@ -624,7 +629,7 @@ func (b *daemonReviewBackend) Review(ctx context.Context, checkout string, reque
 	// inside the checkout, untracked under .git.
 	diff := filepath.Join(checkout, ".git", "change.diff")
 	command := exec.CommandContext(ctx, change.TrustedGitExecutable, "-C", checkout, "diff", "--no-ext-diff", "--no-textconv", request.Base+"...HEAD")
-	command.Env = reviewEnvironment(filepath.Dir(checkout))
+	command.Env = provider.ReviewEnvironment(filepath.Dir(checkout))
 	if out, err := command.Output(); err != nil || os.WriteFile(diff, out, 0o600) != nil {
 		return review.Verdict{}, fmt.Errorf("review: diff: %v", err)
 	} else if len(out) == 0 {
@@ -639,80 +644,38 @@ func (b *daemonReviewBackend) Review(ctx context.Context, checkout string, reque
 		return review.Verdict{}, errors.New("review: no worker login for the provider")
 	}
 	// The provider comes from the workers' tool path: launchd's PATH lacks it.
-	tool, err := provider.WalkToolPath(b.daemon.toolPath, request.Provider)
-	if err != nil {
-		return review.Verdict{}, fmt.Errorf("review: %s not on the tool path: %w", request.Provider, err)
-	}
 	body := request.Body
 	if request.Answer != "" {
 		body += "\n\nThe author disputes the blocking review of this exact head without changing it, answering:\n\n" + request.Answer
 	}
 	prompt := reviewPrompt(checkout, request.Base, body, diff)
-	for _, home := range homes {
-		var command *exec.Cmd
-		// A later entry wins in exec, so the account's HOME replaces the
-		// review home for Claude Code.
-		environment := append(reviewEnvironment(filepath.Dir(checkout)), provider.AccountEnvironment(kind, filepath.Dir(home), home)...)
-		if kind == kernel.ProviderClaudeCode {
-			command = exec.CommandContext(ctx, tool, "-p", prompt, "--permission-mode", "plan", "--safe-mode", "--restricted", "--setting-sources", "", "--strict-mcp-config", "--tools", "Read,Grep,Glob", "--allowedTools", "Read,Grep,Glob")
-		} else {
-			command = exec.CommandContext(ctx, tool, "exec", "--disable", "computer_use", "--disable", "browser_use", "--disable", "plugins", "--ephemeral", "--ignore-user-config", "--strict-config", "-c", "approval_policy={ granular={sandbox_approval=false,rules=false,mcp_elicitations=false,request_permissions=false,skill_approval=false}}", "--ignore-rules", "--skip-git-repo-check")
-			// Git in the checkout reads the registered repository's objects
-			// through the alternates file ReviewCheckout wrote.
-			readable := []string{checkout}
-			if alternates, err := os.ReadFile(filepath.Join(checkout, ".git", "objects", "info", "alternates")); err == nil {
-				readable = append(readable, strings.Split(strings.TrimSpace(string(alternates)), "\n")...)
-			}
-			command.Args = append(append(command.Args, provider.CodexReadOnly(readable...)...), prompt)
-		}
-		command.Dir, command.Env = checkout, environment
-		// The deadline kills the reviewer's whole process group, not only its
-		// leader, and WaitDelay bounds a descendant that keeps the pipe open.
-		command.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
-		command.Cancel = func() error { return syscall.Kill(-command.Process.Pid, syscall.SIGKILL) }
-		command.WaitDelay = 5 * time.Second
-		// The verdict is read from stdout, the final message only: codex
-		// streams its transcript and token count to stderr.
-		var stdout, stderr strings.Builder
-		command.Stdout, command.Stderr = &stdout, &stderr
-		launched := time.Now()
-		err := command.Run()
-		// A non-zero exit ran; only a process that never started is a failed launch.
-		var exited *exec.ExitError
-		b.daemon.observe("client", map[string]string{}, map[string]string{"process.executable.name": filepath.Base(tool)}, err != nil && !errors.As(err, &exited), time.Since(launched))
-		output := []byte(stdout.String() + stderr.String())
-		if ctx.Err() != nil {
-			return review.Verdict{}, fmt.Errorf("review: provider deadline: %w", ctx.Err())
-		}
-		// The live-attempt detector, marker guard included, so quoted text or a
-		// Claude failure surfaces as an ordinary failure.
-		var limit liveAttempt
-		limit.scanUsageLimit(0, uint64(len(output)), output)
-		if err != nil && kind == kernel.ProviderCodex && limit.usageLimit != "" {
-			continue
-		}
-		if err != nil {
-			return review.Verdict{}, err
-		}
-		// A provider may echo its prompt, which quotes the author's body.
-		text := strings.Replace(stdout.String(), prompt, "", 1)
-		event, err := terminalReviewVerdict(text)
-		if err != nil {
-			return review.Verdict{}, err
-		}
-		if event == "ALLOW" && !namesChangedPath(ctx, checkout, request.Base, text) {
-			// #369, minimal: an ALLOW that names nothing the change touches
-			// is a rubber stamp, so it counts as no verdict.
-			return review.Verdict{}, errors.New("review: the ALLOW names no changed path")
-		}
-		return review.Verdict{Event: event, Body: text}, nil
+	readable := []string{checkout}
+	if alternates, err := os.ReadFile(filepath.Join(checkout, ".git", "objects", "info", "alternates")); err == nil {
+		readable = append(readable, strings.Split(strings.TrimSpace(string(alternates)), "\n")...)
 	}
-	return review.Verdict{}, errProviderLimited
+	result, err := provider.RunReview(ctx, kind, b.daemon.toolPath, homes, checkout, prompt, readable)
+	if err != nil {
+		if result.Limited {
+			return review.Verdict{}, errProviderLimited
+		}
+		return review.Verdict{}, fmt.Errorf("review: provider: %w", err)
+	}
+	text := strings.Replace(result.Stdout, prompt, "", 1)
+	event, err := terminalReviewVerdict(text)
+	if err != nil {
+		return review.Verdict{}, err
+	}
+	if event == "ALLOW" && !namesChangedPath(ctx, checkout, request.Base, text) {
+		// #369, minimal: an ALLOW that names nothing the change touches
+		// is a rubber stamp, so it counts as no verdict.
+		return review.Verdict{}, errors.New("review: the ALLOW names no changed path")
+	}
+	return review.Verdict{Event: event, Body: text}, nil
 }
 
 func namesChangedPath(ctx context.Context, checkout, base, text string) bool {
 	command := exec.CommandContext(ctx, change.TrustedGitExecutable, "-C", checkout, "diff", "--name-only", "-z", base+"...HEAD")
-	command.Env = reviewEnvironment(filepath.Dir(checkout))
+	command.Env = provider.ReviewEnvironment(filepath.Dir(checkout))
 	output, err := command.Output()
 	for _, path := range strings.Split(string(output), "\x00") {
 		// The whole relative path, not preceded by a path character and not
@@ -747,40 +710,6 @@ func terminalReviewVerdict(output string) (string, error) {
 		return "", errors.New("review: provider verdict must be one terminal verdict")
 	}
 	return verdicts[0], nil
-}
-
-func filteredReviewEnvironment() []string {
-	result := make([]string, 0, 8)
-	allowed := map[string]bool{"PATH": true, "LANG": true, "LC_ALL": true, "LC_CTYPE": true, "TERM": true, "USER": true, "LOGNAME": true, "SHELL": true}
-	for _, value := range os.Environ() {
-		name := strings.SplitN(value, "=", 2)[0]
-		if allowed[name] {
-			result = append(result, value)
-		}
-	}
-	return result
-}
-
-func reviewEnvironment(root string) []string {
-	home := filepath.Join(root, ".review-home")
-	tmp := filepath.Join(root, ".review-tmp")
-	_ = os.MkdirAll(home, 0700)
-	_ = os.MkdirAll(tmp, 0700)
-	result := filteredReviewEnvironment()
-	result = append(result,
-		"HOME="+home,
-		"TMPDIR="+tmp,
-		"GIT_CONFIG_NOSYSTEM=1",
-		"GIT_CONFIG_GLOBAL=/dev/null",
-		"GIT_CONFIG_SYSTEM=/dev/null",
-		"GIT_TERMINAL_PROMPT=0",
-		"GIT_ASKPASS=/usr/bin/false",
-		"SSH_ASKPASS=/usr/bin/false",
-		"GIT_CONFIG_COUNT=1",
-		"GIT_CONFIG_KEY_0=credential.helper",
-		"GIT_CONFIG_VALUE_0=",
-	)
-	return result
 }
 
 func (b *daemonReviewBackend) Submit(ctx context.Context, operation review.Operation, verdict review.Verdict) error {
@@ -850,11 +779,24 @@ func (b *daemonReviewBackend) ownedPaths(ctx context.Context, request review.Req
 	defer cleanup()
 	git := func(args ...string) string {
 		command := exec.CommandContext(ctx, change.TrustedGitExecutable, append([]string{"-C", checkout}, args...)...)
-		command.Env = reviewEnvironment(filepath.Dir(checkout))
+		command.Env = provider.ReviewEnvironment(filepath.Dir(checkout))
 		out, _ := command.Output()
 		return string(out)
 	}
 	return strings.Join(codeOwned(git("show", request.Base+":.github/CODEOWNERS"), strings.Split(git("diff", "--name-only", "-z", request.Base+"...HEAD"), "\x00")), ", ")
+}
+
+// filteredReviewEnvironment remains a small diagnostic projection for the
+// daemon tests; provider.ReviewEnvironment owns the actual launch policy.
+func filteredReviewEnvironment() []string {
+	allowed := map[string]bool{"PATH": true, "LANG": true, "LC_ALL": true, "LC_CTYPE": true, "TERM": true, "USER": true, "LOGNAME": true, "SHELL": true}
+	result := make([]string, 0, len(allowed))
+	for _, value := range os.Environ() {
+		if allowed[strings.SplitN(value, "=", 2)[0]] {
+			result = append(result, value)
+		}
+	}
+	return result
 }
 
 // codeOwned returns the paths a CODEOWNERS file gives an owner: as on GitHub

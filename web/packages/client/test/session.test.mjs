@@ -1017,16 +1017,16 @@ test("reconnect creates a fresh generation and stale socket frames are fenced", 
   const sockets = [];
   const pairing = new BrowserSession({ url: "ws://127.0.0.1/browser", host: "127.0.0.1", origin: "https://preview.example", challenge, keyStore: store, socketFactory: () => { const socket = new Socket(serverFor); sockets.push(socket); return socket; } });
   await pairing.connect();
-  await settle();
+  await until(() => pairing.status === "ready", "the pairing session never became ready");
   pairing.close();
   const errors = [];
   const timer = new VirtualTimer();
   const client = new BrowserClient({ url: "ws://127.0.0.1/browser", host: "127.0.0.1", origin: "https://preview.example", keyStore: store, timer, reconnectInitialDelayMs: 10, socketFactory: () => { const socket = new Socket(serverFor); sockets.push(socket); return socket; }, onError: (error) => errors.push(error) });
   await client.connect();
-  await settle();
+  await until(() => client.session?.status === "ready", "the first session never became ready");
   sockets[1].close();
   timer.advance(10);
-  await settle();
+  await until(() => sockets.length === 3 && client.session?.status === "ready", "the reconnected session never became ready");
   assert.equal(sockets.length, 3, errors.map((error) => error.code).join(","));
   sockets[1].reply(encodeHello({ daemon_id: "aa".repeat(16), boot_id: "bb".repeat(16), connection_nonce: "cc".repeat(32) }));
   await new Promise((resolve) => setTimeout(resolve, 0));
@@ -1146,7 +1146,7 @@ test("a persisted repair that closes before ready reconnects through AUTH", asyn
   const store = new MemoryKeys();
   const seed = new BrowserSession({ url: "ws://127.0.0.1/browser", host: "127.0.0.1", origin: "https://preview.example", challenge, keyStore: store, socketFactory: () => new Socket(serverFor) });
   await seed.connect();
-  await settle();
+  await until(() => seed.status === "ready", "the seed session never became ready");
   seed.close();
   const timer = new VirtualTimer();
   const sockets = [];
@@ -1160,7 +1160,7 @@ test("a persisted repair that closes before ready reconnects through AUTH", asyn
   assert.equal(sockets[1].sent.filter((wire) => decodeClientControl(wire).type === "PAIR_PROVE").length, 1);
   assert.deepEqual(timer.delays, [10]);
   timer.advance(10);
-  await settle();
+  await until(() => sockets.length === 3 && sockets[2].sent.length > 0, "the repair never redialed");
   assert.equal(sockets.length, 3);
   assert.equal(decodeClientControl(sockets[2].sent[0]).type, "AUTH_PROVE");
   assert.equal(sockets[2].sent.filter((wire) => decodeClientControl(wire).type === "PAIR_PROVE").length, 0);
