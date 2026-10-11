@@ -275,7 +275,7 @@ func (daemon *Daemon) recordPublishedPull(ctx context.Context, project kernel.Pr
 	if err != nil {
 		return err
 	}
-	if daemon.github == nil && daemon.reviewBackend == nil {
+	if daemon.github == nil && daemon.reviewBackend == nil || strings.Contains(body, ": +0 -0 across 0 files from ") {
 		return daemon.store.RecordPublication(ctx, project, task, repo, pr, at)
 	}
 	request := review.Request{Repository: strings.ToLower(repo), PullNumber: pr.Number, Head: strings.ToLower(pr.Head), Base: strings.ToLower(baseSHA), BaseRef: pr.Base, Body: body, Provider: "codex"}
