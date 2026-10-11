@@ -9,14 +9,17 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
 
+	"github.com/dark-factory-build/dark-factory/internal/api"
 	"github.com/dark-factory-build/dark-factory/internal/change"
 	"github.com/dark-factory-build/dark-factory/internal/changeworker"
 	"github.com/dark-factory-build/dark-factory/internal/kernel"
@@ -803,5 +806,40 @@ func TestReclaimChangesRemovesEmptyWorkAndKeepsDirtyWork(t *testing.T) {
 				t.Fatalf("branches after reclaim = %q", branches)
 			}
 		})
+	}
+}
+
+// status --project shows the operator what factoryd waits on: a held health
+// condition, the dirty Change reclaim keeps by its reason, and a repository
+// whose fetch check needs setup.
+func TestOversightShowsHeldConditionsKeptChangesAndRepositorySetup(t *testing.T) {
+	ctx := context.Background()
+	fixture := newRecoveryFixtureWithRole(t, 0x83, kernel.RoleWorker)
+	project, other := mustProjectID(t, testID(0x83)), mustProjectID(t, testID(0x84))
+	_, path, _ := fixture.privateSettlementWorktree(t)
+	fixture.failBeforeRuntime(t)
+	if settled, err := fixture.daemon.settleRun(ctx, fixture.changeParent, fixture.run.ID); err != nil || settled.Phase != kernel.RunTerminal {
+		t.Fatalf("settled = %+v, %v", settled, err)
+	}
+	if err := os.WriteFile(filepath.Join(path, "draft.txt"), []byte("unsaved\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	fixture.daemon.log = io.Discard
+	if reclaimed := fixture.daemon.reclaimChanges(ctx); reclaimed != 0 {
+		t.Fatalf("reclaimed = %d", reclaimed)
+	}
+	at, _ := kernel.NewUnixMillis(9000)
+	if _, err := fixture.store.AddProjectRepository(ctx, kernel.NewProjectRepository{ID: kernel.RepositoryID(other), ProjectID: project, Name: "unready", Root: t.TempDir(), BaseRef: "HEAD"}, at); err != nil {
+		t.Fatal(err)
+	}
+	fixture.daemon.holdHealth("intake:x", project, "intake source x sync failing")
+	fixture.daemon.holdHealth("intake:y", other, "another project's")
+	status, err := fixture.daemon.oversight(ctx, project)
+	if err != nil || len(status.Conditions) != 1 || status.Conditions[0].Detail != "intake source x sync failing" ||
+		len(status.KeptChanges) != 1 || status.KeptChanges["invalid Change input: the Change worktree has uncommitted work"] != 1 ||
+		!slices.ContainsFunc(status.Repositories, func(view api.ProjectRepository) bool {
+			return view.Name == "unready" && view.FetchState == "setup_required"
+		}) {
+		t.Fatalf("oversight = %+v, %v", status, err)
 	}
 }

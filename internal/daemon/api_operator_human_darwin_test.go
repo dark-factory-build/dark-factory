@@ -300,3 +300,88 @@ func TestOperatorHumanListReplyRoundTripAndDeliveryUnknown(t *testing.T) {
 	waitOperatorAPI(t, done)
 	expectNoTerminalEffectWire(t, fixture.peer)
 }
+
+func operatorHumanCancel(t *testing.T, operator *operatorAPITestFixture, input api.HumanCancelInput) (api.MutationResult, error) {
+	t.Helper()
+	done := operator.serve(t)
+	result, err := operator.client.HumanCancel(context.Background(), input)
+	waitOperatorAPI(t, done)
+	return result, err
+}
+
+func requireRemoteRevisionConflict(t *testing.T, name string, err error) {
+	t.Helper()
+	var remote *api.RemoteError
+	if !errors.As(err, &remote) || remote.Code() != api.RemoteRevisionConflict {
+		t.Fatalf("%s = %v", name, err)
+	}
+}
+
+func TestOperatorHumanCancelSettlesRunLikeBrowserCancel(t *testing.T) {
+	fixture := newTerminalEffectFixture(t)
+	operator := newOperatorAPITestFixture(t, fixture.adapter.daemon)
+	ctx := context.Background()
+	request := createOperatorHumanRequest(t, fixture, 240)
+	run, _, err := fixture.adapter.store.Run(ctx, fixture.run.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	done := operator.serve(t)
+	listed, err := operator.client.HumanRequests(ctx)
+	if err != nil || len(listed.Requests) != 1 || listed.Requests[0].Revision != uint64(request.Revision.Int64()) || listed.Requests[0].RunRevision != uint64(run.Revision.Int64()) {
+		t.Fatalf("operator human request list = %+v, %v", listed, err)
+	}
+	waitOperatorAPI(t, done)
+	current := api.HumanCancelInput{RequestID: request.ID.String(), ExpectedRevision: uint64(request.Revision.Int64()), ExpectedRunRevision: uint64(run.Revision.Int64())}
+	staleRequest, staleRun := current, current
+	staleRequest.ExpectedRevision++
+	staleRun.ExpectedRunRevision++
+	for name, input := range map[string]api.HumanCancelInput{"stale request": staleRequest, "stale run": staleRun} {
+		_, err := operatorHumanCancel(t, operator, input)
+		requireRemoteRevisionConflict(t, name, err)
+	}
+	expectNoTerminalEffectWire(t, fixture.peer)
+
+	result, err := operatorHumanCancel(t, operator, current)
+	if err != nil || result.HumanReply == nil || result.HumanReply.RequestID != request.ID.String() || result.HumanReply.State != "resolved" || result.Revision != uint64(request.Revision.Int64()+1) {
+		t.Fatalf("operator human cancel = %+v, %v", result, err)
+	}
+	if terminate := readTerminalEffectWire(t, fixture.peer); terminate.Kind != "terminate" {
+		t.Fatalf("post-cancel lifecycle command = %+v", terminate)
+	}
+	cancelled, _, err := fixture.adapter.store.Run(ctx, run.ID)
+	if err != nil || cancelled.Phase != kernel.RunFinalizing || cancelled.CredentialRevokedAt == nil || cancelled.Revision.Int64() != run.Revision.Int64()+1 {
+		t.Fatalf("operator-cancelled run = %+v, %v", cancelled, err)
+	}
+	_, err = operatorHumanCancel(t, operator, current)
+	requireRemoteRevisionConflict(t, "repeated cancel", err)
+	expectNoTerminalEffectWire(t, fixture.peer)
+}
+
+func TestOperatorHumanCancelDoesNotResumeYieldedOverseer(t *testing.T) {
+	adapter := newAdapterFixture(t, kernel.BrowserCapabilityObserve)
+	run := adapterRunningRun(t, adapter.store, 40)
+	ctx := context.Background()
+	var key [kernel.IDBytes]byte
+	copy(key[:], adapterID(t, 64))
+	request, err := adapter.store.CreateHumanQuestionAndYieldForAttempt(ctx, run.CredentialDigest, kernel.NewHumanQuestion{IdempotencyKey: key, QuestionText: "settled already?"}, adapterTime(t, 500))
+	if err != nil {
+		t.Fatal(err)
+	}
+	completeYieldedOperatorRun(t, adapter.store, run)
+	settled, _, err := adapter.store.Run(ctx, run.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	operator := newOperatorAPITestFixture(t, adapter.daemon)
+	result, err := operatorHumanCancel(t, operator, api.HumanCancelInput{RequestID: request.ID.String(), ExpectedRevision: uint64(request.Revision.Int64()), ExpectedRunRevision: uint64(settled.Revision.Int64())})
+	if err != nil || result.HumanReply == nil || result.HumanReply.State != "resolved" {
+		t.Fatalf("yielded operator cancel = %+v, %v", result, err)
+	}
+	if resumed, err := adapter.store.PromoteQueuedContinuations(ctx, adapterTime(t, 600)); err != nil || len(resumed) != 0 {
+		t.Fatalf("cancelled card resumed %+v, %v", resumed, err)
+	}
+	if open, err := adapter.store.OperatorHumanRequests(ctx); err != nil || len(open) != 0 {
+		t.Fatalf("open human requests after cancel = %+v, %v", open, err)
+	}
+}

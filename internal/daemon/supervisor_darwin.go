@@ -478,7 +478,19 @@ func (daemon *Daemon) runNext(ctx context.Context, spec SupervisorSpec) (resultR
 	// not block otherwise valid supervision, so any failure here just means
 	// no hint, the same as a first-ever run.
 	var previousWorkingDirectory string
+	var projectGitDirs []string
 	if !worker {
+		// An overseer publishes Changes of every enabled repository of its
+		// project, so it reads each one's Git directory; one that cannot be
+		// resolved only loses that grant.
+		repositories, _ := daemon.store.ProjectRepositories(ctx, repository.ProjectID)
+		for _, other := range repositories {
+			if other.Enabled && other.ID != repository.ID {
+				if dir, err := resolveGitCommonDir(ctx, spec.GitExecutable, other.Root); err == nil {
+					projectGitDirs = append(projectGitDirs, dir)
+				}
+			}
+		}
 		if previousRuntimeRoot, found, err := daemon.store.LatestTerminalRuntimeRoot(ctx, run.AgentID); err == nil && found {
 			previousWorkingDirectory = filepath.Join(previousRuntimeRoot, changeworker.HomeName)
 		}
@@ -519,7 +531,7 @@ func (daemon *Daemon) runNext(ctx context.Context, spec SupervisorSpec) (resultR
 		GitAuthor: daemon.gitAuthor(ctx), CustomerMaintainer: customerMaintainer, Provider: run.Provider, Role: run.Role, Model: run.Model, ReasoningEffort: run.ReasoningEffort,
 		AgentID: run.AgentID.String(), TaskIncarnationID: run.TaskIncarnationID.String(), PreviousWorkingDirectory: previousWorkingDirectory,
 		RuntimePath: gotRuntimePath, RuntimeIdentity: runtimeFileIdentity,
-		GitExecutable: spec.GitExecutable, FactoryctlExecutable: factoryctl.Path(), ToolPath: spec.ToolPath, ToolchainReadRoots: spec.ToolchainReadRoots, LocalCILeaseDir: localCILeaseDir, TraceReceiverPort: traceReceiverPort, RunID: telemetryRunID, AccountHome: spec.AccountHome, AccountConfigDir: accountConfigDir, RepositoryRoot: repository.Root, RepositoryIdentity: repositoryIdentity, RepositoryGitIdentity: repositoryGitIdentity, RepositoryOriginDigest: repositoryOriginDigest, GitCommonDir: gitCommonDir,
+		GitExecutable: spec.GitExecutable, FactoryctlExecutable: factoryctl.Path(), ToolPath: spec.ToolPath, ToolchainReadRoots: spec.ToolchainReadRoots, LocalCILeaseDir: localCILeaseDir, TraceReceiverPort: traceReceiverPort, RunID: telemetryRunID, AccountHome: spec.AccountHome, AccountConfigDir: accountConfigDir, RepositoryRoot: repository.Root, RepositoryIdentity: repositoryIdentity, RepositoryGitIdentity: repositoryGitIdentity, RepositoryOriginDigest: repositoryOriginDigest, GitCommonDir: gitCommonDir, ProjectGitDirs: projectGitDirs,
 		Revision: revision, ChangeParent: spec.ChangeParent, FinalName: finalName,
 		AttemptSocket: spec.AttemptSocket, Retained: retained, ProviderTask: providerTask,
 	}
@@ -574,13 +586,6 @@ func (daemon *Daemon) runNext(ctx context.Context, spec SupervisorSpec) (resultR
 	if err != nil {
 		_ = childControl.Close()
 		return daemon.failRun(run, kernel.FailureSpawn, err)
-	}
-	if err := controller.Configure(runner.AttemptSpec{
-		AttemptID: run.ID.String(), Wrapper: wrapper,
-		MarkerName: runner.InnerActivationMarkerName, ResultName: runner.AttemptResultSpoolName, ResultProof: resultProof,
-	}); err != nil {
-		_ = childControl.Close()
-		return daemon.failRun(run, kernel.FailureProtocol, err)
 	}
 	outerStderr, err := newBoundedOutput()
 	if err != nil {
@@ -671,6 +676,17 @@ func (daemon *Daemon) runNext(ctx context.Context, spec SupervisorSpec) (resultR
 	}
 	if !owner.activated {
 		return daemon.convergeActivatedRunner(run, owner, runtimeDirectory, keys.resources.RunnerProcess, runtimeIdentity, runnerResourceIdentity, errInvalidContract)
+	}
+	if err := controller.Configure(runner.AttemptSpec{
+		AttemptID: run.ID.String(), Wrapper: wrapper,
+		MarkerName: runner.InnerActivationMarkerName, ResultName: runner.AttemptResultSpoolName, ResultProof: resultProof,
+	}); err != nil {
+		return daemon.convergeActivatedRunner(run, owner, runtimeDirectory, keys.resources.RunnerProcess, runtimeIdentity, runnerResourceIdentity, err)
+	}
+	if spec.afterOuterConfiguration != nil {
+		if err := spec.afterOuterConfiguration(child); err != nil {
+			return daemon.convergeActivatedRunner(run, owner, runtimeDirectory, keys.resources.RunnerProcess, runtimeIdentity, runnerResourceIdentity, err)
+		}
 	}
 	ready, err := controller.Next(8 * time.Second)
 	if err != nil || ready.Kind != runner.AttemptInnerReady {

@@ -23,6 +23,9 @@ in_shard() { [ -z "$shard" ] || [ "$shard" = "$1" ]; }
 runs() {
     stage=$1
     shift
+    for package; do
+        [ -z "$linux_proved" ] || printf '%s\n' "$linux_proved" | /usr/bin/grep -qxF "$package" || return 1
+    done
     if [ "$shard" = affected ]; then
         for package; do
             printf '%s\n' "$affected_packages" | /usr/bin/grep -qxF "$package" && return 0
@@ -44,6 +47,22 @@ go=${DF_CI_GO-}
 module=
 affected_packages=
 module=$("$go" list -m)
+# Linux tests only packages with native proof, and only once linux-coverage
+# accounts for every package and every Darwin-only test file.
+linux_proved=
+if [ "$(uname -s)" = Linux ]; then
+    coverage=$script_dir/linux-coverage
+    listed=$(/usr/bin/awk '($1 == "package" && $3 ~ /^(proved|L[0-9][0-9])$/) || ($1 == "test" && $3 ~ /^(shared|linux-equivalent|macos-only)$/) { print $1, $2 }' "$coverage" | sort)
+    wanted=$({ { GOOS=darwin "$go" list ./...; "$go" list ./...; } | sort -u | sed "s|^$module/|package |"
+        { git ls-files -co --exclude-standard '*_darwin_test.go'; git grep --untracked -l '^//go:build darwin' -- '*_test.go'; } | sort -u | sed 's/^/test /'; } | sort)
+    [ "$listed" = "$wanted" ] || {
+        echo "go-ci: scripts/linux-coverage must classify every package and Darwin-only test exactly once" >&2
+        printf '%s\n' "$listed" "$wanted" | sort | uniq -u | sed 's/^/go-ci:   /' >&2
+        exit 1
+    }
+    linux_proved=$(/usr/bin/awk -v module="$module" '$1 == "package" && $3 == "proved" { print module "/" $2 }' "$coverage")
+    echo "go-ci: Linux runs proved packages only:" $linux_proved
+fi
 if [ "$shard" = affected ]; then
     changed=$(git diff --name-only "$affected_base" HEAD --)
     if printf '%s\n' "$changed" | /usr/bin/grep -qxE 'go\.(mod|sum)'; then

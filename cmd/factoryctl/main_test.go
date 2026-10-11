@@ -16,6 +16,7 @@ import (
 
 	"github.com/dark-factory-build/dark-factory/internal/api"
 	"github.com/dark-factory-build/dark-factory/internal/install"
+	"github.com/dark-factory-build/dark-factory/internal/runner"
 )
 
 type serverResult struct {
@@ -95,7 +96,7 @@ type apiFixture struct {
 
 func newAPIFixture(t testing.TB) *apiFixture {
 	t.Helper()
-	directory, err := os.MkdirTemp("/private/tmp", "dark-factory-factoryctl-attempt-")
+	directory, err := os.MkdirTemp(runner.ShortTempDir(), "dark-factory-factoryctl-attempt-")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -237,6 +238,7 @@ func TestParseExactAttemptCommands(t *testing.T) {
 		{name: "peer ask", args: []string{"attempt", "peer", "ask", "--task", "0123456789abcdef0123456789abcdef", "--idempotency-key", "fedcba9876543210fedcba9876543210", "--question", "need context"}, command: attemptCommand{kind: commandPeerAsk, id: "0123456789abcdef0123456789abcdef", idempotencyKey: "fedcba9876543210fedcba9876543210", text: "need context"}},
 		{name: "peer answer", args: []string{"attempt", "peer", "answer", "--question", "0123456789abcdef0123456789abcdef", "--revision", "7", "--idempotency-key", "fedcba9876543210fedcba9876543210", "--answer", "context"}, command: attemptCommand{kind: commandPeerAnswer, id: "0123456789abcdef0123456789abcdef", expectedRevision: 7, idempotencyKey: "fedcba9876543210fedcba9876543210", text: "context"}},
 		{name: "send back", args: []string{"attempt", "send-back", "--task", "0123456789abcdef0123456789abcdef", "--note", "five findings"}, command: attemptCommand{kind: commandSendBack, id: "0123456789abcdef0123456789abcdef", text: "five findings"}},
+		{name: "send back at head", args: []string{"attempt", "send-back", "--task", "0123456789abcdef0123456789abcdef", "--head", "abababababababababababababababababababab", "--note", "five findings"}, command: attemptCommand{kind: commandSendBack, id: "0123456789abcdef0123456789abcdef", sourceCommit: "abababababababababababababababababababab", text: "five findings"}},
 		{name: "send back maximum note", args: []string{"attempt", "send-back", "--task", "ffffffffffffffffffffffffffffffff", "--note", strings.Repeat("n", 8192)}, command: attemptCommand{kind: commandSendBack, id: "ffffffffffffffffffffffffffffffff", text: strings.Repeat("n", 8192)}},
 		{name: "human request maximum question", args: []string{"attempt", "request-human", "--idempotency-key", "ffffffffffffffffffffffffffffffff", "--question", strings.Repeat("q", 8192)}, command: attemptCommand{kind: commandRequestHuman, idempotencyKey: "ffffffffffffffffffffffffffffffff", text: strings.Repeat("q", 8192)}},
 	}
@@ -373,7 +375,7 @@ func TestParseExplicitHomeCommands(t *testing.T) {
 }
 
 func TestHomeCLIOutputIsBoundedAndRedacted(t *testing.T) {
-	parent, err := os.MkdirTemp("/private/tmp", "dark-factory-factoryctl-home-")
+	parent, err := os.MkdirTemp(runner.ShortTempDir(), "dark-factory-factoryctl-home-")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -425,6 +427,7 @@ func TestInvalidSyntaxStopsBeforeEnvironmentOrConnection(t *testing.T) {
 		{"attempt", "send-back", "--task", "0123456789abcdef0123456789abcdef", "--note", ""},
 		{"attempt", "send-back", "--task", "0123456789abcdef", "--note", "short id"},
 		{"attempt", "send-back", "--note", "reordered", "--task", "0123456789abcdef0123456789abcdef"},
+		{"attempt", "send-back", "--task", "0123456789abcdef0123456789abcdef", "--note", "n", "--head", "abababababababababababababababababababab"},
 		{"attempt", "send-back", "--task", "0123456789abcdef0123456789abcdef", "--note", strings.Repeat("n", 8193)},
 		{"attempt", "request-human", "--idempotency-key", "0123456789abcdef0123456789abcdef", "--question"},
 		{"attempt", "request-human", "--idempotency-key=0123456789abcdef0123456789abcdef", "--question", "private-question"},
@@ -492,10 +495,10 @@ func TestUsageFailureNamesTheSubcommandUsageLine(t *testing.T) {
 		{[]string{"intake", "create", "--project", id, "--configuration", "{"}, "factoryctl intake create: invalid arguments\nusage: factoryctl intake create --project ID --repository OWNER/REPO|--linear-team TEAM_ID --target-repository ID [--overseer ID] [--label LABEL] [--policy manual|trusted-authors] [--trusted-author LOGIN ...] [--poll-seconds N] [--admission-limit N] [--priority N] [--source ID] [--configuration JSON]\n"},
 		{[]string{"overseer", "status", "--task", id, "--text-offset", "0", "--head", "1"}, "factoryctl overseer status: invalid arguments\nusage: factoryctl overseer status [--task ID] [--offset N --head HEAD] [--text-offset RUNES --head HEAD]\n"},
 		{[]string{"overseer", "task", "add", "--agent", "any", "--title", "t", "--prerequisite", id + ":1", "--priority", "1000001"}, "factoryctl overseer task add: invalid arguments\nusage: factoryctl overseer task add --agent ID|any --title TEXT [--body TEXT] [--priority N] [--prerequisite TASK_ID:WORK_REVISION ...] [--conflict-path PATH ...] [--task-id ID --incarnation-id ID]\n"},
-		{[]string{"task", "add", "--project", id, "--agent", "any", "--title", "t", "--priority", "-1000001"}, "factoryctl task add: invalid arguments\nusage: factoryctl task add --project ID [--repository ID] --agent ID|any --title TEXT [--body TEXT] [--priority N] [--task-id ID --incarnation-id ID]\n"},
+		{[]string{"task", "add", "--project", id, "--agent", "any", "--title", "t", "--priority", "-1000001"}, "factoryctl task add: invalid arguments\nusage: factoryctl task add --project ID [--repository ID] --agent ID|any --title TEXT [--body TEXT] [--priority N] [--content ID:REVISION[,ID:REVISION...]] [--task-id ID --incarnation-id ID]\n"},
 		{[]string{"web", "revoke", id, "--revision", "9223372036854775808"}, "factoryctl web revoke: invalid arguments\nusage: factoryctl web revoke CLIENT_ID --revision REVISION\n"},
 		{[]string{"web", "revoke", id, "--revision", "0"}, "factoryctl web revoke: invalid arguments\nusage: factoryctl web revoke CLIENT_ID --revision REVISION\n"},
-		{[]string{"task", "add", "--project", id, "--agent", "any", "--title", "t", "--priority", "99999999999999999999"}, "factoryctl task add: invalid arguments\nusage: factoryctl task add --project ID [--repository ID] --agent ID|any --title TEXT [--body TEXT] [--priority N] [--task-id ID --incarnation-id ID]\n"},
+		{[]string{"task", "add", "--project", id, "--agent", "any", "--title", "t", "--priority", "99999999999999999999"}, "factoryctl task add: invalid arguments\nusage: factoryctl task add --project ID [--repository ID] --agent ID|any --title TEXT [--body TEXT] [--priority N] [--content ID:REVISION[,ID:REVISION...]] [--task-id ID --incarnation-id ID]\n"},
 		{[]string{"web", "revoke", "private", "--revision", "1"}, "factoryctl web revoke: invalid arguments\nusage: factoryctl web revoke CLIENT_ID --revision REVISION\n"},
 		{[]string{"attempt", "content", "read", "--id", id}, "factoryctl attempt content read: invalid arguments\nusage: factoryctl content read --id ID --revision REVISION\n"},
 		{[]string{"release", "a", "b"}, "factoryctl release: invalid arguments\nusage: factoryctl release SHA [--start] [--wait]\n"},

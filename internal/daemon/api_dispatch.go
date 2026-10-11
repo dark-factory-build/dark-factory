@@ -1,6 +1,7 @@
 package daemon
 
 import (
+	"bytes"
 	"context"
 	"crypto/rand"
 	"encoding/hex"
@@ -83,10 +84,11 @@ type Daemon struct {
 	pipelineAt   atomic.Int64 // unix nanoseconds of the next merge-stage pass
 	pipelineBusy atomic.Bool
 	// The scheduler's Change reclaim pass (tickChangeReclaim), alike, and the
-	// Changes it kept, each logged once; only the pass in flight touches it.
+	// Changes it kept, each logged once with its project and reason; healthMu
+	// guards it for the operator's health read.
 	reclaimAt   atomic.Int64
 	reclaimBusy atomic.Bool
-	keptChanges map[kernel.ChangeID]bool
+	keptChanges map[kernel.ChangeID][2]string
 	store       *kernel.Store
 	now         func() time.Time
 	// livenessClock is deliberately separate from now. The latter is also
@@ -240,7 +242,8 @@ func (daemon *Daemon) HandleConnection(ctx context.Context, connection *api.Conn
 	}
 	dispatchContext, cancel := context.WithTimeout(ctx, defaultDispatchTimeout)
 	defer cancel()
-	if call.Kind() == api.CallMaintainer || call.Kind() == api.CallIntake {
+	// A project's health runs its repositories' fetch checks (oversight).
+	if project, _ := call.HealthProject(); call.Kind() == api.CallMaintainer || call.Kind() == api.CallIntake || project != "" {
 		cancel()
 		dispatchContext, cancel = context.WithTimeout(ctx, 90*time.Second)
 		defer cancel()
@@ -314,14 +317,22 @@ func (daemon *Daemon) markAttemptAPICall(ctx context.Context, call api.Call) {
 // methods; there is no forwarding service layer here.
 func (daemon *Daemon) dispatch(ctx context.Context, call api.Call) api.Reply {
 	switch call.Kind() {
+	case api.CallSnapshot, api.CallHumanRequests, api.CallTaskRead, api.CallIntake:
+		if raw, attempt := call.AttemptDigest(); attempt && !daemon.specialistRead(ctx, raw, call) {
+			return newErrorReply(api.RemoteForbidden)
+		}
+	}
+	switch call.Kind() {
 	case api.CallHealth:
-		return daemon.health(ctx)
+		return daemon.health(ctx, call)
 	case api.CallSnapshot:
 		return daemon.snapshot(ctx)
 	case api.CallHumanRequests:
 		return daemon.humanRequests(ctx)
 	case api.CallHumanReply:
 		return daemon.humanReplyOperator(ctx, call)
+	case api.CallHumanCancel:
+		return daemon.humanCancelOperator(ctx, call)
 	case api.CallCreateProject:
 		return daemon.createProject(ctx, call)
 	case api.CallProjectRepository:
@@ -519,6 +530,19 @@ func (daemon *Daemon) dispatch(ctx context.Context, call api.Call) api.Reply {
 	}
 }
 
+// specialistRead admits a specialist's review run (its carrier) to the
+// operator's read views, and of intake only its list; every other attempt,
+// and every write, is refused.
+func (daemon *Daemon) specialistRead(ctx context.Context, raw api.AttemptDigest, call api.Call) bool {
+	digest, err := attemptDigest(raw)
+	if err != nil {
+		return false
+	}
+	authority, err := daemon.store.AuthenticateAttempt(ctx, digest)
+	intake, _ := call.IntakeInput()
+	return err == nil && authority.Specialist && (call.Kind() != api.CallIntake || intake.Action == "list")
+}
+
 func (daemon *Daemon) agentPaths(ctx context.Context, call api.Call) api.Reply {
 	input, ok := call.AgentPathsInput()
 	if !ok {
@@ -667,7 +691,7 @@ func (daemon *Daemon) humanRequests(ctx context.Context) api.Reply {
 	}
 	result := api.HumanRequestList{Requests: make([]api.HumanRequest, 0, len(requests))}
 	for _, request := range requests {
-		result.Requests = append(result.Requests, api.HumanRequest{ID: request.ID.String(), RunID: request.RunID.String(), TaskID: request.TaskID.String(), AgentID: request.AgentID.String(), Status: request.Status.String(), Revision: uint64(request.Revision.Int64()), Question: request.QuestionText, Options: append([]string{}, request.Options...)})
+		result.Requests = append(result.Requests, api.HumanRequest{ID: request.ID.String(), RunID: request.RunID.String(), TaskID: request.TaskID.String(), AgentID: request.AgentID.String(), Status: request.Status.String(), Revision: uint64(request.Revision.Int64()), RunRevision: uint64(request.RunRevision.Int64()), Question: request.QuestionText, Options: append([]string{}, request.Options...)})
 	}
 	return api.NewHumanRequestListReply(result)
 }
@@ -731,6 +755,33 @@ func (daemon *Daemon) humanReplyOperator(ctx context.Context, call api.Call) api
 	return daemon.overseerHumanReplyMutation(projection)
 }
 
+func (daemon *Daemon) humanCancelOperator(ctx context.Context, call api.Call) api.Reply {
+	input, ok := call.HumanCancelInput()
+	if !ok {
+		return newErrorReply(api.RemoteInvalidRequest)
+	}
+	requestID, err := decodeID(input.RequestID, kernel.HumanRequestIDFromBytes)
+	if err != nil {
+		return newErrorReply(api.RemoteInvalidRequest)
+	}
+	expectedRequest, requestErr := kernel.NewRevision(int64(input.ExpectedRevision))
+	expectedRun, runErr := kernel.NewRevision(int64(input.ExpectedRunRevision))
+	if requestErr != nil || runErr != nil {
+		return newErrorReply(api.RemoteInvalidRequest)
+	}
+	at, err := daemon.timestamp()
+	if err != nil {
+		return newErrorReply(api.RemoteInternal)
+	}
+	_, request, err := daemon.fenceHumanRequestCancel(func() (kernel.Run, kernel.HumanRequest, error) {
+		return daemon.store.CancelHumanRequestRunForOperator(ctx, requestID, expectedRequest, expectedRun, at)
+	})
+	if err != nil {
+		return newErrorReply(remoteErrorCode(err))
+	}
+	return daemon.overseerHumanReplyMutation(kernel.HumanRequestProjection{ID: request.ID, Revision: request.Revision, Status: request.Status})
+}
+
 func (daemon *Daemon) attemptTask(ctx context.Context, call api.Call) api.Reply {
 	digest, ok := call.AttemptDigest()
 	if !ok {
@@ -756,6 +807,11 @@ func (daemon *Daemon) attemptTask(ctx context.Context, call api.Call) api.Reply 
 	task, suppliedKnowledge, err := daemon.prepareKnowledgeTask(ctx, contextRun, []byte(instruction), false)
 	if err != nil {
 		return newErrorReply(api.RemoteInternal)
+	}
+	if call.AttemptTaskResumed() && authority.Role == kernel.RoleOrchestrator && authority.Provider == kernel.ProviderCodex {
+		if marker := bytes.Index(task, []byte("\n\nFactory causal wake:")); marker >= 0 {
+			task = task[marker+2:]
+		}
 	}
 	assignment := api.AttemptTask{Task: string(task)}
 	accepted, found, err := daemon.store.IntakeAcceptanceForTask(ctx, authority.TaskID)
@@ -1056,11 +1112,71 @@ func (daemon *Daemon) notifyPeerDelivery(ctx context.Context, question kernel.Pe
 	return err
 }
 
-func (daemon *Daemon) health(ctx context.Context) api.Reply {
+func (daemon *Daemon) health(ctx context.Context, call api.Call) api.Reply {
 	if _, err := daemon.store.Factory(ctx); err != nil {
 		return newErrorReply(remoteErrorCode(err))
 	}
-	return api.NewHealthReply(api.HealthStatus{Ready: true})
+	project, _ := call.HealthProject()
+	if project == "" {
+		return api.NewHealthReply(api.HealthStatus{Ready: true})
+	}
+	id, err := decodeID(project, kernel.ProjectIDFromBytes)
+	if err != nil {
+		return newErrorReply(api.RemoteInvalidRequest)
+	}
+	status, err := daemon.oversight(ctx, id)
+	if err != nil {
+		return newErrorReply(remoteErrorCode(err))
+	}
+	return api.NewHealthReply(status)
+}
+
+// oversight is what factoryd waits on in project (api.HealthStatus).
+func (daemon *Daemon) oversight(ctx context.Context, project kernel.ProjectID) (api.HealthStatus, error) {
+	status := api.HealthStatus{Ready: true, KeptChanges: map[string]int{}}
+	at, err := daemon.timestamp()
+	if err != nil {
+		return status, err
+	}
+	health := daemon.overseerHealth()
+	for _, held := range health {
+		if held.Project == (kernel.ProjectID{}) || held.Project == project {
+			status.Conditions = append(status.Conditions, api.HealthCondition{Key: held.Key, Detail: held.Detail, SinceMS: held.Since.Int64()})
+		}
+	}
+	items, err := daemon.store.OverseerItems(ctx, project, at, health...)
+	if err != nil {
+		return status, err
+	}
+	for _, item := range items {
+		view := api.OverseerItem{AgentID: item.Agent.String(), State: "stalled", Line: item.Line, CarrierTaskID: hex.EncodeToString(item.Carrier)}
+		if item.Due {
+			view.State = "due"
+		}
+		status.OverseerItems = append(status.OverseerItems, view)
+	}
+	daemon.healthMu.Lock()
+	for _, kept := range daemon.keptChanges {
+		if kept[0] == project.String() {
+			status.KeptChanges[kept[1]]++
+		}
+	}
+	daemon.healthMu.Unlock()
+	repositories, err := daemon.store.ProjectRepositories(ctx, project)
+	if err != nil {
+		return status, err
+	}
+	// ponytail: one bounded fetch check per repository, in turn, as
+	// project repository fetch runs it, within the call's 90s dispatch budget
+	// (HandleConnection); parallelise if projects grow many.
+	for _, repository := range repositories {
+		view, err := daemon.RepositoryReadiness(ctx, repository.ID, true)
+		if err != nil {
+			return status, err
+		}
+		status.Repositories = append(status.Repositories, view)
+	}
+	return status, nil
 }
 
 func (daemon *Daemon) snapshot(ctx context.Context) api.Reply {
@@ -1453,10 +1569,19 @@ func (daemon *Daemon) enqueueTask(ctx context.Context, call api.Call) api.Reply 
 	if err != nil {
 		return newErrorReply(api.RemoteInvalidRequest)
 	}
+	content := make([]kernel.TaskContentReference, len(input.Content))
+	for i, pin := range input.Content {
+		if content[i].ContentID, err = decodeID(pin.ContentID, kernel.ContentIDFromBytes); err != nil {
+			return newErrorReply(api.RemoteInvalidRequest)
+		}
+		if content[i].ContentRevision, err = kernel.NewRevision(int64(pin.ContentRevision)); err != nil {
+			return newErrorReply(api.RemoteInvalidRequest)
+		}
+	}
 	if err := prepareTaskEnqueue(ctx, daemon.store, spec, false); err != nil {
 		return newErrorReply(remoteErrorCode(err))
 	}
-	task, err := daemon.store.EnqueueTask(ctx, spec, at)
+	task, err := daemon.store.EnqueueTask(ctx, spec, at, content...)
 	if err != nil {
 		return newErrorReply(remoteErrorCode(err))
 	}
@@ -1679,15 +1804,18 @@ func (daemon *Daemon) sendBack(ctx context.Context, call api.Call) api.Reply {
 	}
 	var task kernel.Task
 	if attempt {
-		task, err = daemon.store.SendBackTaskForAttempt(ctx, digest, taskID, input.Note, at)
-		if err != nil {
-			return newErrorReply(remoteErrorCode(err))
-		}
+		task, err = daemon.store.SendBackTaskForAttempt(ctx, digest, taskID, input.Head, input.Note, at)
 	} else {
-		task, err = daemon.store.SendBackTask(ctx, taskID, current.Revision, input.Note, at)
-		if err != nil {
-			return newErrorReply(remoteErrorCode(err))
+		task, err = daemon.store.SendBackTask(ctx, taskID, current.Revision, input.Head, input.Note, at)
+	}
+	if err != nil {
+		// A stale head names the Change head to observe instead.
+		if errors.Is(err, kernel.ErrSuperseded) {
+			if reply, replyErr := api.NewErrorDetailReply(api.RemoteConflict, boundedDetail(err)); replyErr == nil {
+				return reply
+			}
 		}
+		return newErrorReply(remoteErrorCode(err))
 	}
 	// The task is queued again; the scheduler should not wait for its tick.
 	daemon.notifyScheduler()
@@ -1803,6 +1931,7 @@ func (daemon *Daemon) overseerSnapshot(ctx context.Context, call api.Call) api.R
 	if err != nil {
 		return newErrorReply(api.RemoteUnavailable)
 	}
+	projected.Factoryd = daemon.factorydHealth()
 	reply, err := api.NewOverseerSnapshotReply(projected)
 	if err != nil {
 		return newErrorReply(api.RemoteInternal)
@@ -2011,8 +2140,16 @@ func (daemon *Daemon) operatorUpdateTask(ctx context.Context, call api.Call) api
 
 func (daemon *Daemon) operatorUpdateAgent(ctx context.Context, call api.Call) api.Reply {
 	input, ok := call.OverseerAgentUpdateInput()
-	if !ok || input.ExpectedRevision > uint64(^uint64(0)>>1) || input.Paused == nil && input.Archived == nil || input.Paused != nil && input.Archived != nil {
+	if !ok || input.ExpectedRevision > uint64(^uint64(0)>>1) {
 		return newErrorReply(api.RemoteInvalidRequest)
+	}
+	patch := kernel.AgentPatch{Paused: input.Paused, Archived: input.Archived}
+	if input.Appearance != nil {
+		appearance, err := kernel.DecodeAgentAppearance(*input.Appearance)
+		if err != nil {
+			return newErrorReply(api.RemoteInvalidRequest)
+		}
+		patch.Appearance = &appearance
 	}
 	id, err := decodeID(input.AgentID, kernel.AgentIDFromBytes)
 	if err != nil {
@@ -2026,7 +2163,7 @@ func (daemon *Daemon) operatorUpdateAgent(ctx context.Context, call api.Call) ap
 	if err != nil {
 		return newErrorReply(api.RemoteInternal)
 	}
-	agent, err := daemon.store.UpdateAgentForOperator(ctx, id, expected, kernel.AgentPatch{Paused: input.Paused, Archived: input.Archived}, at)
+	agent, err := daemon.store.UpdateAgentForOperator(ctx, id, expected, patch, at)
 	if err != nil {
 		return newErrorReply(remoteErrorCode(err))
 	}

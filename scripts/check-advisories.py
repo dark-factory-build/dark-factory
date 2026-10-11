@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """Fail on known OSV advisories for what the release ships: the Go standard
-library at go.mod's go line (release builds use exactly that toolchain), the
+library at go.mod's toolchain line (release builds use exactly that toolchain), the
 modules go.mod requires (since Go 1.17 that is every module the build uses),
 and web/pnpm-lock.yaml. scripts/advisory-allowlist accepts an advisory with a
 reason, one "ID reason" per line."""
@@ -10,7 +10,7 @@ import sys
 import urllib.request
 
 go_mod = open('go.mod').read()
-queries = [('Go', 'stdlib', re.search(r'(?m)^go (\S+)$', go_mod).group(1))]
+queries = [('Go', 'stdlib', re.search(r'(?m)^toolchain go(\S+)$', go_mod).group(1))]
 queries += [('Go', name, version) for name, version in
             re.findall(r'(?m)^\s*(?:require\s+)?([a-z0-9.-]+\.[a-z]+/\S+) (v\S+)', go_mod)]
 packages = open('web/pnpm-lock.yaml').read().split('\npackages:\n', 1)[1].split('\nsnapshots:\n', 1)[0]

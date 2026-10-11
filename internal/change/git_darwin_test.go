@@ -9,6 +9,8 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -22,6 +24,8 @@ import (
 	"time"
 
 	"golang.org/x/sys/unix"
+
+	"github.com/dark-factory-build/dark-factory/internal/runner"
 )
 
 type localGitFixture struct {
@@ -693,6 +697,26 @@ func TestGitPublicFailuresNeverExposePrivateBoundaryData(t *testing.T) {
 	}
 }
 
+func TestGitErrorNamesOperationWithoutExposingArguments(t *testing.T) {
+	err := reviewCheckoutGitError("fetch", newGitError(gitFailureProcess))
+	if got := err.Error(); got != "review checkout fetch: Git process failed" {
+		t.Fatalf("error = %q", got)
+	}
+}
+
+func TestReviewCheckoutCarriesRegisteredSSHCommandIntoFetch(t *testing.T) {
+	args, err := reviewCheckoutSSHArgs(gitCapture{exitCode: 0, output: []byte("/usr/bin/ssh -i /private/key")})
+	if err != nil || !reflect.DeepEqual(args, []string{"-c", "core.sshCommand=/usr/bin/ssh -i /private/key"}) {
+		t.Fatalf("ssh args = %#v, %v", args, err)
+	}
+	if args, err := reviewCheckoutSSHArgs(gitCapture{exitCode: 1}); err != nil || args != nil {
+		t.Fatalf("missing ssh command = %#v, %v", args, err)
+	}
+	if _, err := reviewCheckoutSSHArgs(gitCapture{exitCode: 0, output: []byte("bad\ncommand")}); err == nil {
+		t.Fatal("newline in registered SSH command accepted")
+	}
+}
+
 func TestReadGitCapturePreservesBoundedReaderContract(t *testing.T) {
 	wrappedEOF := fmt.Errorf("wrapped: %w", io.EOF)
 	tests := []struct {
@@ -789,7 +813,7 @@ func mustID(t testing.TB, format ObjectFormat, raw []byte) ObjectID {
 
 func secureTempDir(t testing.TB) string {
 	t.Helper()
-	path, err := os.MkdirTemp("/private/tmp", "dark-factory-change-")
+	path, err := os.MkdirTemp(runner.ShortTempDir(), "dark-factory-change-")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1117,8 +1141,20 @@ func TestFreshSelectionStartsFromOriginDefaultBranchNotCheckout(t *testing.T) {
 	// An unreachable origin stops selection rather than falling back to the
 	// checkout's HEAD or the previously fetched factory ref.
 	runFixtureGit(t, fixture.git, fixture.repository, "remote", "set-url", "origin", filepath.Join(t.TempDir(), "missing"))
-	if _, err := SelectGit(ctx, fixture.git, fixture.repository, "HEAD", fixture.identity); err == nil || !strings.Contains(err.Error(), "source refresh failed") {
+	if _, err := SelectGit(ctx, fixture.git, fixture.repository, "HEAD", fixture.identity); err == nil || !strings.Contains(err.Error(), "source refresh failed (the configured remote does not exist)") {
 		t.Fatalf("failed origin fetch selected old source: %v", err)
+	}
+	// A private origin names the missing authentication, never Git's stderr
+	// or the remote URL, and borrows no ambient credential.
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("WWW-Authenticate", `Basic realm="private"`)
+		w.WriteHeader(http.StatusUnauthorized)
+	}))
+	defer server.Close()
+	runFixtureGit(t, fixture.git, fixture.repository, "remote", "set-url", "origin", server.URL+"/private.git")
+	_, err = SelectGit(ctx, fixture.git, fixture.repository, "HEAD", fixture.identity)
+	if err == nil || !strings.Contains(err.Error(), "remote required authentication") || strings.Contains(err.Error(), server.URL) {
+		t.Fatalf("private origin failure: %v", err)
 	}
 }
 
@@ -1143,7 +1179,7 @@ func TestFreshSelectionFetchesAPullRequestHeadNotOnTheBase(t *testing.T) {
 	if err != nil || selected.Base().Hex() != head {
 		t.Fatalf("base=%s want pull request head %s: %v", selected.Base().Hex(), head, err)
 	}
-	if _, err := SelectRegisteredGit(ctx, fixture.git, fixture.repository, "refs/pull/8/head", source); err == nil || !strings.Contains(err.Error(), "source refresh failed") {
+	if _, err := SelectRegisteredGit(ctx, fixture.git, fixture.repository, "refs/pull/8/head", source); err == nil || !strings.Contains(err.Error(), "source refresh failed (the configured remote branch does not exist)") {
 		t.Fatalf("selected a pull request the origin does not have: %v", err)
 	}
 }

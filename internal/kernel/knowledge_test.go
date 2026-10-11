@@ -281,6 +281,22 @@ func TestKnowledgeAttachmentScopeAndLifecycle(t *testing.T) {
 			t.Fatalf("queued pin/replay: %v", err)
 		}
 	}
+	// Pins given at enqueue get the same scope checks, and a refused one
+	// refuses the whole enqueue.
+	pinned := NewTask{ID: taskID(t, 145), ProjectID: run.ProjectID, RepositoryID: other.ID, IncarnationID: incarnationID(t, 146), Title: "pinned"}
+	if _, err := store.EnqueueTask(ctx, pinned, mustTime(t, 47), TaskContentReference{ContentID: local.ID, ContentRevision: local.Revision}, TaskContentReference{ContentID: content.ID, ContentRevision: content.Revision}); !errors.Is(err, ErrConflict) {
+		t.Fatalf("cross-repository enqueue pin: %v", err)
+	}
+	if _, found, err := store.Task(ctx, pinned.ID); err != nil || found {
+		t.Fatalf("refused enqueue left a task: %v %v", found, err)
+	}
+	created, err := store.EnqueueTask(ctx, pinned, mustTime(t, 48), TaskContentReference{ContentID: local.ID, ContentRevision: local.Revision})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if refs, err := store.TaskContentReferences(ctx, run.ProjectID, created.ID, created.WorkRevision); err != nil || len(refs) != 1 || refs[0].ContentID != local.ID {
+		t.Fatalf("enqueue pins: %+v %v", refs, err)
+	}
 }
 
 func TestKnowledgeProjectScopeAcrossRepositories(t *testing.T) {

@@ -560,13 +560,18 @@ review task for a worker, record a verdict, enqueue, or wait on that pipeline.
 factoryd wakes you with `Escalated: factoryd cannot advance OWNER/REPO#N at
 exact head HEAD: ...` only when it cannot advance a pull request: a review that
 failed twice, an enqueue the App refused, a send-back that reached no task, or
-a change past two repair rounds. An enqueue refused as UNPROCESSABLE (a
-required check that never ran on the head) is final for that head: only a new
-head is reviewed and enqueued. Resolve that cause or raise it with
+a change past two repair rounds. An enqueue refusal is escalated at once and
+the operation stays live: one awaiting CODEOWNERS approval waits for it, and an
+UNPROCESSABLE one is retried up to three times, then again whenever the head's
+checks or review state change. Only invalid input is final for that head.
+Resolve the cause or raise it with
 `attempt request-human` naming the pull request; never start another review.
 
 A send-back of your own (for example a `dirty` worktree, section 1) carries a
-pointer note, never pasted findings.
+pointer note, never pasted findings, and `--head` naming the Change head you
+observed it at (the full head your wake line shows after `change=ID@`). A note
+about any other head is refused as a `conflict` that names the current head:
+observe the premise again there, and send it back only if it still holds.
 
 Never recover a task ID or a Change path from SQLite. The task/status
 handoff is authoritative and cross-project, stale, refused, missing, or

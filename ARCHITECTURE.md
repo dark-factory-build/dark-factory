@@ -93,6 +93,19 @@ unsupported before a provider runs.
 7. No admitted attempt means no provider process or outcome request, and no
    writable source lease. A retry creates a new run and bearer; it never revives
    an old process or credential.
+8. A long-running operation stops only on a failure the same request meets
+   again, and that is escalated once; anything else is retried, and escalated
+   once if it outlasts its bound (#1558). Publication retries hourly and
+   escalates on its first failure. A merge-stage pass (observe, enqueue)
+   retries every 5 minutes and escalates after 30; an enqueue refusal is
+   escalated at once and retried three times, then on each changed
+   observation of the pull request. Run settlement retries a
+   repository, Git or I/O fault and refuses a worktree that fails its own
+   validation; a release drain waits 10 minutes, then fails naming the run. An
+   attempt call waits out a 30-second daemon restart before its run sees the
+   failure. Permanent means invalid input, a tree GitHub cannot return whole,
+   or a Change worktree that does not verify; a refusal whose precondition can
+   come to hold (an approval, a check, a permission) is not.
 
 ## Browser authority
 
@@ -293,6 +306,14 @@ descendant census nor a stored PID/birth observation can grant a direct signal
 right. Providers must retain command children in the runner-owned group or
 offer an authenticated, provider-owned shutdown capability before such cleanup
 can be supported.
+
+One Darwin compatibility sweep (#1403) predates that rule: after group
+convergence the live runner kills same-user processes whose exec-time `TMPDIR`
+lies in the run's runtime root or short private `TMPDIR`, signalling their
+numeric PIDs, then removes that `TMPDIR`. Replacing it
+needs proof of current providers' Mac detached-process behavior, and Linux
+does not copy it. Any sweep failure counts as unproved cleanup, so the runner
+publishes no result and the attempt's resources stay unresolved.
 
 ## Provider boundary
 

@@ -81,6 +81,9 @@ Every record carries `status` (`tentative` unless verified), `evidence`
   for one task), including its factoryd section if present.
 - `attempt terminal observe --project P --task T --run R`: bounded, redacted;
   read the window that answers your question.
+- The operator's read views, through your attempt: `attempt status`,
+  `attempt human list`, `attempt intake list|config [--project ID]` and
+  `attempt task read --task ID --revision N`. Their write forms are refused.
 - Your checkout. Run tests or builds only if your question needs them.
 - GitHub, unauthenticated only (60 requests an hour shared by this machine;
   never use a token; use few): issues, PRs, Actions runs, e.g.
@@ -91,7 +94,9 @@ Every record carries `status` (`tentative` unless verified), `evidence`
   --frozen-lockfile && corepack pnpm run preview:floor fixture` and open
   `http://127.0.0.1:5196/?fixture`. It is static markup over simulated data:
   layout, copy and phone width are reviewable; clicks, keyboard flow and
-  action feedback are not. Say so.
+  action feedback are not. Say so. If no URL is printed, treat it as a
+  bind/occupied-port failure and do not browse stale content on `:5196`; stop
+  any prior fixture and retry once.
 
 ## Limits
 

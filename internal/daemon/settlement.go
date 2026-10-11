@@ -189,15 +189,15 @@ func (daemon *Daemon) reclaimChanges(ctx context.Context) int {
 		LogFactoryd(daemon.log, "factoryd: reclaim Changes: %v\n", err)
 		return 0
 	}
-	if daemon.keptChanges == nil {
-		daemon.keptChanges = map[kernel.ChangeID]bool{}
-	}
 	inspected, reclaimed := 0, 0
 	for _, candidate := range candidates {
 		if inspected == changeReclaimBatch || ctx.Err() != nil {
 			break
 		}
-		if daemon.keptChanges[candidate.ID] {
+		daemon.healthMu.Lock()
+		_, kept := daemon.keptChanges[candidate.ID]
+		daemon.healthMu.Unlock()
+		if kept {
 			continue
 		}
 		inspected++
@@ -223,7 +223,12 @@ func (daemon *Daemon) reclaimChanges(ctx context.Context) int {
 			err = change.RemoveWorktree(ctx, *git, route.Root, repository, filepath.Join(*parent, candidate.ID.String()), head, candidate.GivenUp)
 		}
 		if err != nil {
-			daemon.keptChanges[candidate.ID] = true
+			daemon.healthMu.Lock()
+			if daemon.keptChanges == nil {
+				daemon.keptChanges = map[kernel.ChangeID][2]string{}
+			}
+			daemon.keptChanges[candidate.ID] = [2]string{candidate.ProjectID.String(), err.Error()}
+			daemon.healthMu.Unlock()
 			LogFactoryd(daemon.log, "factoryd: keeping Change %s: %v\n", candidate.ID, err)
 			continue
 		}

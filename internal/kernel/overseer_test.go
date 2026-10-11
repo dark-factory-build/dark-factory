@@ -260,7 +260,7 @@ func TestRetainedChangeHandoffsInspectCurrentSettledOutcomes(t *testing.T) {
 				if err != nil || !found {
 					t.Fatalf("task = %+v, found=%v, err=%v", task, found, err)
 				}
-				if _, err := store.SendBackTask(context.Background(), task.ID, task.Revision, "repair this", mustTime(t, 80)); err != nil {
+				if _, err := store.SendBackTask(context.Background(), task.ID, task.Revision, changeHead(t, store, task.ID), "repair this", mustTime(t, 80)); err != nil {
 					t.Fatal(err)
 				}
 			}
@@ -323,7 +323,7 @@ func TestOverseerSnapshotFirstPageShowsYieldedTerminalQuestionAndRefusesOrphan(t
 		t.Fatalf("selected yielded task = %+v, %v", detail, err)
 	}
 	// Without its waiting continuation a terminal run's open question is corrupt.
-	corruptSQL(t, store, `UPDATE continuations SET state = 'cancelled' WHERE condition_kind = 'human_request' AND condition_id = ?`, request.ID.Bytes())
+	corruptSQL(t, store, `UPDATE human_requests SET continuation = NULL WHERE id = ?`, request.ID.Bytes())
 	if _, err := store.OverseerSnapshotForAttempt(ctx, overseer.CredentialDigest, OverseerSnapshotRequest{}); !errors.Is(err, ErrCorruptState) {
 		t.Fatalf("orphaned terminal question = %v", err)
 	}
