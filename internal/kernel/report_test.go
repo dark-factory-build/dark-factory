@@ -97,6 +97,8 @@ func TestReportAndWhyReadTheReconcilersState(t *testing.T) {
 
 func TestReportLessonCountersUseLatestRevision(t *testing.T) {
 	t.Parallel()
+	// The lesson counters are new report behavior; this guards their stated
+	// latest-revision contract rather than asserting a pre-existing projection.
 	store, run, keys := runningWorkerRun(t)
 	defer store.Close()
 	ctx := context.Background()

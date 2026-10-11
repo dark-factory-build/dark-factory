@@ -97,8 +97,9 @@ func (store *Store) Report(ctx context.Context, project *ProjectID, since, bucke
 			return nil, err
 		}
 	}
-	// The report's lesson-reuse projection describes only each lesson's latest
-	// immutable revision; historical revisions must not inflate its counters.
+	// Issue #1774 adds this lesson-reuse projection: it describes only each
+	// lesson's latest immutable revision; historical revisions must not inflate
+	// its counters.
 	var lessons, reads, citations, stale int64
 	if err := read.connection.QueryRowContext(ctx, `SELECT COUNT(*),
 		COALESCE((SELECT COUNT(DISTINCT a.run_id) FROM content_accesses a JOIN project_content_revisions x ON x.id=a.content_id AND x.revision=a.content_revision WHERE a.kind IN ('read','supplied') AND (?1 IS NULL OR x.project_id=?1) AND x.kind='lesson' AND x.deprecated=0 AND x.revision=(SELECT MAX(revision) FROM project_content_revisions WHERE id=x.id)), 0),
