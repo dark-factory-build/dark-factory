@@ -418,38 +418,43 @@ func (daemon *Daemon) withdrawIntakeTask(ctx context.Context, acceptanceID kerne
 	if task.Status != kernel.TaskRunning {
 		return nil
 	}
-	runs, err := daemon.store.RecoverableRuns(ctx)
+	run, found, err := daemon.store.LatestTaskRun(ctx, task.ID, task.IncarnationID)
+	if err != nil || !found || run.Phase == kernel.RunTerminal {
+		if err == nil {
+			err = kernel.ErrConflict
+		}
+		return err
+	}
+	if run.Phase == kernel.RunFinalizing {
+		return nil
+	}
+	digest := sha256.Sum256([]byte("intake-withdraw/" + acceptanceID.String() + "/" + run.ID.String()))
+	operation, err := kernel.TaskInterventionIDFromBytes(digest[:kernel.IDBytes])
 	if err != nil {
 		return err
 	}
-	for _, value := range runs {
-		run := value.Run
-		if run.TaskID != task.ID {
-			continue
-		}
-		if run.Phase == kernel.RunFinalizing || run.Phase == kernel.RunTerminal {
-			return nil
-		}
-		digest := sha256.Sum256([]byte("intake-withdraw/" + acceptanceID.String() + "/" + run.ID.String()))
-		operation, err := kernel.TaskInterventionIDFromBytes(digest[:kernel.IDBytes])
-		if err != nil {
-			return err
-		}
-		_, err = daemon.store.StopRunForOperator(ctx, kernel.TaskInterventionRequest{OperationID: operation, TaskID: task.ID, RunID: run.ID, ExpectedTaskRevision: task.Revision, ExpectedRunRevision: run.Revision, Kind: kernel.TaskInterventionStop}, nil, at)
-		daemon.notifyScheduler()
-		return err
-	}
-	return kernel.ErrConflict
+	_, err = daemon.store.StopRunForOperator(ctx, kernel.TaskInterventionRequest{OperationID: operation, TaskID: task.ID, RunID: run.ID, ExpectedTaskRevision: task.Revision, ExpectedRunRevision: run.Revision, Kind: kernel.TaskInterventionStop}, nil, at)
+	daemon.notifyScheduler()
+	return err
 }
 
+// intakePassDeadline leaves response time inside the 90-second dispatch budget.
+const intakePassDeadline = 75 * time.Second
+
 func (daemon *Daemon) previewIntake(ctx context.Context, source kernel.IntakeSource, page uint32, tick bool, cursor string) api.IntakeResult {
-	// Leave response time inside the existing 90-second dispatch budget.
-	ctx, cancel := context.WithTimeout(ctx, 75*time.Second)
+	ctx, cancel := context.WithTimeout(ctx, intakePassDeadline)
 	defer cancel()
 	result := api.IntakeResult{SourceID: source.ID.String(), State: "ok", ReviewedRevision: uint64(source.Revision.Int64()), Candidates: []api.IntakeCandidate{}, ImportedTasks: []string{}}
+	// Each step's duration, so health shows where a slow pass spends its time.
+	current, started := "withdrawals", time.Now()
+	step := func(next string) {
+		result.Timing = strings.TrimSpace(result.Timing + " " + current + "=" + time.Since(started).Round(time.Millisecond).String())
+		current, started = next, time.Now()
+	}
 	failure := func(err error) api.IntakeResult {
+		step("")
 		if tick { // the poll keeps only the state; keep the cause visible
-			LogFactoryd(daemon.log, "factoryd: intake source %s: %v\n", source.ID, err)
+			LogFactoryd(daemon.log, "factoryd: intake source %s: %v (%s)\n", source.ID, err, result.Timing)
 		}
 		result.State = intakeFailure(err).State
 		return result
@@ -471,6 +476,7 @@ func (daemon *Daemon) previewIntake(ctx context.Context, source kernel.IntakeSou
 	}
 	// Keep bounded receipt scanning independent of discovery and admission limits.
 	// The caller (the scheduler's intake poll) owns progress; an empty cursor wraps.
+	step("receipts")
 	if tick {
 		after := kernel.IntakeAcceptanceID{}
 		if cursor != "" {
@@ -498,10 +504,12 @@ func (daemon *Daemon) previewIntake(ctx context.Context, source kernel.IntakeSou
 			}
 		}
 	}
+	step("list")
 	observed, err := daemon.sourceIssues(ctx, source, page, source.LabelFilter, 0)
 	if err != nil {
 		return failure(err)
 	}
+	step("issues")
 	result.NextPage = observed.NextPage
 	for _, issue := range observed.Issues {
 		snapshot := intakeSnapshot(source, issue)
@@ -572,6 +580,7 @@ func (daemon *Daemon) previewIntake(ctx context.Context, source kernel.IntakeSou
 		}
 		result.Candidates = append(result.Candidates, candidate)
 	}
+	step("")
 	return result
 }
 

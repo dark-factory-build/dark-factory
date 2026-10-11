@@ -76,7 +76,7 @@ export type SceneWorker = Readonly<{
   role: "orchestrator" | "worker";
   provider?: "claude_code" | "codex" | "shell";
   /** A worker with a standing instruction: its specialty and what it is doing, as the factory serves them. */
-  specialist?: Readonly<{ title: string; text: string; next: string }>;
+  specialist?: Readonly<{ title: string; stage: string; text: string; next: string }>;
   activity: "busy" | "waiting" | "needs-you" | "idle";
   paused?: boolean;
   appearance?: SpriteAppearance;
@@ -95,7 +95,7 @@ export type SceneWorker = Readonly<{
 /** A busy worker whose agent recorded no tool call or API request for this long is shown waiting. */
 export const QUIET_SECONDS = 120;
 
-/** Recorded effort and spend as one line, e.g. "12.4k tokens · $0.31 · 18 tool calls"; only what was recorded. */
+/** Recorded effort and spend as one line, e.g. "12.4k tokens · $0.31 · 18 tool calls · 1 sub-agent running"; only what was recorded. */
 export function telemetryLine(telemetry: RunTelemetry): string {
   const tokens = telemetry.tokens_in + telemetry.tokens_out;
   const cost = telemetry.cost_micro_usd / 1e6;
@@ -103,6 +103,7 @@ export function telemetryLine(telemetry: RunTelemetry): string {
     tokens === 0 ? "" : `${tokens < 1000 ? tokens : tokens < 1e6 ? `${(tokens / 1e3).toFixed(1)}k` : `${(tokens / 1e6).toFixed(1)}M`} tokens`,
     cost === 0 ? "" : cost < 0.01 ? "<$0.01" : `$${cost.toFixed(2)}`,
     telemetry.tool_calls === 0 ? "" : `${telemetry.tool_calls} tool call${telemetry.tool_calls === 1 ? "" : "s"}`,
+    (telemetry.subagents ?? 0) === 0 ? "" : `${telemetry.subagents} sub-agent${telemetry.subagents === 1 ? "" : "s"} running`,
   ].filter((part) => part !== "").join(" · ");
 }
 

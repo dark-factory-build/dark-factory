@@ -5,7 +5,6 @@ import json
 import os
 from pathlib import Path
 import stat
-import subprocess
 import sys
 import tempfile
 from urllib.parse import urlsplit
@@ -66,9 +65,6 @@ def main():
     parser.add_argument('--runtime-dir', required=True)
     args = parser.parse_args()
     config = settings(Path(__file__).resolve().with_suffix('.json'))
-    # Authentication is checked by the existing API, never by reading the token.
-    subprocess.run([os.environ['DARK_FACTORY_FACTORYCTL'], 'attempt', 'task'],
-        check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=15)
     argv, env, session = prepare(config, args.runtime_dir)
     # Relative Unix sockets avoid macOS sun_path limits without leaving the run.
     os.chdir(session)
@@ -78,6 +74,6 @@ def main():
 if __name__ == '__main__':
     try:
         main()
-    except (OSError, ValueError, KeyError, TypeError, subprocess.SubprocessError):
-        print('factory browser unavailable: check the installed configuration and live attempt', file=sys.stderr)
+    except (OSError, ValueError, KeyError, TypeError):
+        print('factory browser unavailable: check the installed configuration', file=sys.stderr)
         sys.exit(1)

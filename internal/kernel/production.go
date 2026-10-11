@@ -609,9 +609,9 @@ func (store *Store) PublishableChanges(ctx context.Context, at UnixMillis) ([]Pu
 // RecordCorrectionPublished marks the Change's correction as published on
 // the pull request factoryd opened for its worker task: neither factoryd nor
 // the overseer's wake treats that settlement as unpublished again.
-// It moves one timestamp no retained-history rule reads, so it is unchecked.
+// It moves one timestamp no retained-history rule reads.
 func (store *Store) RecordCorrectionPublished(ctx context.Context, c PublishableChange, at UnixMillis) error {
-	tx, err := store.beginUncheckedWrite(ctx)
+	tx, err := store.beginValidatedWrite(ctx)
 	if err != nil {
 		return err
 	}
@@ -726,7 +726,8 @@ func (store *Store) SettledProductionChecks(ctx context.Context, project Project
 		FROM production_records r, json_each(r.document, '$.pull_requests') j
 		WHERE r.project_id = ? AND r.repository = ? AND r.kind = 'check' AND json_extract(r.document, '$.scope') = 'head'
 		GROUP BY 1, 2 HAVING MIN(json_extract(r.document, '$.state') = 'completed'
-			AND COALESCE(json_extract(r.document, '$.conclusion'), '') NOT IN ('failure', 'timed_out', 'cancelled', 'action_required', 'startup_failure')) = 1`, project.Bytes(), strings.ToLower(repo))
+			AND COALESCE(json_extract(r.document, '$.conclusion'), '') NOT IN ('failure', 'timed_out', 'cancelled', 'action_required', 'startup_failure')
+			AND json_type(r.document, '$.required') IS NOT NULL) = 1`, project.Bytes(), strings.ToLower(repo))
 	if err != nil {
 		return nil, err
 	}

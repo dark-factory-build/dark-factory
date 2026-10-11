@@ -27,6 +27,15 @@ func (store *Store) CreateProject(ctx context.Context, spec NewProject, at UnixM
 		return Project{}, err
 	}
 	defer tx.Close()
+	if err := validateRepositoryBindings(ctx, tx.connection); err != nil {
+		return Project{}, tx.Rollback(err)
+	}
+	if err := validateChanges(ctx, tx.connection); err != nil {
+		return Project{}, tx.Rollback(err)
+	}
+	if err := validateIntake(ctx, tx.connection); err != nil {
+		return Project{}, tx.Rollback(err)
+	}
 
 	existing, found, err := projectByID(ctx, tx.connection, spec.ID)
 	if err != nil {
@@ -337,6 +346,9 @@ func (store *Store) setFactory(ctx context.Context, expected Revision, at UnixMi
 	if err != nil {
 		return FactoryState{}, tx.Rollback(err)
 	}
+	if err := validateDurableControls(ctx, tx.connection); err != nil {
+		return FactoryState{}, tx.Rollback(err)
+	}
 	// Even a same-value operator command records new intent and invalidates
 	// earlier control authority. A matching value never proves who wrote it.
 	dispatch, capacity := desired(state)
@@ -571,7 +583,7 @@ func (store *Store) LinkAccount(ctx context.Context, spec NewAccount, at UnixMil
 	if spec.ID.zero() || validateAccountFields(spec.Provider, spec.Home, spec.Label) != nil {
 		return Account{}, fmt.Errorf("%w: invalid account", ErrInvalidValue)
 	}
-	tx, err := store.beginUncheckedWrite(ctx)
+	tx, err := store.beginValidatedWrite(ctx)
 	if err != nil {
 		return Account{}, err
 	}
@@ -650,7 +662,7 @@ func (store *Store) UpdateAccount(ctx context.Context, id AccountID, expected Re
 	if id.zero() || expected.Int64() < 1 || (label == nil) != remove {
 		return Account{}, fmt.Errorf("%w: invalid account update", ErrInvalidValue)
 	}
-	tx, err := store.beginUncheckedWrite(ctx)
+	tx, err := store.beginValidatedWrite(ctx)
 	if err != nil {
 		return Account{}, err
 	}

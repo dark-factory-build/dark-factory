@@ -452,7 +452,8 @@ func (store *Store) PendingIntakeAcceptancesAfter(ctx context.Context, sourceID 
 
 // AcceptIntakeSnapshot records the exact bytes the operator reviewed. It does
 // not enqueue; ImportIntakeAcceptance performs the acceptance-aware atomic task
-// insert after the controller has persisted its reconciliation marker.
+// insert after the controller has persisted its reconciliation marker. Like
+// an import, it checks only the source and receipts it reads.
 func (store *Store) AcceptIntakeSnapshot(ctx context.Context, sourceID IntakeSourceID, snapshot IntakeIssueSnapshot, at UnixMillis, expected ...Revision) (IntakeAcceptance, error) {
 	if !validIntakeIssueSnapshot(snapshot) {
 		return IntakeAcceptance{}, ErrInvalidValue
@@ -557,10 +558,11 @@ func (store *Store) ImportIntakeAcceptanceWithPriority(ctx context.Context, id I
 	return store.importIntakeAcceptance(ctx, id, at, priority, source)
 }
 
-// importIntakeAcceptance validates only before it writes: every intake poll
-// replays each imported issue, and a whole-store walk each overran the poll.
+// importIntakeAcceptance checks only the rows it reads and writes: every
+// intake poll replays each imported issue, and a whole-store walk per issue
+// overran the poll as the store grew (#1679, #1754).
 func (store *Store) importIntakeAcceptance(ctx context.Context, id IntakeAcceptanceID, at UnixMillis, priority int64, expectedSource ...IntakeSource) (Task, error) {
-	tx, err := store.beginUncheckedWrite(ctx)
+	tx, err := store.beginValidatedWrite(ctx)
 	if err != nil {
 		return Task{}, err
 	}
@@ -587,9 +589,6 @@ func (store *Store) importIntakeAcceptance(ctx context.Context, id IntakeAccepta
 		}
 		if !found || task.Status != TaskFailed && task.Status != TaskCancelled || !latestFound || latest.ID != accepted.ID {
 			return Task{}, tx.Rollback(ErrConflict)
-		}
-		if err := validateDurableControls(ctx, tx.connection); err != nil {
-			return Task{}, tx.Rollback(err)
 		}
 		if _, err := tx.connection.ExecContext(ctx, `UPDATE intake_acceptances SET withdrawn_at_ms = NULL WHERE id = ?`, id.Bytes()); err != nil {
 			return Task{}, tx.Rollback(err)
@@ -638,9 +637,6 @@ func (store *Store) importIntakeAcceptance(ctx context.Context, id IntakeAccepta
 	latest, found, err := latestIntakeAcceptance(ctx, tx.connection, accepted.Snapshot, accepted.ProjectID, accepted.RepositoryID)
 	if err == nil && (!found || latest.ID != accepted.ID) {
 		err = ErrConflict
-	}
-	if err == nil {
-		err = validateDurableControls(ctx, tx.connection)
 	}
 	if err != nil {
 		return Task{}, tx.Rollback(err)

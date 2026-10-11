@@ -58,7 +58,7 @@ ORDER BY version LIMIT 33`
 // carrier task that last named it and whether OverseerRewakeAfter has passed
 // since any wake named it. It takes the wake query's arguments; ?7 and ?8 are
 // named only so the counts agree.
-const overseerStalledItems = overseerItems + `SELECT last, CASE WHEN id IS NULL THEN detail || ' ' || item_key ELSE (` + overseerWakeLine + `) END,
+const overseerStalledItems = overseerItems + `SELECT last, CASE WHEN id IS NULL THEN detail || CASE WHEN instr(detail, ' [reviewer:') > 0 THEN '' ELSE ' ' || item_key END ELSE (` + overseerWakeLine + `) END,
 	named_at + ?6 <= ?3 FROM counted AS due WHERE wakes > rewakes AND ?7 + ?8 >= 0 ORDER BY last, version`
 
 const overseerItems = `WITH carrier AS MATERIALIZED (SELECT t.id AS task, t.created_at_ms AS at, substr(t.body, instr(t.body, 'Factory causal wake: ')) AS names,
@@ -94,8 +94,14 @@ item AS (
 	JOIN production_records AS p ON p.project_id = e.project_id AND p.repository = e.repository AND p.kind = 'pull_request'
 	  AND p.identity = CAST(json_extract(e.document, '$.request.PullNumber') AS TEXT)
 	WHERE e.project_id = ?1 AND e.kind = 'reviewer' AND COALESCE(json_extract(e.document, '$.escalation'), '') <> ''
-	  AND json_extract(p.document, '$.state') = 'open'
+	  AND COALESCE(json_extract(e.document, '$.route_pending'), 0) = 0 AND json_extract(p.document, '$.state') = 'open'
 	  AND lower(json_extract(p.document, '$.head')) = lower(json_extract(e.document, '$.request.Head'))
+	  AND NOT EXISTS (SELECT 1 FROM production_records AS newer
+	    WHERE newer.project_id = e.project_id AND newer.repository = e.repository AND newer.kind = 'reviewer'
+	      AND json_extract(newer.document, '$.request.PullNumber') = json_extract(e.document, '$.request.PullNumber')
+	      AND lower(json_extract(newer.document, '$.request.Head')) = lower(json_extract(e.document, '$.request.Head'))
+	      AND json_extract(newer.document, '$.escalation') = json_extract(e.document, '$.escalation')
+	      AND (newer.observed_at_ms > e.observed_at_ms OR (newer.observed_at_ms = e.observed_at_ms AND newer.identity > e.identity)))
 	UNION ALL SELECT NULL, COALESCE(json_extract(d.document, '$.failed_at'), d.observed_at_ms), 0, CASE json_extract(d.document, '$.state')
 	  WHEN 'failed' THEN printf('Escalated: factoryd %s failed in phase %s: %s', d.identity, json_extract(d.document, '$.phase'), replace(json_extract(d.document, '$.reason'), char(10), ' '))
 	  ELSE printf('Escalated: factoryd %s is %s after a release failed in phase %s', d.identity, json_extract(d.document, '$.state'), replace(json_extract(d.document, '$.cause'), char(10), ' ')) END,
@@ -149,7 +155,7 @@ const overseerWakeNames = `at > version AND (NOT targeted OR instr(names, item_k
 // Each specialist without an unfinished carrier or an exhausted budget gets
 // one when specialistSchedule says it is due.
 func (store *Store) EnqueueOverseerWakeups(ctx context.Context, at UnixMillis, health ...OverseerHealth) ([]Task, error) {
-	tx, err := store.beginUncheckedWrite(ctx)
+	tx, err := store.beginValidatedWrite(ctx)
 	if err != nil {
 		return nil, err
 	}
@@ -183,18 +189,7 @@ func (store *Store) EnqueueOverseerWakeups(ctx context.Context, at UnixMillis, h
 	if err := rows.Close(); err != nil {
 		return nil, tx.Rollback(err)
 	}
-	// Validate once, before the first write; a quiet poll rolls back without
-	// scanning retained history.
-	validated := false
-	validate := func() error {
-		if validated {
-			return nil
-		}
-		validated = true
-		return validateDurableControls(ctx, tx.connection)
-	}
 	var tasks []Task
-	changed := false
 	for _, agent := range agents {
 		cursor, found, err := overseerWakeCursor(ctx, tx.connection, agent.ID)
 		if err != nil {
@@ -227,7 +222,7 @@ func (store *Store) EnqueueOverseerWakeups(ctx context.Context, at UnixMillis, h
 			}
 			priority = specialistWakePriority
 		} else {
-			if err := raiseStalledItems(ctx, tx, agent, at, health, validate); err != nil {
+			if err := raiseStalledItems(ctx, tx, agent, at, health); err != nil {
 				return nil, tx.Rollback(err)
 			}
 			var err error
@@ -239,25 +234,17 @@ func (store *Store) EnqueueOverseerWakeups(ctx context.Context, at UnixMillis, h
 			// The cursor still records that this quiet poll inspected the current
 			// journal head; no task is created and no provider run can start.
 		} else {
-			if err := validate(); err != nil {
-				return nil, tx.Rollback(err)
-			}
 			task, err := enqueueStandingTaskWithBody(ctx, tx.connection, agent, body, priority, at)
 			if err != nil {
 				return nil, tx.Rollback(err)
 			}
 			tasks = append(tasks, task)
-			changed = true
 		}
 		if cursor != factory.Head.Int64() || !found {
 			if err := setOverseerWakeCursor(ctx, tx.connection, agent, factory.Head.Int64()); err != nil {
 				return nil, tx.Rollback(err)
 			}
-			changed = true
 		}
-	}
-	if !validated && !changed {
-		return nil, tx.Rollback(nil)
 	}
 	if err := tx.Commit(ctx); err != nil {
 		return nil, err
@@ -314,7 +301,7 @@ var stalledItemKey = [IDBytes]byte([]byte("stalled item key"))
 // most one such card; one still unfinished, or already carrying a request,
 // waits. A card closes only once none of its carrier's items is stalled, so
 // a later wake that moves an item's timing never strands it uncarded.
-func raiseStalledItems(ctx context.Context, tx *writeTx, agent Agent, at UnixMillis, health []OverseerHealth, validate func() error) error {
+func raiseStalledItems(ctx context.Context, tx *writeTx, agent Agent, at UnixMillis, health []OverseerHealth) error {
 	connection := tx.connection
 	rows, err := connection.QueryContext(ctx, overseerStalledItems, overseerItemArgs(agent, at.Int64(), health)...)
 	if err != nil {
@@ -360,9 +347,6 @@ func raiseStalledItems(ctx context.Context, tx *writeTx, agent Agent, at UnixMil
 		if err != nil {
 			return err
 		}
-		if err := validate(); err != nil {
-			return err
-		}
 		question := "The overseer was woken and left these unresolved. Reply to wake it with your decision, or cancel to leave them to you.\n" + strings.Join(lines[carrier], "\n")
 		var request [IDBytes]byte
 		if _, err := rand.Read(request[:]); err != nil {
@@ -402,9 +386,6 @@ func raiseStalledItems(ctx context.Context, tx *writeTx, agent Agent, at UnixMil
 		request, found, err := humanRequestByID(ctx, connection, id)
 		if err != nil || !found {
 			return errors.Join(err, ErrCorruptState)
-		}
-		if err := validate(); err != nil {
-			return err
 		}
 		if err := cancelHumanContinuationOnConnection(ctx, tx, request, at); err != nil {
 			return err
@@ -470,7 +451,9 @@ func (store *Store) OverseerItems(ctx context.Context, project ProjectID, at Uni
 					return nil, errors.Join(err, rows.Close())
 				}
 				if escalation {
-					item.Line += " " + key
+					if !strings.Contains(item.Line, key) {
+						item.Line += " " + key
+					}
 				}
 				items = append(items, item)
 			}
@@ -503,7 +486,11 @@ func overseerWake(ctx context.Context, connection *sql.Conn, agent Agent, at int
 			break
 		}
 		if escalation {
-			escalations = append(escalations, strings.ToValidUTF8(detail[:min(len(detail), 256)], "")+" "+key)
+			line := strings.ToValidUTF8(detail[:min(len(detail), 256)], "")
+			if !strings.Contains(line, key) {
+				line += " " + key
+			}
+			escalations = append(escalations, line+escalationWhy(ctx, connection, agent.ProjectID, key))
 		} else if !slices.Contains(lines, detail) {
 			lines = append(lines, detail)
 		}
@@ -547,7 +534,7 @@ const overseerWakeCounts = `WITH open_pr AS (SELECT p.repository, CAST(json_extr
 		  AND json_extract(c.document, '$.conclusion') IN ('failure', 'timed_out', 'action_required', 'cancelled', 'startup_failure')) AS failing
 	FROM open_pr)
 SELECT printf('worker tasks queued=%d running=%d; open factory PRs conflicting=%d failing=%d approved-not-queued=%d', COALESCE(SUM(t.status = 'queued'), 0), COALESCE(SUM(t.status = 'running'), 0),
-	(SELECT COALESCE(SUM(merge_state = 'dirty' OR COALESCE(mergeable = 0, 0)), 0) FROM classified),
+	(SELECT COALESCE(SUM(COALESCE(mergeable = 0, 0)), 0) FROM classified),
 	(SELECT COALESCE(SUM(failing), 0) FROM classified),
 	(SELECT COALESCE(SUM(review = 'allow' AND NOT failing AND merge_state <> 'dirty' AND COALESCE(mergeable, 1) <> 0 AND merge_queue = 'none'), 0) FROM classified))
 FROM tasks AS t LEFT JOIN agents AS a ON a.id = t.assigned_agent_id

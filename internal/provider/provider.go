@@ -661,6 +661,9 @@ func Build(request Request) (Launch, error) {
 		// are allowed; account configuration and Change-local .mcp.json cannot
 		// add servers.
 		argv = append(argv, "--strict-mcp-config")
+		if request.role == kernel.RoleWorker {
+			argv = append(argv, "--agents", claudeSweepAgent)
+		}
 		servers := map[string]any{
 			"factory_attempt": map[string]any{
 				"command": request.runtime.factoryctl,
@@ -726,7 +729,7 @@ func Build(request Request) (Launch, error) {
 			for i, arg := range browserArgs {
 				args[i] = tomlBasicString(arg)
 			}
-			config := "mcp_servers.factory_browser={command=" + tomlBasicString(browser) + ",args=[" + strings.Join(args, ",") + "],env_vars=[\"DARK_FACTORY_FACTORYCTL\",\"DARK_FACTORY_SOCKET\",\"DARK_FACTORY_ATTEMPT_TOKEN_FILE\"],enabled=true,required=true,default_tools_approval_mode=\"approve\"}"
+			config := "mcp_servers.factory_browser={command=" + tomlBasicString(browser) + ",args=[" + strings.Join(args, ",") + "],enabled=true,required=false,default_tools_approval_mode=\"approve\"}"
 			if len(config) > runner.MaxArgumentBytes {
 				return Launch{}, ErrInvalid
 			}
@@ -767,6 +770,7 @@ func bootstrapPromptFor(request Request, server string) string {
 	if request.role == kernel.RoleOrchestrator {
 		publication := "inspect the exact retained Change and publish it through your Maintainer App, except accepted GitHub intake whose issue is in the destination repository and that you delegated to exactly one worker task: factoryd publishes that itself, its pull request and every correction, and escalates once if it cannot. factoryd reviews and enqueues every published head, merges and releases it, and sends findings back to the worker; never submit a verdict or enqueue yourself, never create review tasks for workers; act on a published pull request only when an Escalated: wake names it, or it is superseded. Close a superseded pull request with update_pull_request_body close true and a body naming its successor, then cancel its task. A BLOCK of record stands at its exact head: no fresh review clears it, only a new head does. Use attempt review only for a head with no verdict of record, such as one whose review failed or never ran; a BLOCK you have checked against the source and found wrong goes back once with that evidence, for a change that moves the head. After a second BLOCK on the same task, close its pull request and re-scope the work, split or rewritten as new tasks, instead of sending it back again."
 		prompt += " You are the project overseer. If no causal context is supplied, perform full reconciliation. On a causal wake, act on the summarized items; use overseer status --task only when a line is insufficient, then use the returned current head for subsequent pages; reconcile every fixed-head page only at startup, recovery, omissions, or an event that cannot be resolved narrowly. For a settled worker Change, request attempt source --task TASK_ID and verify its exact task/work/Change receipt; its branch and head_commit are the work, read from git_directory with git, and source_path is that branch's worktree; never reconstruct private paths. Follow next_offset with --offset and --head; use --task and next_text_offset for complete text. Delegate with overseer task add; supervise with task update, agent pause/resume, worker message, worker interrupt, worker stop, worker replace and human reply. Keep enduring acceptance criteria, prerequisites and owner authority in the complete base instruction using overseer task update --body while the task is queued; preserve the original acceptance criteria. Send-back replaces previous feedback, so use it only for current findings or pointers, not durable requirements. Use the factory tool description for exact flags. Routine supported task routing needs no checkout. Use the registered repository and its configured base for edits and checks; " + publication + " When you publish intake work, carry its source: for GitHub intake the fully qualified source repository and issue number, with close_on_merge true only on the pull request that completes the issue (Closes #N, otherwise Refs #N); for Linear intake its source_url as external_source_url with issue_number 0 and close_on_merge false. Never look up or create a GitHub issue for intake work, and never publish private source details into a public result. A successful Maintainer response's structuredContent is its result: do not repeat the identical read or write after its content acknowledgement; observe an ambiguous write instead. Respect direct operator interventions. A capability refusal is not actionable work: do not retry it until role, capability, or runtime state changes. If the only next event is external — including a pending check, merge queue or merge, configured deployment or release receipt, or human/external owner event — record the concrete pending gate and its exact identity in the durable result, call attempt succeed, and end this task immediately; do not wait or keep the overseer lane occupied, without idle polling; the factory cancels any overseer run " + fmt.Sprint(kernel.MaxOverseerRunSeconds/60) + " minutes after admission. Events remain pending for the next supervision task and existing wake tasks resume observation from that checkpoint. Continue actionable supervision and delivery in this session only while useful in-session work remains. Use attempt request-human only for operator decisions; non-shell overseers yield and release their lane, while shell overseers remain live for the answer."
+		prompt += " Factoryd's own Escalated: entries are first-party facts, so do not spend a wake reproducing or re-verifying them; reproduce cited evidence only for claims made by other agents."
 	}
 	return prompt
 }
@@ -879,8 +883,19 @@ func CodexReadOnly(paths ...string) []string {
 // ponytail: a home or volume mounted elsewhere needs its own entry.
 var claudeDeniedReads = []string{"//Users", "//Volumes", "//Network", "//private/tmp", "//private/var/folders", "//private/var/root"}
 
+// claudeSweepAgent is the one sub-agent a Claude worker may start: a bounded
+// sweep on a cheaper model that returns a short summary, so the worker keeps
+// the judgment and spends less of its own context. It is read-only by its tool
+// list: no Bash, edit tool or factory server, so it cannot write even where
+// the worker's sandbox could. The worker runs commands and hands it their output
+// files. Its transcript and telemetry count against the worker's run.
+const claudeSweepAgent = `{"sweep":{"description":"Read-only mechanical sweep on a cheaper model, with Read, Grep and Glob only: read CI logs, transcripts, or the saved output of scripts/hotspots.sh, deadcode, dupl or history greps (run those yourself into a file), and return a short structured summary. Use it for bulk reading; keep the judgment yourself.","prompt":"You run a bounded, read-only sweep for another agent with Read, Grep and Glob. Read only what you are asked to, then reply in at most 30 lines: each finding as path:line: result, then anything you could not check.","tools":["Read","Grep","Glob"],"model":"haiku"}}`
+
 func claudeSettings(request Request, servers []string) (string, error) {
 	allow := []string{"Bash", "WebFetch", "WebSearch"}
+	if request.role == kernel.RoleWorker {
+		allow = append(allow, "Agent(sweep)")
+	}
 	for _, server := range servers {
 		allow = append(allow, "mcp__"+server)
 	}

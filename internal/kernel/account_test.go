@@ -171,7 +171,7 @@ func TestAccountWritesDeferUnrelatedCorruptionButRejectAffectedCorruption(t *tes
 		if err != nil {
 			t.Fatal(err)
 		}
-		corruptSQL(t, store, `UPDATE projects SET name = '' WHERE id = ?`, project.ID.Bytes())
+		corruptSQLUnvalidated(t, store, `UPDATE projects SET name = '' WHERE id = ?`, project.ID.Bytes())
 		account, err := store.LinkAccount(context.Background(), NewAccount{ID: accountID(t, 31), Provider: ProviderCodex, Home: "/Users/operator/.codex-deferred", Label: "deferred"}, mustTime(t, 2))
 		if err != nil {
 			t.Fatalf("link over unrelated corruption = %v", err)

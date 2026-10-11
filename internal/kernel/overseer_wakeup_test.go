@@ -101,7 +101,7 @@ func TestOverseerEscalationWake(t *testing.T) {
 	if bodies := wakeBodies(t, store, 1000+maxDelay-1); len(bodies) != 0 {
 		t.Fatalf("early wake = %q", bodies)
 	}
-	if bodies := wakeBodies(t, store, 1000+maxDelay); len(bodies) != 1 || !strings.Contains(bodies[0], "stuck 7 [reviewer:op7]\nEscalated: stuck 8") {
+	if bodies := wakeBodies(t, store, 1000+maxDelay); len(bodies) != 1 || !strings.Contains(bodies[0], "stuck 7 [reviewer:op7]\n  why: pull: example/factory#7 open") || !strings.Contains(bodies[0], "waits on: operator: factoryd escalated it to the overseer\nEscalated: stuck 8") {
 		t.Fatalf("starved wake = %q", bodies)
 	}
 }

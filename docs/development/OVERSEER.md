@@ -72,7 +72,8 @@ fixed head. This private, project-scoped view contains workers, task objective a
 result excerpts, active runs, questions and explicit intervention history. On an
 ordinary causal wake, the standing task appends a `Factory causal wake` record:
 worker task and open pull request counts, one summary line per due task, and
-each open escalation. Act on the summarized items; use `overseer status --task`
+each open escalation with its pull request's `why` line beneath it (head,
+checks, review, queue, task, and whom it waits on). Act on the summarized items; use `overseer status --task`
 only when a line is insufficient. `mode=full` is the explicit initial/overflow
 recovery signal. Do not reconstruct an unchanged project merely because the
 overseer woke. Status returns four entries from each collection. When
@@ -228,6 +229,8 @@ eligible same-project handoffs can be read in one attempt.
   change that moves the head. After a second BLOCK on the same task, close
   its pull request and re-scope the work instead of sending it back again.
 - `attempt intake list` reads the project's intake sources and sync health.
+  `attempt why --pull N | --task ID` says where one stands and whom it waits
+  on; `attempt report` measures runs, tokens and merges.
   Do not run a nested provider or grant local commands Maintainer credentials.
 - Do not publish settled Changes or delegate their publication. factoryd owns
   publication, review, enqueue, merge and release; the App refuses

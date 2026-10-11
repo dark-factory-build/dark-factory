@@ -123,6 +123,13 @@ a regular file, executable by its owner and writable by nobody else, and an
 orchestrator launch is refused, naming which, when it is missing or fails
 that. Claude workers still have the provider's existing local-command
 authority; this MCP boundary does not create a hostile same-user sandbox.
+Since #1760 a Claude worker may also start one sub-agent type, `sweep`
+(`--agents`, allowed as `Agent(sweep)`), for bounded read-only sweeps on
+Haiku. It is read-only by its tool list, Read, Grep and Glob, with no Bash,
+edit tool or MCP server, so it has no write path even inside the worker's
+writable sandbox. The worker runs commands itself and hands it their output.
+Its transcript (`<session>/subagents/`) counts toward the run's tokens, and
+its accepted and finished calls show on the floor as companions while it runs.
 Every Codex launch receives the same `factory_attempt` server, and a Codex
 orchestrator receives the Maintainer server beside it.
 
@@ -335,8 +342,10 @@ An operator can install `scripts/dark-factory-browser-mcp.py` as the executable
 Claude then receive the explicit `factory_browser` MCP server; an absent bridge
 leaves browser tools unavailable, and an unsafe installed bridge refuses launch.
 This reuses Playwright MCP, not Codex desktop control or a personal browser.
-The bridge authenticates the live attempt through `factoryctl attempt task`
-before starting the server. Chromium starts on the first browser action.
+The bridge receives no attempt credentials and makes no factory call, and it is
+never a required server: a bridge that cannot start leaves that run without
+browser tools (Codex reports the failed server at startup) instead of ending
+it. Chromium starts on the first browser action.
 
 Install a pinned `@playwright/mcp@0.0.80` separately from application dependencies
 (`npm install --prefix TOOL_DIRECTORY --ignore-scripts --save-exact

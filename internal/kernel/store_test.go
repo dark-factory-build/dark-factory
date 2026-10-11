@@ -875,6 +875,23 @@ func corruptSQL(t *testing.T, store *Store, statement string, args ...any) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	corruptSQLOnConnection(t, connection, statement, args...)
+	if err := connection.Close(); err != nil {
+		t.Fatal(err)
+	}
+	// Retained history is validated by the periodic check, not on every
+	// write: run it, as the daemon would, so the corruption becomes a hold.
+	_ = store.Validate(context.Background())
+}
+
+// corruptSQLUnvalidated plants corruption without the periodic validation,
+// for paths that must not trip over unrelated history on their own.
+func corruptSQLUnvalidated(t *testing.T, store *Store, statement string, args ...any) {
+	t.Helper()
+	connection, err := store.writer.Conn(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
 	defer connection.Close()
 	corruptSQLOnConnection(t, connection, statement, args...)
 }
