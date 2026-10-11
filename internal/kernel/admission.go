@@ -136,6 +136,9 @@ func (store *Store) AdmitNext(ctx context.Context, keys AdmissionKeys, at UnixMi
 	if task.ProjectID != agent.ProjectID || !task.AssignedAgentID.zero() && task.AssignedAgentID != agent.ID {
 		return AdmissionResult{}, tx.Rollback(ErrCorruptState)
 	}
+	if err := validateTaskRunTopology(ctx, tx.connection, task); err != nil {
+		return AdmissionResult{}, tx.Rollback(err)
+	}
 	if at.Int64() < task.UpdatedAt.Int64() {
 		return AdmissionResult{}, tx.Rollback(ErrRevisionConflict)
 	}

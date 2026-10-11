@@ -27,6 +27,9 @@ func (store *Store) CreateProject(ctx context.Context, spec NewProject, at UnixM
 		return Project{}, err
 	}
 	defer tx.Close()
+	if err := validateRepositoryBindings(ctx, tx.connection); err != nil {
+		return Project{}, tx.Rollback(err)
+	}
 
 	existing, found, err := projectByID(ctx, tx.connection, spec.ID)
 	if err != nil {
