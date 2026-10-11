@@ -4,6 +4,7 @@ package provider
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -120,6 +121,83 @@ func TestPrepareGoModuleCacheCreatesTrustedTree(t *testing.T) {
 	}
 	if info.Mode().Perm() != 0o700 {
 		t.Fatalf("trusted Go module cache mode = %o, want 700", info.Mode().Perm())
+	}
+}
+
+func TestPrepareWebDependenciesProvisionsPinnedCorepackPnpm(t *testing.T) {
+	root := t.TempDir()
+	toolDir := filepath.Join(root, "tools")
+	if err := os.Mkdir(toolDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	node := filepath.Join(toolDir, "node")
+	if err := os.WriteFile(node, []byte("#!/bin/sh\ncase \"$*\" in *--config.ignorePnpmfile=true*--config.storeDir=*--config.modulesDir=*--config.virtualStoreDir=*--config.stateDir=*) exit 0 ;; *) printf ran > .pnpmfile-ran; exit 1 ;; esac\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	account := filepath.Join(root, "account")
+	corepackPnpm := filepath.Join(account, "Library", "Caches", "dark-factory", "local-ci", "trusted", "corepack", "v1", "pnpm", pnpmVersion)
+	if err := os.MkdirAll(corepackPnpm, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(corepackPnpm, "package.json"), []byte(`{"name":"pnpm","version":"11.19.0"}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(corepackPnpm, "bin.mjs"), []byte("pinned"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(pnpmStorePath(account), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	runtime := runtimeFixture(t, toolDir, account)
+	working := filepath.Join(root, "change")
+	if err := os.MkdirAll(filepath.Join(working, "web"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(working, "web", "package.json"), []byte(`{"packageManager":"pnpm@11.19.0"}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(working, "web", ".pnpmfile.cjs"), []byte("require('fs').writeFileSync('.pnpmfile-ran', 'ran')"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := runtime.PrepareWebDependencies(context.Background(), working); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(filepath.Join(working, "web", ".pnpmfile-ran")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("pnpmfile ran: %v", err)
+	}
+	got, err := os.ReadFile(filepath.Join(runtime.home, ".cache", "corepack", "v1", "pnpm", pnpmVersion, "bin.mjs"))
+	if err != nil || string(got) != "pinned" {
+		t.Fatalf("private Corepack pnpm = %q, %v", got, err)
+	}
+}
+
+func TestPrepareWebDependenciesRejectsSymlinkedWebWorkspace(t *testing.T) {
+	root := t.TempDir()
+	account := filepath.Join(root, "account")
+	corepackPnpm := filepath.Join(account, "Library", "Caches", "dark-factory", "local-ci", "trusted", "corepack", "v1", "pnpm", pnpmVersion)
+	if err := os.MkdirAll(corepackPnpm, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(corepackPnpm, "package.json"), []byte(`{"name":"pnpm","version":"11.19.0"}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(pnpmStorePath(account), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	runtime := runtimeFixture(t, "/usr/bin:/bin", account)
+	working := filepath.Join(root, "change")
+	outside := filepath.Join(root, "outside")
+	if err := os.MkdirAll(working, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(outside, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(outside, filepath.Join(working, "web")); err != nil {
+		t.Fatal(err)
+	}
+	if err := runtime.PrepareWebDependencies(context.Background(), working); err == nil {
+		t.Fatal("symlinked web workspace was accepted")
 	}
 }
 
