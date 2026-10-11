@@ -508,7 +508,7 @@ func (store *Store) OperatorHumanRequests(ctx context.Context) ([]OperatorHumanR
 		if !found {
 			return nil, ErrCorruptState
 		}
-		result = append(result, OperatorHumanRequest{ID: request.ID, RunID: run.ID, TaskID: run.TaskID, AgentID: run.AgentID, Status: request.Status, Revision: request.Revision, RunRevision: run.Revision, QuestionText: request.QuestionText, Options: append([]string(nil), request.Options...)})
+		result = append(result, OperatorHumanRequest{ID: request.ID, ProjectID: run.ProjectID, RunID: run.ID, TaskID: run.TaskID, AgentID: run.AgentID, Status: request.Status, Revision: request.Revision, RunRevision: run.Revision, QuestionText: request.QuestionText, Options: append([]string(nil), request.Options...)})
 	}
 	if err := rows.Err(); err != nil {
 		return nil, err

@@ -736,14 +736,14 @@ func (client client) call(ctx context.Context, method string, params, output any
 		ctx, cancel = context.WithTimeout(ctx, requestTimeout)
 	}
 	defer cancel()
-	// An attempt outlives factoryd generations. A restart unbinds the socket
-	// and drains in-flight requests as unavailable, so the call waits the
-	// restart out instead of handing the run a blocker. A mutation's
-	// unavailable reply may follow its commit, so only reads replay it.
+	// An attempt outlives factoryd restarts, so a read replays an unavailable
+	// or lost reply rather than hand the run a blocker. An outcome replays a
+	// lost reply: a committed one revoked the credential, so it is refused, not
+	// applied twice. Another mutation's reply may follow its commit.
 	retryUntil := time.Now().Add(RestartRetryWindow)
 	for {
 		err := client.exchange(ctx, method, encoded, output)
-		retry := readMethod(method) && unavailable(err)
+		retry := (readMethod(method) || outcomeMethod(method)) && errors.Is(err, ErrTransport) || readMethod(method) && unavailable(err)
 		var failure undelivered
 		if errors.As(err, &failure) {
 			err, retry = failure.err, true

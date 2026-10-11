@@ -136,6 +136,7 @@ type HumanRequestProjection struct {
 
 type OperatorHumanRequest struct {
 	ID           HumanRequestID
+	ProjectID    ProjectID
 	RunID        RunID
 	TaskID       TaskID
 	AgentID      AgentID
