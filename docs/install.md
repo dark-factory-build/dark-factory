@@ -353,7 +353,9 @@ nothing about the factory's fetch. A `gh auth git-credential` helper fails here:
 GitHub deploy key for that repository with an SSH origin and an absolute,
 passphrase-free key:
 `git -C CHECKOUT config core.sshCommand "/usr/bin/ssh -i /ABSOLUTE/KEY -o IdentitiesOnly=yes -o UserKnownHostsFile=/ABSOLUTE/known_hosts"`.
-Then rerun the fetch check.
+Then rerun the fetch check. Work and reviews refuse a checkout whose remotes
+changed since they were pinned; a passing fetch check of the same checkout is
+the only way to re-pin its changed origin.
 
 Use `factoryctl project repository github --id REPOSITORY_ID` to bind its
 configured publication repository to the live GitHub connection. Fetch readiness

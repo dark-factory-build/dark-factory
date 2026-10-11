@@ -588,13 +588,6 @@ func (daemon *Daemon) runNext(ctx context.Context, spec SupervisorSpec) (resultR
 		_ = childControl.Close()
 		return daemon.failRun(run, kernel.FailureSpawn, err)
 	}
-	if err := controller.Configure(runner.AttemptSpec{
-		AttemptID: run.ID.String(), Wrapper: wrapper,
-		MarkerName: runner.InnerActivationMarkerName, ResultName: runner.AttemptResultSpoolName, ResultProof: resultProof,
-	}); err != nil {
-		_ = childControl.Close()
-		return daemon.failRun(run, kernel.FailureProtocol, err)
-	}
 	outerStderr, err := newBoundedOutput()
 	if err != nil {
 		_ = childControl.Close()
@@ -684,6 +677,17 @@ func (daemon *Daemon) runNext(ctx context.Context, spec SupervisorSpec) (resultR
 	}
 	if !owner.activated {
 		return daemon.convergeActivatedRunner(run, owner, runtimeDirectory, keys.resources.RunnerProcess, runtimeIdentity, runnerResourceIdentity, errInvalidContract)
+	}
+	if err := controller.Configure(runner.AttemptSpec{
+		AttemptID: run.ID.String(), Wrapper: wrapper,
+		MarkerName: runner.InnerActivationMarkerName, ResultName: runner.AttemptResultSpoolName, ResultProof: resultProof,
+	}); err != nil {
+		return daemon.convergeActivatedRunner(run, owner, runtimeDirectory, keys.resources.RunnerProcess, runtimeIdentity, runnerResourceIdentity, err)
+	}
+	if spec.afterOuterConfiguration != nil {
+		if err := spec.afterOuterConfiguration(child); err != nil {
+			return daemon.convergeActivatedRunner(run, owner, runtimeDirectory, keys.resources.RunnerProcess, runtimeIdentity, runnerResourceIdentity, err)
+		}
 	}
 	ready, err := controller.Next(8 * time.Second)
 	if err != nil || ready.Kind != runner.AttemptInnerReady {

@@ -851,3 +851,45 @@ func TestHostPullRequestRepairTaskNamesTheReviewedHead(t *testing.T) {
 		t.Fatalf("closed pull request found=%v err=%v", found, err)
 	}
 }
+
+// A pull request observed on its Change's branch, with no publication row, is
+// still the task's: a note at its head is sent back, and one at any other
+// head is refused.
+func TestSendBackAcceptsTheHeadOfTheChangeBranchPullRequest(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	proposal, err := NewSuccessProposal("published")
+	if err != nil {
+		t.Fatal(err)
+	}
+	store, finalizing := finalizingReleasedRun(t, RoleWorker, proposal)
+	defer store.Close()
+	change, found, err := store.Change(ctx, *finalizing.ChangeID)
+	if err != nil || !found {
+		t.Fatalf("change=%+v found=%v err=%v", change, found, err)
+	}
+	settlement, err := NewRetainedChangeSettlement(change.Revision, change.HeadCommit)
+	if err != nil {
+		t.Fatal(err)
+	}
+	worker, err := store.FinalizeWorkerRun(ctx, finalizing.ID, finalizing.Revision, settlement, mustTime(t, 60))
+	if err != nil {
+		t.Fatal(err)
+	}
+	published := strings.Repeat("d", 40)
+	pr := ProductionPullRequest{Number: 9, Title: "Ship it", URL: "https://github.com/example/factory/pull/9", Head: published, Branch: "factory/" + change.ID.String()[:12], Base: "main", State: "open", Review: ProductionReview{Head: published, State: "unknown"}}
+	if err := store.RecordProductionObservation(ctx, worker.ProjectID, ProductionObservation{Repository: "example/factory", ObservedAt: 61, PullRequests: []ProductionPullRequest{pr}}, mustTime(t, 61)); err != nil {
+		t.Fatal(err)
+	}
+	task, found, err := store.Task(ctx, worker.TaskID)
+	if err != nil || !found {
+		t.Fatalf("task=%+v found=%v err=%v", task, found, err)
+	}
+	if _, err := store.SendBackTask(ctx, task.ID, task.Revision, strings.Repeat("e", 40), "an older head", mustTime(t, 62)); !errors.Is(err, ErrSuperseded) {
+		t.Fatalf("other head err=%v, want ErrSuperseded", err)
+	}
+	sent, err := store.SendBackTask(ctx, task.ID, task.Revision, published, "fix the finding", mustTime(t, 62))
+	if err != nil || sent.WorkRevision.Int64() != 2 {
+		t.Fatalf("published head send-back=%+v err=%v", sent, err)
+	}
+}

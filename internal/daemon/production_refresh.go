@@ -66,6 +66,7 @@ func (daemon *Daemon) refreshProduction(ctx context.Context, project kernel.Proj
 			continue
 		}
 		corrections := changedProductionHeads(known, observation.PullRequests)
+		conflicts := newProductionConflicts(known, observation.PullRequests)
 		at, err := daemon.timestamp()
 		if err != nil {
 			return err
@@ -80,11 +81,29 @@ func (daemon *Daemon) refreshProduction(ctx context.Context, project kernel.Proj
 			}
 		}
 		prepared := make([]review.Operation, 0, len(corrections))
+		changed := make(map[uint64]bool, len(corrections))
 		for _, correction := range corrections {
 			op, err := daemon.preparePublishedReview(ctx, project, identity.PublicationRepository, correction.Number, correction.Head)
 			if err != nil {
 				return err
 			}
+			prepared = append(prepared, op)
+			changed[correction.Number] = true
+		}
+		for _, conflict := range conflicts {
+			if changed[conflict.Number] {
+				continue
+			}
+			if _, found, err := daemon.store.PublishedChangeID(ctx, project, identity.PublicationRepository, conflict.Number); err != nil {
+				return err
+			} else if !found {
+				continue
+			}
+			op, err := daemon.preparePublishedReview(ctx, project, identity.PublicationRepository, conflict.Number, conflict.Head)
+			if err != nil {
+				return err
+			}
+			op.State, op.RoutePending, op.Detail = "ejected", true, productionConflictDetail(conflict)
 			prepared = append(prepared, op)
 		}
 		if len(prepared) == 0 {
@@ -101,8 +120,15 @@ func (daemon *Daemon) refreshProduction(ctx context.Context, project kernel.Proj
 			}
 		}
 		for _, op := range prepared {
-			daemon.launchReview(project, op)
+			if op.RoutePending && op.State == "ejected" && strings.Contains(op.Detail, "conflicts with") {
+				if err := daemon.repairPublishedConflict(ctx, project, identity.PublicationRepository, op); err != nil {
+					LogFactoryd(daemon.log, "factoryd: repair PR #%d: %v\n", op.Request.PullNumber, err)
+				}
+			} else {
+				daemon.launchReview(project, op)
+			}
 		}
+		daemon.advanceReviewOperations(ctx, false)
 		recordCIObservations(daemon.runtimeStore(), repository.ID.String(), observation, at.Int64())
 	}
 	return nil
@@ -138,6 +164,32 @@ func changedProductionHeads(known []kernel.ProductionPullRequest, observed []ker
 		}
 	}
 	return changed
+}
+
+func newProductionConflicts(known, observed []kernel.ProductionPullRequest) []kernel.ProductionPullRequest {
+	prior := make(map[uint64]kernel.ProductionPullRequest, len(known))
+	for _, pull := range known {
+		prior[pull.Number] = pull
+	}
+	conflicts := make([]kernel.ProductionPullRequest, 0)
+	for _, pull := range observed {
+		if pull.State == "open" && productionPullConflict(pull) && !productionPullConflict(prior[pull.Number]) {
+			conflicts = append(conflicts, pull)
+		}
+	}
+	return conflicts
+}
+
+func productionPullConflict(pull kernel.ProductionPullRequest) bool {
+	return pull.Mergeable != nil && !*pull.Mergeable || strings.EqualFold(pull.MergeState, "dirty")
+}
+
+func productionConflictDetail(pull kernel.ProductionPullRequest) string {
+	base := pull.Base
+	if base == "" {
+		base = "main"
+	}
+	return fmt.Sprintf("Exact head %s conflicts with %s. Rebase this Change onto origin/%s and resolve the conflict.", pull.Head, base, base)
 }
 
 // githubQuotaLow holds back non-urgent GitHub polling (pull request refresh,
@@ -244,6 +296,9 @@ type maintainerPullRequest struct {
 	BaseSHA        string                  `json:"base_sha"`
 	State          string                  `json:"state"`
 	Merged         bool                    `json:"merged"`
+	Mergeable      *bool                   `json:"mergeable"`
+	MergeState     string                  `json:"merge_state_status"`
+	MergeQueue     string                  `json:"merge_queue"`
 	Review         kernel.ProductionReview `json:"review"`
 }
 
@@ -289,6 +344,15 @@ func pullRequestObservation(ctx context.Context, call maintainerMCP, repository 
 		if review, ok := prior[value.Number]; ok && strings.EqualFold(review.Head, value.Head) {
 			pr.Review = review
 		}
+		if pr.Review.State == "allow" {
+			pr.MergeQueue = "unknown"
+			if queue, err := readMaintainerMergeQueue(ctx, call, repository, githubID, pr); err != nil {
+				fault(err)
+				result.Unavailable = "merge_queue"
+			} else {
+				pr.MergeQueue = queue
+			}
+		}
 		result.PullRequests = append(result.PullRequests, pr)
 	}
 	// Every pull read here is open or was open at the last refresh. Its
@@ -318,8 +382,22 @@ func pullRequestObservation(ctx context.Context, call maintainerMCP, repository 
 	return result, nil
 }
 
-// recordCIObservations is the github adapter: the checks a refresh read
-// light the jobs of the repository's CI unit, and fail them on a failed
+func readMaintainerMergeQueue(ctx context.Context, call maintainerMCP, repository string, githubID uint64, pr kernel.ProductionPullRequest) (string, error) {
+	content, err := maintainerTool(ctx, call, repository, githubID, "observe_pull_request_merge", observePullRequestMergeArguments(repository, pr.Number, pr.Head, pr.Base))
+	if err != nil {
+		return "", err
+	}
+	var merge observePullRequestMergeResponse
+	if json.Unmarshal(content, &merge) != nil || merge.PullNumber != pr.Number || merge.Head != pr.Head {
+		return "", errors.New("Maintainer returned an invalid merge observation")
+	}
+	if merge.State == "ACTIVE_QUEUE" {
+		return "active", nil
+	}
+	return "none", nil
+}
+
+// recordCIObservations is the github adapter: the checks a refresh read light the jobs of the repository's CI unit, and fail them on a failed
 // conclusion. A refresh reads only heads whose checks can still change, so a
 // job lights while it runs and once when it settles. Silence is claimed only
 // when no read failed and the pull page was complete.
@@ -514,7 +592,7 @@ func productionPullRequest(value maintainerPullRequest) kernel.ProductionPullReq
 	if review.State == "" {
 		review.State = "unknown"
 	}
-	return kernel.ProductionPullRequest{Number: value.Number, Title: value.Title, URL: value.URL, Head: value.Head, HeadRepository: value.HeadRepository, Branch: value.Branch, Base: value.Base, BaseSHA: value.BaseSHA, State: state, Review: review}
+	return kernel.ProductionPullRequest{Number: value.Number, Title: value.Title, URL: value.URL, Head: value.Head, HeadRepository: value.HeadRepository, Branch: value.Branch, Base: value.Base, BaseSHA: value.BaseSHA, State: state, Mergeable: value.Mergeable, MergeState: value.MergeState, MergeQueue: value.MergeQueue, Review: review}
 }
 
 type maintainerPullRequestPage struct {

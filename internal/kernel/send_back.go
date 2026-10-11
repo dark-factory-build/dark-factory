@@ -531,7 +531,12 @@ func sendBackTask(ctx context.Context, connection *sql.Conn, task Task, head, no
 	// note names the pull request head, never the local Change head.
 	var published bool
 	if current != "" && !strings.EqualFold(head, current) {
-		if err := connection.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM publication_tasks p JOIN production_records r ON r.project_id = p.project_id AND r.repository = p.repository AND r.kind = 'pull_request' AND r.identity = CAST(p.pull_number AS TEXT) WHERE p.task_id = ? AND ? <> '' AND lower(json_extract(r.document, '$.head')) = lower(?))`, task.ID.Bytes(), head, head).Scan(&published); err != nil {
+		// The pull request is the task's by its publication row, or by its
+		// branch, which names the Change.
+		if err := connection.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM production_records r WHERE r.project_id = ?1 AND r.kind = 'pull_request' AND ?3 <> '' AND lower(json_extract(r.document, '$.head')) = lower(?3)
+			AND (EXISTS(SELECT 1 FROM publication_tasks p WHERE p.task_id = ?2 AND p.project_id = r.project_id AND p.repository = r.repository AND CAST(p.pull_number AS TEXT) = r.identity)
+			  OR json_extract(r.document, '$.branch') IN (SELECT 'factory/' || substr(lower(hex(c.id)), 1, 12) FROM changes c WHERE c.task_id = ?2 AND c.task_incarnation_id = ?4)))`,
+			task.ProjectID.Bytes(), task.ID.Bytes(), head, task.IncarnationID.Bytes()).Scan(&published); err != nil {
 			return Task{}, err
 		}
 	}
@@ -584,7 +589,7 @@ const taskIssueWithdrawn = `EXISTS (SELECT 1 FROM intake_task_bindings AS b JOIN
 // continuation, and validation runs before a write, not at its commit.
 func refuseAwaitedTask(ctx context.Context, connection *sql.Conn, id TaskID) error {
 	var awaited bool
-	if err := connection.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM continuations WHERE task_id = ? AND state IN ('waiting', 'queued'))`, id.Bytes()).Scan(&awaited); err != nil {
+	if err := connection.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM human_requests h JOIN runs r ON r.id = h.run_id WHERE r.task_id = ? AND h.continuation IN ('waiting', 'queued'))`, id.Bytes()).Scan(&awaited); err != nil {
 		return err
 	}
 	if awaited {

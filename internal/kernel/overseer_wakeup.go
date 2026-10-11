@@ -33,7 +33,8 @@ const (
 // keyed by its cause and dated by when it first failed so, which factoryd
 // carries over every release that fails the same way, a same-commit retry
 // included (RecordDelivery): it wakes once, never re-wakes, and so becomes
-// one NEEDS YOU card. An accepted intake task that succeeded with a diff (or
+// one NEEDS YOU card. So does a pull request waiting on its code owner's
+// approval, which no overseer can give. An accepted intake task that succeeded with a diff (or
 // whose published Change was since reclaimed) needs none: factoryd publishes
 // it, and the Change item covers a publication that never happens. While
 // factoryd records
@@ -89,7 +90,8 @@ item AS (
 	JOIN intake_acceptances AS i ON i.id = b.acceptance_id
 	JOIN agents AS o ON o.id = i.overseer_agent_id
 	WHERE t.project_id = ?1 AND o.id = ?4 AND ` + taskEndedAutomatically + ` AND NOT ` + taskIssueWithdrawn + `
-	UNION ALL SELECT NULL, e.observed_at_ms, 3, 'Escalated: ' || json_extract(e.document, '$.escalation'), '[reviewer:' || e.identity || ']' FROM production_records AS e
+	UNION ALL SELECT NULL, e.observed_at_ms, CASE WHEN json_extract(e.document, '$.owner_approval') THEN 0 ELSE 3 END,
+	  'Escalated: ' || json_extract(e.document, '$.escalation'), '[reviewer:' || e.identity || ']' FROM production_records AS e
 	JOIN production_records AS p ON p.project_id = e.project_id AND p.repository = e.repository AND p.kind = 'pull_request'
 	  AND p.identity = CAST(json_extract(e.document, '$.request.PullNumber') AS TEXT)
 	WHERE e.project_id = ?1 AND e.kind = 'reviewer' AND COALESCE(json_extract(e.document, '$.escalation'), '') <> ''
@@ -367,14 +369,11 @@ func raiseStalledItems(ctx context.Context, tx *writeTx, agent Agent, at UnixMil
 		if _, err := rand.Read(request[:]); err != nil {
 			return err
 		}
-		if _, err := connection.ExecContext(ctx, `INSERT INTO human_requests(id, run_id, idempotency_key, kind, reason_code, question_text, options_json, status, revision, created_at_ms, updated_at_ms) VALUES(?, ?, ?, 'question', 'provider_question', ?, '[]', 'open', 1, ?, ?)`,
+		if _, err := connection.ExecContext(ctx, `INSERT INTO human_requests(id, run_id, idempotency_key, kind, reason_code, question_text, options_json, status, revision, created_at_ms, updated_at_ms, continuation) VALUES(?, ?, ?, 'question', 'provider_question', ?, '[]', 'open', 1, ?, ?, 'waiting')`,
 			request[:], run, stalledItemKey[:], strings.ToValidUTF8(question[:min(len(question), MaxHumanRequestQuestionBytes)], ""), at.Int64(), at.Int64()); err != nil {
 			return err
 		}
 		if err := appendInvalidations(ctx, connection, at, []pendingInvalidation{{kind: EntityHumanRequest, id: request[:], revision: 1}}); err != nil {
-			return err
-		}
-		if _, err := insertWaitingContinuation(ctx, connection, task, ConditionHumanRequest, ContinuationConditionID(request), Revision{value: 1}, at); err != nil {
 			return err
 		}
 	}
@@ -405,18 +404,10 @@ func raiseStalledItems(ctx context.Context, tx *writeTx, agent Agent, at UnixMil
 		if err != nil || !found {
 			return errors.Join(err, ErrCorruptState)
 		}
-		run, found, err := runByID(ctx, connection, request.RunID)
-		if err != nil || !found {
-			return errors.Join(err, ErrCorruptState)
-		}
-		continuation, found, err := humanRequestContinuation(ctx, connection, request, run)
-		if err != nil || !found {
-			return errors.Join(err, ErrCorruptState)
-		}
 		if err := validate(); err != nil {
 			return err
 		}
-		if err := cancelHumanContinuationOnConnection(ctx, tx, request, continuation, at); err != nil {
+		if err := cancelHumanContinuationOnConnection(ctx, tx, request, at); err != nil {
 			return err
 		}
 	}
@@ -543,8 +534,23 @@ const overseerWakeLine = `SELECT printf('- %s "%s" %s rev=%d', lower(hex(t.id)),
 		WHERE u.task_id = t.id AND h.status IN ('open', 'delivering', 'delivery_unknown') LIMIT 1)), 1, 120), char(10), ' '), '')
 FROM tasks AS t WHERE t.id = due.id`
 
-const overseerWakeCounts = `SELECT printf('worker tasks queued=%d running=%d; open PRs=%d', COALESCE(SUM(t.status = 'queued'), 0), COALESCE(SUM(t.status = 'running'), 0),
-	(SELECT count(*) FROM production_records WHERE project_id = ?1 AND kind = 'pull_request' AND json_extract(document, '$.state') = 'open'))
+const overseerWakeCounts = `WITH open_pr AS (SELECT p.repository, CAST(json_extract(p.document, '$.number') AS INTEGER) AS number, json_extract(p.document, '$.head') AS head,
+	json_extract(p.document, '$.mergeable') AS mergeable, lower(COALESCE(json_extract(p.document, '$.merge_state'), '')) AS merge_state,
+	lower(COALESCE(json_extract(p.document, '$.merge_queue'), '')) AS merge_queue,
+	lower(COALESCE(json_extract(p.document, '$.review.state'), '')) AS review
+	FROM production_records AS p WHERE p.project_id = ?1 AND p.kind = 'pull_request' AND json_extract(p.document, '$.state') = 'open'
+	AND EXISTS (SELECT 1 FROM publication_tasks AS pt WHERE pt.project_id = p.project_id AND pt.repository = p.repository
+		AND pt.pull_number = CAST(json_extract(p.document, '$.number') AS INTEGER))),
+	classified AS (SELECT open_pr.*,
+	EXISTS (SELECT 1 FROM production_records AS c, json_each(c.document, '$.pull_requests') AS n
+		WHERE c.project_id = ?1 AND c.repository = open_pr.repository AND c.kind = 'check' AND json_extract(c.document, '$.scope') = 'head'
+		  AND lower(json_extract(c.document, '$.revision')) = lower(open_pr.head) AND CAST(n.value AS INTEGER) = open_pr.number
+		  AND json_extract(c.document, '$.conclusion') IN ('failure', 'timed_out', 'action_required', 'cancelled', 'startup_failure')) AS failing
+	FROM open_pr)
+SELECT printf('worker tasks queued=%d running=%d; open factory PRs conflicting=%d failing=%d approved-not-queued=%d', COALESCE(SUM(t.status = 'queued'), 0), COALESCE(SUM(t.status = 'running'), 0),
+	(SELECT COALESCE(SUM(merge_state = 'dirty' OR COALESCE(mergeable = 0, 0)), 0) FROM classified),
+	(SELECT COALESCE(SUM(failing), 0) FROM classified),
+	(SELECT COALESCE(SUM(review = 'allow' AND NOT failing AND merge_state <> 'dirty' AND COALESCE(mergeable, 1) <> 0 AND merge_queue = 'none'), 0) FROM classified))
 FROM tasks AS t LEFT JOIN agents AS a ON a.id = t.assigned_agent_id
 WHERE t.project_id = ?1 AND t.status IN ('queued', 'running') AND COALESCE(a.role, 'worker') = 'worker'`
 

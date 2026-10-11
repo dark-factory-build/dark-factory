@@ -146,11 +146,9 @@ func TestMain(m *testing.M) {
 }
 
 func TestCodexContinuationContextPreservesMaximumOriginalTask(t *testing.T) {
-	var condition kernel.ContinuationConditionID
-	copy(condition[:], supervisorIDBytes(240))
-	revision, _ := kernel.NewRevision(1)
+	request, _ := kernel.HumanRequestIDFromBytes(supervisorIDBytes(240))
 	task := bytes.Repeat([]byte{'x'}, kernel.MaxContinuationTaskBytes)
-	contexts := []kernel.ContinuationContext{{ConditionKind: kernel.ConditionHumanRequest, ConditionID: condition, ConditionRevision: revision, ResolutionDetail: "continue"}}
+	contexts := []kernel.ContinuationContext{{RequestID: request, ResolutionDetail: "continue"}}
 	framed, err := providerTaskWithContinuationContext(kernel.ProviderCodex, task, contexts)
 	if err == nil || framed != nil {
 		t.Fatalf("maximum Codex API continuation framing: bytes=%d err=%v", len(framed), err)
@@ -174,11 +172,9 @@ func TestCodexContinuationContextPreservesMaximumOriginalTask(t *testing.T) {
 }
 
 func TestProviderContinuationContextPreservesMaximumProviderTask(t *testing.T) {
-	var condition kernel.ContinuationConditionID
-	copy(condition[:], supervisorIDBytes(241))
-	revision, _ := kernel.NewRevision(1)
+	request, _ := kernel.HumanRequestIDFromBytes(supervisorIDBytes(241))
 	task := bytes.Repeat([]byte{'x'}, kernel.MaxContinuationTaskBytes)
-	framed, err := providerTaskWithContinuationContext(kernel.ProviderClaudeCode, task, []kernel.ContinuationContext{{ConditionKind: kernel.ConditionHumanRequest, ConditionID: condition, ConditionRevision: revision, ResolutionDetail: "continue"}})
+	framed, err := providerTaskWithContinuationContext(kernel.ProviderClaudeCode, task, []kernel.ContinuationContext{{RequestID: request, ResolutionDetail: "continue"}})
 	if err == nil || framed != nil {
 		t.Fatalf("maximum provider continuation framing: bytes=%d err=%v", len(framed), err)
 	}

@@ -20,6 +20,20 @@ func reviewCheckoutGitError(operation string, err error) error {
 	return fmt.Errorf("review checkout %s: %w", operation, err)
 }
 
+func reviewCheckoutSSHArgs(result gitCapture) ([]string, error) {
+	if result.exitCode == 1 {
+		return nil, nil
+	}
+	if result.exitCode != 0 {
+		return nil, newGitError(gitFailureProcess)
+	}
+	command := strings.TrimSpace(string(result.output))
+	if command == "" || strings.ContainsAny(command, "\x00\r\n") {
+		return nil, &ValidationError{Reason: "registered SSH command is invalid"}
+	}
+	return []string{"-c", "core.sshCommand=" + command}, nil
+}
+
 // ReviewCheckout makes path a disposable clone checked out at exactly head,
 // the head of ref (a pull request's or a branch's), with base present. The
 // clone borrows the registered repository's objects through Git alternates
@@ -51,6 +65,14 @@ func ReviewCheckout(ctx context.Context, gitExecutable, root string, expected Re
 	if err != nil {
 		return reviewCheckoutGitError("remote", err)
 	}
+	sshCommand, err := authority.run(ctx, maxGitSelectionOutput, "-C", root, "config", "--local", "--get", "core.sshCommand")
+	if err != nil {
+		return reviewCheckoutGitError("config", err)
+	}
+	sshArgs, err := reviewCheckoutSSHArgs(sshCommand)
+	if err != nil {
+		return reviewCheckoutGitError("config", err)
+	}
 	if _, err := authority.succeed(ctx, maxGitSelectionOutput, "init", "--quiet", "--", path); err != nil {
 		return reviewCheckoutGitError("init", err)
 	}
@@ -60,6 +82,7 @@ func ReviewCheckout(ctx context.Context, gitExecutable, root string, expected Re
 	// The origin is the registered, digest-bound remote, so a local-path
 	// origin (a mirror, or a test fixture) is as trusted as a GitHub one.
 	fetch := []string{"-C", path, "-c", "core.hooksPath=/dev/null", "-c", "protocol.file.allow=always", "fetch", "--quiet", "--no-tags", "--no-recurse-submodules", "--no-write-fetch-head", "--no-auto-maintenance", "--end-of-options", strings.TrimSpace(string(origin)), "+refs/heads/" + strings.TrimPrefix(baseRef, "refs/heads/") + ":refs/review/base"}
+	fetch = append(fetch[:4], append(sshArgs, fetch[4:]...)...)
 	checkout := head
 	if ref != "" {
 		fetch, checkout = append(fetch, "+"+ref+":refs/review/head"), "refs/review/head"
@@ -81,6 +104,32 @@ func ReviewCheckout(ctx context.Context, gitExecutable, root string, expected Re
 	}
 	if checked.exitCode != 0 || string(checked.output) != head+"\n"+base+"\n" {
 		return &ValidationError{Reason: "pull request head or base differs from the requested review"}
+	}
+	return nil
+}
+
+// ProbeOrigin proves the checkout's own origin answers a sealed fetch, whatever
+// the configured base fetches from. It changes no refs, and a remote whose HEAD
+// names a missing branch still answers.
+func ProbeOrigin(ctx context.Context, gitExecutable, root string, expected RepositorySourceIdentity) error {
+	authority, err := openGitAuthority(gitExecutable, root, expected.Root, nil, true)
+	if err != nil {
+		return err
+	}
+	defer authority.close()
+	actual, err := authority.sourceIdentity(ctx)
+	if err != nil {
+		return err
+	}
+	if actual.Root != expected.Root || actual.Git != expected.Git || actual.OriginDigest != expected.OriginDigest {
+		return &ValidationError{Reason: "registered checkout identity changed"}
+	}
+	result, err := authority.run(ctx, maxGitSelectionOutput, "-C", root, "ls-remote", "origin", "HEAD")
+	if err != nil {
+		return err
+	}
+	if result.exitCode != 0 {
+		return refreshFailure(result.stderr)
 	}
 	return nil
 }
