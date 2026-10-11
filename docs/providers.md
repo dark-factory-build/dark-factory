@@ -234,7 +234,9 @@ configuration and hooks; the directory is never persisted in Codex config and
 the provider cannot choose a different working directory.
 
 Install and sign in to the chosen CLI through its normal local workflow before
-dispatching work. Both providers receive a private runtime `TMPDIR`. Claude
+dispatching work. Both providers receive a private `TMPDIR`, the short
+`/private/tmp/df-<first 8 of the run id>` (so tests can bind Unix sockets
+beneath it), or the runtime's `tmp` if that name is taken. Claude
 uses the operator's normal `HOME`, which is where its CLI keeps the signed-in
 account; Codex keeps a private runtime `HOME` and receives its existing account
 configuration explicitly:

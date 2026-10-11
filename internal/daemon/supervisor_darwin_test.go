@@ -1715,7 +1715,9 @@ func TestSupervisorCleanupUncertaintyBlocksTerminal(t *testing.T) {
 	// has made the name removable, the sweep removes the runtime, releases
 	// it and settles the run.
 	runtimePath := filepath.Join(fixture.runtimeParentPath, run.ID.String())
-	unsafe := filepath.Join(runtimePath, "tmp", "unsafe")
+	// The shell provider's HOME is the runtime home; its TMPDIR is the short
+	// private one outside the runtime.
+	unsafe := filepath.Join(runtimePath, "home", "unsafe")
 	sweep := func(want RecoveredRunAction) {
 		t.Helper()
 		dispositions, sweepErr := fixture.daemon.RecoverAbandonedRuns(context.Background(), fixture.runtimeParent, fixture.changeParent)
@@ -2271,7 +2273,7 @@ func newSupervisorFixture(t *testing.T, program string) *supervisorFixture {
 func newSupervisorRoleFixture(t *testing.T, program string, role kernel.AgentRole) *supervisorFixture {
 	t.Helper()
 	baselineFDs := supervisorFDCount(t)
-	root, err := os.MkdirTemp("/private/tmp", "dark-factory-supervisor-")
+	root, err := os.MkdirTemp(runner.ShortTempDir(), "dark-factory-supervisor-")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -2821,7 +2823,7 @@ func cleanupFailureProgram(t *testing.T) string {
 	if err != nil {
 		t.Fatal(err)
 	}
-	return "set -eu\nprintf x > __WITNESS__\nprintf x > \"$TMPDIR/unsafe\" && chmod 4600 \"$TMPDIR/unsafe\"\n" + quoteShell(executable) + " --supervisor-attempt-succeed typed-success\n"
+	return "set -eu\nprintf x > __WITNESS__\nprintf x > \"$HOME/unsafe\" && chmod 4600 \"$HOME/unsafe\"\n" + quoteShell(executable) + " --supervisor-attempt-succeed typed-success\n"
 }
 
 func quoteShell(value string) string { return "'" + strings.ReplaceAll(value, "'", "'\\''") + "'" }

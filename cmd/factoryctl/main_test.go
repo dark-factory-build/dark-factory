@@ -16,6 +16,7 @@ import (
 
 	"github.com/dark-factory-build/dark-factory/internal/api"
 	"github.com/dark-factory-build/dark-factory/internal/install"
+	"github.com/dark-factory-build/dark-factory/internal/runner"
 )
 
 type serverResult struct {
@@ -95,7 +96,7 @@ type apiFixture struct {
 
 func newAPIFixture(t testing.TB) *apiFixture {
 	t.Helper()
-	directory, err := os.MkdirTemp("/private/tmp", "dark-factory-factoryctl-attempt-")
+	directory, err := os.MkdirTemp(runner.ShortTempDir(), "dark-factory-factoryctl-attempt-")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -374,7 +375,7 @@ func TestParseExplicitHomeCommands(t *testing.T) {
 }
 
 func TestHomeCLIOutputIsBoundedAndRedacted(t *testing.T) {
-	parent, err := os.MkdirTemp("/private/tmp", "dark-factory-factoryctl-home-")
+	parent, err := os.MkdirTemp(runner.ShortTempDir(), "dark-factory-factoryctl-home-")
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -1587,7 +1587,7 @@ func TestCodexToolchainSandbox(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(software, "library"), []byte("fixture library"), 0600); err != nil {
 		t.Fatal(err)
 	}
-	shared, err := os.MkdirTemp("/private/tmp", "toolchain-proof-")
+	shared, err := os.MkdirTemp(runner.ShortTempDir(), "toolchain-proof-")
 	if err != nil {
 		t.Fatal(err)
 	}

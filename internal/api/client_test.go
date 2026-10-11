@@ -18,6 +18,8 @@ import (
 	"syscall"
 	"testing"
 	"time"
+
+	"github.com/dark-factory-build/dark-factory/internal/runner"
 )
 
 const (
@@ -102,7 +104,7 @@ func (fixture *wireFixture) wait(t testing.TB) {
 
 func privateTestDirectory(t testing.TB) string {
 	t.Helper()
-	directory, err := os.MkdirTemp("/private/tmp", "dark-factory-api-test-")
+	directory, err := os.MkdirTemp(runner.ShortTempDir(), "dark-factory-api-test-")
 	if err != nil {
 		t.Fatal(err)
 	}
