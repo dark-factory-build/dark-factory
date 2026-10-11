@@ -111,18 +111,21 @@ func (store *Store) transitionResource(ctx context.Context, runID RunID, resourc
 	if !found {
 		return Resource{}, tx.Rollback(ErrNotFound)
 	}
-	if resource.RunID != runID {
-		return Resource{}, tx.Rollback(ErrConflict)
-	}
-	if resource.Kind == ResourceProviderProcess || resource.Kind == ResourceProviderGroup || resource.Kind == ResourceRunnerProcess && (target == ResourceActive || target == ResourceReleased) {
-		return Resource{}, tx.Rollback(ErrConflict)
-	}
 	run, found, err := runByID(ctx, tx.connection, runID)
 	if err != nil || !found {
 		if err == nil {
 			err = ErrCorruptState
 		}
 		return Resource{}, tx.Rollback(err)
+	}
+	if _, err := loadRunRelationships(ctx, tx.connection, run); err != nil {
+		return Resource{}, tx.Rollback(err)
+	}
+	if resource.RunID != runID {
+		return Resource{}, tx.Rollback(ErrConflict)
+	}
+	if resource.Kind == ResourceProviderProcess || resource.Kind == ResourceProviderGroup || resource.Kind == ResourceRunnerProcess && (target == ResourceActive || target == ResourceReleased) {
+		return Resource{}, tx.Rollback(ErrConflict)
 	}
 	if target == ResourceReleased && !resource.Identity.Empty() {
 		switch resource.Kind {
@@ -357,6 +360,9 @@ func (store *Store) ProposeAttemptOutcome(ctx context.Context, digest AttemptDig
 	}
 	if !found || run.Phase != RunRunning || run.CredentialRevokedAt != nil {
 		return Run{}, tx.Rollback(ErrUnauthorized)
+	}
+	if _, err := loadRunRelationships(ctx, tx.connection, run); err != nil {
+		return Run{}, tx.Rollback(err)
 	}
 	finalizing, err := store.enterFinalizing(ctx, tx, run, run.Revision, proposal, at, nil)
 	if err != nil && (errors.Is(err, ErrConflict) || errors.Is(err, ErrRevisionConflict)) {

@@ -31,6 +31,9 @@ type Store struct {
 	closed      atomic.Bool
 	close       sync.Once
 	closeErr    error
+	// held is the corruption the last whole-store validation found. Validated
+	// writes and snapshot reads refuse while it is set (see Validate).
+	held atomic.Pointer[error]
 
 	repositoryBase string // Boot-owned initial binding default; protected by writerGate.
 }
@@ -336,6 +339,29 @@ func (store *Store) validateOpen(ctx context.Context) error {
 	return errors.Join(err, tx.Close())
 }
 
+// Validate checks one coherent durable snapshot without holding the writer.
+// Corruption it finds becomes a hold that refuses validated writes and
+// snapshot reads until a later validation passes; a timeout or interruption
+// is not corruption and leaves the hold as it was.
+func (store *Store) Validate(ctx context.Context) error {
+	err := store.validateOpen(ctx)
+	switch {
+	case err == nil:
+		store.held.Store(nil)
+	case errors.Is(err, ErrCorruptState):
+		store.held.Store(&err)
+	}
+	return err
+}
+
+// heldCorruption is the hold Validate recorded, if any.
+func (store *Store) heldCorruption() error {
+	if err := store.held.Load(); err != nil {
+		return *err
+	}
+	return nil
+}
+
 func validateDatabaseSnapshot(ctx context.Context, connection *sql.Conn) error {
 	if err := validateExactSchema(ctx, connection); err != nil {
 		return err
@@ -418,22 +444,15 @@ type writeTx struct {
 }
 
 func (store *Store) beginValidatedWrite(ctx context.Context) (*writeTx, error) {
-	tx, err := store.beginUncheckedWrite(ctx)
-	if err != nil {
+	if err := store.heldCorruption(); err != nil {
 		return nil, err
 	}
-	if err := validateDurableControls(ctx, tx.connection); err != nil {
-		err = tx.Rollback(err)
-		tx.Close()
-		return nil, err
-	}
-	return tx, nil
+	return store.beginUncheckedWrite(ctx)
 }
 
-// beginUncheckedWrite reserves the writer without validating retained history.
-// Enqueue polls may inspect candidates and roll back a true no-op. Account
-// link/update transactions validate affected rows and references locally;
-// other mutations use beginValidatedWrite or validateDurableControls first.
+// beginUncheckedWrite reserves the writer. Mutations validate the rows and
+// references they touch; retained history is checked at open and by the
+// daemon's periodic health validation instead of on every write.
 func (store *Store) beginUncheckedWrite(ctx context.Context) (*writeTx, error) {
 	if err := store.acquireWriter(ctx); err != nil {
 		return nil, err

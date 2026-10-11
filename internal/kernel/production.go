@@ -619,9 +619,9 @@ func (store *Store) PublishableChanges(ctx context.Context, at UnixMillis) ([]Pu
 // RecordCorrectionPublished marks the Change's correction as published on
 // the pull request factoryd opened for its worker task: neither factoryd nor
 // the overseer's wake treats that settlement as unpublished again.
-// It moves one timestamp no retained-history rule reads, so it is unchecked.
+// It moves one timestamp no retained-history rule reads.
 func (store *Store) RecordCorrectionPublished(ctx context.Context, c PublishableChange, at UnixMillis) error {
-	tx, err := store.beginUncheckedWrite(ctx)
+	tx, err := store.beginValidatedWrite(ctx)
 	if err != nil {
 		return err
 	}

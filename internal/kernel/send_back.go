@@ -262,11 +262,7 @@ func (store *Store) RetryTask(ctx context.Context, digest *AttemptDigest, id Tas
 	if id.zero() || expected.Int64() < 1 {
 		return Task{}, fmt.Errorf("%w: invalid task retry", ErrInvalidValue)
 	}
-	begin := store.beginValidatedWrite
-	if intakeLimit > 0 {
-		begin = store.beginUncheckedWrite
-	}
-	tx, err := begin(ctx)
+	tx, err := store.beginValidatedWrite(ctx)
 	if err != nil {
 		return Task{}, err
 	}
@@ -293,6 +289,11 @@ func (store *Store) retryTaskTx(ctx context.Context, tx *writeTx, digest *Attemp
 	}
 	if !found {
 		return Task{}, tx.Rollback(ErrNotFound)
+	}
+	if intakeLimit == 0 {
+		if err := validateTaskRunTopology(ctx, tx.connection, task); err != nil {
+			return Task{}, tx.Rollback(err)
+		}
 	}
 	if digest != nil && task.ProjectID != project {
 		return Task{}, tx.Rollback(ErrUnauthorized)

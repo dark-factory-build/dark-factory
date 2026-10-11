@@ -26,6 +26,7 @@ func TestPeerQuestionCorruptProjectFailsClosed(t *testing.T) {
 	if _, err := store.writer.Exec(`UPDATE peer_questions SET project_id = ? WHERE id = ?`, other.ID.Bytes(), question.ID.Bytes()); err != nil {
 		t.Fatal(err)
 	}
+	_ = store.Validate(ctx)
 	if _, err := store.Snapshot(ctx); !errors.Is(err, ErrCorruptState) {
 		t.Fatalf("corrupt project snapshot = %v", err)
 	}
