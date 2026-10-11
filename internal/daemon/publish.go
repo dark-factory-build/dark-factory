@@ -270,13 +270,23 @@ func (daemon *Daemon) publishPull(ctx context.Context, c kernel.PublishableChang
 				break
 			}
 		}
-		listing, err := gitOutput(ctx, gitDir, "log", "--format=", "--name-only", "-z", "--first-parent", "--no-renames", workerHead+".."+c.Head)
+		listing, err := gitOutput(ctx, gitDir, "log", "--format=", "--name-only", "-z", "--first-parent", "--no-merges", "--no-renames", workerHead+".."+c.Head, "--not", main)
 		if err != nil {
 			return err
 		}
+		net, err := gitOutput(ctx, gitDir, "diff", "--name-only", "-z", "--no-renames", workerHead, c.Head)
+		if err != nil {
+			return err
+		}
+		netPaths := make(map[string]bool)
+		for _, path := range strings.Split(string(net), "\x00") {
+			if path != "" {
+				netPaths[path] = true
+			}
+		}
 		workerPaths = make(map[string]bool)
 		for _, path := range strings.Split(string(listing), "\x00") {
-			if path = strings.Trim(path, "\n"); path != "" {
+			if path = strings.Trim(path, "\n"); path != "" && netPaths[path] {
 				workerPaths[path] = true
 			}
 		}
