@@ -12,6 +12,7 @@ import (
 	"os/exec"
 	"os/signal"
 	"path/filepath"
+	"runtime/pprof"
 	"strconv"
 	"strings"
 	"sync"
@@ -328,6 +329,42 @@ func validBrowserOrigin(value string) bool {
 	return err == nil && (parsed.Scheme == "https" || parsed.Scheme == "http") && parsed.Host != "" && parsed.User == nil && parsed.Path == "" && parsed.RawQuery == "" && parsed.Fragment == "" && parsed.String() == value && !strings.Contains(value, "*") && len(value) <= 8192
 }
 
+const (
+	profileName     = "factoryd.cpu.pprof"
+	profileDuration = 10 * time.Second
+)
+
+// profileOnSignal attributes saturation without a profiling endpoint: on
+// SIGUSR1 (kill -USR1 <factoryd pid>, only the operator's own account can
+// send it) factoryd writes a CPU profile of the next 10s to path, for
+// go tool pprof. Go keeps function names in a stripped binary.
+func profileOnSignal(ctx context.Context, path string) {
+	signals := make(chan os.Signal, 1)
+	signal.Notify(signals, syscall.SIGUSR1)
+	go func() {
+		defer signal.Stop(signals)
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-signals:
+			}
+			file, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o600)
+			if err == nil {
+				if err = pprof.StartCPUProfile(file); err == nil {
+					select {
+					case <-ctx.Done():
+					case <-time.After(profileDuration):
+					}
+					pprof.StopCPUProfile()
+				}
+				err = errors.Join(err, file.Close())
+			}
+			daemon.LogFactoryd(recoveryLog, "factoryd: cpu profile %s: %v\n", path, cmp.Or[error](err, errors.New("written")))
+		}
+	}()
+}
+
 func serve(ctx context.Context, configuration config) error {
 	if ctx == nil || !validHome(configuration.home) || !validBrowserAddress(configuration.browserAddress, true) || len(configuration.browserOrigins) == 0 ||
 		!validHome(configuration.gitExecutable) || provider.ValidateToolPath(configuration.toolPath) != nil || !validBaseRevision(configuration.baseRevision) ||
@@ -363,6 +400,7 @@ func serve(ctx context.Context, configuration config) error {
 		<-limit.Done()
 		return owner.close()
 	}
+	profileOnSignal(ctx, filepath.Join(configuration.home, profileName))
 	// Only bin/current boots under launchd, so a marker naming this build
 	// means its trial promoted it; any other marker is a release that did not.
 	if marker, upgrading, err := install.ReadUpgradeMarker(configuration.home); upgrading || err != nil {

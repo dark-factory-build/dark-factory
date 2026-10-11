@@ -26,8 +26,11 @@ import (
 )
 
 const (
-	defaultDispatchTimeout           = 10 * time.Second
-	retainedSourceDispatchTimeout    = 10 * time.Minute
+	defaultDispatchTimeout        = 10 * time.Second
+	retainedSourceDispatchTimeout = 10 * time.Minute
+	// attemptTaskDispatchTimeout lets a slow task fetch finish inside the
+	// client's budget instead of failing the run before its first tool call.
+	attemptTaskDispatchTimeout       = 30 * time.Second
 	storageCompactionDispatchTimeout = 10 * time.Minute
 )
 
@@ -254,6 +257,11 @@ func (daemon *Daemon) HandleConnection(ctx context.Context, connection *api.Conn
 	if call.Kind() == api.CallAttemptSource {
 		cancel()
 		dispatchContext, cancel = context.WithTimeout(ctx, retainedSourceDispatchTimeout)
+		defer cancel()
+	}
+	if call.Kind() == api.CallAttemptTask {
+		cancel()
+		dispatchContext, cancel = context.WithTimeout(ctx, attemptTaskDispatchTimeout)
 		defer cancel()
 	}
 	if call.Kind() == api.CallCompactStorage || call.Kind() == api.CallBackupCreate || call.Kind() == api.CallBackupVerify {
@@ -866,10 +874,22 @@ func (daemon *Daemon) attemptTask(ctx context.Context, call api.Call) api.Reply 
 	if err != nil {
 		return newErrorReply(api.RemoteInvalidRequest)
 	}
+	// Each step's duration, logged when the fetch is slow (#1780).
+	timing, current, began, started := "", "authenticate", time.Now(), time.Now()
+	step := func(next string) {
+		timing = strings.TrimSpace(timing + " " + current + "=" + time.Since(started).Round(time.Millisecond).String())
+		current, started = next, time.Now()
+	}
+	defer func() {
+		if step(""); time.Since(began) > time.Second {
+			LogFactoryd(daemon.log, "factoryd: slow attempt task %s: %s\n", time.Since(began).Round(time.Millisecond), timing)
+		}
+	}()
 	authority, err := daemon.store.AuthenticateAttempt(ctx, kDigest)
 	if err != nil {
 		return newErrorReply(remoteErrorCode(err))
 	}
+	step("attachments")
 	attachments, err := daemon.store.TaskAttachments(ctx, authority.TaskID)
 	if err != nil {
 		return newErrorReply(remoteErrorCode(err))
@@ -878,6 +898,7 @@ func (daemon *Daemon) attemptTask(ctx context.Context, call api.Call) api.Reply 
 	if err != nil {
 		return newErrorReply(api.RemoteInternal)
 	}
+	step("knowledge")
 	contextRun := kernel.Run{ID: authority.RunID, CredentialDigest: kDigest, ProjectID: authority.ProjectID, AgentID: authority.AgentID, TaskID: authority.TaskID, ChangeID: authority.ChangeID, Provider: authority.Provider, AdmittedTaskWorkRevision: authority.AdmittedTaskWorkRevision, ContinuationContexts: authority.ContinuationContexts}
 	task, suppliedKnowledge, err := daemon.prepareKnowledgeTask(ctx, contextRun, []byte(instruction), false)
 	if err != nil {
@@ -888,6 +909,7 @@ func (daemon *Daemon) attemptTask(ctx context.Context, call api.Call) api.Reply 
 			task = task[marker+2:]
 		}
 	}
+	step("intake")
 	assignment := api.AttemptTask{Task: string(task)}
 	accepted, found, err := daemon.store.IntakeAcceptanceForTask(ctx, authority.TaskID)
 	if err != nil {
@@ -916,6 +938,7 @@ func (daemon *Daemon) attemptTask(ctx context.Context, call api.Call) api.Reply 
 	}
 	// Receipts mean this exact task response was served, not that the model
 	// understood it. Reauthenticate and record the complete set atomically.
+	step("receipts")
 	at, err := daemon.timestamp()
 	if err != nil {
 		return newErrorReply(api.RemoteInternal)

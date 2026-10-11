@@ -27,6 +27,13 @@ func TestRecoverableRunExactLookupMatchesPluralEntry(t *testing.T) {
 	if exact.Change == nil || len(exact.Resources) != 4 {
 		t.Fatalf("exact lookup omitted durable relationships: %+v", exact)
 	}
+	// Recovery no longer validates retained history itself; it refuses while
+	// the periodic validation holds corruption.
+	held := error(ErrCorruptState)
+	store.held.Store(&held)
+	if _, err := store.RecoverableRuns(context.Background()); !errors.Is(err, ErrCorruptState) {
+		t.Fatalf("RecoverableRuns under a validation hold = %v", err)
+	}
 }
 
 func TestRecoverableRunExactLookupReturnsNotFoundForTerminalAndUnknownRuns(t *testing.T) {
