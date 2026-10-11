@@ -278,34 +278,54 @@ func (daemon *Daemon) tryAutoRebase(ctx context.Context, project kernel.ProjectI
 	if err != nil {
 		return false, err
 	}
-	current, err := change.SelectRegisteredGit(ctx, *git, repositoryState.Root, repositoryState.BaseRef, change.RepositorySourceIdentity{Root: root, Git: gitIdentity, OriginDigest: source.OriginDigest})
-	if err != nil {
-		return false, err
-	}
 	path := filepath.Join(*parent, state.ID.String())
-	if err := change.FetchBase(ctx, current, path); err != nil {
-		return false, err
-	}
-	facts, err := change.RebaseWorktree(ctx, current, path)
+	state, _, err = daemon.rebaseRetainedChange(ctx, state, repositoryState, root, *git, path, change.RepositorySourceIdentity{Root: root, Git: gitIdentity, OriginDigest: source.OriginDigest})
 	if errors.Is(err, change.ErrRebaseConflict) {
 		return false, nil
 	}
 	if err != nil {
 		return false, err
 	}
-	if facts.Dirty() || facts.Branch() != change.BranchName(state.ID.String()) {
-		return false, errors.New("rebased Change worktree failed verification")
+	return true, nil
+}
+
+// rebaseRetainedChange refreshes the registered base and rebases a retained
+// worktree before its provider is released. Retry, send-back and review rescue
+// all use this same Git handoff.
+func (daemon *Daemon) rebaseRetainedChange(ctx context.Context, state kernel.Change, repository kernel.ProjectRepository, repositoryIdentity change.RepositoryIdentity, git, path string, source change.RepositorySourceIdentity) (kernel.Change, change.WorktreeFacts, error) {
+	if state.Selection == nil || state.HeadCommit == nil {
+		return kernel.Change{}, change.WorktreeFacts{}, fmt.Errorf("retained Change has no Git head")
+	}
+	current, err := change.SelectRegisteredGit(ctx, git, repository.Root, repository.BaseRef, source)
+	if err != nil {
+		return kernel.Change{}, change.WorktreeFacts{}, err
+	}
+	if err := change.FetchBase(ctx, current, path); err != nil {
+		return kernel.Change{}, change.WorktreeFacts{}, err
+	}
+	facts, err := change.RebaseWorktree(ctx, current, path)
+	if err != nil {
+		return kernel.Change{}, change.WorktreeFacts{}, err
+	}
+	if facts.Branch() != change.BranchName(state.ID.String()) {
+		return kernel.Change{}, change.WorktreeFacts{}, errors.New("rebased Change worktree failed verification")
 	}
 	newHead, err := kernelCommit(facts.Head())
 	if err != nil {
-		return false, err
+		return kernel.Change{}, change.WorktreeFacts{}, err
+	}
+	if kernelCommitEqual(*state.HeadCommit, newHead) {
+		return state, facts, nil
 	}
 	at, err := daemon.timestamp()
 	if err != nil {
-		return false, err
+		return kernel.Change{}, change.WorktreeFacts{}, err
 	}
-	_, err = daemon.store.RecordChangeRebased(ctx, state.ID, state.Revision, *state.HeadCommit, newHead, at)
-	return err == nil, err
+	updated, err := daemon.store.RecordChangeRebased(ctx, state.ID, state.Revision, *state.HeadCommit, newHead, at)
+	if err != nil {
+		return kernel.Change{}, change.WorktreeFacts{}, err
+	}
+	return updated, facts, nil
 }
 
 func (daemon *Daemon) repairPublishedConflict(ctx context.Context, project kernel.ProjectID, repository string, op review.Operation) error {

@@ -93,8 +93,19 @@ func TestSupervisorRetainedCanonicalGitRetryPreservesWorktree(t *testing.T) {
 		t.Fatal(err)
 	}
 
+	if err := os.WriteFile(filepath.Join(project, "main-fix.txt"), []byte("main fix\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	supervisorGit(t, git, "-C", project, "add", "main-fix.txt")
+	supervisorGit(t, git, "-C", project, "commit", "-m", "advance main")
+	mainHead = strings.TrimSpace(supervisorGitOutput(t, git, "-C", project, "rev-parse", "HEAD"))
+	mainIndex, err = os.ReadFile(filepath.Join(project, ".git", "index"))
+	if err != nil {
+		t.Fatal(err)
+	}
+
 	queueSupervisorRetry(t, fixture, first)
-	fixture.spec.BaseRevision = "refs/heads/retained-canonical-must-not-resolve"
+	fixture.spec.BaseRevision = "HEAD"
 	second, err := fixture.daemon.RunNext(context.Background(), fixture.spec)
 	if err != nil {
 		t.Fatalf("retained RunNext: %v", err)
@@ -108,6 +119,14 @@ func TestSupervisorRetainedCanonicalGitRetryPreservesWorktree(t *testing.T) {
 	}
 	if body, err := os.ReadFile(filepath.Join(path, "canonical-git-ok.txt")); err != nil || string(body) != "ok" {
 		t.Fatalf("provider Git inspection marker = %q, %v", body, err)
+	}
+	newHead := strings.TrimSpace(supervisorGitOutput(t, git, "-C", path, "rev-parse", "HEAD"))
+	if newHead == head {
+		t.Fatalf("retry did not rebase the branch: still at %s", newHead)
+	}
+	supervisorGit(t, git, "-C", path, "merge-base", "--is-ancestor", mainHead, newHead)
+	if body, err := os.ReadFile(filepath.Join(path, "main-fix.txt")); err != nil || string(body) != "main fix\n" {
+		t.Fatalf("rebased main fix = %q, %v", body, err)
 	}
 	if witness, err := os.ReadFile(fixture.witness); err != nil || string(witness) != "xx" {
 		t.Fatalf("retained provider witness = %q, %v", witness, err)

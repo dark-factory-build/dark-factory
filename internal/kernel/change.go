@@ -368,9 +368,9 @@ func (store *Store) PublishedChangeID(ctx context.Context, project ProjectID, re
 	return id, err == nil, err
 }
 
-// RecordChangeRebased advances a retained Change's durable head after
-// factoryd has cleanly rebased its worktree onto the current main. The Change
-// revision remains the worker's settled revision; only the Git head changed.
+// RecordChangeRebased advances a Change's durable head after factoryd has
+// cleanly rebased its worktree onto the current main. The Change revision
+// remains the worker's revision; only the Git head changed.
 func (store *Store) RecordChangeRebased(ctx context.Context, id ChangeID, expected Revision, oldHead, newHead CommitID, at UnixMillis) (Change, error) {
 	if id.zero() || oldHead.Format() == ObjectFormat(0) || newHead.Format() == ObjectFormat(0) || oldHead.Format() != newHead.Format() {
 		return Change{}, fmt.Errorf("%w: invalid rebased Change", ErrInvalidValue)
