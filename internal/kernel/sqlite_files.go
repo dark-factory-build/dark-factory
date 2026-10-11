@@ -143,8 +143,8 @@ func inspectOperationalSnapshot(ctx context.Context, path string, files *databas
 		return files.verifySnapshot(ctx, snapshot)
 	}
 	// A large WAL can take longer than the normal busy timeout to validate. The
-	// caller already bounds startup; validation must not turn that timeout into
-	// a false corruption report.
+	// caller bounds startup; this inspection deliberately has no second fixed
+	// deadline and reports validation errors directly.
 	inspectionCtx := ctx
 	if err := files.recheckPaths(); err != nil {
 		return err

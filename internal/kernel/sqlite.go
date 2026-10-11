@@ -390,6 +390,8 @@ func (store *Store) Close() error {
 		store.bindingMu.Lock()
 		defer store.bindingMu.Unlock()
 		store.waitForCheckedOutConnections()
+		// The existing binding fence must complete before checkpointing or
+		// closing the pools; checkpointing is maintenance, not a new fence.
 		store.closeErr = errors.Join(store.closeErr, store.checkpointWAL(context.Background(), "TRUNCATE"))
 		poolErr := errors.Join(closeSQLitePool("reader", store.readers), closeSQLitePool("writer", store.writer))
 		if poolErr != nil {
