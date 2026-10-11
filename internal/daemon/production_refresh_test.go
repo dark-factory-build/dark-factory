@@ -35,6 +35,31 @@ func TestRefreshRepairsAnUnqueuedPullThatBecomesConflicting(t *testing.T) {
 	}
 }
 
+func TestRefreshSchedulesAPreviouslySkippedExactHead(t *testing.T) {
+	head := strings.Repeat("a", 40)
+	known := []kernel.ProductionPullRequest{{Number: 7, Head: head, State: "open", Review: kernel.ProductionReview{Head: head, State: "unknown"}}}
+	observed := []kernel.ProductionPullRequest{{Number: 7, Head: head, State: "open", Review: kernel.ProductionReview{Head: head, State: "skipped"}}}
+	if got := changedProductionHeads(known, observed); len(got) != 1 || got[0].Number != 7 {
+		t.Fatalf("skipped exact head was not scheduled: %+v", got)
+	}
+	known[0].Review.State = "skipped"
+	if got := changedProductionHeads(known, observed); len(got) != 0 {
+		t.Fatalf("skipped exact head was scheduled twice: %+v", got)
+	}
+}
+
+func TestRefreshKeepsLiveSkippedReviewWhenStoredReviewIsUnknown(t *testing.T) {
+	head := strings.Repeat("b", 40)
+	call := func(_ context.Context, _ json.RawMessage, _ map[string]uint64) (json.RawMessage, error) {
+		return json.RawMessage(`{"jsonrpc":"2.0","id":1,"result":{"structuredContent":{"pull_requests":[{"number":7,"head_sha":"` + head + `","state":"open","review":{"head":"` + head + `","state":"skipped"}}],"next_page":null}}}`), nil
+	}
+	known := []kernel.ProductionPullRequest{{Number: 7, Head: head, State: "open", Review: kernel.ProductionReview{Head: head, State: "unknown"}}}
+	got, err := pullRequestObservation(context.Background(), call, "o/r", 1, known, map[kernel.ProductionHead]bool{{Number: 7, Head: head}: true}, func(error) {})
+	if err != nil || len(got.PullRequests) != 1 || got.PullRequests[0].Review.State != "skipped" {
+		t.Fatalf("live skipped review was lost: %+v, %v", got.PullRequests, err)
+	}
+}
+
 func TestRefreshReadsQueueStateForApprovedPulls(t *testing.T) {
 	head := strings.Repeat("a", 40)
 	pull := kernel.ProductionPullRequest{Number: 7, Head: head, Base: "main"}
