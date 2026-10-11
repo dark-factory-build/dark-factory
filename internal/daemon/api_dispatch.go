@@ -638,6 +638,9 @@ func (daemon *Daemon) taskRead(ctx context.Context, call api.Call) api.Reply {
 	if err != nil {
 		return newErrorReply(remoteErrorCode(err))
 	}
+	if len(questions) > 1 {
+		questions = questions[:1]
+	}
 	peerQuestions := make([]api.PeerQuestion, 0, len(questions))
 	for _, question := range questions {
 		peerQuestions = append(peerQuestions, api.PeerQuestion{ID: question.ID.String(), SourceTaskID: question.SourceTaskID.String(), TargetTaskID: question.TargetTaskID.String(), Question: question.Question, Answer: question.Answer, RecipientDeliveryState: question.RecipientDeliveryState.String(), AnswerDeliveryState: question.AnswerDeliveryState.String(), Revision: uint64(question.Revision.Int64())})

@@ -502,7 +502,7 @@ func NewAttemptSourceReply(source RetainedChangeHandoff) (Reply, error) {
 }
 
 func NewTaskTextReply(value TaskText) (Reply, error) {
-	if !validID(value.TaskID) || value.Revision == 0 || !validText(value.Instruction, 0, 8192) || !validText(value.Feedback, 0, 8192) || value.Outcome != nil && !validText(*value.Outcome, 0, 8192) || value.NextOffset != nil && *value.NextOffset == 0 {
+	if !validID(value.TaskID) || value.Revision == 0 || !validText(value.Instruction, 0, 8192) || !validText(value.Feedback, 0, 8192) || value.Outcome != nil && !validText(*value.Outcome, 0, 8192) || len(value.PeerQuestions) > 1 || value.NextOffset != nil && *value.NextOffset == 0 {
 		return Reply{}, ErrInvalidInput
 	}
 	for _, question := range value.PeerQuestions {

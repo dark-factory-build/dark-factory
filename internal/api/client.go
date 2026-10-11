@@ -404,7 +404,7 @@ func (client *OperatorClient) ReadTask(ctx context.Context, input TaskReadInput)
 	if err := client.client.call(ctx, "task_read", input, &result); err != nil {
 		return TaskText{}, err
 	}
-	if result.TaskID != input.TaskID || result.Revision != input.ExpectedRevision || !validText(result.Instruction, 0, 8192) || !validText(result.Feedback, 0, 8192) || result.Outcome != nil && !validText(*result.Outcome, 0, 8192) || result.NextOffset != nil && *result.NextOffset != input.Offset+2048 {
+	if result.TaskID != input.TaskID || result.Revision != input.ExpectedRevision || !validText(result.Instruction, 0, 8192) || !validText(result.Feedback, 0, 8192) || result.Outcome != nil && !validText(*result.Outcome, 0, 8192) || len(result.PeerQuestions) > 1 || result.NextOffset != nil && *result.NextOffset != input.Offset+2048 {
 		return TaskText{}, ErrProtocol
 	}
 	return result, nil

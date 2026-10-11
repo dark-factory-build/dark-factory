@@ -693,14 +693,16 @@ func validProjectContentInput(value ProjectContentInput) bool {
 }
 
 type TaskText struct {
-	Attachments   []kernel.TaskAttachment `json:"attachments,omitempty"`
-	TaskID        string                  `json:"task_id"`
-	Revision      uint64                  `json:"revision"`
-	Instruction   string                  `json:"instruction"`
-	Feedback      string                  `json:"feedback"`
-	Outcome       *string                 `json:"outcome,omitempty"`
-	PeerQuestions []PeerQuestion          `json:"peer_questions,omitempty"`
-	NextOffset    *uint64                 `json:"next_offset,omitempty"`
+	Attachments []kernel.TaskAttachment `json:"attachments,omitempty"`
+	TaskID      string                  `json:"task_id"`
+	Revision    uint64                  `json:"revision"`
+	Instruction string                  `json:"instruction"`
+	Feedback    string                  `json:"feedback"`
+	Outcome     *string                 `json:"outcome,omitempty"`
+	// PeerQuestions contains only the newest task-linked question. Full peer
+	// question history remains available through the browser's paged detail.
+	PeerQuestions []PeerQuestion `json:"peer_questions,omitempty"`
+	NextOffset    *uint64        `json:"next_offset,omitempty"`
 }
 
 // DashboardSnapshot deliberately contains only the bounded public Store
