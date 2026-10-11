@@ -226,10 +226,14 @@ func TestKnowledgeLaunchKeepsExactTaskWithContext(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	supplied := false
 	for _, a := range accesses {
-		if a.Kind == "supplied" {
-			t.Fatal("fallback recorded omitted knowledge")
+		if a.Kind == "supplied" && a.ContentID == lesson.ID && a.ContentRevision == lesson.Revision && a.ByteLength > 0 {
+			supplied = true
 		}
+	}
+	if !supplied {
+		t.Fatalf("missing exact supplied receipt: %+v", accesses)
 	}
 }
 

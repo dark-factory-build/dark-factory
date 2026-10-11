@@ -1,10 +1,14 @@
 package browserprotocol
 
-import "fmt"
+import (
+	"fmt"
+
+	"github.com/dark-factory-build/dark-factory/internal/kernel"
+)
 
 // MaxTaskDetailTextOffset covers a whole task body or result. Text offsets
 // count runes, and valid UTF-8 task text has no more runes than its byte cap.
-const MaxTaskDetailTextOffset = 131072
+const MaxTaskDetailTextOffset = kernel.MaxContinuationTaskBytes
 
 // AgentControl targets one observed task/run pair. Replacement IDs belong to
 // the caller so retrying a lost response cannot create a second successor.

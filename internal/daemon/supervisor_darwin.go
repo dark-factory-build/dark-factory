@@ -376,7 +376,8 @@ func (daemon *Daemon) runNext(ctx context.Context, spec SupervisorSpec) (resultR
 		return daemon.failRunBeforeRuntime(daemon.cleanupCtx, run, keys.resources.RuntimeRoot, kernel.FailureInternal, err)
 	}
 	rawProviderTask = []byte(instruction)
-	rawProviderTask, _, err = daemon.prepareKnowledgeTask(ctx, run, rawProviderTask, true)
+	var suppliedKnowledge []kernel.ContentAccess
+	rawProviderTask, suppliedKnowledge, err = daemon.prepareKnowledgeTask(ctx, run, rawProviderTask, true)
 	if err != nil {
 		return daemon.failRunBeforeRuntime(daemon.cleanupCtx, run, keys.resources.RuntimeRoot, kernel.FailureSpawn, err)
 	}
@@ -395,6 +396,15 @@ func (daemon *Daemon) runNext(ctx context.Context, spec SupervisorSpec) (resultR
 		providerTask = rawProviderTask
 	default:
 		return daemon.failRunBeforeRuntime(daemon.cleanupCtx, run, keys.resources.RuntimeRoot, kernel.FailureSpawn, provider.ErrInvalid)
+	}
+	if len(suppliedKnowledge) != 0 {
+		at, e := daemon.timestamp()
+		if e != nil {
+			return daemon.failRunBeforeRuntime(daemon.cleanupCtx, run, keys.resources.RuntimeRoot, kernel.FailureInternal, e)
+		}
+		if e = daemon.store.RecordSuppliedContentForAttempt(ctx, run.CredentialDigest, suppliedKnowledge, at); e != nil {
+			return daemon.failRunBeforeRuntime(daemon.cleanupCtx, run, keys.resources.RuntimeRoot, kernel.FailureInternal, e)
+		}
 	}
 	var changeState kernel.Change
 	var retained *changeworker.Result

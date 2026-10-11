@@ -89,7 +89,7 @@ type OverseerQuestion struct {
 // It intentionally carries outstanding question text because the overseer is
 // the project authority that must route it; the ordinary dashboard does not.
 func (store *Store) OverseerSnapshotForAttempt(ctx context.Context, digest AttemptDigest, request OverseerSnapshotRequest) (OverseerSnapshot, error) {
-	if request.Offset > uint64(^uint64(0)>>1)-OverseerSnapshotPageSize || request.TextOffset > 131072 || request.ExpectedHead.Int64() < 0 || request.ExpectedHead.Int64() == 0 && (request.Offset != 0 || request.TextOffset != 0) || request.TextOffset != 0 && request.TaskID == nil {
+	if request.Offset > uint64(^uint64(0)>>1)-OverseerSnapshotPageSize || request.TextOffset > MaxContinuationTaskBytes || request.ExpectedHead.Int64() < 0 || request.ExpectedHead.Int64() == 0 && (request.Offset != 0 || request.TextOffset != 0) || request.TextOffset != 0 && request.TaskID == nil {
 		return OverseerSnapshot{}, ErrInvalidValue
 	}
 	read, err := store.beginRead(ctx)

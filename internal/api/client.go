@@ -1294,7 +1294,7 @@ func validHandoffGitDirectory(value string) bool {
 }
 
 func validOverseerSnapshotInput(input OverseerSnapshotInput) bool {
-	if input.TaskID != "" && !validID(input.TaskID) || input.ExpectedHead > uint64(^uint64(0)>>1) || input.Offset > uint64(^uint64(0)>>1)-kernel.OverseerSnapshotPageSize || input.TextOffset > 131072 || input.TextOffset != 0 && input.TaskID == "" {
+	if input.TaskID != "" && !validID(input.TaskID) || input.ExpectedHead > uint64(^uint64(0)>>1) || input.Offset > uint64(^uint64(0)>>1)-kernel.OverseerSnapshotPageSize || input.TextOffset > kernel.MaxContinuationTaskBytes || input.TextOffset != 0 && input.TaskID == "" {
 		return false
 	}
 	return input.ExpectedHead != 0 || input.Offset == 0 && input.TextOffset == 0

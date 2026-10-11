@@ -392,7 +392,7 @@ func (daemon *Daemon) knowledgeAttachmentManifest(ctx context.Context, run kerne
 }
 
 // prepareKnowledgeTask is shared by actual provider launch and its private
-// task-retrieval checkpoint. A fallback launch records no omitted knowledge.
+// task-retrieval checkpoint. It returns the exact revisions supplied inline.
 func (daemon *Daemon) prepareKnowledgeTask(ctx context.Context, run kernel.Run, task []byte, launch bool) ([]byte, []kernel.ContentAccess, error) {
 	items, err := daemon.knowledgeContext(ctx, run, string(task))
 	if err != nil {
@@ -476,9 +476,6 @@ func (daemon *Daemon) prepareKnowledgeTask(ctx context.Context, run kernel.Run, 
 				combined = append(combined, []byte(notice)...)
 			}
 		}
-	}
-	if launch {
-		accesses = nil
 	}
 	return combined, accesses, nil
 }
