@@ -720,7 +720,25 @@ func TestPublishableIntakeChangeIsFactorydsUntilPublishedOrFailed(t *testing.T) 
 	if _, err := store.writer.ExecContext(ctx, `UPDATE tasks SET title = 'ordinary task' WHERE id = ?`, worker.TaskID.Bytes()); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := store.writer.ExecContext(ctx, `UPDATE production_records SET document = json_set(document, '$.branch', 'feature/login') WHERE kind = 'pull_request' AND identity = '5'`); err != nil {
+	if _, err := store.writer.ExecContext(ctx, `INSERT INTO publication_tasks (project_id, repository, pull_number, task_id, created_at_ms) VALUES (?, 'example/factory', 6, ?, 65)`, worker.ProjectID.Bytes(), worker.TaskID.Bytes()); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.writer.ExecContext(ctx, `INSERT INTO production_records (project_id, repository, kind, identity, visual_id, document, observed_at_ms) VALUES (?, 'example/factory', 'pull_request', '6', '', '{"number":6,"branch":"feature/login","state":"open"}', 65)`, worker.ProjectID.Bytes()); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.writer.ExecContext(ctx, `UPDATE changes SET updated_at_ms = 66 WHERE id = ?`, change.ID.Bytes()); err != nil {
+		t.Fatal(err)
+	}
+	if found := candidates(); len(found) != 1 || found[0].Pull != 6 || !found[0].Repair {
+		t.Fatalf("existing pull provenance was not retained after its title changed: %+v", found)
+	}
+	if _, err := store.writer.ExecContext(ctx, `DELETE FROM publication_tasks WHERE pull_number = 6`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.writer.ExecContext(ctx, `DELETE FROM production_records WHERE kind = 'pull_request' AND identity = '6'`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.writer.ExecContext(ctx, `UPDATE changes SET updated_at_ms = 60 WHERE id = ?`, change.ID.Bytes()); err != nil {
 		t.Fatal(err)
 	}
 	var linked int
@@ -735,9 +753,12 @@ func TestPublishableIntakeChangeIsFactorydsUntilPublishedOrFailed(t *testing.T) 
 	if found := candidates(); len(found) != 1 || found[0].Pull != 5 {
 		t.Fatalf("first-publication rebase correction candidates = %+v", found)
 	}
-	if !found[0].Repair {
-		t.Fatalf("host pull provenance was not retained after its title changed: %+v", found[0])
+	var updated, created int64
+	var document string
+	if err := store.writer.QueryRowContext(ctx, `SELECT c.updated_at_ms, p.created_at_ms, r.document FROM changes c JOIN publication_tasks p ON p.change_id = c.id JOIN production_records r ON r.identity = '5' WHERE c.id = ?`, change.ID.Bytes()).Scan(&updated, &created, &document); err != nil {
+		t.Fatal(err)
 	}
+	t.Logf("publication provenance updated=%d created=%d document=%s", updated, created, document)
 	if _, err := store.writer.ExecContext(ctx, `UPDATE changes SET updated_at_ms = 70 WHERE id = ?`, change.ID.Bytes()); err != nil {
 		t.Fatal(err)
 	}
