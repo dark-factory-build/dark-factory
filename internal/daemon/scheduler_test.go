@@ -673,7 +673,7 @@ func TestSchedulerRetriesARepeatingTickFailureWithBackoff(t *testing.T) {
 	if _, err := daemon.WebStatus(ctx); err != nil {
 		t.Fatalf("web_status while the scheduler retries: %v", err)
 	}
-	if reply := daemon.snapshot(ctx); reply.Failed() {
+	if reply := daemon.snapshot(ctx, nil); reply.Failed() {
 		t.Fatal("console snapshot failed while the scheduler retries")
 	}
 	cancel()
