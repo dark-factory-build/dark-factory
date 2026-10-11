@@ -323,8 +323,8 @@ func (daemon *Daemon) factorydHealth() api.FactorydHealth {
 		}
 		name := ""
 		switch {
-		case item.Kind == "internal" && item.Attributes["code.function.name"] == schedulerFunction:
-			name = schedulerFunction
+		case item.Kind == "internal" && (item.Attributes["code.function.name"] == schedulerFunction || strings.HasPrefix(item.Attributes["code.function.name"], intakeStepFunction)):
+			name = item.Attributes["code.function.name"]
 		case item.Kind == "server" && item.Attributes["network.transport"] == "unix":
 			name = item.Attributes["rpc.method"]
 		}

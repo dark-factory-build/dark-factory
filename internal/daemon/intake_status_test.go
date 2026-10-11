@@ -4,6 +4,8 @@ import (
 	"context"
 	"database/sql"
 	"encoding/hex"
+	"maps"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -134,6 +136,21 @@ func TestIntakePollWaitsForInterval(t *testing.T) {
 	}
 	if tasks := fixture.tasks(t); len(tasks) != 1 {
 		t.Fatalf("repeat poll duplicated work: %+v", tasks)
+	}
+}
+
+// An overrunning poll must name its slow step in factoryd health.
+func TestIntakePollTimesEachStepInFactorydHealth(t *testing.T) {
+	fixture := newIntakePollFixture(t, 60)
+	fixture.daemon.pollIntake(context.Background())
+	steps := map[string]uint64{}
+	for _, call := range fixture.daemon.factorydHealth().Calls {
+		if step, ok := strings.CutPrefix(call.Name, intakeStepFunction); ok {
+			steps[step] = call.Count
+		}
+	}
+	if want := map[string]uint64{"withdrawals": 1, "receipts": 1, "list": 1, "issues": 1}; !maps.Equal(steps, want) {
+		t.Fatalf("intake steps in health = %v, want %v", steps, want)
 	}
 }
 

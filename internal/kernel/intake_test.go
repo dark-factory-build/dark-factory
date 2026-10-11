@@ -347,9 +347,9 @@ func TestAcceptedIntakeImportsOnceAcrossOverlappingSourcesAndWithdrawal(t *testi
 	}
 }
 
-// An intake poll replays every already-imported issue on each tick, so a
-// replay must not walk the whole store; a new import still validates first.
-func TestIntakeImportReplaySkipsWholeStoreValidation(t *testing.T) {
+// Every intake poll passes through acceptance, import, replay and retry, so
+// none of them may walk the whole store; an operator's retry still does.
+func TestIntakeWritesSkipWholeStoreValidation(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
 	store, _ := newTestStore(t)
@@ -377,12 +377,6 @@ func TestIntakeImportReplaySkipsWholeStoreValidation(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	other := intakeSnapshotForTest()
-	other.IssueNumber, other.NodeID = 8, "I_kwDOOther"
-	pending, err := store.AcceptIntakeSnapshot(ctx, source.ID, other, mustTime(t, 6))
-	if err != nil {
-		t.Fatal(err)
-	}
 
 	// Corrupt retained history so any whole-store walk refuses.
 	tx, err := store.beginUncheckedWrite(ctx)
@@ -400,8 +394,21 @@ func TestIntakeImportReplaySkipsWholeStoreValidation(t *testing.T) {
 	if replay, err := store.ImportIntakeAcceptanceWithPriority(ctx, imported.ID, mustTime(t, 7), source, 0); err != nil || replay.ID != task.ID {
 		t.Fatalf("replay of an imported issue = %+v, %v", replay, err)
 	}
-	if _, err := store.ImportIntakeAcceptanceWithPriority(ctx, pending.ID, mustTime(t, 7), source, 0); !errors.Is(err, ErrCorruptState) {
-		t.Fatalf("new import over corrupt history = %v, want ErrCorruptState", err)
+	other := intakeSnapshotForTest()
+	other.IssueNumber, other.NodeID = 8, "I_kwDOOther"
+	pending, err := store.AcceptIntakeSnapshot(ctx, source.ID, other, mustTime(t, 6))
+	if err != nil {
+		t.Fatalf("acceptance over corrupt history = %v", err)
+	}
+	if _, err := store.ImportIntakeAcceptanceWithPriority(ctx, pending.ID, mustTime(t, 7), source, 0); err != nil {
+		t.Fatalf("new import over corrupt history = %v", err)
+	}
+	// The queued task cannot retry; intake learns that without a store walk.
+	if _, err := store.RetryTask(ctx, nil, task.ID, task.Revision, AgentID{}, mustTime(t, 8), IntakeRetryLimit); !errors.Is(err, ErrConflict) {
+		t.Fatalf("intake retry over corrupt history = %v, want ErrConflict", err)
+	}
+	if _, err := store.RetryTask(ctx, nil, task.ID, task.Revision, AgentID{}, mustTime(t, 8), 0); !errors.Is(err, ErrCorruptState) {
+		t.Fatalf("operator retry over corrupt history = %v, want ErrCorruptState", err)
 	}
 }
 

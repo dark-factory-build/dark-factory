@@ -46,6 +46,9 @@ type scheduledOwner struct {
 // timer node is inferred under.
 const schedulerFunction = "github.com/dark-factory-build/dark-factory/internal/daemon.Daemon.RunScheduler"
 
+// intakeStepFunction prefixes each intake poll step's code.function.name.
+const intakeStepFunction = "github.com/dark-factory-build/dark-factory/internal/daemon.Daemon.previewIntake/"
+
 func (daemon *Daemon) RunScheduler(ctx context.Context, spec SupervisorSpec) error {
 	if daemon == nil || daemon.store == nil || ctx == nil {
 		return fmt.Errorf("%w: invalid scheduler", kernel.ErrInvalidValue)

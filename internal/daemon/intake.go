@@ -447,7 +447,17 @@ func (daemon *Daemon) previewIntake(ctx context.Context, source kernel.IntakeSou
 	ctx, cancel := context.WithTimeout(ctx, 75*time.Second)
 	defer cancel()
 	result := api.IntakeResult{SourceID: source.ID.String(), State: "ok", ReviewedRevision: uint64(source.Revision.Int64()), Candidates: []api.IntakeCandidate{}, ImportedTasks: []string{}}
+	// A poll times each step into factoryd health, so an overrun names its step.
+	step, started, failed := "withdrawals", time.Now(), false
+	mark := func(next string) {
+		if tick {
+			daemon.observe("internal", map[string]string{"code.function.name": intakeStepFunction + step}, nil, failed, time.Since(started))
+		}
+		step, started = next, time.Now()
+	}
+	defer func() { mark("") }()
 	failure := func(err error) api.IntakeResult {
+		failed = true
 		if tick { // the poll keeps only the state; keep the cause visible
 			LogFactoryd(daemon.log, "factoryd: intake source %s: %v\n", source.ID, err)
 		}
@@ -469,6 +479,7 @@ func (daemon *Daemon) previewIntake(ctx context.Context, source kernel.IntakeSou
 	if tick && !source.Enabled {
 		return api.IntakeResult{State: "paused"}
 	}
+	mark("receipts")
 	// Keep bounded receipt scanning independent of discovery and admission limits.
 	// The caller (the scheduler's intake poll) owns progress; an empty cursor wraps.
 	if tick {
@@ -498,10 +509,12 @@ func (daemon *Daemon) previewIntake(ctx context.Context, source kernel.IntakeSou
 			}
 		}
 	}
+	mark("list")
 	observed, err := daemon.sourceIssues(ctx, source, page, source.LabelFilter, 0)
 	if err != nil {
 		return failure(err)
 	}
+	mark("issues")
 	result.NextPage = observed.NextPage
 	for _, issue := range observed.Issues {
 		snapshot := intakeSnapshot(source, issue)
