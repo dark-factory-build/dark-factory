@@ -406,6 +406,13 @@ func (daemon *Daemon) rebaseRetainedChange(ctx context.Context, state kernel.Cha
 	if err != nil {
 		return false, err
 	}
+	_, recordedBase, err := changeCommit(state.Selection.Commit())
+	if err != nil {
+		return false, err
+	}
+	if current.Base().Equal(recordedBase) {
+		return false, nil
+	}
 	path := filepath.Join(*parent, state.ID.String())
 	if err := change.FetchBase(ctx, current, path); err != nil {
 		return false, err
