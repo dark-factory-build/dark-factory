@@ -60,7 +60,7 @@ func (f *fakePublishMaintainer) call(_ context.Context, name string, arguments m
 	}
 	f.writes = append(f.writes, map[string]any{"name": name, "arguments": arguments})
 	if f.unavailable {
-		return nil, maintainerRejection("unavailable: Maintainer authority is unavailable.")
+		return nil, fmt.Errorf("review: Maintainer rejected operation: unavailable: Maintainer authority is unavailable.")
 	}
 	var result json.RawMessage
 	switch name {
@@ -71,7 +71,7 @@ func (f *fakePublishMaintainer) call(_ context.Context, name string, arguments m
 		for _, entry := range arguments["changes"].([]map[string]any) {
 			if f.refuse != "" && strings.HasPrefix(entry["path"].(string), f.refuse) {
 				if f.externalRefuse {
-					return nil, maintainerRejection("refused: The request was refused: rejected before execution as UNPROCESSABLE.")
+					return nil, fmt.Errorf("review: Maintainer rejected operation: refused: branch precondition")
 				}
 				return nil, fmt.Errorf("refused: %s cannot be written", f.refuse)
 			}
@@ -402,6 +402,12 @@ func TestExternalPublicationRefusalRetriesWhenItClears(t *testing.T) {
 	}
 	if len(app.writes) != 3 {
 		t.Fatalf("writes after refusal cleared = %d, want 3", len(app.writes))
+	}
+}
+
+func TestIndeterminatePublicationRetries(t *testing.T) {
+	if !publicationFailureRetryable(fmt.Errorf("indeterminate: The operation outcome is indeterminate and was not repeated.")) {
+		t.Fatal("indeterminate publication outcome became terminal")
 	}
 }
 

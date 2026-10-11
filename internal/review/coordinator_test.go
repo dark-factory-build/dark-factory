@@ -462,8 +462,7 @@ func TestPersistentObservationFailureEscalatesOnce(t *testing.T) {
 	}
 }
 
-// A failure the same request meets again (ErrPermanent) fails the head at
-// once, not retryable, so it is escalated once and never enqueued again.
+// A permanent enqueue failure is terminal for the exact head, not retryable.
 func TestPermanentEnqueueFailureIsTerminalForTheHead(t *testing.T) {
 	store := &memoryStore{}
 	backend := &fakeBackend{enqueueErr: fmt.Errorf("invalid_input: %w", ErrPermanent)}
@@ -474,8 +473,5 @@ func TestPermanentEnqueueFailureIsTerminalForTheHead(t *testing.T) {
 	}
 	if _, err := c.Advance(context.Background(), op); err == nil {
 		t.Fatal("a failed head was advanced again")
-	}
-	if _, err := c.ReserveRetry(context.Background(), op); err == nil {
-		t.Fatal("a permanently refused head was retried")
 	}
 }

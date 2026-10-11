@@ -295,7 +295,7 @@ func (store *Store) recordProductionObservation(ctx context.Context, c *sql.Conn
 		}
 		// A verdict recorded meanwhile wins only when it covers this exact
 		// head. A corrected PR invalidates older review authority.
-		if stored, ok := storedProductionReview(ctx, c, project, observation.Repository, pr.Number); ok && strings.EqualFold(stored.Head, pr.Head) {
+		if stored, ok := storedProductionReview(ctx, c, project, observation.Repository, pr.Number); ok && strings.EqualFold(stored.Head, pr.Head) && stored.State != "unknown" {
 			pr.Review = stored
 		} else if !strings.EqualFold(pr.Review.Head, pr.Head) {
 			pr.Review = ProductionReview{Head: pr.Head, State: "unknown"}

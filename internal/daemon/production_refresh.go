@@ -159,7 +159,7 @@ func changedProductionHeads(known []kernel.ProductionPullRequest, observed []ker
 	changed := make([]kernel.ProductionPullRequest, 0)
 	for _, pull := range observed {
 		old, ok := prior[pull.Number]
-		if ok && old.Head != "" && !strings.EqualFold(old.Head, pull.Head) && pull.State == "open" {
+		if (ok && old.Head != "" && strings.EqualFold(old.Head, pull.Head) && pull.State == "open" && pull.Review.State == "skipped" && old.Review.State != "skipped") || (ok && old.Head != "" && !strings.EqualFold(old.Head, pull.Head) && pull.State == "open") {
 			changed = append(changed, pull)
 		}
 	}
@@ -341,7 +341,7 @@ func pullRequestObservation(ctx context.Context, call maintainerMCP, repository 
 			return kernel.ProductionObservation{}, fmt.Errorf("Maintainer returned an invalid pull request head")
 		}
 		pr := productionPullRequest(value)
-		if review, ok := prior[value.Number]; ok && strings.EqualFold(review.Head, value.Head) {
+		if review, ok := prior[value.Number]; ok && strings.EqualFold(review.Head, value.Head) && review.State != "unknown" {
 			pr.Review = review
 		}
 		if pr.Review.State == "allow" {

@@ -77,6 +77,37 @@ func TestProductionObservationKeepsAReviewRecordedDuringTheRefresh(t *testing.T)
 	t.Fatal("pull request record missing")
 }
 
+func TestProductionObservationKeepsALiveSkippedReviewAcrossRefreshes(t *testing.T) {
+	store, _, project, _ := newAdmissionStore(t, RoleOrchestrator, 2)
+	defer store.Close()
+	ctx := context.Background()
+	head := strings.Repeat("c", 40)
+	for i, state := range []string{"unknown", "skipped", "skipped"} {
+		observation := ProductionObservation{Repository: "example/factory", ObservedAt: int64(10 + i), PullRequests: []ProductionPullRequest{{Number: 7, Title: "A machine", Head: head, State: "open", Review: ProductionReview{Head: head, State: state}}}}
+		if err := store.RecordProductionObservation(ctx, project.ID, observation, mustTime(t, int64(10+i))); err != nil {
+			t.Fatal(err)
+		}
+	}
+	page, err := store.Production(ctx, project.ID, 0, 8, UnixMillis{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, record := range page.Records {
+		if record.Kind != "pull_request" {
+			continue
+		}
+		var pull ProductionPullRequest
+		if err := json.Unmarshal(record.Document, &pull); err != nil {
+			t.Fatal(err)
+		}
+		if pull.Review.State != "skipped" {
+			t.Fatalf("live skipped review did not persist: %+v", pull.Review)
+		}
+		return
+	}
+	t.Fatal("pull request record missing")
+}
+
 func TestProductionReviewBlockSurvivesASameHeadAllow(t *testing.T) {
 	t.Parallel()
 	store, _, project, _ := newAdmissionStore(t, RoleOrchestrator, 2)

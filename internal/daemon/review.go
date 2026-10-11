@@ -782,7 +782,7 @@ func (b *daemonReviewBackend) Observe(ctx context.Context, operationID string) (
 }
 
 func (b *daemonReviewBackend) Enqueue(ctx context.Context, operation review.Operation) error {
-	err := b.call(ctx, "enqueue_pull_request", map[string]any{"repository": b.repository, "pull_number": operation.Request.PullNumber, "head_sha": operation.Request.Head, "base": operation.Request.BaseRef, "reviewed_body_digest": reviewedBodyDigest(operation)})
+	err := enqueueRefused(b.call(ctx, "enqueue_pull_request", map[string]any{"repository": b.repository, "pull_number": operation.Request.PullNumber, "head_sha": operation.Request.Head, "base": operation.Request.BaseRef, "reviewed_body_digest": reviewedBodyDigest(operation)}))
 	if errors.Is(err, review.ErrOwnerApproval) {
 		err = fmt.Errorf("%w; owned paths: %s", err, b.ownedPaths(ctx, operation.Request))
 	}
@@ -841,22 +841,16 @@ func codeOwned(codeowners string, paths []string) (owned []string) {
 	return owned
 }
 
-// maintainerRejection is the broker's "code: reason" (mcp.rs tool_error).
-type maintainerRejection string
-
-func (r maintainerRejection) Error() string {
-	return "review: Maintainer rejected operation: " + string(r)
-}
-
-// Is classifies the rejection once for every caller. Only invalid input or a
-// tree GitHub cannot return whole is permanent; a refusal (not RATE_LIMITED)
-// for a CODEOWNERS approval (GitHub's "Waiting on code owner review") or as
-// UNPROCESSABLE can come to hold (#1531).
-func (r maintainerRejection) Is(target error) bool {
-	why, refused := string(r), strings.HasPrefix(string(r), "refused:") && !strings.Contains(string(r), "RATE_LIMITED")
-	return target == review.ErrPermanent && (strings.HasPrefix(why, "invalid_input:") || strings.Contains(why, "too large for GitHub to return whole")) ||
-		target == review.ErrOwnerApproval && refused && (strings.Contains(strings.ToLower(why), "required codeowners approval") || strings.Contains(strings.ToLower(why), "waiting on code owner review") || strings.Contains(why, "CODEOWNERS_APPROVAL")) ||
-		target == review.ErrRefused && refused && strings.Contains(why, "UNPROCESSABLE")
+func enqueueRefused(err error) error {
+	if why := fmt.Sprint(err); strings.Contains(why, "rejected operation: refused:") && !strings.Contains(why, "RATE_LIMITED") {
+		if lower := strings.ToLower(why); strings.Contains(lower, "required codeowners approval") || strings.Contains(lower, "waiting on code owner review") || strings.Contains(why, "CODEOWNERS_APPROVAL") {
+			return fmt.Errorf("%w (%v)", review.ErrOwnerApproval, err)
+		}
+		if strings.Contains(why, "UNPROCESSABLE") {
+			return fmt.Errorf("%w (%v)", review.ErrRefused, err)
+		}
+	}
+	return err
 }
 
 func reviewedBodyDigest(operation review.Operation) string {
@@ -1002,12 +996,14 @@ func reviewResponseStructuredContent(request maintainerRequest, response json.Ra
 		return nil, errors.New("review: Maintainer returned an invalid response")
 	}
 	if value.Result.IsError {
-		// The broker's reason is what an operator needs to act on.
 		reason := ""
 		if len(value.Result.Content) > 0 {
-			reason = strings.ToValidUTF8(value.Result.Content[0].Text[:min(len(value.Result.Content[0].Text), 300)], "")
+			reason = ": " + strings.ToValidUTF8(value.Result.Content[0].Text[:min(len(value.Result.Content[0].Text), 300)], "")
 		}
-		return nil, maintainerRejection(reason)
+		if strings.Contains(strings.ToLower(reason), "invalid_input") {
+			return nil, fmt.Errorf("%w: review: Maintainer rejected operation%s", review.ErrPermanent, reason)
+		}
+		return nil, errors.New("review: Maintainer rejected operation" + reason)
 	}
 	return value.Result.StructuredContent, nil
 }

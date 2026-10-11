@@ -139,15 +139,13 @@ func (g *GroupRun) note(head string) string {
 }
 
 // ErrRefused marks an enqueue GitHub refused as UNPROCESSABLE. The operation
-// stays attached to the exact head and retries the existing enqueue operation.
 var ErrRefused = errors.New("the merge queue refuses this exact head; factoryd will wait for its checks or review state to change")
 
 var ErrOwnerApproval = errors.New("the merge queue requires CODEOWNERS owner approval")
 
-const RefusedRetryLimit = 3
-
-// ErrPermanent marks a failure the same request meets again; others retry.
 var ErrPermanent = errors.New("the same request fails the same way, so factoryd will not repeat it; a new head is reviewed afresh")
+
+const RefusedRetryLimit = 3
 
 // FailuresBeforeEscalation is how many consecutive merge-stage passes may
 // fail before the overseer is told: 30 minutes at the 5-minute merge tick.
@@ -260,7 +258,7 @@ func (c Coordinator) finishSubmitted(ctx context.Context, op Operation) (Operati
 // Advance moves an allowed exact head one step toward merge, deciding from
 // one observation of its pull request. It sends the head back to its author
 // when it conflicts, a check on it fails, or the queue removes it again after
-// the one re-queue, and fails it on a permanent failure (ErrPermanent); it
+// the one re-queue, and fails it when the queue refuses it (ErrRefused); it
 // never decides from a write's journal.
 // A wrong enqueue cannot merge unreviewed code: the merge group's gate still
 // requires an ALLOW at the exact head.
@@ -311,13 +309,18 @@ func (c Coordinator) Advance(ctx context.Context, op Operation) (Operation, erro
 			op.UpdatedAt = c.Now()
 			return op, errors.Join(err, c.Store.Update(ctx, op))
 		} else if errors.Is(err, ErrRefused) {
+			if strings.EqualFold(pull.MergeStateStatus, "DIRTY") {
+				op.State, op.RoutePending, op.Detail = "ejected", true, op.conflict()
+				op.UpdatedAt = c.Now()
+				return op, c.Store.Update(ctx, op)
+			}
 			op.RefusedAttempts++
 			// Keep the operation live. A changed check or review observation is
 			// normal refresh trigger, but retry while the small transient budget
 			// remains: mergeability can become queueable without changing checks
 			// or review state.
 			op.Refused, op.RefusedObservation = true, observation
-			op.Escalate(fmt.Sprintf("%v: %v", ErrRefused, err))
+			op.Escalate(fmt.Sprintf("the merge queue refused this exact head: %v", err))
 			op.UpdatedAt = c.Now()
 			return op, errors.Join(err, c.Store.Update(ctx, op))
 		} else if err != nil {
@@ -393,10 +396,6 @@ func pullObservation(p Pull) string {
 	return hex.EncodeToString(hash[:])
 }
 
-// failedPass records a pass that could not observe the pull request or
-// enqueue its head. A transient failure, or a merge landing between the read
-// and the write, settles on a later pass; one that persists for
-// FailuresBeforeEscalation consecutive passes is escalated once; a permanent one, now.
 func (c Coordinator) failedPass(ctx context.Context, op Operation, cause error) (Operation, error) {
 	if errors.Is(cause, ErrPermanent) {
 		return c.fail(ctx, op, cause, false)
