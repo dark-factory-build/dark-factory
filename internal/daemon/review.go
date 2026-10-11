@@ -372,6 +372,12 @@ func (daemon *Daemon) rebaseChange(ctx context.Context, open kernel.OpenPull) (b
 	if err != nil || !found || state.Phase != kernel.ChangeRetained || state.Selection == nil || state.HeadCommit == nil {
 		return false, err
 	}
+	return daemon.rebaseRetainedChange(ctx, state)
+}
+
+// rebaseRetainedChange is the single retained-Change refresh used by review
+// rescue and by the worker's retry/send-back admission path.
+func (daemon *Daemon) rebaseRetainedChange(ctx context.Context, state kernel.Change) (bool, error) {
 	parent, git := daemon.changeParent.Load(), daemon.gitExecutable.Load()
 	if parent == nil || *parent == "" || git == nil || *git == "" {
 		return false, errPublishLater

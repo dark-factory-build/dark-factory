@@ -380,21 +380,6 @@ func (daemon *Daemon) runNext(ctx context.Context, spec SupervisorSpec) (resultR
 	if err != nil {
 		return daemon.failRunBeforeRuntime(daemon.cleanupCtx, run, keys.resources.RuntimeRoot, kernel.FailureSpawn, err)
 	}
-	delivery, preparedTask, err := provider.PrepareTask(run.Provider, rawProviderTask)
-	if err != nil {
-		return daemon.failRunBeforeRuntime(daemon.cleanupCtx, run, keys.resources.RuntimeRoot, kernel.FailureSpawn, err)
-	}
-	var providerTask []byte
-	switch delivery {
-	case provider.TaskDeliveryFD11:
-		providerTask = preparedTask
-	case provider.TaskDeliveryAttemptAPI:
-		if len(preparedTask) != 0 {
-			return daemon.failRunBeforeRuntime(daemon.cleanupCtx, run, keys.resources.RuntimeRoot, kernel.FailureSpawn, provider.ErrInvalid)
-		}
-	default:
-		return daemon.failRunBeforeRuntime(daemon.cleanupCtx, run, keys.resources.RuntimeRoot, kernel.FailureSpawn, provider.ErrInvalid)
-	}
 	var changeState kernel.Change
 	var retained *changeworker.Result
 	if worker {
@@ -444,6 +429,33 @@ func (daemon *Daemon) runNext(ctx context.Context, spec SupervisorSpec) (resultR
 	}
 	if sourceErr != nil {
 		return daemon.failRunBeforeRuntime(daemon.cleanupCtx, run, keys.resources.RuntimeRoot, kernel.FailureSource, sourceErr)
+	}
+	retainedRebaseConflict := false
+	if worker && retained != nil {
+		_, rebaseErr := daemon.rebaseRetainedChange(ctx, changeState)
+		if errors.Is(rebaseErr, change.ErrRebaseConflict) {
+			retainedRebaseConflict = true
+		} else if rebaseErr != nil {
+			return daemon.failRunBeforeRuntime(daemon.cleanupCtx, run, keys.resources.RuntimeRoot, kernel.FailureSource, rebaseErr)
+		}
+	}
+	if retainedRebaseConflict {
+		rawProviderTask = append(rawProviderTask, []byte("\n\nThe retained Change could not be rebased cleanly onto current main. Resolve the rebase conflict in the existing worktree before continuing.")...)
+	}
+	delivery, preparedTask, err := provider.PrepareTask(run.Provider, rawProviderTask)
+	if err != nil {
+		return daemon.failRunBeforeRuntime(daemon.cleanupCtx, run, keys.resources.RuntimeRoot, kernel.FailureSpawn, err)
+	}
+	var providerTask []byte
+	switch delivery {
+	case provider.TaskDeliveryFD11:
+		providerTask = preparedTask
+	case provider.TaskDeliveryAttemptAPI:
+		if len(preparedTask) != 0 {
+			return daemon.failRunBeforeRuntime(daemon.cleanupCtx, run, keys.resources.RuntimeRoot, kernel.FailureSpawn, provider.ErrInvalid)
+		}
+	default:
+		return daemon.failRunBeforeRuntime(daemon.cleanupCtx, run, keys.resources.RuntimeRoot, kernel.FailureSpawn, provider.ErrInvalid)
 	}
 	repositoryGitIdentity, _ = change.NewRepositoryIdentity(source.GitDevice, source.GitInode)
 	repositoryOriginDigest = source.OriginDigest
@@ -756,7 +768,7 @@ func (daemon *Daemon) runNext(ctx context.Context, spec SupervisorSpec) (resultR
 		return daemon.failRun(run, kernel.FailureSource, errInvalidContract)
 	}
 	if worker {
-		if retained != nil || pull.Number != 0 {
+		if pull.Number != 0 {
 			// The registered checkout is factoryd's fetch boundary. Refresh the
 			// current base there, then copy that exact commit into a retained
 			// or pull request Change before the worker can run a correction
