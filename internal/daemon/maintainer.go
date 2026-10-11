@@ -264,18 +264,18 @@ func (daemon *Daemon) recordMaintainerPublication(ctx context.Context, project k
 			return err
 		}
 	}
-	return daemon.recordPublishedPull(ctx, project, task, repo, kernel.ProductionPullRequest{Number: reply.Result.Pull.Number, Title: title, URL: reply.Result.Pull.URL, Head: reply.Result.Pull.Head, Branch: branch, Base: base, State: "open", Review: kernel.ProductionReview{Head: reply.Result.Pull.Head, State: "unknown"}}, body, reply.Result.Pull.Base, false)
+	return daemon.recordPublishedPull(ctx, project, task, repo, kernel.ProductionPullRequest{Number: reply.Result.Pull.Number, Title: title, URL: reply.Result.Pull.URL, Head: reply.Result.Pull.Head, Branch: branch, Base: base, State: "open", Review: kernel.ProductionReview{Head: reply.Result.Pull.Head, State: "unknown"}}, body, reply.Result.Pull.Base)
 }
 
 // recordPublishedPull records a created pull request against the task that
 // published it and, on the Maintainer path, claims and launches its review in
 // the same write.
-func (daemon *Daemon) recordPublishedPull(ctx context.Context, project kernel.ProjectID, task kernel.TaskID, repo string, pr kernel.ProductionPullRequest, body, baseSHA string, noOp bool) error {
+func (daemon *Daemon) recordPublishedPull(ctx context.Context, project kernel.ProjectID, task kernel.TaskID, repo string, pr kernel.ProductionPullRequest, body, baseSHA string) error {
 	at, err := daemon.timestamp()
 	if err != nil {
 		return err
 	}
-	if daemon.github == nil && daemon.reviewBackend == nil || noOp {
+	if daemon.github == nil && daemon.reviewBackend == nil {
 		return daemon.store.RecordPublication(ctx, project, task, repo, pr, at)
 	}
 	request := review.Request{Repository: strings.ToLower(repo), PullNumber: pr.Number, Head: strings.ToLower(pr.Head), Base: strings.ToLower(baseSHA), BaseRef: pr.Base, Body: body, Provider: "codex"}

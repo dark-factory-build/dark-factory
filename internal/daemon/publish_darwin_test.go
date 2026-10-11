@@ -289,8 +289,8 @@ func TestFirstPublicationOfAnAlreadyPublishedTreeOpensItsPullRequest(t *testing.
 	if len(app.writes) != 1 || app.writes[0]["name"] != "create_pull_request" || app.writes[0]["arguments"].(map[string]any)["head_sha"] != c.Head {
 		t.Fatalf("writes = %+v", app.writes)
 	}
-	if pending, err := fixture.store.InFlightReviewOperations(ctx); err != nil || len(pending) != 0 || backend.reviews != 0 {
-		t.Fatalf("no-op publication scheduled review: pending=%v err=%v reviews=%d", pending, err, backend.reviews)
+	if pending, err := fixture.store.InFlightReviewOperations(ctx); err != nil || len(pending) != 1 {
+		t.Fatalf("publication did not schedule one review: pending=%v err=%v", pending, err)
 	}
 }
 
