@@ -302,7 +302,7 @@ func (daemon *Daemon) rebaseRetainedChange(ctx context.Context, state kernel.Cha
 	if err != nil {
 		return kernel.Change{}, change.WorktreeFacts{}, err
 	}
-	if facts.Dirty() || facts.Branch() != change.BranchName(state.ID.String()) {
+	if facts.Branch() != change.BranchName(state.ID.String()) {
 		return kernel.Change{}, change.WorktreeFacts{}, errors.New("rebased Change worktree failed verification")
 	}
 	newHead, err := kernelCommit(facts.Head())

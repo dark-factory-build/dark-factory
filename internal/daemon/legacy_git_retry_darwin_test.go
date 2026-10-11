@@ -93,7 +93,6 @@ func TestSupervisorRetainedCanonicalGitRetryPreservesWorktree(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	baseBranch := strings.TrimSpace(supervisorGitOutput(t, git, "-C", project, "symbolic-ref", "--short", "HEAD"))
 	if err := os.WriteFile(filepath.Join(project, "main-fix.txt"), []byte("main fix\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
@@ -106,7 +105,7 @@ func TestSupervisorRetainedCanonicalGitRetryPreservesWorktree(t *testing.T) {
 	}
 
 	queueSupervisorRetry(t, fixture, first)
-	fixture.spec.BaseRevision = "refs/heads/" + baseBranch
+	fixture.spec.BaseRevision = "HEAD"
 	second, err := fixture.daemon.RunNext(context.Background(), fixture.spec)
 	if err != nil {
 		t.Fatalf("retained RunNext: %v", err)

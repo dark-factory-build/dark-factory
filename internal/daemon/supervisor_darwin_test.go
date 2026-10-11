@@ -965,7 +965,6 @@ func TestSupervisorRetainedRetryReopensTheSameWorktree(t *testing.T) {
 	}
 	git := supervisorNativeGit(t)
 	project := filepath.Join(fixture.root, "repository")
-	baseBranch := strings.TrimSpace(supervisorGitOutput(t, git, "-C", project, "symbolic-ref", "--short", "HEAD"))
 	if err := os.WriteFile(filepath.Join(project, "main-fix.txt"), []byte("main fix\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
@@ -973,7 +972,7 @@ func TestSupervisorRetainedRetryReopensTheSameWorktree(t *testing.T) {
 	supervisorGit(t, git, "-C", project, "commit", "-m", "advance main")
 	mainHead := strings.TrimSpace(supervisorGitOutput(t, git, "-C", project, "rev-parse", "HEAD"))
 	queueSupervisorRetry(t, fixture, first)
-	fixture.spec.BaseRevision = "refs/heads/" + baseBranch
+	fixture.spec.BaseRevision = "HEAD"
 	second, err := fixture.daemon.RunNext(context.Background(), fixture.spec)
 	if err != nil {
 		t.Fatalf("retained RunNext: %v", err)
