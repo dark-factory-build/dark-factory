@@ -38,6 +38,30 @@ func TestKnowledgeMetadataRequiresCanonicalKeys(t *testing.T) {
 	}
 }
 
+func TestLessonsRequireRunnableVerification(t *testing.T) {
+	t.Parallel()
+	store, run, _ := runningWorkerRun(t)
+	defer store.Close()
+	ctx := context.Background()
+	lesson := knowledgeSpec(t, run.ProjectID, 80, ContentLesson, KnowledgeMetadata{Status: "current", Evidence: []string{"internal/kernel/knowledge.go:242"}})
+	if _, err := store.CreateContent(ctx, lesson, mustTime(t, 40)); !errors.Is(err, ErrInvalidValue) {
+		t.Fatalf("lesson without verification = %v", err)
+	}
+	lesson.SourceReferences = `{"status":"tentative","evidence":["internal/kernel/knowledge.go:242"],"verification":"go test ./internal/kernel -run TestLessonsRequireRunnableVerification"}`
+	created, err := store.CreateContentForAttempt(ctx, run.CredentialDigest, lesson, mustTime(t, 41))
+	if err != nil {
+		t.Fatalf("verified lesson = %v", err)
+	}
+	// Legacy metadata without verification remains retireable.
+	if _, err := store.writer.ExecContext(ctx, `UPDATE project_content_revisions SET source_references=? WHERE id=? AND revision=?`, `{"status":"tentative","evidence":["legacy source"]}`, created.ID.Bytes(), created.Revision.Int64()); err != nil {
+		t.Fatal(err)
+	}
+	retired, err := store.DeprecateContentForAttempt(ctx, run.CredentialDigest, created.ID, created.Revision, mustTime(t, 42))
+	if err != nil || !retired.Deprecated {
+		t.Fatalf("legacy lesson retirement = %+v, %v", retired, err)
+	}
+}
+
 func TestKnowledgeAuthorityScopeAndImmutableThreads(t *testing.T) {
 	t.Parallel()
 	store, run, _ := runningWorkerRun(t)

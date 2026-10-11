@@ -124,7 +124,7 @@ func (store *Store) CreateContent(ctx context.Context, spec NewContent, at UnixM
 }
 
 func createContentTx(ctx context.Context, tx *writeTx, spec NewContent, at UnixMillis, authorTask *TaskID) (ContentRevision, error) {
-	if err := validateKnowledge(ctx, tx.connection, spec, Revision{}, nil); err != nil {
+	if err := validateKnowledge(ctx, tx.connection, spec, Revision{}, nil, false); err != nil {
 		return ContentRevision{}, tx.Rollback(err)
 	}
 	if err := validateContent(spec); err != nil {
@@ -264,7 +264,7 @@ func (store *Store) reviseContent(ctx context.Context, expected Revision, spec N
 }
 
 func reviseContentTx(ctx context.Context, tx *writeTx, expected Revision, spec NewContent, deprecated bool, at UnixMillis) (ContentRevision, error) {
-	if err := validateKnowledge(ctx, tx.connection, spec, expected, nil); err != nil {
+	if err := validateKnowledge(ctx, tx.connection, spec, expected, nil, deprecated); err != nil {
 		return ContentRevision{}, tx.Rollback(err)
 	}
 	if err := validateContent(spec); err != nil {
@@ -611,7 +611,7 @@ func (store *Store) CreateContentForAttempt(ctx context.Context, digest AttemptD
 	if spec.ProjectID != authority.ProjectID {
 		return ContentRevision{}, tx.Rollback(ErrUnauthorized)
 	}
-	if err := validateKnowledge(ctx, tx.connection, spec, Revision{}, &authority); err != nil {
+	if err := validateKnowledge(ctx, tx.connection, spec, Revision{}, &authority, false); err != nil {
 		return ContentRevision{}, tx.Rollback(err)
 	}
 	spec.Author = contentProvenance(authority)
@@ -644,7 +644,7 @@ func (store *Store) ReviseContentForAttempt(ctx context.Context, digest AttemptD
 	if spec.ProjectID != authority.ProjectID {
 		return ContentRevision{}, tx.Rollback(ErrUnauthorized)
 	}
-	if err := validateKnowledge(ctx, tx.connection, spec, expected, &authority); err != nil {
+	if err := validateKnowledge(ctx, tx.connection, spec, expected, &authority, false); err != nil {
 		return ContentRevision{}, tx.Rollback(err)
 	}
 	spec.Author = contentProvenance(authority)
@@ -662,7 +662,7 @@ func (store *Store) DeprecateContentForAttempt(ctx context.Context, digest Attem
 		return ContentRevision{}, tx.Rollback(err)
 	}
 	spec := NewContent{ID: id, ProjectID: current.ProjectID, Kind: current.Kind, SourceReferences: current.SourceReferences}
-	if err := validateKnowledge(ctx, tx.connection, spec, expected, &authority); err != nil {
+	if err := validateKnowledge(ctx, tx.connection, spec, expected, &authority, true); err != nil {
 		return ContentRevision{}, tx.Rollback(err)
 	}
 	return deprecateContentTx(ctx, tx, id, authority.ProjectID, expected, contentProvenance(authority), at)

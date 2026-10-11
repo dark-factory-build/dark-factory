@@ -97,6 +97,18 @@ func (store *Store) Report(ctx context.Context, project *ProjectID, since, bucke
 			return nil, err
 		}
 	}
+	// Issue #1774 adds this lesson-reuse projection: it describes only each
+	// lesson's latest immutable revision; historical revisions must not inflate
+	// its counters.
+	var lessons, reads, citations, stale int64
+	if err := read.connection.QueryRowContext(ctx, `SELECT COUNT(*),
+		COALESCE((SELECT COUNT(DISTINCT a.run_id) FROM content_accesses a JOIN project_content_revisions x ON x.id=a.content_id AND x.revision=a.content_revision WHERE a.kind IN ('read','supplied') AND (?1 IS NULL OR x.project_id=?1) AND x.kind='lesson' AND x.deprecated=0 AND x.revision=(SELECT MAX(revision) FROM project_content_revisions WHERE id=x.id)), 0),
+		COALESCE((SELECT SUM(json_array_length(json_extract(x.source_references, '$.evidence'))) FROM project_content_revisions x WHERE (?1 IS NULL OR x.project_id=?1) AND x.kind='lesson' AND x.deprecated=0 AND x.revision=(SELECT MAX(revision) FROM project_content_revisions WHERE id=x.id) AND json_valid(x.source_references) AND json_type(x.source_references, '$.evidence')='array'), 0),
+		COALESCE((SELECT COUNT(*) FROM project_content_revisions x WHERE (?1 IS NULL OR x.project_id=?1) AND x.kind='lesson' AND x.deprecated=0 AND x.revision=(SELECT MAX(revision) FROM project_content_revisions WHERE id=x.id) AND json_extract(CASE WHEN json_valid(x.source_references) THEN x.source_references ELSE '{}' END, '$.status') IN ('needs_revalidation','superseded') ), 0)
+		FROM project_content_revisions c WHERE (?1 IS NULL OR c.project_id=?1) AND c.kind='lesson' AND c.deprecated=0 AND c.revision=(SELECT MAX(revision) FROM project_content_revisions WHERE id=c.id)`, scope).Scan(&lessons, &reads, &citations, &stale); err != nil {
+		return nil, err
+	}
+	lines = append(lines, fmt.Sprintf("lessons=%d reads=%d citations=%d stale=%d", lessons, reads, citations, stale))
 	return lines, nil
 }
 

@@ -36,6 +36,7 @@ func TestReportAndWhyReadTheReconcilersState(t *testing.T) {
 	want := []string{
 		"1970-01-01T00:00Z runs=1 failed=0% tokens=300 worker=0 overseer=300 specialist=0 merges=1 tokens/merge=300",
 		"top task tokens=300 " + task.ID.String() + ` running "oversee"`,
+		"lessons=0 reads=0 citations=0 stale=0",
 	}
 	if err != nil || !slices.Equal(lines, want) {
 		t.Fatalf("report = %q, %v", lines, err)
@@ -91,5 +92,34 @@ func TestReportAndWhyReadTheReconcilersState(t *testing.T) {
 	// leaves it, so it waits on no factoryd pass.
 	if waits := whyPullWaits(ProductionPullRequest{State: "open"}, true, Task{Status: TaskCancelled}, &review.Operation{State: "enqueued", Verdict: "allow"}, 0, 0); waits != "operator: its task was cancelled, so factoryd no longer advances it" {
 		t.Fatalf("a cancelled task's pull waits on %q", waits)
+	}
+}
+
+func TestReportLessonCountersUseLatestRevision(t *testing.T) {
+	t.Parallel()
+	// The lesson counters are new report behavior; this guards their stated
+	// latest-revision contract rather than asserting a pre-existing projection.
+	store, run, keys := runningWorkerRun(t)
+	defer store.Close()
+	ctx := context.Background()
+	spec := contentSpec(t, run.ProjectID, 221, "lesson")
+	spec.Kind = ContentLesson
+	spec.Author = "operator:local"
+	spec.SourceReferences = `{"status":"needs_revalidation","evidence":["old source"],"verification":"go test ./internal/kernel"}`
+	lesson, err := store.CreateContent(ctx, spec, mustTime(t, 10))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.RecordContentAccessForAttempt(ctx, keys.AttemptDigest, ContentAccess{ContentID: lesson.ID, ContentRevision: lesson.Revision, Kind: "read", ByteLength: 1, CreatedAt: mustTime(t, 10)}); err != nil {
+		t.Fatal(err)
+	}
+	spec.Title = "revalidated"
+	spec.SourceReferences = `{"status":"current","evidence":["new source"],"verification":"go test ./internal/kernel"}`
+	if _, err := store.ReviseContent(ctx, lesson.Revision, spec, mustTime(t, 11)); err != nil {
+		t.Fatal(err)
+	}
+	lines, err := store.Report(ctx, &run.ProjectID, 0, 3600000)
+	if err != nil || len(lines) != 2 || lines[1] != "lessons=1 reads=0 citations=1 stale=0" {
+		t.Fatalf("latest lesson report = %q, %v", lines, err)
 	}
 }

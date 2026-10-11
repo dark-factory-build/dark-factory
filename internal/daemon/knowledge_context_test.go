@@ -34,6 +34,9 @@ func contentAccesses(ctx context.Context, store *kernel.Store, project kernel.Pr
 
 func seedContextKnowledge(t *testing.T, f *dispatchFixture, project kernel.ProjectID, seed byte, kind kernel.ContentKind, metadata kernel.KnowledgeMetadata, body string) kernel.ContentRevision {
 	t.Helper()
+	if kind == kernel.ContentLesson && metadata.Verification == "" {
+		metadata.Verification = "go test ./internal/daemon"
+	}
 	id, err := decodeID(testID(seed), kernel.ContentIDFromBytes)
 	if err != nil {
 		t.Fatal(err)
@@ -124,7 +127,7 @@ func TestKnowledgeReachesFreshProviderTaskAndPinsExplicitRevision(t *testing.T) 
 				t.Fatalf("missing exact supplied receipt: %+v", accesses)
 			}
 			// A newer correction appears as a checkpoint notice; the prior run's pin stays.
-			metadata := kernel.KnowledgeMetadata{Status: "current", Evidence: []string{"new review"}}
+			metadata := kernel.KnowledgeMetadata{Status: "current", Evidence: []string{"new review"}, Verification: "go test ./internal/daemon"}
 			encoded, _ := json.Marshal(metadata)
 			spec, err := f.daemon.writeContentSource(ctx, kernel.NewContent{ID: lesson.ID, ProjectID: lesson.ProjectID, Kind: lesson.Kind, Title: lesson.Title, Author: "operator:local", SourceReferences: string(encoded), Body: "CORRECTED LESSON"}, 2)
 			if err != nil {
@@ -382,7 +385,7 @@ func TestKnowledgeCrossTaskReviewConclusionLoop(t *testing.T) {
 	git("commit", "-m", "reject missing authority")
 	integrated := git("rev-parse", "HEAD")
 	done = f.serve(t)
-	lesson, err := operator.ContentCreate(ctx, api.ContentInput{ID: testID(223), ProjectID: reviewer.run.ProjectID.String(), Kind: string(kernel.ContentLesson), Title: "Reject absent authority before guard work", Body: "An absent caller credential must fail closed before any guarded effect.", SourceReferences: metadata(kernel.KnowledgeMetadata{Status: "current", Entities: []string{entity}, SourceRevision: integrated, Evidence: []string{"discussion:" + finding.ID + ":1", "reply:" + reply.ID + ":1"}})})
+	lesson, err := operator.ContentCreate(ctx, api.ContentInput{ID: testID(223), ProjectID: reviewer.run.ProjectID.String(), Kind: string(kernel.ContentLesson), Title: "Reject absent authority before guard work", Body: "An absent caller credential must fail closed before any guarded effect.", SourceReferences: metadata(kernel.KnowledgeMetadata{Status: "current", Entities: []string{entity}, SourceRevision: integrated, Evidence: []string{"discussion:" + finding.ID + ":1", "reply:" + reply.ID + ":1"}, Verification: "go test ./internal/daemon"})})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -557,7 +560,7 @@ func TestBoardActivityReportsTwoAgentsRecordedOperations(t *testing.T) {
 	f.daemon.now = func() time.Time { return time.UnixMilli(2000) }
 	var lesson api.Content
 	invoke(func() (err error) {
-		lesson, err = operator.ContentCreate(ctx, api.ContentInput{ID: testID(233), ProjectID: project.String(), Kind: string(kernel.ContentLesson), Title: "Conclusion: retry keeps the run guard", Body: "Retries reserve the exact run.", SourceReferences: `{"status":"tentative","thread_id":"` + thread.ID + `","evidence":["content:` + thread.ID + `@1","content:` + reply.ID + `@1"]}`})
+		lesson, err = operator.ContentCreate(ctx, api.ContentInput{ID: testID(233), ProjectID: project.String(), Kind: string(kernel.ContentLesson), Title: "Conclusion: retry keeps the run guard", Body: "Retries reserve the exact run.", SourceReferences: `{"status":"tentative","thread_id":"` + thread.ID + `","evidence":["content:` + thread.ID + `@1","content:` + reply.ID + `@1"],"verification":"go test ./internal/daemon"}`})
 		return err
 	})
 	activity, err = f.daemon.contentActivity(ctx, project, 0, 1)

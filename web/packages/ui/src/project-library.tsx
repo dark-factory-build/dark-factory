@@ -207,7 +207,7 @@ function LibraryDocuments({ state, call, onUseInTask, projectID, board = false, 
           }}>
             <label>Reply <textarea name="reply" rows={3} required /></label><button>Post reply</button>
           </form>
-          <button type="button" onClick={() => begin("lesson", { ...metadata, resolved: false, pinned: false, thread_id: selected.id, evidence: [...strings(metadata.evidence), `content:${selected.id}@${selected.revision}`], status: "tentative" })}>Save conclusion</button>
+          <button type="button" onClick={() => begin("lesson", { ...metadata, resolved: false, pinned: false, thread_id: selected.id, evidence: [...strings(metadata.evidence), `content:${selected.id}@${selected.revision}`], verification: "", status: "tentative" })}>Save conclusion</button>
         </section>}
 
         </>}
@@ -245,6 +245,7 @@ function LibraryDocuments({ state, call, onUseInTask, projectID, board = false, 
           Object.assign(details, { scope: data.get("scope"), evidence: lines(data.get("evidence")), entities: lines(data.get("entities")), mentions: lines(data.get("mentions")) });
           for (const key of ["source_revision", "branch", "environment", "thread_id", "task_id", "change_id", "record_type", "record_id", "supersedes"]) { const value = text(data.get(key)); if (value) details[key] = value; else delete details[key]; }
         } else if (kinds.includes(kind)) details.status = editorMeta.status || "tentative";
+        if (kind === "lesson") details.verification = text(data.get("verification")).trim();
         if (newKind === "observation") details.evidence = lines(data.get("links"));
         if (newKind) { details.scope ??= kind === "project_brief" ? "project" : "repository"; if (["decision", "lesson", "project_brief"].includes(kind)) details.evidence = lines(data.get("evidence")); }
         const updatedBody = editingSources ? body : String(data.get("body"));
@@ -260,6 +261,7 @@ function LibraryDocuments({ state, call, onUseInTask, projectID, board = false, 
           {!newKind || !["decision", "lesson", "project_brief"].includes(editorKind) ? null : <label>Supporting references <textarea name="evidence" defaultValue={strings(editorMeta.evidence).join("\n")} required={editorKind !== "project_brief"} /></label>}
           {newKind === "observation" ? <label>Supporting links <textarea name="links" placeholder="One URL or reference per line" /></label> : null}
         </>}
+        {(newKind || editorKind) === "lesson" ? <label>Verification command or query <textarea name="verification" defaultValue={text(editorMeta.verification)} placeholder="Command or query that re-verifies this lesson" required /></label> : null}
         {!editingSources ? null : <>
         <label>Supporting evidence (one reference per line) <textarea name="evidence" defaultValue={strings(editorMeta.evidence).join("\n")} /></label>
         <fieldset className="dfProjectLibrary__fields"><legend>Scope and sources</legend>

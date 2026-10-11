@@ -24,6 +24,7 @@ type KnowledgeMetadata struct {
 	Scope          string   `json:"scope,omitempty"`
 	Status         string   `json:"status"`
 	Evidence       []string `json:"evidence,omitempty"`
+	Verification   string   `json:"verification,omitempty"`
 	Entities       []string `json:"entities,omitempty"`
 	SourceRevision string   `json:"source_revision,omitempty"`
 	Branch         string   `json:"branch,omitempty"`
@@ -79,7 +80,7 @@ func ParseKnowledgeMetadata(raw string) (KnowledgeMetadata, error) {
 		// SQL applicability filters and browser metadata use exact JSON keys.
 		// encoding/json otherwise accepts case-insensitive field aliases.
 		switch name {
-		case "scope", "status", "evidence", "entities", "source_revision", "branch", "environment", "thread_id", "task_id", "change_id", "record_type", "record_id", "mission_id", "mentions", "resolved", "pinned", "supersedes":
+		case "scope", "status", "evidence", "verification", "entities", "source_revision", "branch", "environment", "thread_id", "task_id", "change_id", "record_type", "record_id", "mission_id", "mentions", "resolved", "pinned", "supersedes":
 		default:
 			return m, ErrInvalidValue
 		}
@@ -109,6 +110,9 @@ func ParseKnowledgeMetadata(raw string) (KnowledgeMetadata, error) {
 		if len(s) > 1024 {
 			return m, ErrInvalidValue
 		}
+	}
+	if len(m.Verification) > 2048 || !utf8.ValidString(m.Verification) {
+		return m, ErrInvalidValue
 	}
 	for _, list := range [][]string{m.Evidence, m.Entities, m.Mentions} {
 		if len(list) > 32 {
@@ -175,7 +179,7 @@ func knowledgeReference(ctx context.Context, c *sql.Conn, project ProjectID, tab
 	return nil
 }
 
-func validateKnowledge(ctx context.Context, c *sql.Conn, spec NewContent, expected Revision, a *AttemptAuthority) error {
+func validateKnowledge(ctx context.Context, c *sql.Conn, spec NewContent, expected Revision, a *AttemptAuthority, retiring bool) error {
 	if a != nil {
 		if spec.ProjectID != a.ProjectID {
 			return ErrUnauthorized
@@ -233,6 +237,12 @@ func validateKnowledge(ctx context.Context, c *sql.Conn, spec NewContent, expect
 		return ErrUnauthorized
 	}
 	if (spec.Kind == ContentDecision || spec.Kind == ContentLesson || (spec.Kind == ContentProjectBrief && m.Status == "current")) && len(m.Evidence) == 0 {
+		return ErrInvalidValue
+	}
+	// New and revised lessons are evidence-backed operational memory: they must
+	// carry a command or query that can re-verify the claim. Retirement preserves
+	// legacy metadata so existing lessons remain manageable.
+	if spec.Kind == ContentLesson && !retiring && strings.TrimSpace(m.Verification) == "" {
 		return ErrInvalidValue
 	}
 	if spec.Kind != ContentDiscussion && (m.Resolved || m.Pinned) {
@@ -385,7 +395,7 @@ func (store *Store) ValidateKnowledgeWrite(ctx context.Context, spec NewContent,
 		return err
 	}
 	defer tx.Close()
-	return validateKnowledge(ctx, tx.connection, spec, expected, nil)
+	return validateKnowledge(ctx, tx.connection, spec, expected, nil, false)
 }
 func (store *Store) ValidateKnowledgeWriteForAttempt(ctx context.Context, digest AttemptDigest, spec NewContent, expected Revision) error {
 	tx, err := store.beginRead(ctx)
@@ -400,7 +410,7 @@ func (store *Store) ValidateKnowledgeWriteForAttempt(ctx context.Context, digest
 	if a.Role != RoleWorker && a.Role != RoleOrchestrator {
 		return ErrUnauthorized
 	}
-	return validateKnowledge(ctx, tx.connection, spec, expected, &a)
+	return validateKnowledge(ctx, tx.connection, spec, expected, &a, false)
 }
 
 func (store *Store) SearchKnowledge(ctx context.Context, project ProjectID, repository RepositoryID, q KnowledgeQuery) (ContentPage, error) {
