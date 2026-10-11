@@ -1243,11 +1243,11 @@ func AccountEnvironment(kind kernel.Provider, accountHome, accountConfig string)
 	return nil
 }
 
-// PrepareWebDependencies installs the locked web workspace into a Change
-// from the factory-maintained, read-only pnpm store. It runs before the
-// provider sandbox is built because pnpm must create the Change's
-// node_modules tree; --offline and COREPACK_ENABLE_NETWORK=0 keep this host
-// preparation from becoming a network escape hatch.
+// PrepareWebDependencies is the Change-introduced host preparation path for
+// the locked web workspace. It runs before the provider sandbox is built so
+// pnpm can create the Change's node_modules tree, while every pnpm destination
+// is explicitly bound to the Change, private runtime, or trusted store; the
+// checkout's pnpm configuration cannot redirect host writes elsewhere.
 func (runtime RuntimePaths) PrepareWebDependencies(ctx context.Context, workingDirectory string) error {
 	if !runtime.valid() || !validAbsolute(workingDirectory, maxPathBytes) {
 		return ErrInvalid
