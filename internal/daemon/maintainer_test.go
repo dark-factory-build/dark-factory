@@ -107,7 +107,7 @@ func TestAttemptsCannotSubmitAVerdictOrEnqueue(t *testing.T) {
 	}
 	defer fixture.daemon.unregisterLiveAttempt(active.run.ID, owner)
 	// No customer host is installed, so an allowed call stops there (unavailable).
-	for name, want := range map[string]string{"submit_pull_request_review": "denied", "enqueue_pull_request": "denied", "observe_operation": "unavailable"} {
+	for name, want := range map[string]string{"submit_pull_request_review": "denied", "enqueue_pull_request": "denied", "publish_commit": "denied", "create_pull_request": "denied", "observe_operation": "unavailable"} {
 		done := fixture.serve(t)
 		result, err := active.client.Maintainer(ctx, api.MaintainerInput{Request: json.RawMessage(`{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"` + name + `","arguments":{"repository":"team/repo"}}}`)})
 		waitDispatch(t, done)

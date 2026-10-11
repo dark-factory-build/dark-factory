@@ -494,7 +494,7 @@ func TestUpdateTaskRetiresABlockedTaskButNeverEditsIt(t *testing.T) {
 	}
 }
 
-func TestUpdateTaskForOverseerRetiresUnpublishedSucceededTask(t *testing.T) {
+func TestUpdateTaskForOverseerCannotRetireSucceededTask(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
 	success, _ := NewSuccessProposal("completed result")
@@ -546,9 +546,8 @@ func TestUpdateTaskForOverseerRetiresUnpublishedSucceededTask(t *testing.T) {
 	if _, err := store.ActivateRun(ctx, admission.Run.ID, session.ID, activeRun.Revision, session.Revision, mustTime(t, 78)); err != nil {
 		t.Fatal(err)
 	}
-	retired, err := store.UpdateTaskForOverseer(ctx, keys.AttemptDigest, workerTask.ID, workerTask.Revision, TaskPatch{Cancel: true}, mustTime(t, 79))
-	if err != nil || retired.Status != TaskCancelled || retired.Result != "" || retired.WorkRevision.Int64() != workerTask.WorkRevision.Int64()+1 {
-		t.Fatalf("retired successful task = %+v, err=%v", retired, err)
+	if _, err := store.UpdateTaskForOverseer(ctx, keys.AttemptDigest, workerTask.ID, workerTask.Revision, TaskPatch{Cancel: true}, mustTime(t, 79)); !errors.Is(err, ErrConflict) {
+		t.Fatalf("retiring successful task = %v, want ErrConflict", err)
 	}
 }
 

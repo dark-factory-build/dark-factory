@@ -66,21 +66,9 @@ func (daemon *Daemon) attemptMaintainer(ctx context.Context, call api.Call) api.
 			return failure("denied")
 		}
 		request.Params = encoded
-		// A published Change carries its own worker task's intake source; the
-		// overseer publishes it from a wake task that has none.
+		// The attempt's task is the only source authority. Publication tools are
+		// refused above; factoryd publishes every settled Change itself.
 		sourceTask := authority.TaskID
-		if params.Name == "publish_commit" || params.Name == "create_pull_request" {
-			var branch string
-			_ = json.Unmarshal(params.Arguments["branch"], &branch)
-			_ = json.Unmarshal(params.Arguments["head"], &branch)
-			if task, closed, err := daemon.store.ChangeBranchClosedToOverseer(ctx, authority.ProjectID, branch); err != nil {
-				return failure("unavailable")
-			} else if closed {
-				return failure("denied") // a sent-back Change, or intake work factoryd publishes
-			} else if task != (kernel.TaskID{}) {
-				sourceTask = task
-			}
-		}
 		var repository, source string
 		if json.Unmarshal(params.Arguments["repository"], &repository) != nil || repository == "" {
 			return failure("invalid")

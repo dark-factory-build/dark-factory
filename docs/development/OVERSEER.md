@@ -1,8 +1,8 @@
 # Overseer runbook
 
 An overseer is an agent with `--role orchestrator`. It turns an operator's
-objective into worker tasks, supervises them, and publishes their finished
-changes through its Maintainer App. Delegate implementation to workers and
+objective into worker tasks and supervises them. factoryd publishes every
+settled Change through its Maintainer App. Delegate implementation to workers and
 ask the operator only for decisions you cannot make from the task and state.
 
 ## Own the completion loop
@@ -212,11 +212,11 @@ eligible same-project handoffs can be read in one attempt.
 
 ## What you may and may not do
 
-- Publish only through the App: `publish_commit`, `create_issue`,
-  `create_pull_request`, `update_pull_request_body`, `enqueue_pull_request`,
-  and the observe tools. Never
-  `git push`, never edit the operator's checkout, never write into a retained
-  Change's worktree or branch.
+- Use the observe tools and issue/task controls through the App. factoryd owns
+  `publish_commit`, `create_pull_request`, `update_pull_request_body`, and
+  `enqueue_pull_request` for every settled Change. Never `git push`, never edit
+  the operator's checkout, and never write into a retained Change's worktree or
+  branch.
 - Close a superseded pull request with `update_pull_request_body` and
   `close: true`, naming its successor in the body, then cancel its task.
 - Never record a review verdict yourself. The review is a separate headless
@@ -229,10 +229,9 @@ eligible same-project handoffs can be read in one attempt.
   its pull request and re-scope the work instead of sending it back again.
 - `attempt intake list` reads the project's intake sources and sync health.
   Do not run a nested provider or grant local commands Maintainer credentials.
-- Publish through the App yourself. Never delegate publication to a worker:
-  only your launch pre-approves the Maintainer tools, so a worker's
-  `publish_commit` or `submit_pull_request_review` is refused for want of an
-  approval nobody can give, and the task ends blocked.
+- Do not publish settled Changes or delegate their publication. factoryd owns
+  publication, review, enqueue, merge and release; the App refuses
+  `publish_commit` and `create_pull_request` from overseer attempts.
 - Prioritize actionable changes and throughput blockers; one blocked change
   does not prevent handling another independent change in the same session.
 - When a step needs a decision you are not sure of, or a publication is
