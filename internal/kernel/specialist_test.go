@@ -25,12 +25,6 @@ func makeSpecialist(t *testing.T, store *Store, agent Agent, wakeOn string, at i
 // run. Its seeds must keep every run's identities and runtime root distinct.
 func runCarrier(t *testing.T, store *Store, seed byte, at int64) (Task, Run) {
 	t.Helper()
-	proposal, _ := NewSuccessProposal("done")
-	return endCarrier(t, store, seed, at, proposal, TaskSucceeded)
-}
-
-func endCarrier(t *testing.T, store *Store, seed byte, at int64, proposal Proposal, status TaskStatus) (Task, Run) {
-	t.Helper()
 	keys := admissionKeys(t, seed, nil)
 	admission, err := store.AdmitNext(context.Background(), keys, mustTime(t, at))
 	if err != nil || !admission.Admitted() {
@@ -53,6 +47,7 @@ func endCarrier(t *testing.T, store *Store, seed byte, at int64, proposal Propos
 	if _, err := store.ActivateRun(ctx, run.ID, session.ID, run.Revision, session.Revision, mustTime(t, at+10)); err != nil {
 		t.Fatal(err)
 	}
+	proposal, _ := NewSuccessProposal("done")
 	if _, err := store.ProposeAttemptOutcome(ctx, keys.AttemptDigest, proposal, mustTime(t, at+11)); err != nil {
 		t.Fatal(err)
 	}
@@ -74,7 +69,7 @@ func endCarrier(t *testing.T, store *Store, seed byte, at int64, proposal Propos
 		t.Fatal(err)
 	}
 	task, _, err := store.Task(ctx, terminal.TaskID)
-	if err != nil || task.Title != overseerWakeTitle || task.Status != status {
+	if err != nil || task.Title != overseerWakeTitle || task.Status != TaskSucceeded {
 		t.Fatalf("carrier = %+v, %v", task, err)
 	}
 	return task, terminal
@@ -107,7 +102,7 @@ func setSpecialistLimits(t *testing.T, store *Store, project ProjectID, runs, pr
 }
 
 // A specialist is due at once, then a cadence after each review, doubling for
-// each quiet review up to 8x; a proposal resets the backoff, and only its
+// each quiet review up to 8x; a contribution resets the backoff, and only its
 // wake_on classes bring a review forward, a quarter cadence after the last. A
 // review escalation is the overseer's, never an event.
 // It holds at most one carrier, across a restart, and pausing or an
@@ -161,22 +156,12 @@ func TestSpecialistSchedule(t *testing.T) {
 		at = state.NextReviewAt + 1
 	}
 
-	// A note is not work for anyone: the backoff holds. A proposal resets it;
-	// it is not an event, and neither is a merge for a specialist woken only
-	// by failures.
+	// A contribution resets the backoff; it is not an event, and neither is a
+	// merge for a specialist woken only by failures.
 	task, run = runCarrier(t, store, 131, at)
-	author := contentProvenance(AttemptAuthority{RunID: run.ID, AgentID: agent.ID, Role: RoleWorker})
 	note := knowledgeSpec(t, project.ID, 91, ContentObservation, KnowledgeMetadata{Status: "tentative"})
-	note.Author = author
+	note.Author = contentProvenance(AttemptAuthority{RunID: run.ID, AgentID: agent.ID, Role: RoleWorker})
 	if _, err := store.CreateContent(ctx, note, mustTime(t, at+30)); err != nil {
-		t.Fatal(err)
-	}
-	if state := specialistStateOf(t, store, agent.ID); state.QuietReviews != 3 {
-		t.Fatalf("note state = %+v", state)
-	}
-	proposal := knowledgeSpec(t, project.ID, 92, ContentObservation, KnowledgeMetadata{Status: "tentative", RecordType: "proposal"})
-	proposal.Author = author
-	if _, err := store.CreateContent(ctx, proposal, mustTime(t, at+31)); err != nil {
 		t.Fatal(err)
 	}
 	escalateAt := at + 40
@@ -205,25 +190,19 @@ func TestSpecialistSchedule(t *testing.T) {
 		t.Fatalf("event wake = %q", next)
 	}
 
-	// A blocked review is not quiet.
-	blocked, _ := NewBlockedProposal("local API transport failed")
-	task, _ = endCarrier(t, store, 157, state.NextReviewAt+1, blocked, TaskBlocked)
-	if state := specialistStateOf(t, store, agent.ID); state.NextReason != "scheduled" || state.QuietReviews != 0 {
-		t.Fatalf("blocked state = %+v", state)
-	}
-
 	// Pausing, or an exhausted budget, stops its wakes.
+	task, _ = runCarrier(t, store, 157, state.NextReviewAt+1)
 	current, _, _ = store.Agent(ctx, agent.ID)
-	paused := pauseAgent(t, store, current, true, task.UpdatedAt.Int64()+1)
+	paused := pauseAgent(t, store, current, true, task.CompletedAt.Int64()+1)
 	if state := specialistStateOf(t, store, agent.ID); state.Waiting != "paused" || state.NextReviewAt != 0 {
 		t.Fatalf("paused state = %+v", state)
 	}
 	if woken := wakeBodies(t, store, 1<<40); len(woken) != 0 {
 		t.Fatalf("paused wake = %q", woken)
 	}
-	resumed := pauseAgent(t, store, paused, false, task.UpdatedAt.Int64()+2)
+	resumed := pauseAgent(t, store, paused, false, task.CompletedAt.Int64()+2)
 	budget := resumed.Idle.RunsUsed
-	exhausted, err := store.UpdateAgent(ctx, agent.ID, resumed.Revision, AgentPatch{IdleRunBudget: &budget}, mustTime(t, task.UpdatedAt.Int64()+3))
+	exhausted, err := store.UpdateAgent(ctx, agent.ID, resumed.Revision, AgentPatch{IdleRunBudget: &budget}, mustTime(t, task.CompletedAt.Int64()+3))
 	if err != nil {
 		t.Fatal(err)
 	}

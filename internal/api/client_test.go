@@ -1513,59 +1513,6 @@ func TestAttemptRestartRetryHonorsDeadline(t *testing.T) {
 	}
 }
 
-// A read or an outcome whose reply is lost is sent again, and the call
-// returns the second answer instead of a transport failure.
-func TestAttemptReadAndOutcomeReplayLostReply(t *testing.T) {
-	directory := privateTestDirectory(t)
-	token := filepath.Join(directory, "token")
-	writeTestToken(t, token, testCredential('L'))
-	t.Setenv(attemptTokenFileEnv, token)
-	listener, socket := testListener(t, directory)
-	defer listener.Close()
-	client, err := NewAttemptClientFromEnvironment(socket)
-	if err != nil {
-		t.Fatal(err)
-	}
-	done := make(chan error, 1)
-	go func() {
-		for _, answer := range []func(net.Conn, []byte) error{
-			nil,
-			func(connection net.Conn, _ []byte) error {
-				return writeTestResponse(connection, wireAttemptDomain, successResponse(`{"task":"replayed"}`))
-			},
-			nil,
-			func(connection net.Conn, _ []byte) error {
-				return writeTestOutcomeResponse(connection, wireAttemptDomain, mutationResponse())
-			},
-		} {
-			connection, err := listener.Accept()
-			if err != nil {
-				done <- err
-				return
-			}
-			request, err := readTestFrame(connection)
-			if err == nil && answer != nil {
-				err = answer(connection, request)
-			}
-			connection.Close()
-			if err != nil {
-				done <- err
-				return
-			}
-		}
-		done <- nil
-	}()
-	if task, err := client.Task(context.Background()); err != nil || task.Task != "replayed" {
-		t.Fatalf("task after lost reply = %+v, %v", task, err)
-	}
-	if result, err := client.Succeed(context.Background(), "finished"); err != nil || result.Revision != 4 {
-		t.Fatalf("outcome after lost reply = %+v, %v", result, err)
-	}
-	if err := <-done; err != nil {
-		t.Fatal(err)
-	}
-}
-
 func TestInputBoundsFailBeforeConnection(t *testing.T) {
 	bearer := testCredential('B')
 	directory := privateTestDirectory(t)

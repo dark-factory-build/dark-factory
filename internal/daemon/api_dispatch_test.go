@@ -2069,7 +2069,17 @@ func TestDaemonSpecialistOperatorReadsStayInItsProject(t *testing.T) {
 		t.Fatal(err)
 	}
 	waitDispatch(t, done)
-	specialist := prepareActiveAttemptInProject(t, fixture, 211, testID(211), "worker")
+	specialist := prepareActiveAttemptInProject(t, fixture, 211, testID(211), "worker", func() {
+		operator, err := api.NewOperatorClient(fixture.socket, fixture.operator)
+		if err != nil {
+			t.Fatal(err)
+		}
+		done := fixture.serve(t)
+		if _, err := operator.EnqueueTask(ctx, api.EnqueueTaskInput{ID: testID(213), ProjectID: testID(211), AssignedAgentID: testID(212), IncarnationID: testID(214), Title: "Standing instruction", Body: "Review.", Priority: 1}); err != nil {
+			t.Fatal(err)
+		}
+		waitDispatch(t, done)
+	})
 	done = fixture.serve(t)
 	if _, err := specialist.client.RequestHuman(ctx, api.HumanQuestionInput{IdempotencyKey: testID(242), Question: "own project question"}); err != nil {
 		t.Fatal(err)
