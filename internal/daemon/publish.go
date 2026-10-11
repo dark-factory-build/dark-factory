@@ -212,7 +212,7 @@ func (daemon *Daemon) publishPull(ctx context.Context, c kernel.PublishableChang
 	if err != nil {
 		return err
 	}
-	if tip != "" {
+	if tip != "" && c.Pull != 0 {
 		checked, ref = tip, "refs/heads/"+branch
 	}
 	if done {
@@ -294,7 +294,7 @@ func (daemon *Daemon) publishPull(ctx context.Context, c kernel.PublishableChang
 		}
 	}
 	entriesFrom := diffFrom
-	if tip != "" {
+	if tip != "" && c.Pull != 0 {
 		// A correction must carry the worker's settled tree, even when its
 		// resolution deliberately matches main; the branch still has the
 		// rejected worker version at tip.
