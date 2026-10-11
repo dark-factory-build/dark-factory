@@ -30,6 +30,9 @@ func (store *Store) CreateProject(ctx context.Context, spec NewProject, at UnixM
 	if err := validateRepositoryBindings(ctx, tx.connection); err != nil {
 		return Project{}, tx.Rollback(err)
 	}
+	if err := validateChanges(ctx, tx.connection); err != nil {
+		return Project{}, tx.Rollback(err)
+	}
 
 	existing, found, err := projectByID(ctx, tx.connection, spec.ID)
 	if err != nil {

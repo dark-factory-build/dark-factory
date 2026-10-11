@@ -111,12 +111,6 @@ func (store *Store) transitionResource(ctx context.Context, runID RunID, resourc
 	if !found {
 		return Resource{}, tx.Rollback(ErrNotFound)
 	}
-	if resource.RunID != runID {
-		return Resource{}, tx.Rollback(ErrConflict)
-	}
-	if resource.Kind == ResourceProviderProcess || resource.Kind == ResourceProviderGroup || resource.Kind == ResourceRunnerProcess && (target == ResourceActive || target == ResourceReleased) {
-		return Resource{}, tx.Rollback(ErrConflict)
-	}
 	run, found, err := runByID(ctx, tx.connection, runID)
 	if err != nil || !found {
 		if err == nil {
@@ -126,6 +120,12 @@ func (store *Store) transitionResource(ctx context.Context, runID RunID, resourc
 	}
 	if _, err := loadRunRelationships(ctx, tx.connection, run); err != nil {
 		return Resource{}, tx.Rollback(err)
+	}
+	if resource.RunID != runID {
+		return Resource{}, tx.Rollback(ErrConflict)
+	}
+	if resource.Kind == ResourceProviderProcess || resource.Kind == ResourceProviderGroup || resource.Kind == ResourceRunnerProcess && (target == ResourceActive || target == ResourceReleased) {
+		return Resource{}, tx.Rollback(ErrConflict)
 	}
 	if target == ResourceReleased && !resource.Identity.Empty() {
 		switch resource.Kind {
