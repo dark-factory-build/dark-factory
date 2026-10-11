@@ -1,0 +1,103 @@
+package provider
+
+import (
+	"context"
+	"errors"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"regexp"
+	"strings"
+	"syscall"
+	"time"
+
+	"github.com/dark-factory-build/dark-factory/internal/kernel"
+)
+
+var providerTerminalCSI = regexp.MustCompile(`\x1b\[[0-?]*[ -/]*[@-~]`)
+
+// ReviewResult is the provider-owned outcome of one read-only review launch.
+// The daemon remains responsible for interpreting the provider's verdict.
+type ReviewResult struct {
+	Stdout  string
+	Stderr  string
+	Limited bool
+}
+
+// ReviewEnvironment is the same filtered, disposable environment used by the
+// worker path. In particular, provider credentials and host Git credentials do
+// not cross the daemon/provider boundary.
+func ReviewEnvironment(root string) []string {
+	home := filepath.Join(root, ".review-home")
+	tmp := filepath.Join(root, ".review-tmp")
+	_ = os.MkdirAll(home, 0700)
+	_ = os.MkdirAll(tmp, 0700)
+	allowed := map[string]bool{"PATH": true, "LANG": true, "LC_ALL": true, "LC_CTYPE": true, "TERM": true, "USER": true, "LOGNAME": true, "SHELL": true}
+	result := make([]string, 0, 12)
+	for _, value := range os.Environ() {
+		if allowed[strings.SplitN(value, "=", 2)[0]] {
+			result = append(result, value)
+		}
+	}
+	return append(result,
+		"HOME="+home, "TMPDIR="+tmp,
+		"GIT_CONFIG_NOSYSTEM=1", "GIT_CONFIG_GLOBAL=/dev/null", "GIT_CONFIG_SYSTEM=/dev/null",
+		"GIT_TERMINAL_PROMPT=0", "GIT_ASKPASS=/usr/bin/false", "SSH_ASKPASS=/usr/bin/false",
+		"GIT_CONFIG_COUNT=1", "GIT_CONFIG_KEY_0=credential.helper", "GIT_CONFIG_VALUE_0=",
+	)
+}
+
+// RunReview launches the installed provider with the review's read-only
+// policy. Provider selection, account selection, environment construction,
+// process-group lifetime, and usage-limit handling live here with ordinary
+// provider launches; callers do not assemble provider command lines.
+func RunReview(ctx context.Context, kind kernel.Provider, toolPath string, accountHomes []string, checkout, prompt string, readable []string) (ReviewResult, error) {
+	toolName := "codex"
+	if kind == kernel.ProviderClaudeCode {
+		toolName = "claude"
+	}
+	tool, err := WalkToolPath(toolPath, toolName)
+	if err != nil {
+		return ReviewResult{}, err
+	}
+	for _, account := range accountHomes {
+		environment := append(ReviewEnvironment(filepath.Dir(checkout)), AccountEnvironment(kind, filepath.Dir(account), account)...)
+		var argv []string
+		if kind == kernel.ProviderClaudeCode {
+			argv = []string{"-p", prompt, "--permission-mode", "plan", "--safe-mode", "--restricted", "--setting-sources", "", "--strict-mcp-config", "--tools", "Read,Grep,Glob", "--allowedTools", "Read,Grep,Glob"}
+		} else {
+			argv = []string{"exec", "--disable", "computer_use", "--disable", "browser_use", "--disable", "plugins", "--ephemeral", "--ignore-user-config", "--strict-config", "-c", "approval_policy={ granular={sandbox_approval=false,rules=false,mcp_elicitations=false,request_permissions=false,skill_approval=false}}", "--ignore-rules", "--skip-git-repo-check"}
+			argv = append(argv, CodexReadOnly(readable...)...)
+			argv = append(argv, prompt)
+		}
+		command := exec.CommandContext(ctx, tool, argv...)
+		command.Dir, command.Env = checkout, environment
+		command.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+		command.Cancel = func() error { return syscall.Kill(-command.Process.Pid, syscall.SIGKILL) }
+		command.WaitDelay = 5 * time.Second
+		var stdout, stderr strings.Builder
+		command.Stdout, command.Stderr = &stdout, &stderr
+		err := command.Run()
+		result := ReviewResult{Stdout: stdout.String(), Stderr: stderr.String()}
+		if ctx.Err() != nil {
+			return result, ctx.Err()
+		}
+		if err != nil && kind == kernel.ProviderCodex && ReviewUsageLimited(result.Stdout+result.Stderr) {
+			result.Limited = true
+			continue
+		}
+		if err != nil {
+			return result, err
+		}
+		return result, nil
+	}
+	return ReviewResult{Limited: true}, errors.New("provider_limited")
+}
+
+// ReviewUsageLimited mirrors the worker's marker-aware Codex detector. The
+// glyph is part of the provider error cell: quoted task or tool text without
+// it is ordinary reviewer output, not account exhaustion.
+func ReviewUsageLimited(output string) bool {
+	text := providerTerminalCSI.ReplaceAllString(output, "")
+	return strings.Contains(text, "■ You've hit your usage limit") || strings.Contains(text, "⚠ Selected model is at capacity")
+}
