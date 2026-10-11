@@ -571,7 +571,7 @@ func (store *Store) LinkAccount(ctx context.Context, spec NewAccount, at UnixMil
 	if spec.ID.zero() || validateAccountFields(spec.Provider, spec.Home, spec.Label) != nil {
 		return Account{}, fmt.Errorf("%w: invalid account", ErrInvalidValue)
 	}
-	tx, err := store.beginUncheckedWrite(ctx)
+	tx, err := store.beginValidatedWrite(ctx)
 	if err != nil {
 		return Account{}, err
 	}
@@ -650,7 +650,7 @@ func (store *Store) UpdateAccount(ctx context.Context, id AccountID, expected Re
 	if id.zero() || expected.Int64() < 1 || (label == nil) != remove {
 		return Account{}, fmt.Errorf("%w: invalid account update", ErrInvalidValue)
 	}
-	tx, err := store.beginUncheckedWrite(ctx)
+	tx, err := store.beginValidatedWrite(ctx)
 	if err != nil {
 		return Account{}, err
 	}

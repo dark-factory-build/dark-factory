@@ -15,7 +15,7 @@ func (store *Store) AdmitNext(ctx context.Context, keys AdmissionKeys, at UnixMi
 	if !keys.valid() {
 		return AdmissionResult{}, fmt.Errorf("%w: invalid admission request", ErrInvalidValue)
 	}
-	tx, err := store.beginUncheckedWrite(ctx)
+	tx, err := store.beginValidatedWrite(ctx)
 	if err != nil {
 		return AdmissionResult{}, err
 	}
@@ -29,9 +29,6 @@ func (store *Store) AdmitNext(ctx context.Context, keys AdmissionKeys, at UnixMi
 		return AdmissionResult{}, tx.Rollback(err)
 	} else if found {
 		// A reconciled admission still grants existing launch authority.
-		if err := validateDurableControls(ctx, tx.connection); err != nil {
-			return AdmissionResult{}, tx.Rollback(err)
-		}
 		if err := tx.Rollback(nil); err != nil {
 			return AdmissionResult{}, err
 		}
@@ -162,12 +159,6 @@ func (store *Store) AdmitNext(ctx context.Context, keys AdmissionKeys, at UnixMi
 	baseTask := EffectiveTaskText(agent.Provider, task.Title, task.Body)
 	if !ContinuationTaskFits(agent.Provider, baseTask, continuationContexts) && !ContinuationTaskCanUseFetchFallback(agent.Provider, continuationContexts) {
 		return AdmissionResult{}, tx.Rollback(fmt.Errorf("%w: continuation context exceeds provider task bound", ErrInvalidValue))
-	}
-
-	// Empty probes only read. Validate the complete graph before the first
-	// admission write, while retaining the same reserved transaction.
-	if err := validateDurableControls(ctx, tx.connection); err != nil {
-		return AdmissionResult{}, tx.Rollback(err)
 	}
 
 	var change *Change

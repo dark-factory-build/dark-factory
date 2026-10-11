@@ -262,11 +262,7 @@ func (store *Store) RetryTask(ctx context.Context, digest *AttemptDigest, id Tas
 	if id.zero() || expected.Int64() < 1 {
 		return Task{}, fmt.Errorf("%w: invalid task retry", ErrInvalidValue)
 	}
-	begin := store.beginValidatedWrite
-	if intakeLimit > 0 {
-		begin = store.beginUncheckedWrite
-	}
-	tx, err := begin(ctx)
+	tx, err := store.beginValidatedWrite(ctx)
 	if err != nil {
 		return Task{}, err
 	}

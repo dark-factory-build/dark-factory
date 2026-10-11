@@ -152,7 +152,7 @@ const overseerWakeNames = `at > version AND (NOT targeted OR instr(names, item_k
 // Each specialist without an unfinished carrier or an exhausted budget gets
 // one when specialistSchedule says it is due.
 func (store *Store) EnqueueOverseerWakeups(ctx context.Context, at UnixMillis, health ...OverseerHealth) ([]Task, error) {
-	tx, err := store.beginUncheckedWrite(ctx)
+	tx, err := store.beginValidatedWrite(ctx)
 	if err != nil {
 		return nil, err
 	}
@@ -185,16 +185,6 @@ func (store *Store) EnqueueOverseerWakeups(ctx context.Context, at UnixMillis, h
 	}
 	if err := rows.Close(); err != nil {
 		return nil, tx.Rollback(err)
-	}
-	// Validate once, before the first write; a quiet poll rolls back without
-	// scanning retained history.
-	validated := false
-	validate := func() error {
-		if validated {
-			return nil
-		}
-		validated = true
-		return validateDurableControls(ctx, tx.connection)
 	}
 	var tasks []Task
 	changed := false
@@ -230,7 +220,7 @@ func (store *Store) EnqueueOverseerWakeups(ctx context.Context, at UnixMillis, h
 			}
 			priority = specialistWakePriority
 		} else {
-			if err := raiseStalledItems(ctx, tx, agent, at, health, validate); err != nil {
+			if err := raiseStalledItems(ctx, tx, agent, at, health); err != nil {
 				return nil, tx.Rollback(err)
 			}
 			var err error
@@ -242,9 +232,6 @@ func (store *Store) EnqueueOverseerWakeups(ctx context.Context, at UnixMillis, h
 			// The cursor still records that this quiet poll inspected the current
 			// journal head; no task is created and no provider run can start.
 		} else {
-			if err := validate(); err != nil {
-				return nil, tx.Rollback(err)
-			}
 			task, err := enqueueStandingTaskWithBody(ctx, tx.connection, agent, body, priority, at)
 			if err != nil {
 				return nil, tx.Rollback(err)
@@ -259,7 +246,7 @@ func (store *Store) EnqueueOverseerWakeups(ctx context.Context, at UnixMillis, h
 			changed = true
 		}
 	}
-	if !validated && !changed {
+	if !changed {
 		return nil, tx.Rollback(nil)
 	}
 	if err := tx.Commit(ctx); err != nil {
@@ -317,7 +304,7 @@ var stalledItemKey = [IDBytes]byte([]byte("stalled item key"))
 // most one such card; one still unfinished, or already carrying a request,
 // waits. A card closes only once none of its carrier's items is stalled, so
 // a later wake that moves an item's timing never strands it uncarded.
-func raiseStalledItems(ctx context.Context, tx *writeTx, agent Agent, at UnixMillis, health []OverseerHealth, validate func() error) error {
+func raiseStalledItems(ctx context.Context, tx *writeTx, agent Agent, at UnixMillis, health []OverseerHealth) error {
 	connection := tx.connection
 	rows, err := connection.QueryContext(ctx, overseerStalledItems, overseerItemArgs(agent, at.Int64(), health)...)
 	if err != nil {
@@ -363,9 +350,6 @@ func raiseStalledItems(ctx context.Context, tx *writeTx, agent Agent, at UnixMil
 		if err != nil {
 			return err
 		}
-		if err := validate(); err != nil {
-			return err
-		}
 		question := "The overseer was woken and left these unresolved. Reply to wake it with your decision, or cancel to leave them to you.\n" + strings.Join(lines[carrier], "\n")
 		var request [IDBytes]byte
 		if _, err := rand.Read(request[:]); err != nil {
@@ -405,9 +389,6 @@ func raiseStalledItems(ctx context.Context, tx *writeTx, agent Agent, at UnixMil
 		request, found, err := humanRequestByID(ctx, connection, id)
 		if err != nil || !found {
 			return errors.Join(err, ErrCorruptState)
-		}
-		if err := validate(); err != nil {
-			return err
 		}
 		if err := cancelHumanContinuationOnConnection(ctx, tx, request, at); err != nil {
 			return err

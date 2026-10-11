@@ -13,7 +13,8 @@ import (
 )
 
 const (
-	schedulerPollInterval = time.Second
+	schedulerPollInterval   = time.Second
+	storeValidationInterval = time.Minute
 	// schedulerMaxBackoff is the most polls a failure pauses the scheduler.
 	schedulerMaxBackoff = 64
 )
@@ -162,6 +163,13 @@ func (daemon *Daemon) RunScheduler(ctx context.Context, spec SupervisorSpec) err
 			}
 			tick := time.Now()
 			if !stopping {
+				if !tick.Before(daemon.validationDue) {
+					daemon.validationDue = tick.Add(storeValidationInterval)
+					if err := daemon.store.Validate(ownedCtx); err != nil {
+						daemon.releaseHold.Store(true)
+						LogFactoryd(daemon.log, "factoryd: durable validation hold: %v\n", err)
+					}
+				}
 				if now := daemon.now(); !now.Before(nextAttachmentCleanup) {
 					if at, err := kernel.NewUnixMillis(now.UnixMilli()); err == nil {
 						expired, _ := daemon.store.ExpireBlockedTasks(ownedCtx, at)

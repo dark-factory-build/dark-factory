@@ -336,6 +336,11 @@ func (store *Store) validateOpen(ctx context.Context) error {
 	return errors.Join(err, tx.Close())
 }
 
+// Validate checks one coherent durable snapshot without holding the writer.
+func (store *Store) Validate(ctx context.Context) error {
+	return store.validateOpen(ctx)
+}
+
 func validateDatabaseSnapshot(ctx context.Context, connection *sql.Conn) error {
 	if err := validateExactSchema(ctx, connection); err != nil {
 		return err
@@ -418,22 +423,12 @@ type writeTx struct {
 }
 
 func (store *Store) beginValidatedWrite(ctx context.Context) (*writeTx, error) {
-	tx, err := store.beginUncheckedWrite(ctx)
-	if err != nil {
-		return nil, err
-	}
-	if err := validateDurableControls(ctx, tx.connection); err != nil {
-		err = tx.Rollback(err)
-		tx.Close()
-		return nil, err
-	}
-	return tx, nil
+	return store.beginUncheckedWrite(ctx)
 }
 
-// beginUncheckedWrite reserves the writer without validating retained history.
-// Enqueue polls may inspect candidates and roll back a true no-op. Account
-// link/update transactions validate affected rows and references locally;
-// other mutations use beginValidatedWrite or validateDurableControls first.
+// beginUncheckedWrite reserves the writer. Mutations validate the rows and
+// references they touch; retained history is checked at open and by the
+// daemon's periodic health validation instead of on every write.
 func (store *Store) beginUncheckedWrite(ctx context.Context) (*writeTx, error) {
 	if err := store.acquireWriter(ctx); err != nil {
 		return nil, err

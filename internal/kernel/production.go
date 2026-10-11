@@ -621,7 +621,7 @@ func (store *Store) PublishableChanges(ctx context.Context, at UnixMillis) ([]Pu
 // the overseer's wake treats that settlement as unpublished again.
 // It moves one timestamp no retained-history rule reads, so it is unchecked.
 func (store *Store) RecordCorrectionPublished(ctx context.Context, c PublishableChange, at UnixMillis) error {
-	tx, err := store.beginUncheckedWrite(ctx)
+	tx, err := store.beginValidatedWrite(ctx)
 	if err != nil {
 		return err
 	}

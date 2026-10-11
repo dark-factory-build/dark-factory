@@ -348,6 +348,10 @@ func (daemon *Daemon) release(project kernel.ProjectID, root string, source chan
 		fail("backup: " + err.Error())
 		return
 	}
+	if err := daemon.store.Validate(ctx); err != nil {
+		fail("durable validation: " + err.Error())
+		return
+	}
 	if err := releaseUpgrade(ctx, daemon.home, filepath.Join(directory, "bin"), identity); err != nil {
 		fail("upgrade: " + err.Error())
 		return

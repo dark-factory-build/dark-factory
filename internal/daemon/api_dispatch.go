@@ -70,6 +70,7 @@ type Daemon struct {
 	publicRepoMu        sync.Mutex
 	publicRepos         map[string]*publicRepository
 	productionRefreshAt map[kernel.ProjectID]time.Time
+	validationDue       time.Time
 	// What factoryd knows of its health only in memory, for the overseer's
 	// wake (overseerHealth): each held condition, and the streak of
 	// Maintainer faults.
