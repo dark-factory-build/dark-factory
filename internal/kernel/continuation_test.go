@@ -16,9 +16,6 @@ func TestContinuationTaskFitsCodexProviderLimit(t *testing.T) {
 	if ContinuationTaskFits(ProviderCodex, strings.Repeat("x", MaxContinuationTaskBytes), []ContinuationContext{context}) {
 		t.Fatal("exact-limit Codex task was admitted without room for causal context")
 	}
-	if !ContinuationTaskCanUseFetchFallback(ProviderCodex, []ContinuationContext{context}) {
-		t.Fatal("oversized Codex continuation lost its bounded fetch fallback")
-	}
 }
 
 func TestQuestionYieldCannotBeStrandedByImmediateResolution(t *testing.T) {

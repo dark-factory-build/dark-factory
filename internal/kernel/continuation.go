@@ -68,17 +68,6 @@ func ContinuationTaskFits(provider Provider, task string, contexts []Continuatio
 	return len(ContinuationTaskText(task, contexts, false)) <= limit
 }
 
-// ContinuationTaskCanUseFetchFallback reports whether admission can preserve
-// progress when the causal envelope cannot fit inline. The daemon then starts
-// a fresh provider authority with a bounded instruction to fetch the durable
-// task and continuation context; no causal field is discarded.
-func ContinuationTaskCanUseFetchFallback(provider Provider, contexts []ContinuationContext) bool {
-	if len(contexts) == 0 {
-		return false
-	}
-	return provider == ProviderClaudeCode || provider == ProviderCodex
-}
-
 // yieldHumanQuestion is the shared atomic portion of yielding. The caller
 // owns tx and decides when the complete question/yield transaction is
 // committed.

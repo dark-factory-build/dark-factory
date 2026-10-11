@@ -9,7 +9,7 @@ import (
 	"strings"
 )
 
-// Open migrates the four earlier versions. v41 folds the continuations
+// Open migrates the five earlier versions. v41 folds the continuations
 // table onto the human request each row awaited; v40 drops
 // browser_security_events, a log nothing read; v39 names the retryable
 // failure code 'transient' where v38 named 'runner_exit', which nothing ever
@@ -21,6 +21,7 @@ const (
 	v38UserVersion = 38
 	v39UserVersion = 39
 	v40UserVersion = 40
+	v41UserVersion = 41
 )
 
 var browserSecurityEventStatements = []string{
@@ -63,8 +64,11 @@ var v40Continuations = []string{
 }
 
 func legacySchemaStatements(version int) []string {
-	pairs := []string{humanContinuationColumns, "", "'peer_question')),", "'peer_question', 'continuation')),"}
+	var pairs []string
 	if version <= v40UserVersion {
+		pairs = append(pairs, humanContinuationColumns, "", "'peer_question')),", "'peer_question', 'continuation')),")
+	}
+	if version <= v41UserVersion {
 		pairs = append(pairs, `length(CAST(body AS BLOB)) <= 148480`, `length(CAST(body AS BLOB)) <= 131072`)
 	}
 	if version < v39UserVersion {
@@ -79,16 +83,18 @@ func legacySchemaStatements(version int) []string {
 		at := slices.IndexFunc(statements, func(statement string) bool { return strings.HasPrefix(statement, "CREATE TABLE browser_clients ") }) + 1
 		statements = slices.Insert(statements, at, browserSecurityEventStatements...)
 	}
-	at := slices.IndexFunc(statements, func(statement string) bool { return strings.HasPrefix(statement, "CREATE TABLE invalidations") })
-	statements = slices.Insert(statements, at, v40Continuations...)
+	if version <= v40UserVersion {
+		at := slices.IndexFunc(statements, func(statement string) bool { return strings.HasPrefix(statement, "CREATE TABLE invalidations") })
+		statements = slices.Insert(statements, at, v40Continuations...)
+	}
 	for index, statement := range statements {
 		statements[index] = replacer.Replace(statement)
 	}
 	return statements
 }
 
-// validateOpenableSnapshot accepts a current database or an exact v37, v38,
-// v39 or v40 one, whose durable controls are checked inside the migration
+// validateOpenableSnapshot accepts a current database or an exact v37 through
+// v41 one, whose durable controls are checked inside the migration
 // before it commits.
 func validateOpenableSnapshot(ctx context.Context, connection *sql.Conn) error {
 	if _, version, err := inspectIdentity(ctx, connection); err != nil {
@@ -135,7 +141,7 @@ func (store *Store) migrateLegacy(ctx context.Context) error {
 	switch version {
 	case userVersion:
 		return connection.Close()
-	case v37UserVersion, v38UserVersion, v39UserVersion, v40UserVersion:
+	case v37UserVersion, v38UserVersion, v39UserVersion, v40UserVersion, v41UserVersion:
 	default:
 		cause := ErrForeignDatabase
 		if appID == applicationID && version > userVersion {
@@ -160,6 +166,9 @@ func (store *Store) migrateLegacy(ctx context.Context) error {
 func migrateFrom(ctx context.Context, connection *sql.Conn, version int) error {
 	if err := validateSchemaVersion(ctx, connection, version, legacySchemaStatements(version)); err != nil {
 		return err
+	}
+	if version == v41UserVersion {
+		return migrateTaskBodyLimit(ctx, connection)
 	}
 	// Every continuation awaited a human request of its own run's task work
 	// revision, which is all the request needs to stand in for it.
@@ -224,6 +233,28 @@ func migrateFrom(ctx context.Context, connection *sql.Conn, version int) error {
 		WHERE ? AND (proposal_code = 'protocol' AND proposal_detail IN (?, ?) OR proposal_code = 'provider_exit' AND proposal_detail = ?)`,
 		version < v39UserVersion, NeverStartedRunDetail, OverseerRunLimitDetail, ProviderCapacityRunDetail); err != nil {
 		return err
+	}
+	if err := validateExactSchema(ctx, connection); err != nil {
+		return err
+	}
+	return validateDurableControls(ctx, connection)
+}
+
+func migrateTaskBodyLimit(ctx context.Context, connection *sql.Conn) error {
+	var schemaVersion int
+	if err := connection.QueryRowContext(ctx, "PRAGMA schema_version").Scan(&schemaVersion); err != nil {
+		return err
+	}
+	for _, statement := range []string{
+		"PRAGMA writable_schema = ON",
+		`UPDATE sqlite_schema SET sql = replace(sql, 'length(CAST(body AS BLOB)) <= 131072', 'length(CAST(body AS BLOB)) <= 148480') WHERE type = 'table' AND name = 'tasks'`,
+		"PRAGMA writable_schema = OFF",
+		fmt.Sprintf("PRAGMA schema_version = %d", schemaVersion+1),
+		fmt.Sprintf("PRAGMA user_version = %d", userVersion),
+	} {
+		if _, err := connection.ExecContext(ctx, statement); err != nil {
+			return err
+		}
 	}
 	if err := validateExactSchema(ctx, connection); err != nil {
 		return err

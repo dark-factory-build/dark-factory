@@ -160,7 +160,7 @@ func (store *Store) AdmitNext(ctx context.Context, keys AdmissionKeys, at UnixMi
 		return AdmissionResult{}, tx.Rollback(err)
 	}
 	baseTask := EffectiveTaskText(agent.Provider, task.Title, task.Body)
-	if !ContinuationTaskFits(agent.Provider, baseTask, continuationContexts) && !ContinuationTaskCanUseFetchFallback(agent.Provider, continuationContexts) {
+	if !ContinuationTaskFits(agent.Provider, baseTask, continuationContexts) {
 		return AdmissionResult{}, tx.Rollback(fmt.Errorf("%w: continuation context exceeds provider task bound", ErrInvalidValue))
 	}
 
