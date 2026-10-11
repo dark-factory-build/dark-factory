@@ -44,9 +44,10 @@ func (daemon *Daemon) projectContent(ctx context.Context, call api.Call) api.Rep
 		}{page, currentDaemonBuild(), latestPublishedRelease(daemon)})
 	case "task_list":
 		var input struct {
-			AgentID, ProjectID string
-			BeforeUpdatedAtMS  *int64 `json:"before_updated_at_ms"`
-			BeforeTaskID       string `json:"before_task_id"`
+			AgentID           string `json:"agent_id"`
+			ProjectID         string `json:"project_id"`
+			BeforeUpdatedAtMS *int64 `json:"before_updated_at_ms"`
+			BeforeTaskID      string `json:"before_task_id"`
 		}
 		if json.Unmarshal(request.Input, &input) != nil || (input.AgentID == "") == (input.ProjectID == "") || input.BeforeUpdatedAtMS == nil && input.BeforeTaskID != "" || input.BeforeUpdatedAtMS != nil && input.BeforeTaskID == "" {
 			return newErrorReply(api.RemoteInvalidRequest)
