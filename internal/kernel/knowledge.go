@@ -179,7 +179,7 @@ func knowledgeReference(ctx context.Context, c *sql.Conn, project ProjectID, tab
 	return nil
 }
 
-func validateKnowledge(ctx context.Context, c *sql.Conn, spec NewContent, expected Revision, a *AttemptAuthority) error {
+func validateKnowledge(ctx context.Context, c *sql.Conn, spec NewContent, expected Revision, a *AttemptAuthority, retiring bool) error {
 	if a != nil {
 		if spec.ProjectID != a.ProjectID {
 			return ErrUnauthorized
@@ -241,7 +241,7 @@ func validateKnowledge(ctx context.Context, c *sql.Conn, spec NewContent, expect
 	}
 	// Lessons are evidence-backed operational memory: every new or revised
 	// lesson must carry a command or query that can re-verify its claim.
-	if spec.Kind == ContentLesson && strings.TrimSpace(m.Verification) == "" {
+	if spec.Kind == ContentLesson && !retiring && strings.TrimSpace(m.Verification) == "" {
 		return ErrInvalidValue
 	}
 	if spec.Kind != ContentDiscussion && (m.Resolved || m.Pinned) {
@@ -394,7 +394,7 @@ func (store *Store) ValidateKnowledgeWrite(ctx context.Context, spec NewContent,
 		return err
 	}
 	defer tx.Close()
-	return validateKnowledge(ctx, tx.connection, spec, expected, nil)
+	return validateKnowledge(ctx, tx.connection, spec, expected, nil, false)
 }
 func (store *Store) ValidateKnowledgeWriteForAttempt(ctx context.Context, digest AttemptDigest, spec NewContent, expected Revision) error {
 	tx, err := store.beginRead(ctx)
@@ -409,7 +409,7 @@ func (store *Store) ValidateKnowledgeWriteForAttempt(ctx context.Context, digest
 	if a.Role != RoleWorker && a.Role != RoleOrchestrator {
 		return ErrUnauthorized
 	}
-	return validateKnowledge(ctx, tx.connection, spec, expected, &a)
+	return validateKnowledge(ctx, tx.connection, spec, expected, &a, false)
 }
 
 func (store *Store) SearchKnowledge(ctx context.Context, project ProjectID, repository RepositoryID, q KnowledgeQuery) (ContentPage, error) {

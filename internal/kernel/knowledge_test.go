@@ -47,9 +47,18 @@ func TestLessonsRequireRunnableVerification(t *testing.T) {
 	if _, err := store.CreateContent(ctx, lesson, mustTime(t, 40)); !errors.Is(err, ErrInvalidValue) {
 		t.Fatalf("lesson without verification = %v", err)
 	}
-	lesson.SourceReferences = `{"status":"current","evidence":["internal/kernel/knowledge.go:242"],"verification":"go test ./internal/kernel -run TestLessonsRequireRunnableVerification"}`
-	if _, err := store.CreateContent(ctx, lesson, mustTime(t, 41)); err != nil {
+	lesson.SourceReferences = `{"status":"tentative","evidence":["internal/kernel/knowledge.go:242"],"verification":"go test ./internal/kernel -run TestLessonsRequireRunnableVerification"}`
+	created, err := store.CreateContentForAttempt(ctx, run.CredentialDigest, lesson, mustTime(t, 41))
+	if err != nil {
 		t.Fatalf("verified lesson = %v", err)
+	}
+	// A pre-change lesson may lack verification; retirement must remain possible.
+	if _, err := store.writer.ExecContext(ctx, `UPDATE project_content_revisions SET source_references=? WHERE id=? AND revision=?`, `{"status":"tentative","evidence":["legacy source"]}`, created.ID.Bytes(), created.Revision.Int64()); err != nil {
+		t.Fatal(err)
+	}
+	retired, err := store.DeprecateContentForAttempt(ctx, run.CredentialDigest, created.ID, created.Revision, mustTime(t, 42))
+	if err != nil || !retired.Deprecated {
+		t.Fatalf("legacy lesson retirement = %+v, %v", retired, err)
 	}
 }
 
