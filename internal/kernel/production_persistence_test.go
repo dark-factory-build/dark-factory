@@ -267,7 +267,7 @@ func TestOverseerWakeRule(t *testing.T) {
 	if _, err := store.writer.ExecContext(ctx, `UPDATE changes SET head_commit = ? WHERE id = ?`, head.Bytes(), change.ID.Bytes()); err != nil {
 		t.Fatal(err)
 	}
-	policy, after, instruction := IdleStandingInstruction, uint32(1), "Publish completed Changes."
+	policy, after, instruction := IdleStandingInstruction, uint32(1), "factoryd publishes completed Changes."
 	overseer, err := store.CreateAgent(ctx, NewAgent{ID: agentID(t, 191), ProjectID: terminal.ProjectID, Name: "overseer", Role: RoleOrchestrator, Provider: ProviderCodex, ToolBudgetLimit: 8}, mustTime(t, 80))
 	if err != nil {
 		t.Fatal(err)
@@ -275,51 +275,14 @@ func TestOverseerWakeRule(t *testing.T) {
 	if _, err := store.UpdateAgent(ctx, overseer.ID, overseer.Revision, AgentPatch{IdlePolicy: &policy, IdleAfterSeconds: &after, IdleInstruction: &instruction}, mustTime(t, 81)); err != nil {
 		t.Fatal(err)
 	}
-	wake := func(at int64) []Task {
-		t.Helper()
-		tasks, err := store.EnqueueOverseerWakeups(ctx, mustTime(t, at))
-		if err != nil {
-			t.Fatal(err)
-		}
-		return tasks
-	}
-	rewake := OverseerRewakeAfter.Milliseconds()
-	at := int64(200_080)
-	first := wake(at)
-	if len(first) != 0 {
-		t.Fatalf("first wake = %+v", first)
-	}
-	return
-	if again := wake(at + 2*rewake); len(again) != 0 {
-		t.Fatalf("second carrier while one is queued = %+v", again)
-	}
-	for round := range 4 {
-		settleCarrier(t, store, at+1, byte(31+21*round), "ran")
-		if early := wake(at + rewake - 1); len(early) != 0 {
-			t.Fatalf("round %d re-woke early = %+v", round, early)
-		}
-		next := wake(at + rewake)
-		if round == 3 {
-			if len(next) != 0 {
-				t.Fatalf("fourth re-wake = %+v", next)
-			}
-			break
-		}
-		if len(next) != 1 {
-			t.Fatalf("re-wake %d = %+v", round+1, next)
-		}
-		at += rewake
-	}
-	// Publication clears it.
-	pr := ProductionPullRequest{Number: 7, Title: "Ship", URL: "https://github.com/example/factory/pull/7", Head: hex.EncodeToString(head.Bytes()), Branch: "factory/" + change.ID.String()[:12], Base: "main", State: "open", Review: ProductionReview{Head: hex.EncodeToString(head.Bytes()), State: "unknown"}}
-	if err := store.RecordPublication(ctx, terminal.ProjectID, terminal.TaskID, "example/factory", pr, mustTime(t, at+3*rewake)); err != nil {
+	tasks, err := store.EnqueueOverseerWakeups(ctx, mustTime(t, 200_080))
+	if err != nil {
 		t.Fatal(err)
 	}
-	if published := wake(at + 5*rewake); len(published) != 0 {
-		t.Fatalf("published Change still woke the overseer = %+v", published)
+	if len(tasks) != 0 {
+		t.Fatalf("finished Change woke the overseer: %+v", tasks)
 	}
 }
-
 func TestProductionPublicationUsesOwnedChangeForTransformedHead(t *testing.T) {
 	t.Parallel()
 	for _, historical := range []bool{false, true} {
