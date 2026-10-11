@@ -772,6 +772,14 @@ func TestSettledProductionChecks(t *testing.T) {
 	if err != nil || len(settled) != 1 || !settled[ProductionHead{Number: 1, Head: a}] {
 		t.Fatalf("settled %v, %v", settled, err)
 	}
+	// A check recorded before the required flag existed settles nothing: one
+	// more read records the flag that why counts.
+	if _, err := store.writer.ExecContext(ctx, `UPDATE production_records SET document = json_remove(document, '$.required') WHERE kind = 'check' AND identity = '1'`); err != nil {
+		t.Fatal(err)
+	}
+	if settled, err := store.SettledProductionChecks(ctx, project.ID, "example/factory"); err != nil || len(settled) != 0 {
+		t.Fatalf("a legacy check settled %v, %v", settled, err)
+	}
 }
 
 // Deployment records, once seen, survive a refresh that could not read them
