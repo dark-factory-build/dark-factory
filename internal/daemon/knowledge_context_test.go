@@ -127,7 +127,7 @@ func TestKnowledgeReachesFreshProviderTaskAndPinsExplicitRevision(t *testing.T) 
 				t.Fatalf("missing exact supplied receipt: %+v", accesses)
 			}
 			// A newer correction appears as a checkpoint notice; the prior run's pin stays.
-			metadata := kernel.KnowledgeMetadata{Status: "current", Evidence: []string{"new review"}}
+			metadata := kernel.KnowledgeMetadata{Status: "current", Evidence: []string{"new review"}, Verification: "go test ./internal/daemon"}
 			encoded, _ := json.Marshal(metadata)
 			spec, err := f.daemon.writeContentSource(ctx, kernel.NewContent{ID: lesson.ID, ProjectID: lesson.ProjectID, Kind: lesson.Kind, Title: lesson.Title, Author: "operator:local", SourceReferences: string(encoded), Body: "CORRECTED LESSON"}, 2)
 			if err != nil {
