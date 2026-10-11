@@ -301,13 +301,16 @@ func (daemon *Daemon) publishPull(ctx context.Context, c kernel.PublishableChang
 		externalSourceURL = c.Accepted.Snapshot.URL
 	}
 	createdIssue := false
-	if issueNumber == 0 && externalSourceURL == "" && c.Pull == 0 {
+	if issueNumber == 0 && externalSourceURL == "" {
 		issue := struct {
 			Number uint64 `json:"number"`
 		}{}
 		step := "issue"
 		done, issueErr := completed(step, &issue)
 		if issueErr == nil && !done {
+			if c.Pull != 0 {
+				return errors.New("the synthetic issue for this correction was not observed")
+			}
 			text := kernel.TaskInstruction(c.Task)
 			if text == "" {
 				text = c.Task.Title
@@ -325,9 +328,10 @@ func (daemon *Daemon) publishPull(ctx context.Context, c kernel.PublishableChang
 		if issue.Number == 0 {
 			return errors.New("create_issue returned no issue")
 		}
-		issueNumber, createdIssue = issue.Number, true
+		issueNumber, createdIssue = issue.Number, !done
 	}
-	closeOnMerge := createdIssue || (!linearSource && c.Accepted.TaskID == c.Task.ID)
+	syntheticIssue := !linearSource && c.Accepted.Snapshot.IssueNumber == 0 && issueNumber != 0
+	closeOnMerge := createdIssue || syntheticIssue || (!linearSource && c.Accepted.TaskID == c.Task.ID)
 	issueReference := func() string {
 		if externalSourceURL != "" {
 			return "\n\nRefs " + externalSourceURL

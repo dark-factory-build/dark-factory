@@ -271,6 +271,21 @@ func TestFactorydCreatesIssuesAndPreservesLinearProvenance(t *testing.T) {
 	if issue["title"] != c.Task.Title || pull["issue_number"] != uint64(29) || pull["close_on_merge"] != true {
 		t.Fatalf("non-intake publication = %+v", app.writes)
 	}
+	app.writes = nil
+	c.Pull = 31
+	app.tip = c.Head
+	if err := fixture.daemon.publishChange(ctx, c, "owner/destination", source, app.call, checkout); err != nil {
+		t.Fatal(err)
+	}
+	var correction map[string]any
+	for _, write := range app.writes {
+		if write["name"] == "update_pull_request_body" {
+			correction = write["arguments"].(map[string]any)
+		}
+	}
+	if !strings.HasSuffix(correction["body"].(string), "\n\nCloses #29") {
+		t.Fatalf("non-intake correction body = %+v", correction)
+	}
 
 	linearFixture, linear, linearSource, linearApp, linearCheckout := publishFixture(t, 1, false)
 	linear.Accepted = kernel.IntakeAcceptance{Snapshot: kernel.IntakeIssueSnapshot{LinearTeamID: "team", URL: "https://linear.app/acme/issue/ENG-7/intake"}, TaskID: linear.Task.ID}
