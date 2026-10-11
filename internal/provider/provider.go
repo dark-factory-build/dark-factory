@@ -853,19 +853,38 @@ func codexProfile(name string, grants []grant, network string) string {
 	return "permissions." + name + `={filesystem={` + strings.Join(entries, ",") + `},network=` + network + `}`
 }
 
-// CodexReadOnly is the -c overrides that let a Codex exec's local commands
-// read only paths (and Codex's minimal system profile), with no network. It
-// replaces --sandbox read-only, which reads the whole disk. Each path is
-// granted under its resolved spelling as well.
-func CodexReadOnly(paths ...string) []string {
+// CodexReview is the -c overrides and environment that let a Codex exec's
+// local commands read only paths, the frozen toolchain and the trusted Go and
+// pnpm caches (and Codex's minimal system profile), write only scratch, and
+// reach no network, so a reviewer can run the change's tests. It replaces
+// --sandbox read-only, which reads the whole disk. Each path is granted under
+// its resolved spelling as well.
+func CodexReview(toolPath, toolchainReadRoots, accountHome, scratch string, paths ...string) (arguments, environment []string) {
 	var grants []grant
-	for _, path := range paths {
-		grants = append(grants, grant{path, false})
+	add := func(path string, write bool) {
+		grants = append(grants, grant{path, write})
 		if resolved, err := filepath.EvalSymlinks(path); err == nil && resolved != path {
-			grants = append(grants, grant{resolved, false})
+			grants = append(grants, grant{resolved, write})
 		}
 	}
-	return []string{"-c", `default_permissions="dark-factory-review"`, "-c", codexProfile("dark-factory-review", grants, "{enabled=false}")}
+	for _, path := range slices.Concat(paths, filepath.SplitList(toolchainReadRoots), []string{goModuleCachePath(accountHome), pnpmStorePath(accountHome)}) {
+		add(path, false)
+	}
+	add(scratch, true)
+	arguments = []string{"-c", `default_permissions="dark-factory-review"`, "-c", codexProfile("dark-factory-review", grants, "{enabled=false}")}
+	environment = []string{
+		"PATH=" + toolPath,
+		"GOENV=off",
+		"GOTOOLCHAIN=local",
+		"GOFLAGS=-mod=readonly",
+		"GOCACHE=" + filepath.Join(scratch, "go-build"),
+		"GOMODCACHE=" + goModuleCachePath(accountHome),
+		"GOPROXY=off",
+		"GOSUMDB=off",
+		"pnpm_config_store_dir=" + pnpmStorePath(accountHome),
+		"COREPACK_ENABLE_NETWORK=0",
+	}
+	return arguments, environment
 }
 
 // claudeSettings confines a Claude Code run to the same grants Codex gets.

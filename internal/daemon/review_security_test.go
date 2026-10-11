@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"syscall"
@@ -67,7 +68,7 @@ func reviewerFixture(t *testing.T, reviewers ...string) (*daemonReviewBackend, m
 	fixture, project := reviewPublicFixture(t)
 	ctx := context.Background()
 	bin := t.TempDir()
-	script := "#!/bin/sh\n[ -e \"$CODEX_HOME/limited\" ] && { echo \"■ You've hit your usage limit. Try again later.\"; exit 1; }\n[ -e \"$CODEX_HOME/quoted\" ] && { echo \"the task says: You've hit your usage limit\"; exit 1; }\n[ -e \"$CODEX_HOME/hang\" ] && { sleep 600 & echo $$ > \"$CODEX_HOME/pid\"; wait; }\n[ -e \"$CODEX_HOME/say\" ] && { cat \"$CODEX_HOME/say\" >&2; echo \"tokens used: 12\" >&2; cat \"$CODEX_HOME/say\"; exit 0; }\n[ -e \"$CODEX_HOME/argv\" ] && printf '%s\\0' \"$@\" > \"$CODEX_HOME/argv\"\n[ -e \"$CODEX_HOME/stamp\" ] && { for prompt; do :; done; echo \"$prompt\"; echo \"VERDICT: ALLOW\"; exit 0; }\necho \"read changed.go\"\necho \"VERDICT: ALLOW\"\n"
+	script := "#!/bin/sh\n[ -e \"$CODEX_HOME/limited\" ] && { echo \"■ You've hit your usage limit. Try again later.\"; exit 1; }\n[ -e \"$CODEX_HOME/quoted\" ] && { echo \"the task says: You've hit your usage limit\"; exit 1; }\n[ -e \"$CODEX_HOME/hang\" ] && { sleep 600 & echo $$ > \"$CODEX_HOME/pid\"; wait; }\n[ -e \"$CODEX_HOME/say\" ] && { cat \"$CODEX_HOME/say\" >&2; echo \"tokens used: 12\" >&2; cat \"$CODEX_HOME/say\"; exit 0; }\n[ -e \"$CODEX_HOME/argv\" ] && printf '%s\\0' \"$@\" > \"$CODEX_HOME/argv\"\n[ -e \"$CODEX_HOME/env\" ] && env > \"$CODEX_HOME/env\"\n[ -e \"$CODEX_HOME/stamp\" ] && { for prompt; do :; done; echo \"$prompt\"; echo \"VERDICT: ALLOW\"; exit 0; }\necho \"read changed.go\"\necho \"VERDICT: ALLOW\"\n"
 	if err := os.WriteFile(filepath.Join(bin, "codex"), []byte(script), 0o700); err != nil {
 		t.Fatal(err)
 	}
@@ -305,14 +306,20 @@ func TestReviewLimitNeedsTheCodexMarkerAndACodexReviewer(t *testing.T) {
 	}
 }
 
-// The Codex reviewer's local commands may read the checkout and the objects it
-// borrows, and nothing else the operator owns: a deny-root permission profile, never --sandbox, which
-// would override it and reads the whole disk.
-func TestCodexReviewerReadsOnlyItsCheckout(t *testing.T) {
+// The Codex reviewer's local commands may read the checkout, the objects it
+// borrows, the frozen toolchain and the trusted Go and pnpm caches, and write
+// only the review's temporary directory, so it can run the change's tests,
+// and nothing else the operator owns: a deny-root permission profile, never
+// --sandbox, which would override it and reads the whole disk.
+func TestCodexReviewerReadsOnlyItsCheckoutAndToolchain(t *testing.T) {
 	backend, homes := reviewerFixture(t, "argv")
-	if err := os.WriteFile(filepath.Join(homes["argv"], "argv"), nil, 0o600); err != nil {
-		t.Fatal(err)
+	for _, marker := range []string{"argv", "env"} {
+		if err := os.WriteFile(filepath.Join(homes["argv"], marker), nil, 0o600); err != nil {
+			t.Fatal(err)
+		}
 	}
+	toolchain := t.TempDir()
+	backend.daemon.toolchainReadRoots = toolchain
 	// Like ReviewCheckout, the checkout borrows the registered repository's
 	// objects through alternates, which git in the checkout must read.
 	registered, request := reviewCheckout(t)
@@ -330,8 +337,33 @@ func TestCodexReviewerReadsOnlyItsCheckout(t *testing.T) {
 	argv := strings.Split(strings.TrimSuffix(string(raw), "\x00"), "\x00")
 	t.Logf("reviewer argv: %q", argv)
 	joined := strings.Join(argv, "\n")
+	operator, err := operatorHome()
+	if err != nil {
+		t.Fatal(err)
+	}
+	scratch := filepath.Join(filepath.Dir(checkout), ".review-tmp")
+	resolved, err := filepath.EvalSymlinks(scratch)
+	if err != nil {
+		t.Fatal(err)
+	}
 	profile := "\n" + `permissions.dark-factory-review={filesystem={":root"="deny",":minimal"="read","/private/tmp"="deny","/private/var/tmp"="deny",` + strconv.Quote(checkout) + `="read",`
-	if strings.Contains(joined, "--sandbox") || strings.Contains(joined, "sandbox_mode") || strings.Contains(joined, `"write"`) || !strings.Contains(joined, "\ndefault_permissions=\"dark-factory-review\"\n") || !strings.Contains(joined, profile) || !strings.Contains(joined, strconv.Quote(filepath.Join(registered, ".git", "objects"))+`="read"`) || !strings.Contains(joined, "},network={enabled=false}}\n") {
-		t.Fatalf("reviewer argv = %q, want the deny-root read-only profile and no --sandbox", argv)
+	reads := []string{filepath.Join(registered, ".git", "objects"), toolchain, filepath.Join(operator, "Library", "Caches", "dark-factory", "local-ci", "trusted", "go-mod"), filepath.Join(operator, "Library", "Caches", "dark-factory", "local-ci", "trusted", "pnpm-store")}
+	writes := strings.Count(joined, `="write"`) - strings.Count(joined, strconv.Quote(scratch)+`="write"`) - strings.Count(joined, strconv.Quote(resolved)+`="write"`)
+	if strings.Contains(joined, "--sandbox") || strings.Contains(joined, "sandbox_mode") || writes != 0 || !strings.Contains(joined, strconv.Quote(scratch)+`="write"`) || !strings.Contains(joined, "\ndefault_permissions=\"dark-factory-review\"\n") || !strings.Contains(joined, profile) || !strings.Contains(joined, "},network={enabled=false}}\n") {
+		t.Fatalf("reviewer argv = %q, want the deny-root profile writing only %s and no --sandbox", argv, scratch)
+	}
+	for _, path := range reads {
+		if !strings.Contains(joined, strconv.Quote(path)+`="read"`) {
+			t.Fatalf("reviewer argv = %q, want %s readable", argv, path)
+		}
+	}
+	environment, err := os.ReadFile(filepath.Join(homes["argv"], "env"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{"PATH=" + backend.daemon.toolPath, "TMPDIR=" + scratch, "GOTOOLCHAIN=local", "GOFLAGS=-mod=readonly", "GOCACHE=" + filepath.Join(scratch, "go-build"), "GOMODCACHE=" + reads[2], "GOPROXY=off"} {
+		if !slices.Contains(strings.Split(string(environment), "\n"), want) {
+			t.Fatalf("reviewer environment = %s, want %s", environment, want)
+		}
 	}
 }

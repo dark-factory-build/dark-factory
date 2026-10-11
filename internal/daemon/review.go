@@ -604,6 +604,10 @@ func (b *daemonReviewBackend) Review(ctx context.Context, checkout string, reque
 	if err != nil {
 		return review.Verdict{}, fmt.Errorf("review: %s not on the tool path: %w", request.Provider, err)
 	}
+	operator, err := operatorHome()
+	if err != nil {
+		return review.Verdict{}, err
+	}
 	prompt := reviewPrompt(checkout, request.Base, request.Body, diff)
 	for _, home := range homes {
 		var command *exec.Cmd
@@ -620,7 +624,11 @@ func (b *daemonReviewBackend) Review(ctx context.Context, checkout string, reque
 			if alternates, err := os.ReadFile(filepath.Join(checkout, ".git", "objects", "info", "alternates")); err == nil {
 				readable = append(readable, strings.Split(strings.TrimSpace(string(alternates)), "\n")...)
 			}
-			command.Args = append(append(command.Args, provider.CodexReadOnly(readable...)...), prompt)
+			// The tests it may run use the workers' toolchain and trusted caches,
+			// writing only the review's own temporary directory.
+			arguments, toolEnvironment := provider.CodexReview(b.daemon.toolPath, b.daemon.toolchainReadRoots, operator, filepath.Join(filepath.Dir(checkout), ".review-tmp"), readable...)
+			command.Args = append(append(command.Args, arguments...), prompt)
+			environment = append(environment, toolEnvironment...)
 		}
 		command.Dir, command.Env = checkout, environment
 		// The deadline kills the reviewer's whole process group, not only its
