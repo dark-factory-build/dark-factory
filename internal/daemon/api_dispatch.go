@@ -634,7 +634,7 @@ func (daemon *Daemon) taskRead(ctx context.Context, call api.Call) api.Reply {
 	if err != nil {
 		return newErrorReply(remoteErrorCode(err))
 	}
-	questions, _, _, err := daemon.store.PeerQuestionsForTask(ctx, task.ID, 0, kernel.EventSequence{})
+	questions, nextPeerOffset, _, err := daemon.store.PeerQuestionsForTask(ctx, task.ID, input.PeerOffset, kernel.EventSequence{})
 	if err != nil {
 		return newErrorReply(remoteErrorCode(err))
 	}
@@ -650,6 +650,7 @@ func (daemon *Daemon) taskRead(ctx context.Context, call api.Call) api.Reply {
 		next := input.Offset + 2048
 		result.NextOffset = &next
 	}
+	result.NextPeerOffset = nextPeerOffset
 	reply, err := api.NewTaskTextReply(result)
 	if err != nil {
 		return newErrorReply(api.RemoteInternal)

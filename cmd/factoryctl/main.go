@@ -295,6 +295,7 @@ type attemptCommand struct {
 	offset              uint64
 	limit               uint64
 	cursor              string
+	peerOffset          uint64
 	head                uint64
 	textOffset          uint64
 	terminalText        bool
@@ -1403,7 +1404,7 @@ func parseOperator(args []string) (attemptCommand, bool, bool) {
 		if !ok || !validHumanRequestKey(values["--project"]) {
 			return attemptCommand{}, false, false
 		}
-		offset, offsetOK := parseRevision(values["--offset"])
+		offset, offsetOK := parseCount(values["--offset"], true)
 		limit, limitOK := parseRevision(values["--limit"])
 		if values["--offset"] == "" {
 			offset, offsetOK = 0, true
@@ -1657,7 +1658,7 @@ func parseOperator(args []string) (attemptCommand, bool, bool) {
 	case "task send-back":
 		command.kind, names = commandTaskSendBack, []string{"--task", "--head", "--note"}
 	case "task read":
-		command.kind, names = commandTaskRead, []string{"--task", "--revision", "--offset"}
+		command.kind, names = commandTaskRead, []string{"--task", "--revision", "--offset", "--peer-offset"}
 	default:
 		return attemptCommand{}, false, false
 	}
@@ -1748,6 +1749,8 @@ func parseOperator(args []string) (attemptCommand, bool, bool) {
 			command.id = value
 		case name == "--offset" && command.kind == commandTaskRead && isCount:
 			command.offset = count
+		case name == "--peer-offset" && command.kind == commandTaskRead && isCount:
+			command.peerOffset = count
 		case name == "--head" && command.kind == commandTaskSendBack:
 			command.sourceCommit = value
 		case name == "--note" && command.kind == commandTaskSendBack && validOperatorText(value, 1, 8192):

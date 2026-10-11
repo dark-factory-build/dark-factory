@@ -906,7 +906,7 @@ func decodeCall(domain byte, bearer credential, encoded []byte) (Call, RemoteErr
 			return Call{}, RemoteInvalidRequest
 		}
 	case CallTaskRead:
-		if err := decodeExact(request.Params, &call.taskRead); err != nil || !validID(call.taskRead.TaskID) || call.taskRead.ExpectedRevision == 0 || call.taskRead.Offset > uint64(^uint64(0)>>1) {
+		if err := decodeExact(request.Params, &call.taskRead); err != nil || !validID(call.taskRead.TaskID) || call.taskRead.ExpectedRevision == 0 || call.taskRead.Offset > uint64(^uint64(0)>>1) || call.taskRead.PeerOffset > uint64(^uint64(0)>>1) {
 			return Call{}, RemoteInvalidRequest
 		}
 	case CallProjectContent:
