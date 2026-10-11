@@ -34,8 +34,42 @@ func projectSnapshot(snapshot kernel.DashboardSnapshot) api.DashboardSnapshot {
 	for _, task := range snapshot.Tasks {
 		result.Tasks = append(result.Tasks, api.TaskSummary{
 			ID: task.ID.String(), ProjectID: task.ProjectID.String(), AssignedAgentID: optionalAgentText(task.AssignedAgentID),
-			IncarnationID: task.IncarnationID.String(), WorkRevision: uint64(task.WorkRevision.Int64()), Title: task.Title, Status: task.Status, Priority: task.Priority, Revision: uint64(task.Revision.Int64()),
+			IncarnationID: task.IncarnationID.String(), WorkRevision: uint64(task.WorkRevision.Int64()), Title: task.Title, Status: task.Status, BlockedReason: task.BlockedReason, UpdatedAt: uint64(task.UpdatedAt.Int64()), IssueNumber: task.IssueNumber, MissionID: task.MissionID, Priority: task.Priority, Revision: uint64(task.Revision.Int64()),
 		})
+	}
+	return result
+}
+
+func projectPublicSnapshot(snapshot kernel.PublicSnapshot, defaults func(string, string) (string, string, string)) api.DashboardSnapshot {
+	base := kernel.DashboardSnapshot{Head: snapshot.Head, Factory: snapshot.Factory, Agents: snapshot.Agents, Tasks: snapshot.Tasks}
+	for _, project := range snapshot.Projects {
+		base.Projects = append(base.Projects, kernel.ProjectSummary{ID: project.ID, Name: project.Name, RunBudgetLimit: project.RunBudgetLimit, RunsUsed: project.RunsUsed, MaxRunSeconds: project.MaxRunSeconds, Tokens: project.Tokens, SpecialistRuns: project.SpecialistRuns, SpecialistOpenProposals: project.SpecialistOpenProposals, Revision: project.Revision})
+	}
+	result := projectSnapshot(base)
+	result.Accounts = make([]api.AccountSummary, 0, len(snapshot.Accounts))
+	result.PeerQuestions = make([]api.PeerQuestionSummary, 0, len(snapshot.PeerQuestions))
+	for _, account := range snapshot.Accounts {
+		result.Accounts = append(result.Accounts, api.AccountSummary{ID: account.ID.String(), Provider: account.Provider, Home: account.Home, Label: account.Label, Revision: uint64(account.Revision.Int64())})
+	}
+	for _, question := range snapshot.PeerQuestions {
+		result.PeerQuestions = append(result.PeerQuestions, api.PeerQuestionSummary{ID: question.ID.String(), SourceTaskID: question.SourceTaskID.String(), TargetTaskID: question.TargetTaskID.String(), Answered: question.Answered, Revision: uint64(question.Revision.Int64())})
+	}
+	homes := make(map[kernel.AccountID]string, len(snapshot.Accounts))
+	for _, account := range snapshot.Accounts {
+		homes[account.ID] = account.Home
+	}
+	for index, agent := range snapshot.Agents {
+		if defaults == nil {
+			continue
+		}
+		model, effort, source := defaults(agent.Provider, homes[agent.AccountID])
+		if agent.Model != "" {
+			model, source = agent.Model, "agent"
+		}
+		if agent.ReasoningEffort != "" {
+			effort = agent.ReasoningEffort
+		}
+		result.Agents[index].EffectiveModel, result.Agents[index].EffectiveReasoningEffort, result.Agents[index].ModelSource = model, effort, source
 	}
 	return result
 }
@@ -84,7 +118,7 @@ func projectOverseerSnapshot(snapshot kernel.OverseerSnapshot) (api.OverseerSnap
 }
 
 func projectAgentSummary(agent kernel.AgentSummary) api.AgentSummary {
-	return api.AgentSummary{
+	result := api.AgentSummary{
 		ID: agent.ID.String(), ProjectID: agent.ProjectID.String(), Name: agent.Name,
 		Role: agent.Role, Provider: agent.Provider, Paused: agent.Paused, Archived: agent.Archived,
 		Model: agent.Model, ReasoningEffort: agent.ReasoningEffort,
@@ -92,7 +126,12 @@ func projectAgentSummary(agent kernel.AgentSummary) api.AgentSummary {
 		IdlePolicy: string(agent.Idle.Policy), IdleAfterSeconds: agent.Idle.AfterSeconds,
 		IdleInstruction: agent.Idle.Instruction, IdleRunBudget: agent.Idle.RunBudget, IdleRunsUsed: agent.Idle.RunsUsed, IdleWakeOn: agent.Idle.WakeOn,
 		AccountID: optionalAccountText(agent.AccountID), Revision: uint64(agent.Revision.Int64()),
+		Appearance: api.AgentAppearance{Automatic: agent.Appearance.Automatic, Skin: agent.Appearance.Skin, Hair: agent.Appearance.Hair, HairColour: agent.Appearance.HairColour, Face: agent.Appearance.Face, Outfit: agent.Appearance.Outfit, ClothesColour: agent.Appearance.ClothesColour, Shoes: agent.Appearance.Shoes, Tool: agent.Appearance.Tool, Headwear: agent.Appearance.Headwear},
 	}
+	if agent.Specialist != nil {
+		result.Specialist = &api.SpecialistSummary{NextReviewAtMillis: uint64(max(agent.Specialist.NextReviewAt, 0)), NextReason: agent.Specialist.NextReason, Waiting: agent.Specialist.Waiting, QuietReviews: uint8(agent.Specialist.QuietReviews), OpenProposals: uint16(agent.Specialist.OpenProposals), OpenProposalLimit: uint16(agent.Specialist.OpenProposalLimit), LastReviewTaskID: agent.Specialist.LastReviewTaskID}
+	}
+	return result
 }
 
 func optionalAccountText(account kernel.AccountID) string {

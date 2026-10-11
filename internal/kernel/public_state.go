@@ -38,7 +38,7 @@ const taskReplacementOrder = `EXISTS (SELECT 1 FROM task_interventions WHERE sta
 
 // ponytail: mission_task_bindings has no task_id index, so the mission
 // subquery scans its primary key per row; index (task_id) if history pages slow.
-const publicTaskColumns = `id, project_id, assigned_agent_id, title, status, blocked_reason, priority, revision, updated_at_ms,
+const publicTaskColumns = `id, project_id, assigned_agent_id, incarnation_id, work_revision, title, status, blocked_reason, priority, revision, updated_at_ms,
  (SELECT a.issue_number FROM intake_task_bindings b JOIN intake_acceptances a ON a.id = b.acceptance_id WHERE b.task_id = tasks.id),
  (SELECT lower(hex(mission_id)) FROM mission_task_bindings WHERE task_id = tasks.id ORDER BY created_at_ms, mission_id LIMIT 1)`
 
@@ -205,7 +205,7 @@ func readPublicAccounts(ctx context.Context, connection *sql.Conn) ([]AccountSum
 // at all, so it cannot reach a projection by accident.
 
 func readPublicProjects(ctx context.Context, connection *sql.Conn) ([]ProjectSummary, error) {
-	rows, err := connection.QueryContext(ctx, `SELECT id, name, run_budget_limit, runs_used, max_run_seconds, revision, specialist_runs, specialist_open_proposals FROM projects ORDER BY id`)
+	rows, err := connection.QueryContext(ctx, `SELECT p.id, p.name, p.run_budget_limit, p.runs_used, p.max_run_seconds, p.revision, COALESCE(k.token_limit, 0), COALESCE(k.tokens_used, 0), p.specialist_runs, p.specialist_open_proposals FROM projects AS p LEFT JOIN project_tokens AS k ON k.project_id = p.id ORDER BY p.id`)
 	if err != nil {
 		return nil, fmt.Errorf("read public projects: %w", err)
 	}
@@ -214,8 +214,8 @@ func readPublicProjects(ctx context.Context, connection *sql.Conn) ([]ProjectSum
 	for rows.Next() {
 		var rawID []byte
 		var name string
-		var runBudget, runsUsed, maxRunSeconds, rawRevision, specialistRuns, openProposals int64
-		if err := rows.Scan(&rawID, &name, &runBudget, &runsUsed, &maxRunSeconds, &rawRevision, &specialistRuns, &openProposals); err != nil {
+		var runBudget, runsUsed, maxRunSeconds, rawRevision, tokenLimit, tokensUsed, specialistRuns, openProposals int64
+		if err := rows.Scan(&rawID, &name, &runBudget, &runsUsed, &maxRunSeconds, &rawRevision, &tokenLimit, &tokensUsed, &specialistRuns, &openProposals); err != nil {
 			return nil, fmt.Errorf("scan public project: %w", err)
 		}
 		id, idErr := ProjectIDFromBytes(rawID)
@@ -223,7 +223,7 @@ func readPublicProjects(ctx context.Context, connection *sql.Conn) ([]ProjectSum
 		if idErr != nil || revisionErr != nil || byteLen(name) < 1 || byteLen(name) > 128 || runBudget < 0 || runsUsed < 0 || maxRunSeconds < 0 || maxRunSeconds > maxProjectRunSeconds || runBudget != 0 && runsUsed > runBudget {
 			return nil, fmt.Errorf("%w: invalid public project", ErrCorruptState)
 		}
-		result = append(result, ProjectSummary{ID: id, Name: name, RunBudgetLimit: uint64(runBudget), RunsUsed: uint64(runsUsed), MaxRunSeconds: uint32(maxRunSeconds), SpecialistRuns: uint32(specialistRuns), SpecialistOpenProposals: uint32(openProposals), Revision: revision})
+		result = append(result, ProjectSummary{ID: id, Name: name, RunBudgetLimit: uint64(runBudget), RunsUsed: uint64(runsUsed), MaxRunSeconds: uint32(maxRunSeconds), Tokens: ProjectTokens{TokenLimit: uint64(tokenLimit), TokensUsed: uint64(tokensUsed)}, SpecialistRuns: uint32(specialistRuns), SpecialistOpenProposals: uint32(openProposals), Revision: revision})
 	}
 	return result, rows.Err()
 }
@@ -274,27 +274,29 @@ func readPublicTasks(ctx context.Context, connection *sql.Conn) ([]TaskSummary, 
 func scanPublicTasks(rows *sql.Rows) ([]TaskSummary, error) {
 	result := make([]TaskSummary, 0)
 	for rows.Next() {
-		var rawID, rawProjectID, rawAgentID []byte
+		var rawID, rawProjectID, rawAgentID, rawIncarnationID []byte
 		var title, rawStatus string
 		var rawBlockedReason sql.NullString
-		var priority, rawRevision, rawUpdatedAt int64
+		var workRevision, priority, rawRevision, rawUpdatedAt int64
 		var issue sql.NullInt64
 		var mission sql.NullString
-		if err := rows.Scan(&rawID, &rawProjectID, &rawAgentID, &title, &rawStatus, &rawBlockedReason, &priority, &rawRevision, &rawUpdatedAt, &issue, &mission); err != nil {
+		if err := rows.Scan(&rawID, &rawProjectID, &rawAgentID, &rawIncarnationID, &workRevision, &title, &rawStatus, &rawBlockedReason, &priority, &rawRevision, &rawUpdatedAt, &issue, &mission); err != nil {
 			return nil, fmt.Errorf("scan public task: %w", err)
 		}
 		id, idErr := TaskIDFromBytes(rawID)
 		projectID, projectErr := ProjectIDFromBytes(rawProjectID)
 		agentID, agentErr := optionalAgentID(rawAgentID)
+		incarnationID, incarnationErr := IncarnationIDFromBytes(rawIncarnationID)
+		workRev, workRevisionErr := NewRevision(workRevision)
 		status, statusErr := parseTaskStatus(rawStatus)
 		revision, revisionErr := NewRevision(rawRevision)
 		updatedAt, updatedAtErr := NewUnixMillis(rawUpdatedAt)
-		if idErr != nil || projectErr != nil || agentErr != nil || statusErr != nil || revisionErr != nil ||
+		if idErr != nil || projectErr != nil || agentErr != nil || incarnationErr != nil || workRevisionErr != nil || statusErr != nil || revisionErr != nil ||
 			updatedAtErr != nil || byteLen(title) < 1 || byteLen(title) > 1024 || priority < -1_000_000 || priority > 1_000_000 {
 			return nil, fmt.Errorf("%w: invalid public task", ErrCorruptState)
 		}
 		blockedReason, _ := overseerExcerpt(rawBlockedReason.String, PublicBlockedReasonExcerptBytes)
-		result = append(result, TaskSummary{ID: id, ProjectID: projectID, AssignedAgentID: agentID, Title: title, Status: status.String(), BlockedReason: blockedReason, Priority: priority, Revision: revision, UpdatedAt: updatedAt, IssueNumber: issue.Int64, MissionID: mission.String})
+		result = append(result, TaskSummary{ID: id, ProjectID: projectID, AssignedAgentID: agentID, IncarnationID: incarnationID, WorkRevision: workRev, Title: title, Status: status.String(), BlockedReason: blockedReason, Priority: priority, Revision: revision, UpdatedAt: updatedAt, IssueNumber: issue.Int64, MissionID: mission.String})
 	}
 	return result, rows.Err()
 }

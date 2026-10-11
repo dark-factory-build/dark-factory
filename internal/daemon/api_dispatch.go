@@ -573,7 +573,14 @@ func (daemon *Daemon) agentPaths(ctx context.Context, call api.Call) api.Reply {
 			paths = observedPaths
 		}
 	}
-	reply, err := api.NewAgentPathsReply(api.AgentPaths{AgentID: input.AgentID, RunID: run, SourcePath: sourcePath, RuntimePath: runtimePath, Paths: paths})
+	var telemetry *api.RunTelemetry
+	if runID != (kernel.RunID{}) {
+		value := daemon.runTelemetryView(runID)
+		if value != nil {
+			telemetry = &api.RunTelemetry{TokensIn: value.TokensIn, TokensOut: value.TokensOut, CostMicroUSD: value.CostMicroUSD, ToolCalls: value.ToolCalls, APIRequests: value.APIRequests, QuietSeconds: value.QuietSeconds}
+		}
+	}
+	reply, err := api.NewAgentPathsReply(api.AgentPaths{AgentID: input.AgentID, RunID: run, SourcePath: sourcePath, RuntimePath: runtimePath, Paths: paths, Telemetry: telemetry})
 	if err != nil {
 		return newErrorReply(api.RemoteInternal)
 	}
@@ -1164,11 +1171,11 @@ func (daemon *Daemon) oversight(ctx context.Context, project kernel.ProjectID) (
 }
 
 func (daemon *Daemon) snapshot(ctx context.Context) api.Reply {
-	snapshot, err := daemon.store.Snapshot(ctx)
+	snapshot, err := daemon.store.ReadPublicSnapshot(ctx)
 	if err != nil {
 		return newErrorReply(remoteErrorCode(err))
 	}
-	public := projectSnapshot(snapshot)
+	public := projectPublicSnapshot(snapshot, daemon.providerAccountDefaults)
 	reply, err := api.NewSnapshotReply(public)
 	if err != nil {
 		return newErrorReply(api.RemoteInternal)
