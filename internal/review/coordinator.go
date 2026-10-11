@@ -18,14 +18,15 @@ import (
 var HeadRE = regexp.MustCompile(`^[0-9a-f]{40}$`)
 
 type Request struct {
-	Repository string
-	PullNumber uint64
-	Head       string
-	Base       string
-	BaseRef    string
-	Body       string
-	Provider   string
-	Answer     string // its task's answer to the block it disputes, for a review once more
+	Repository    string
+	PullNumber    uint64
+	Head          string
+	Base          string
+	BaseRef       string
+	Body          string
+	Provider      string
+	Answer        string // its task's answer to the block it disputes, for a review once more
+	PriorFindings string // blocking findings from an earlier head, for an incremental re-review
 }
 
 type Operation struct {
@@ -35,6 +36,7 @@ type Operation struct {
 	Retryable     bool      `json:"retryable"`
 	RetryOf       string    `json:"retry_of,omitempty"`
 	Verdict       string    `json:"verdict,omitempty"`
+	DiffID        string    `json:"diff_id,omitempty"`
 	Detail        string    `json:"detail,omitempty"`
 	Submitted     bool      `json:"submitted,omitempty"`
 	Escalation    string    `json:"escalation,omitempty"`  // why factoryd cannot advance it: due to the overseer
@@ -51,8 +53,9 @@ type Operation struct {
 }
 
 type Verdict struct {
-	Event string
-	Body  string
+	Event  string
+	Body   string
+	DiffID string
 }
 
 // Receipt is the durable broker observation for a write operation. A receipt
@@ -227,9 +230,32 @@ func (c Coordinator) Resume(ctx context.Context, op Operation) (Operation, error
 		return c.failPreSubmit(ctx, op, errors.New("review: provider returned no valid verdict"))
 	}
 	op.Verdict, op.Detail, op.State, op.UpdatedAt = strings.ToLower(verdict.Event), verdict.Body, "submitting", c.Now()
+	op.DiffID = verdict.DiffID
 	if err := c.Store.Update(ctx, op); err != nil {
 		return Operation{}, err
 	}
+	if err := c.Backend.Submit(ctx, op, verdict); err != nil {
+		return c.reconcileSubmitting(ctx, op, err)
+	}
+	return c.finishSubmitted(ctx, op)
+}
+
+// CarryForward records a prior ALLOW for a new commit whose exact diff is
+// unchanged. The merge queue still receives a fresh exact-head review record;
+// the provider is not needlessly asked to rereview identical code.
+func (c Coordinator) CarryForward(ctx context.Context, request Request, prior Operation) (Operation, error) {
+	if prior.Verdict != "allow" || prior.DiffID == "" {
+		return Operation{}, errors.New("review: prior operation is not carryable")
+	}
+	op, err := Prepare(request, c.Now)
+	if err != nil {
+		return Operation{}, err
+	}
+	op.DiffID, op.Verdict, op.Detail, op.State = prior.DiffID, "allow", prior.Detail, "submitting"
+	if err := c.Store.Create(ctx, op); err != nil {
+		return Operation{}, err
+	}
+	verdict := Verdict{Event: "ALLOW", Body: prior.Detail, DiffID: prior.DiffID}
 	if err := c.Backend.Submit(ctx, op, verdict); err != nil {
 		return c.reconcileSubmitting(ctx, op, err)
 	}
