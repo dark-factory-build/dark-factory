@@ -272,7 +272,7 @@ func (daemon *Daemon) publishPull(ctx context.Context, c kernel.PublishableChang
 				break
 			}
 		}
-		listing, err := gitOutput(ctx, gitDir, "log", "--full-history", "--format=", "--name-only", "-z", "--no-merges", "--no-renames", workerHead+".."+c.Head)
+		listing, err := gitOutput(ctx, gitDir, "log", "--full-history", "--format=", "--name-only", "-z", "--no-merges", "--no-renames", workerHead+".."+c.Head, "--not", main)
 		if err != nil {
 			return err
 		}

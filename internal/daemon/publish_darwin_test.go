@@ -468,6 +468,7 @@ func TestCorrectionExcludesImportedMainCommits(t *testing.T) {
 	supervisorGit(t, git, "-C", registered, "-c", "user.name=fixture", "-c", "user.email=fixture@example.invalid", "add", "main-only.txt")
 	supervisorGit(t, git, "-C", registered, "-c", "user.name=fixture", "-c", "user.email=fixture@example.invalid", "commit", "-q", "-m", "main 2")
 	app.main = strings.TrimSpace(supervisorGitOutput(t, git, "-C", registered, "rev-parse", "HEAD"))
+	app.tip = app.main // the PR branch already contains newer main M2
 	supervisorGit(t, git, "-C", root, "fetch", "-q", "origin", "main")
 	supervisorGit(t, git, "-C", root, "merge", "-q", "--no-ff", m1, "-m", "integrate main")
 	if err := os.WriteFile(filepath.Join(root, "f00.txt"), []byte("correction\n"), 0o644); err != nil {
