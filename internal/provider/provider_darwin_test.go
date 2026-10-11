@@ -2049,13 +2049,13 @@ func TestClaudeSettingsConfineTheRunToItsGrants(t *testing.T) {
 		}
 	}
 	// A worker may delegate reading to its one sweep sub-agent: a cheaper
-	// model with no edit tool, under these same rules and sandbox.
+	// model with only the read tools, so no Bash or edit tool can write.
 	var agents map[string]struct {
 		Tools []string
 		Model string
 	}
 	if err := json.Unmarshal([]byte(claudeSweepAgent), &agents); err != nil || len(agents) != 1 || agents["sweep"].Model != "haiku" ||
-		slices.ContainsFunc(agents["sweep"].Tools, func(tool string) bool { return tool != "Read" && tool != "Grep" && tool != "Glob" && tool != "Bash" }) {
+		slices.ContainsFunc(agents["sweep"].Tools, func(tool string) bool { return tool != "Read" && tool != "Grep" && tool != "Glob" }) {
 		t.Fatalf("sweep agent = %+v, %v", agents, err)
 	}
 	for _, rule := range []string{"Edit(" + change + "/**)", "mcp__factory_browser", "Agent(sweep)"} {
