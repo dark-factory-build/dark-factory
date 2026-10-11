@@ -124,6 +124,9 @@ func (store *Store) transitionResource(ctx context.Context, runID RunID, resourc
 		}
 		return Resource{}, tx.Rollback(err)
 	}
+	if _, err := loadRunRelationships(ctx, tx.connection, run); err != nil {
+		return Resource{}, tx.Rollback(err)
+	}
 	if target == ResourceReleased && !resource.Identity.Empty() {
 		switch resource.Kind {
 		case ResourceProviderProcess, ResourceProviderGroup:

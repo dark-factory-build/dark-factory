@@ -337,6 +337,9 @@ func (store *Store) setFactory(ctx context.Context, expected Revision, at UnixMi
 	if err != nil {
 		return FactoryState{}, tx.Rollback(err)
 	}
+	if err := validateDurableControls(ctx, tx.connection); err != nil {
+		return FactoryState{}, tx.Rollback(err)
+	}
 	// Even a same-value operator command records new intent and invalidates
 	// earlier control authority. A matching value never proves who wrote it.
 	dispatch, capacity := desired(state)

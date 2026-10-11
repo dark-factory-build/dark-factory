@@ -423,6 +423,19 @@ func (store *Store) advanceChange(ctx context.Context, id ChangeID, expected Rev
 	if !found {
 		return Change{}, tx.Rollback(ErrNotFound)
 	}
+	var owner Run
+	owner, found, err = scanRun(tx.connection.QueryRowContext(ctx, `SELECT `+runColumns+` FROM runs WHERE change_id = ? AND phase <> 'terminal'`, change.ID.Bytes()))
+	if err != nil {
+		return Change{}, tx.Rollback(err)
+	}
+	if found {
+		if _, err := loadRunRelationships(ctx, tx.connection, owner); err != nil {
+			return Change{}, tx.Rollback(err)
+		}
+		if _, err := loadLifecycleFootprint(ctx, tx.connection, owner); err != nil {
+			return Change{}, tx.Rollback(err)
+		}
+	}
 	replayed, err := apply(change, tx.connection)
 	if err != nil {
 		return Change{}, tx.Rollback(err)
@@ -457,6 +470,12 @@ func requireChangeMutationOwner(ctx context.Context, connection *sql.Conn, chang
 	}
 	if !found {
 		return ErrConflict
+	}
+	if _, err := loadRunRelationships(ctx, connection, run); err != nil {
+		return err
+	}
+	if _, err := loadLifecycleFootprint(ctx, connection, run); err != nil {
+		return err
 	}
 	if _, err := classifyWorkerChangeOwnership(ctx, connection, run, change); err != nil {
 		return err
