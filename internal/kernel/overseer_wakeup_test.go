@@ -106,6 +106,31 @@ func TestOverseerEscalationWake(t *testing.T) {
 	}
 }
 
+// #1698: a pull request waiting on its code owner wakes the overseer once,
+// never re-wakes, and becomes one NEEDS YOU card naming it.
+func TestOverseerOwnerApprovalEscalationIsOneCard(t *testing.T) {
+	t.Parallel()
+	store, worker, _ := wakeFixture(t)
+	head := strings.Repeat("a", 40)
+	escalate(t, store, worker.ProjectID, "7", "open", head, head, 1000)
+	if _, err := store.writer.ExecContext(context.Background(), `UPDATE production_records SET document = json_set(document, '$.owner_approval', json('true')) WHERE kind = 'reviewer'`); err != nil {
+		t.Fatal(err)
+	}
+	at := 1000 + overseerWakeSettle.Milliseconds()
+	if bodies := wakeBodies(t, store, at); len(bodies) != 1 || !strings.Contains(bodies[0], "Escalated: stuck 7") {
+		t.Fatalf("wake = %q", bodies)
+	}
+	settleCarrier(t, store, at+1, 31, "ran")
+	for rewake := range int64(3) {
+		if bodies := wakeBodies(t, store, at+(rewake+1)*OverseerRewakeAfter.Milliseconds()+10); len(bodies) != 0 {
+			t.Fatalf("re-wake %d = %q", rewake+1, bodies)
+		}
+	}
+	if requests, err := store.OperatorHumanRequests(context.Background()); err != nil || len(requests) != 1 || !strings.Contains(requests[0].QuestionText, "Escalated: stuck 7 [reviewer:op7]") {
+		t.Fatalf("owner card = %+v, %v", requests, err)
+	}
+}
+
 // A Change factoryd could not publish has no pull request; its escalation
 // wakes the overseer exactly once, the unpublished Change it names is not
 // re-woken while that refusal stands, and it becomes one NEEDS YOU card.
@@ -320,7 +345,7 @@ func TestOverseerWakeSummarisesTasks(t *testing.T) {
 		t.Fatal(err)
 	}
 	bodies := wakeBodies(t, store, 80+overseerWakeSettle.Milliseconds())
-	want := "Supervise.\n\nFactory causal wake: mode=full; prior_task_id=; worker tasks queued=1 running=0; open PRs=1. mode=full requires fixed-head reconciliation.\n- " +
+	want := "Supervise.\n\nFactory causal wake: mode=full; prior_task_id=; worker tasks queued=1 running=0; open factory PRs conflicting=0 failing=0 approved-not-queued=0. mode=full requires fixed-head reconciliation.\n- " +
 		finalizing.TaskID.String() + ` "verify" blocked rev=1 change=` + change.ID.String()[:12] + `@` + strings.Repeat("d2", 20) + ` PR #7 open/unknown: needs a decision`
 	if len(bodies) != 1 || bodies[0] != want {
 		t.Fatalf("wake = %q\nwant %q", bodies, want)
@@ -551,7 +576,7 @@ func TestOverseerRewakesCountPerItemAndStartedOnly(t *testing.T) {
 		t.Fatalf("resumed carrier = %+v, %v", resumed, err)
 	}
 	var resolution string
-	if err := store.writer.QueryRowContext(ctx, `SELECT resolution_detail FROM continuations WHERE condition_id = ?`, card.ID.Bytes()).Scan(&resolution); err != nil ||
+	if err := store.writer.QueryRowContext(ctx, `SELECT continuation_reply FROM human_requests WHERE id = ?`, card.ID.Bytes()).Scan(&resolution); err != nil ||
 		!strings.HasPrefix(resolution, "Operator reply to: "+card.QuestionText) || !strings.HasSuffix(resolution, "\nclose #7") {
 		t.Fatalf("resumed context = %q, %v", resolution, err)
 	}
@@ -639,15 +664,7 @@ func TestCancelledStalledCardStaysCancelled(t *testing.T) {
 	if err != nil {
 		t.Fatal(tx.Rollback(err))
 	}
-	run, _, err := runByID(ctx, tx.connection, request.RunID)
-	if err != nil {
-		t.Fatal(tx.Rollback(err))
-	}
-	continuation, _, err := humanRequestContinuation(ctx, tx.connection, request, run)
-	if err != nil {
-		t.Fatal(tx.Rollback(err))
-	}
-	if err := cancelHumanContinuationOnConnection(ctx, tx, request, continuation, mustTime(t, at+1)); err != nil {
+	if err := cancelHumanContinuationOnConnection(ctx, tx, request, mustTime(t, at+1)); err != nil {
 		t.Fatal(tx.Rollback(err))
 	}
 	if err := tx.Commit(ctx); err != nil {

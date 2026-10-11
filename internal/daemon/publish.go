@@ -29,7 +29,7 @@ type publishCheckout func(ctx context.Context, ref, head string) (string, func()
 
 // errPublishLater is a failure of the connection or the checkout, not of the
 // Change: the next pass retries it.
-var errPublishLater = errors.New("publication waits for the next pass")
+var errPublishLater, errRepositoryDisabled = errors.New("publication waits for the next pass"), errors.New("repository disabled for new work")
 
 // publishSettledChanges publishes each succeeded intake worker's settled
 // Change as one pull request through the project's Maintainer connection,
@@ -74,7 +74,7 @@ func (daemon *Daemon) publishSettledChange(ctx context.Context, c kernel.Publish
 	// Accepted work keeps its destination, but a disabled repository is
 	// neither cloned nor reviewed: the overseer or operator decides.
 	if repository, found, err := daemon.store.ProjectRepository(ctx, repositoryID); err != nil || !found || !repository.Enabled {
-		return daemon.publishFailed(ctx, c, repo, errors.Join(err, errors.New("repository disabled for new work")))
+		return daemon.publishFailed(ctx, c, repo, errors.Join(err, errRepositoryDisabled))
 	}
 	backend := &daemonReviewBackend{daemon: daemon, project: c.Task.ProjectID, repository: repo, repositoryID: id}
 	checkout := func(ctx context.Context, ref, head string) (string, func(), error) {
@@ -144,16 +144,11 @@ func (daemon *Daemon) publishFailed(ctx context.Context, c kernel.PublishableCha
 	return durableReviewStore{store: daemon.store, project: c.Task.ProjectID, repository: repo, now: daemon.now}.Create(ctx, failed)
 }
 
-// publicationFailureRetryable distinguishes a Maintainer refusal from a
-// change-caused validation failure. The former can be a branch or worker
-// precondition that changes outside factoryd; invalid_input is the App's
-// deterministic rejection of this Change and must remain terminal.
+// publicationFailureRetryable: a Maintainer rejection that can pass outside
+// factoryd, unlike a permanent one or a change-caused local failure.
 func publicationFailureRetryable(err error) bool {
-	text := err.Error()
-	return strings.Contains(text, "review: Maintainer rejected operation: refused:") ||
-		strings.Contains(text, "review: Maintainer rejected operation: conflict:") ||
-		strings.Contains(text, "review: Maintainer rejected operation: unavailable:") ||
-		strings.Contains(text, "repository disabled for new work")
+	var rejection maintainerRejection
+	return errors.As(err, &rejection) && !errors.Is(err, review.ErrPermanent) || errors.Is(err, errRepositoryDisabled)
 }
 
 // publishPull is the overseer runbook's publication, made deterministic:

@@ -61,7 +61,9 @@ Access policy, or App configuration is live.
   verdict contract. Each write's operation UUID is accepted
   in either case and canonicalized to lowercase, so one UUID is one replay
   identity however the caller's `uuidgen` spelled it. Merge queue enqueue is
-  the only merge path; it never falls back to a direct merge.
+  the merge path; a base with no merge queue gets one exact-head squash merge
+  once every check run at that head has passed; commit statuses are not read,
+  because the App holds no `statuses` permission.
   Publication refuses `.github` itself, the three
   CODEOWNERS locations and the dependabot config, and every
   write is bound to a stated head commit and to a durable operation ID.

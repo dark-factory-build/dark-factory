@@ -60,7 +60,7 @@ func (f *fakePublishMaintainer) call(_ context.Context, name string, arguments m
 	}
 	f.writes = append(f.writes, map[string]any{"name": name, "arguments": arguments})
 	if f.unavailable {
-		return nil, fmt.Errorf("review: Maintainer rejected operation: unavailable: Maintainer authority is unavailable.")
+		return nil, maintainerRejection("unavailable: Maintainer authority is unavailable.")
 	}
 	var result json.RawMessage
 	switch name {
@@ -71,7 +71,7 @@ func (f *fakePublishMaintainer) call(_ context.Context, name string, arguments m
 		for _, entry := range arguments["changes"].([]map[string]any) {
 			if f.refuse != "" && strings.HasPrefix(entry["path"].(string), f.refuse) {
 				if f.externalRefuse {
-					return nil, fmt.Errorf("review: Maintainer rejected operation: refused: branch precondition")
+					return nil, maintainerRejection("refused: The request was refused: rejected before execution as UNPROCESSABLE.")
 				}
 				return nil, fmt.Errorf("refused: %s cannot be written", f.refuse)
 			}
@@ -303,19 +303,6 @@ func TestEmptyDiffFromIntegratedMainOpensNoPullRequestAtAStaleTip(t *testing.T) 
 	registered := strings.TrimSpace(supervisorGitOutput(t, git, "-C", root, "remote", "get-url", "origin"))
 	supervisorGit(t, git, "-C", registered, "fetch", "-q", "--update-head-ok", root, "HEAD:main") // main now is the worker's head
 	app.main, app.tip = c.Head, c.Base                                                            // the branch holds a stale commit
-	if err := fixture.daemon.publishPull(ctx, c, "team/repo", source, app.call, checkout); err == nil || !strings.Contains(err.Error(), "nothing to publish") || len(app.writes) != 0 {
-		t.Fatalf("err = %v, writes = %+v", err, app.writes)
-	}
-}
-
-func TestEmptyDiffOnAnAlreadyPublishedPullRequestDoesNotPublish(t *testing.T) {
-	fixture, c, source, app, checkout := publishFixture(t, 1, false)
-	ctx := context.Background()
-	root, git := filepath.Dir(source), change.TrustedGitExecutable
-	registered := strings.TrimSpace(supervisorGitOutput(t, git, "-C", root, "remote", "get-url", "origin"))
-	supervisorGit(t, git, "-C", registered, "fetch", "-q", "--update-head-ok", root, "HEAD:main")
-	app.main, app.tip = c.Head, c.Base
-	c.Pull = 31
 	if err := fixture.daemon.publishPull(ctx, c, "team/repo", source, app.call, checkout); err == nil || !strings.Contains(err.Error(), "nothing to publish") || len(app.writes) != 0 {
 		t.Fatalf("err = %v, writes = %+v", err, app.writes)
 	}

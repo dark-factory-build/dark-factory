@@ -218,11 +218,12 @@ observed at; a note about any other head is refused with the current one, so a
 worker never runs on a stale premise. A task with no Change head omits it.
 
 When factoryd cannot publish a finished Change, it records the failure and
-escalates it to the project's overseer once. A Maintainer refusal, conflict or
-unavailability, or a repository disabled for new work, is retried for the same
-Change revision about hourly, so a cause fixed outside factoryd heals itself.
-Any other rejection, such as invalid input caused by the Change, is final for
-that Change revision: send the task back so a corrected revision can publish.
+escalates it to the project's overseer once. A Maintainer rejection, or a
+repository disabled for new work, is retried for the same Change revision
+about hourly, so a cause fixed outside factoryd heals itself. Invalid input, a
+commit tree GitHub cannot return whole, or a local failure caused by the
+Change is final for that Change revision: send the task back so a corrected
+revision can publish.
 
 ## Try a task without a model
 
@@ -353,7 +354,9 @@ nothing about the factory's fetch. A `gh auth git-credential` helper fails here:
 GitHub deploy key for that repository with an SSH origin and an absolute,
 passphrase-free key:
 `git -C CHECKOUT config core.sshCommand "/usr/bin/ssh -i /ABSOLUTE/KEY -o IdentitiesOnly=yes -o UserKnownHostsFile=/ABSOLUTE/known_hosts"`.
-Then rerun the fetch check.
+Then rerun the fetch check. Work and reviews refuse a checkout whose remotes
+changed since they were pinned; a passing fetch check of the same checkout is
+the only way to re-pin its changed origin.
 
 Use `factoryctl project repository github --id REPOSITORY_ID` to bind its
 configured publication repository to the live GitHub connection. Fetch readiness

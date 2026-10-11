@@ -406,6 +406,11 @@ func TestOwnerApprovalRefusalEscalatesOnce(t *testing.T) {
 		t.Fatalf("owner approval refusal = %+v err=%v enqueues=%d", op, err, backend.enqueues)
 	}
 	backend.enqueueErr = nil
+	// #1698: the same observation waits for the owner, still escalated, without another enqueue.
+	if waiting, err := c.Advance(context.Background(), op); err != nil || backend.enqueues != 0 || !waiting.OwnerApproval || waiting.Escalation != op.Escalation {
+		t.Fatalf("owner approval retried before approval: %+v err=%v enqueues=%d", waiting, err, backend.enqueues)
+	}
+	backend.pull.Review, backend.pull.MergeStateStatus = "APPROVED", "CLEAN"
 	if next, err := c.Advance(context.Background(), op); err != nil || backend.enqueues != 1 || next.Refused || next.OwnerApproval || next.Enqueues != 1 {
 		t.Fatalf("owner approval did not recover: %+v err=%v enqueues=%d", next, err, backend.enqueues)
 	}
@@ -454,5 +459,23 @@ func TestPersistentObservationFailureEscalatesOnce(t *testing.T) {
 	backend.observeErr, backend.pull = nil, &Pull{Head: op.Request.Head, State: "open", Pending: true}
 	if waited, err := c.Advance(context.Background(), op); err != nil || waited.Failures != 0 || waited.Escalation != "" || len(store.values) != FailuresBeforeEscalation+2 {
 		t.Fatalf("waiting pass: operation=%+v err=%v writes=%d", waited, err, len(store.values))
+	}
+}
+
+// A failure the same request meets again (ErrPermanent) fails the head at
+// once, not retryable, so it is escalated once and never enqueued again.
+func TestPermanentEnqueueFailureIsTerminalForTheHead(t *testing.T) {
+	store := &memoryStore{}
+	backend := &fakeBackend{enqueueErr: fmt.Errorf("invalid_input: %w", ErrPermanent)}
+	c := Coordinator{Store: store, Backend: backend, Now: func() time.Time { return time.Unix(20, 0) }}
+	op, err := c.Advance(context.Background(), Operation{ID: "op", Request: reviewRequest(), State: "enqueued", Verdict: "allow", Submitted: true})
+	if !errors.Is(err, ErrPermanent) || op.State != "failed" || op.Retryable || !strings.Contains(op.Detail, "invalid_input") || store.values[len(store.values)-1].State != "failed" {
+		t.Fatalf("operation=%+v err=%v", op, err)
+	}
+	if _, err := c.Advance(context.Background(), op); err == nil {
+		t.Fatal("a failed head was advanced again")
+	}
+	if _, err := c.ReserveRetry(context.Background(), op); err == nil {
+		t.Fatal("a permanently refused head was retried")
 	}
 }

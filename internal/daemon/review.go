@@ -303,6 +303,19 @@ func (daemon *Daemon) tryAutoRebase(ctx context.Context, project kernel.ProjectI
 	return err == nil, err
 }
 
+func (daemon *Daemon) repairPublishedConflict(ctx context.Context, project kernel.ProjectID, repository string, op review.Operation) error {
+	rebased, err := daemon.tryAutoRebase(ctx, project, repository, op)
+	if err != nil {
+		return err
+	}
+	if rebased {
+		daemon.publishSettledChanges(ctx)
+		op.State, op.RoutePending, op.UpdatedAt = "superseded", false, daemon.now()
+		return (durableReviewStore{store: daemon.store, project: project, repository: repository, now: daemon.now}).Update(ctx, op)
+	}
+	return daemon.finishReviewRouting(ctx, project, repository, op)
+}
+
 func (daemon *Daemon) reviewCoordinator(ctx context.Context, project kernel.ProjectID, repository string) (review.Coordinator, error) {
 	targets, _, unbound, err := daemon.projectMaintainerRepositories(ctx, project)
 	if err != nil {
@@ -769,21 +782,81 @@ func (b *daemonReviewBackend) Observe(ctx context.Context, operationID string) (
 }
 
 func (b *daemonReviewBackend) Enqueue(ctx context.Context, operation review.Operation) error {
-	return enqueueRefused(b.call(ctx, "enqueue_pull_request", map[string]any{"repository": b.repository, "pull_number": operation.Request.PullNumber, "head_sha": operation.Request.Head, "base": operation.Request.BaseRef, "reviewed_body_digest": reviewedBodyDigest(operation)}))
-}
-
-// enqueueRefused reports the broker's typed refusal "refused: ...
-// UNPROCESSABLE" as review.ErrRefused. One also RATE_LIMITED may pass later.
-func enqueueRefused(err error) error {
-	if why := fmt.Sprint(err); strings.Contains(why, "rejected operation: refused:") && !strings.Contains(why, "RATE_LIMITED") {
-		if strings.Contains(strings.ToLower(why), "required codeowners approval") || strings.Contains(why, "CODEOWNERS_APPROVAL") {
-			return fmt.Errorf("%w (%v)", review.ErrOwnerApproval, err)
-		}
-		if strings.Contains(why, "UNPROCESSABLE") {
-			return fmt.Errorf("%w (%v)", review.ErrRefused, err)
-		}
+	err := b.call(ctx, "enqueue_pull_request", map[string]any{"repository": b.repository, "pull_number": operation.Request.PullNumber, "head_sha": operation.Request.Head, "base": operation.Request.BaseRef, "reviewed_body_digest": reviewedBodyDigest(operation)})
+	if errors.Is(err, review.ErrOwnerApproval) {
+		err = fmt.Errorf("%w; owned paths: %s", err, b.ownedPaths(ctx, operation.Request))
 	}
 	return err
+}
+
+// ownedPaths names, best effort, the changed paths the base's
+// .github/CODEOWNERS gives an owner, for the card that asks that owner.
+func (b *daemonReviewBackend) ownedPaths(ctx context.Context, request review.Request) string {
+	checkout, cleanup, err := b.CloneReadOnly(ctx, request)
+	if err != nil {
+		return "unread (" + err.Error() + ")"
+	}
+	defer cleanup()
+	git := func(args ...string) string {
+		command := exec.CommandContext(ctx, change.TrustedGitExecutable, append([]string{"-C", checkout}, args...)...)
+		command.Env = reviewEnvironment(filepath.Dir(checkout))
+		out, _ := command.Output()
+		return string(out)
+	}
+	return strings.Join(codeOwned(git("show", request.Base+":.github/CODEOWNERS"), strings.Split(git("diff", "--name-only", "-z", request.Base+"...HEAD"), "\x00")), ", ")
+}
+
+// codeOwned returns the paths a CODEOWNERS file gives an owner: as on GitHub
+// the last matching line wins, and a line naming no owner gives none. A
+// pattern with an inner or leading '/' is anchored at the root, one ending in
+// '/' matches only below a directory, and a match covers everything below it.
+func codeOwned(codeowners string, paths []string) (owned []string) {
+	for _, file := range paths {
+		hit, parts := false, strings.Split(file, "/")
+		for _, line := range strings.Split(codeowners, "\n") {
+			fields := strings.Fields(line)
+			if file == "" || len(fields) == 0 || strings.HasPrefix(fields[0], "#") {
+				continue
+			}
+			pattern, below := strings.Trim(fields[0], "/"), parts
+			anchored := strings.Contains(strings.TrimSuffix(fields[0], "/"), "/")
+			if strings.HasSuffix(fields[0], "/") {
+				below = parts[:len(parts)-1]
+			}
+			for i := range below {
+				candidate := parts[i]
+				if anchored {
+					candidate = strings.Join(parts[:i+1], "/")
+				}
+				if match, _ := filepath.Match(pattern, candidate); match {
+					hit = len(fields) > 1
+					break
+				}
+			}
+		}
+		if hit {
+			owned = append(owned, file)
+		}
+	}
+	return owned
+}
+
+// maintainerRejection is the broker's "code: reason" (mcp.rs tool_error).
+type maintainerRejection string
+
+func (r maintainerRejection) Error() string {
+	return "review: Maintainer rejected operation: " + string(r)
+}
+
+// Is classifies the rejection once for every caller. Only invalid input or a
+// tree GitHub cannot return whole is permanent; a refusal (not RATE_LIMITED)
+// for a CODEOWNERS approval (GitHub's "Waiting on code owner review") or as
+// UNPROCESSABLE can come to hold (#1531).
+func (r maintainerRejection) Is(target error) bool {
+	why, refused := string(r), strings.HasPrefix(string(r), "refused:") && !strings.Contains(string(r), "RATE_LIMITED")
+	return target == review.ErrPermanent && (strings.HasPrefix(why, "invalid_input:") || strings.Contains(why, "too large for GitHub to return whole")) ||
+		target == review.ErrOwnerApproval && refused && (strings.Contains(strings.ToLower(why), "required codeowners approval") || strings.Contains(strings.ToLower(why), "waiting on code owner review") || strings.Contains(why, "CODEOWNERS_APPROVAL")) ||
+		target == review.ErrRefused && refused && strings.Contains(why, "UNPROCESSABLE")
 }
 
 func reviewedBodyDigest(operation review.Operation) string {
@@ -932,9 +1005,9 @@ func reviewResponseStructuredContent(request maintainerRequest, response json.Ra
 		// The broker's reason is what an operator needs to act on.
 		reason := ""
 		if len(value.Result.Content) > 0 {
-			reason = ": " + strings.ToValidUTF8(value.Result.Content[0].Text[:min(len(value.Result.Content[0].Text), 300)], "")
+			reason = strings.ToValidUTF8(value.Result.Content[0].Text[:min(len(value.Result.Content[0].Text), 300)], "")
 		}
-		return nil, errors.New("review: Maintainer rejected operation" + reason)
+		return nil, maintainerRejection(reason)
 	}
 	return value.Result.StructuredContent, nil
 }
