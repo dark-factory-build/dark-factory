@@ -161,6 +161,32 @@ func TestRecordChangeRebasedUpdatesRetainedHeadWithoutOpeningWork(t *testing.T) 
 	}
 }
 
+func TestRecordChangeRebasedUpdatesAvailableAndRejectsReserved(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	store, change := ownedReservedChange(t)
+	defer store.Close()
+	selection := testChangeSelection(t)
+	prepared, err := store.RecordChangePrepared(ctx, change.ID, change.Revision, selection, mustTime(t, 10))
+	if err != nil {
+		t.Fatal(err)
+	}
+	available, err := store.MarkChangeAvailable(ctx, change.ID, prepared.Revision, selection.Commit(), mustTime(t, 11))
+	if err != nil {
+		t.Fatal(err)
+	}
+	newHead, _ := NewCommitID(selection.commit.format, bytes.Repeat([]byte{0x7b}, selection.commit.format.oidLength()))
+	updated, err := store.RecordChangeRebased(ctx, available.ID, available.Revision, *available.HeadCommit, newHead, mustTime(t, 12))
+	if err != nil || updated.Phase != ChangeAvailable || !updated.HeadCommit.equal(newHead) {
+		t.Fatalf("available rebased Change = %+v, err=%v", updated, err)
+	}
+	reservedStore, reserved := ownedReservedChange(t)
+	defer reservedStore.Close()
+	if _, err := reservedStore.RecordChangeRebased(ctx, reserved.ID, reserved.Revision, selection.commit, newHead, mustTime(t, 13)); !errors.Is(err, ErrRevisionConflict) {
+		t.Fatalf("reserved rebase = %v", err)
+	}
+}
+
 func TestChangeSchemaIsPathFreeCanonicalAndCircularlyBound(t *testing.T) {
 	t.Parallel()
 	store, _ := newTestStore(t)
