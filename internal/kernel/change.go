@@ -387,13 +387,13 @@ func (store *Store) RecordChangeRebased(ctx context.Context, id ChangeID, expect
 		}
 		return Change{}, tx.Rollback(err)
 	}
-	if current.Revision != expected || current.Phase != ChangeRetained && current.Phase != ChangeAvailable || current.HeadCommit == nil || !current.HeadCommit.equal(oldHead) {
+	if current.Revision != expected || current.Phase != ChangeRetained || current.HeadCommit == nil || !current.HeadCommit.equal(oldHead) {
 		return Change{}, tx.Rollback(ErrRevisionConflict)
 	}
 	if at.Int64() < current.UpdatedAt.Int64() {
 		return Change{}, tx.Rollback(ErrRevisionConflict)
 	}
-	result, err := tx.connection.ExecContext(ctx, `UPDATE changes SET head_commit = ?, updated_at_ms = ? WHERE id = ? AND revision = ? AND phase IN ('retained', 'available') AND head_commit = ?`, newHead.Bytes(), at.Int64(), id.Bytes(), expected.Int64(), oldHead.Bytes())
+	result, err := tx.connection.ExecContext(ctx, `UPDATE changes SET head_commit = ?, updated_at_ms = ? WHERE id = ? AND revision = ? AND phase = 'retained' AND head_commit = ?`, newHead.Bytes(), at.Int64(), id.Bytes(), expected.Int64(), oldHead.Bytes())
 	if err := requireOneRow(result, err); err != nil {
 		return Change{}, tx.Rollback(err)
 	}
