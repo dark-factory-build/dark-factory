@@ -461,3 +461,17 @@ func TestPersistentObservationFailureEscalatesOnce(t *testing.T) {
 		t.Fatalf("waiting pass: operation=%+v err=%v writes=%d", waited, err, len(store.values))
 	}
 }
+
+// A permanent enqueue failure is terminal for the exact head, not retryable.
+func TestPermanentEnqueueFailureIsTerminalForTheHead(t *testing.T) {
+	store := &memoryStore{}
+	backend := &fakeBackend{enqueueErr: fmt.Errorf("invalid_input: %w", ErrPermanent)}
+	c := Coordinator{Store: store, Backend: backend, Now: func() time.Time { return time.Unix(20, 0) }}
+	op, err := c.Advance(context.Background(), Operation{ID: "op", Request: reviewRequest(), State: "enqueued", Verdict: "allow", Submitted: true})
+	if !errors.Is(err, ErrPermanent) || op.State != "failed" || op.Retryable || !strings.Contains(op.Detail, "invalid_input") || store.values[len(store.values)-1].State != "failed" {
+		t.Fatalf("operation=%+v err=%v", op, err)
+	}
+	if _, err := c.Advance(context.Background(), op); err == nil {
+		t.Fatal("a failed head was advanced again")
+	}
+}

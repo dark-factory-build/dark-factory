@@ -139,10 +139,11 @@ func (g *GroupRun) note(head string) string {
 }
 
 // ErrRefused marks an enqueue GitHub refused as UNPROCESSABLE. The operation
-// stays attached to the exact head and retries the existing enqueue operation.
 var ErrRefused = errors.New("the merge queue refuses this exact head; factoryd will wait for its checks or review state to change")
 
 var ErrOwnerApproval = errors.New("the merge queue requires CODEOWNERS owner approval")
+
+var ErrPermanent = errors.New("the same request fails the same way, so factoryd will not repeat it; a new head is reviewed afresh")
 
 const RefusedRetryLimit = 3
 
@@ -395,11 +396,10 @@ func pullObservation(p Pull) string {
 	return hex.EncodeToString(hash[:])
 }
 
-// failedPass records a pass that could not observe the pull request or
-// enqueue its head. A transient failure, or a merge landing between the read
-// and the write, settles on a later pass; one that persists for
-// FailuresBeforeEscalation consecutive passes is escalated once.
 func (c Coordinator) failedPass(ctx context.Context, op Operation, cause error) (Operation, error) {
+	if errors.Is(cause, ErrPermanent) {
+		return c.fail(ctx, op, cause, false)
+	}
 	if op.Failures++; op.Failures == FailuresBeforeEscalation {
 		op.Escalate(fmt.Sprintf("its merge stage failed %d passes in a row: %v", op.Failures, cause))
 	}
