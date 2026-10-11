@@ -732,6 +732,21 @@ func TestPublishableIntakeChangeIsFactorydsUntilPublishedOrFailed(t *testing.T) 
 	if found := candidates(); len(found) != 1 || found[0].Pull != 6 || !found[0].Repair {
 		t.Fatalf("existing pull provenance was not retained after its title changed: %+v", found)
 	}
+	if err := store.RecordCorrectionPublished(ctx, candidates()[0], mustTime(t, 67)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.writer.ExecContext(ctx, `UPDATE changes SET updated_at_ms = 68 WHERE id = ?`, change.ID.Bytes()); err != nil {
+		t.Fatal(err)
+	}
+	if found := candidates(); len(found) != 1 || found[0].Pull != 6 || !found[0].Repair {
+		t.Fatalf("second repair settlement lost provenance: %+v", found)
+	}
+	if err := store.RecordCorrectionPublished(ctx, candidates()[0], mustTime(t, 69)); err != nil {
+		t.Fatal(err)
+	}
+	if found := candidates(); len(found) != 0 {
+		t.Fatalf("second repair correction remained publishable: %+v", found)
+	}
 	if _, err := store.writer.ExecContext(ctx, `DELETE FROM publication_tasks WHERE pull_number = 6`); err != nil {
 		t.Fatal(err)
 	}
@@ -753,12 +768,6 @@ func TestPublishableIntakeChangeIsFactorydsUntilPublishedOrFailed(t *testing.T) 
 	if found := candidates(); len(found) != 1 || found[0].Pull != 5 {
 		t.Fatalf("first-publication rebase correction candidates = %+v", found)
 	}
-	var updated, created int64
-	var document string
-	if err := store.writer.QueryRowContext(ctx, `SELECT c.updated_at_ms, p.created_at_ms, r.document FROM changes c JOIN publication_tasks p ON p.change_id = c.id JOIN production_records r ON r.identity = '5' WHERE c.id = ?`, change.ID.Bytes()).Scan(&updated, &created, &document); err != nil {
-		t.Fatal(err)
-	}
-	t.Logf("publication provenance updated=%d created=%d document=%s", updated, created, document)
 	if _, err := store.writer.ExecContext(ctx, `UPDATE changes SET updated_at_ms = 70 WHERE id = ?`, change.ID.Bytes()); err != nil {
 		t.Fatal(err)
 	}

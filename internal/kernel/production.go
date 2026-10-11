@@ -616,7 +616,7 @@ func (store *Store) RecordCorrectionPublished(ctx context.Context, c Publishable
 		return err
 	}
 	defer tx.Close()
-	if _, err := tx.connection.ExecContext(ctx, `UPDATE publication_tasks SET change_id = ?, created_at_ms = ? WHERE pull_number = ? AND task_id = ? AND (change_id = ? OR change_id IS NULL)`, c.Change.Bytes(), at.Int64(), c.Pull, c.Task.ID.Bytes(), c.Change.Bytes()); err != nil {
+	if _, err := tx.connection.ExecContext(ctx, `UPDATE publication_tasks SET change_id = CASE WHEN ? THEN NULL ELSE ? END, created_at_ms = ? WHERE pull_number = ? AND task_id = ? AND (change_id = ? OR change_id IS NULL)`, c.Repair, c.Change.Bytes(), at.Int64(), c.Pull, c.Task.ID.Bytes(), c.Change.Bytes()); err != nil {
 		return tx.Rollback(err)
 	}
 	return tx.Commit(ctx)
