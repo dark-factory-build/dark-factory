@@ -6,12 +6,15 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"syscall"
 	"time"
 
 	"github.com/dark-factory-build/dark-factory/internal/kernel"
 )
+
+var providerTerminalCSI = regexp.MustCompile(`\x1b\[[0-?]*[ -/]*[@-~]`)
 
 // ReviewResult is the provider-owned outcome of one read-only review launch.
 // The daemon remains responsible for interpreting the provider's verdict.
@@ -64,7 +67,7 @@ func RunReview(ctx context.Context, kind kernel.Provider, toolPath string, accou
 			argv = []string{"-p", prompt, "--permission-mode", "plan", "--safe-mode", "--restricted", "--setting-sources", "", "--strict-mcp-config", "--tools", "Read,Grep,Glob", "--allowedTools", "Read,Grep,Glob"}
 		} else {
 			argv = []string{"exec", "--disable", "computer_use", "--disable", "browser_use", "--disable", "plugins", "--ephemeral", "--ignore-user-config", "--strict-config", "-c", "approval_policy={ granular={sandbox_approval=false,rules=false,mcp_elicitations=false,request_permissions=false,skill_approval=false}}", "--ignore-rules", "--skip-git-repo-check"}
-			argv = append(argv, CodexReadOnly(append([]string{checkout}, readable...)...)...)
+			argv = append(argv, CodexReadOnly(readable...)...)
 			argv = append(argv, prompt)
 		}
 		command := exec.CommandContext(ctx, tool, argv...)
@@ -79,7 +82,7 @@ func RunReview(ctx context.Context, kind kernel.Provider, toolPath string, accou
 		if ctx.Err() != nil {
 			return result, ctx.Err()
 		}
-		if err != nil && kind == kernel.ProviderCodex && strings.Contains(result.Stdout+result.Stderr, "You've hit your usage limit") {
+		if err != nil && kind == kernel.ProviderCodex && ReviewUsageLimited(result.Stdout+result.Stderr) {
 			result.Limited = true
 			continue
 		}
@@ -89,4 +92,12 @@ func RunReview(ctx context.Context, kind kernel.Provider, toolPath string, accou
 		return result, nil
 	}
 	return ReviewResult{Limited: true}, errors.New("provider_limited")
+}
+
+// ReviewUsageLimited mirrors the worker's marker-aware Codex detector. The
+// glyph is part of the provider error cell: quoted task or tool text without
+// it is ordinary reviewer output, not account exhaustion.
+func ReviewUsageLimited(output string) bool {
+	text := providerTerminalCSI.ReplaceAllString(output, "")
+	return strings.Contains(text, "■ You've hit your usage limit") || strings.Contains(text, "⚠ Selected model is at capacity")
 }
