@@ -49,6 +49,7 @@ if [ "$local_ci_mode" = affected ]; then
 fi
 if [ "$local_ci_mode" = full ] && in_source_shard; then
     echo "local-ci: release fixture"; ./scripts/test-release.sh
+    echo "local-ci: hotspots fixture"; ./scripts/test-hotspots.sh
 fi
 if [ "$local_ci_mode" = full ]; then
     if in_source_shard; then

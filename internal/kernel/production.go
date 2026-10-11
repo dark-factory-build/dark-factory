@@ -178,18 +178,15 @@ func productionRecordOnConnection(ctx context.Context, c *sql.Conn, project Proj
 	return err
 }
 
-type ProductionReviewOperation struct {
-	ID       string
-	Document any
-}
-
-// PendingReviewOperation is one unfinished daemon-owned review operation.
-type PendingReviewOperation struct {
+// OpenPull is an open pull request factoryd advances: a task published it or
+// factoryd reviewed it. Operations are the review operations at its recorded
+// head, in no order.
+type OpenPull struct {
 	Project    ProjectID
 	Repository string
-	ID         string
-	Document   []byte
-	Ended      bool // its pull request is recorded merged, closed or at a new head
+	Pull       ProductionPullRequest
+	Task       TaskID // zero when no task published it
+	Operations []json.RawMessage
 }
 
 // PublishingProjects lists the projects that have published a pull request.
@@ -240,39 +237,6 @@ func (store *Store) RecordProductionObservation(ctx context.Context, project Pro
 	defer tx.Close()
 	if err := store.recordProductionObservation(ctx, tx.connection, project, observation, at); err != nil {
 		return tx.Rollback(err)
-	}
-	return tx.Commit(ctx)
-}
-
-// RecordProductionObservationWithReviewOperations atomically stores a changed
-// published head and its prepared review claims. A refresh can therefore not
-// make a corrected head durable and then lose the review in the launch window.
-func (store *Store) RecordProductionObservationWithReviewOperations(ctx context.Context, project ProjectID, observation ProductionObservation, claims []ProductionReviewOperation, at UnixMillis) error {
-	if !validProductionObservation(project, observation, at) {
-		return ErrInvalidValue
-	}
-	for _, claim := range claims {
-		if !validOutcomeText(claim.ID, 128) {
-			return ErrInvalidValue
-		}
-		body, err := json.Marshal(claim.Document)
-		if err != nil || len(body) < 2 || len(body) > 32768 {
-			return ErrInvalidValue
-		}
-	}
-	tx, err := store.beginValidatedWrite(ctx)
-	if err != nil {
-		return err
-	}
-	defer tx.Close()
-	if err := store.recordProductionObservation(ctx, tx.connection, project, observation, at); err != nil {
-		return tx.Rollback(err)
-	}
-	repo := strings.ToLower(observation.Repository)
-	for _, claim := range claims {
-		if err := productionRecordOnConnection(ctx, tx.connection, project, repo, "reviewer", claim.ID, "", claim.Document, at.Int64()); err != nil {
-			return tx.Rollback(err)
-		}
 	}
 	return tx.Commit(ctx)
 }
@@ -808,7 +772,7 @@ func storedProductionReview(ctx context.Context, c *sql.Conn, project ProjectID,
 // ProductionReviewBlocks reports a block of record at this exact head: no
 // plain ALLOW clears it (RecordProductionReview), and neither does the gate.
 // TaskOpenPullRequest reports the open pull request task's work is published
-// on, the one SendBackPublishedReview would route to, and its observed head:
+// on, the one OpenPulls names it the task of, and its observed head:
 // a fresh Change for that task starts there, never at the base.
 func (store *Store) TaskOpenPullRequest(ctx context.Context, task TaskID) (ProductionPullRequest, bool, error) {
 	tx, err := store.beginRead(ctx)
@@ -865,8 +829,9 @@ func (store *Store) RecordProductionReview(ctx context.Context, project ProjectI
 	if json.Unmarshal([]byte(body), &pr) != nil || pr.Number != number || !validProductionPull(pr) {
 		return tx.Rollback(ErrCorruptState)
 	}
-	if review.State == "allow" && pr.Review.Head == review.Head && pr.Review.State == "block" {
-		// Nothing clears a block at the same head.
+	if review.State == "unknown" || review.State == "allow" && pr.Review.Head == review.Head && pr.Review.State == "block" {
+		// A claim records only a pull request not yet recorded, and nothing
+		// clears a block at the same head.
 		return tx.Commit(ctx)
 	}
 	pr.Review = review
@@ -968,46 +933,51 @@ func (store *Store) ReviewOperation(ctx context.Context, project ProjectID, oper
 	return []byte(document), true, nil
 }
 
-// InFlightReviewOperations returns every unfinished review operation: reviews
-// to relaunch, verdict writes whose external receipts may have been lost,
-// allowed heads awaiting merge, results whose task routing has not landed,
-// and unhandled failures of a still-open pull request at the same head.
-func (store *Store) InFlightReviewOperations(ctx context.Context) ([]PendingReviewOperation, error) {
+// OpenPulls reads every open pull request factoryd advances, each with the
+// task that published it (a worker's publication row before an overseer's)
+// and the review operations at its recorded head.
+func (store *Store) OpenPulls(ctx context.Context) ([]OpenPull, error) {
 	tx, err := store.beginRead(ctx)
 	if err != nil {
 		return nil, err
 	}
 	defer tx.Close()
-	rows, err := tx.connection.QueryContext(ctx, `SELECT project_id, repository, identity, document, (SELECT json_extract(p.document, '$.state') = 'open' AND lower(json_extract(p.document, '$.head')) = lower(json_extract(r.document, '$.request.Head'))
-                FROM production_records p WHERE p.project_id = r.project_id AND p.repository = r.repository AND p.kind = 'pull_request' AND p.identity = CAST(json_extract(r.document, '$.request.PullNumber') AS TEXT)) AS live
-        FROM production_records r WHERE kind = 'reviewer' AND (json_extract(document, '$.state') IN ('running', 'submitting', 'enqueued') OR json_extract(document, '$.route_pending') = 1
-            OR (json_extract(document, '$.state') = 'failed' AND json_extract(document, '$.handled') IS NOT 1 AND live))
-          AND json_type(document, '$.request') = 'object'`)
+	rows, err := tx.connection.QueryContext(ctx, `SELECT project_id, repository, document, task, operations FROM (SELECT p.project_id, p.repository, p.document,
+	    (SELECT t.task_id FROM publication_tasks t WHERE t.project_id = p.project_id AND t.repository = p.repository AND CAST(t.pull_number AS TEXT) = p.identity
+	        ORDER BY t.change_id IS NOT NULL DESC, t.created_at_ms DESC LIMIT 1) AS task,
+	    (SELECT json_group_array(json(r.document)) FROM production_records r WHERE r.project_id = p.project_id AND r.repository = p.repository AND r.kind = 'reviewer'
+	        AND json_type(r.document, '$.request') = 'object' AND CAST(json_extract(r.document, '$.request.PullNumber') AS TEXT) = p.identity
+	        AND lower(json_extract(r.document, '$.request.Head')) = lower(json_extract(p.document, '$.head'))) AS operations,
+	    EXISTS (SELECT 1 FROM production_records r WHERE r.project_id = p.project_id AND r.repository = p.repository AND r.kind = 'reviewer'
+	        AND CAST(json_extract(r.document, '$.request.PullNumber') AS TEXT) = p.identity) AS reviewed
+	  FROM production_records p WHERE p.kind = 'pull_request' AND json_extract(p.document, '$.state') = 'open')
+	WHERE task IS NOT NULL OR reviewed`)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
-	var pending []PendingReviewOperation
+	var pulls []OpenPull
 	for rows.Next() {
-		var projectBytes []byte
-		var repository, operationID, document string
-		var live sql.NullBool
-		if err := rows.Scan(&projectBytes, &repository, &operationID, &document, &live); err != nil {
+		var projectBytes, taskBytes []byte
+		var pull OpenPull
+		var document, operations string
+		if err := rows.Scan(&projectBytes, &pull.Repository, &document, &taskBytes, &operations); err != nil {
 			return nil, err
 		}
-		project, err := ProjectIDFromBytes(projectBytes)
-		if err != nil {
+		if pull.Project, err = ProjectIDFromBytes(projectBytes); err != nil {
 			return nil, err
 		}
-		if !json.Valid([]byte(document)) {
-			return nil, fmt.Errorf("%w: review operation", ErrCorruptState)
+		if taskBytes != nil {
+			if pull.Task, err = TaskIDFromBytes(taskBytes); err != nil {
+				return nil, err
+			}
 		}
-		pending = append(pending, PendingReviewOperation{Project: project, Repository: repository, ID: operationID, Document: []byte(document), Ended: live.Valid && !live.Bool})
+		if json.Unmarshal([]byte(document), &pull.Pull) != nil || json.Unmarshal([]byte(operations), &pull.Operations) != nil || !productionSHA(pull.Pull.Head) {
+			return nil, fmt.Errorf("%w: open pull request", ErrCorruptState)
+		}
+		pulls = append(pulls, pull)
 	}
-	if err := rows.Err(); err != nil {
-		return nil, err
-	}
-	return pending, nil
+	return pulls, rows.Err()
 }
 
 // RecoverRunningReviewOperations reconciles review claims left by a stopped
@@ -1084,12 +1054,8 @@ func (store *Store) RecoverRunningReviewOperations(ctx context.Context, at UnixM
 		_ = json.Unmarshal(item.document["verdict"], &verdict)
 		_ = json.Unmarshal(item.document["submitted"], &submitted)
 		if verdict == "request_changes" && submitted {
-			// The provider write and completed state may already be durable,
-			// while task routing was interrupted immediately afterward.
-			// Preserve a recoverable route marker instead of converting this
-			// exact result into an unretryable failure.
+			// The block is on GitHub: the reconciler sends it back from here.
 			item.document["state"] = json.RawMessage(`"completed"`)
-			item.document["route_pending"] = json.RawMessage(`true`)
 			delete(item.document, "detail")
 		} else if verdict == "" {
 			// Nothing external was written: startup relaunches it, so a

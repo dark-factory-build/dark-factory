@@ -140,7 +140,7 @@ func TestProductionReviewIdentitylessBlockSurvivesPlainAllow(t *testing.T) {
 	t.Fatal("pull request record missing")
 }
 
-func TestCorrectedProductionHeadStoresRecoverableReviewClaimAtomically(t *testing.T) {
+func TestCorrectedProductionHeadReviewClaimRecovers(t *testing.T) {
 	t.Parallel()
 	store, path, project, _ := newAdmissionStore(t, RoleOrchestrator, 2)
 	ctx := context.Background()
@@ -155,7 +155,7 @@ func TestCorrectedProductionHeadStoresRecoverableReviewClaimAtomically(t *testin
 	// A claim persisted as gating, before the pre-review gate was removed, recovers like a running one.
 	operation := map[string]any{"id": operationID, "state": "gating", "request": map[string]any{"repository": "example/factory", "head": newHead}}
 	corrected := ProductionObservation{Repository: "example/factory", ObservedAt: 20, PullRequests: []ProductionPullRequest{{Number: 7, Title: "A machine", Head: newHead, State: "open"}}}
-	if err := store.RecordProductionObservationWithReviewOperations(ctx, project.ID, corrected, []ProductionReviewOperation{{ID: operationID, Document: operation}}, mustTime(t, 20)); err != nil {
+	if err := errors.Join(store.RecordProductionObservation(ctx, project.ID, corrected, mustTime(t, 20)), store.RecordReviewOperation(ctx, project.ID, "example/factory", operationID, operation, mustTime(t, 20))); err != nil {
 		store.Close()
 		t.Fatal(err)
 	}
@@ -196,7 +196,7 @@ func TestCorrectedProductionHeadStoresRecoverableReviewClaimAtomically(t *testin
 	}
 }
 
-func TestRequestChangesReviewRecoveryPreservesRoutePending(t *testing.T) {
+func TestSubmittedRequestChangesRecoversCompleted(t *testing.T) {
 	t.Parallel()
 	store, _, project, _ := newAdmissionStore(t, RoleOrchestrator, 2)
 	defer store.Close()
@@ -231,16 +231,12 @@ func TestRequestChangesReviewRecoveryPreservesRoutePending(t *testing.T) {
 	if err := json.Unmarshal(document, &recovered); err != nil {
 		t.Fatal(err)
 	}
-	if recovered["state"] != "completed" || recovered["route_pending"] != true {
+	if recovered["state"] != "completed" || recovered["verdict"] != "request_changes" {
 		t.Fatalf("recovered request-changes operation=%v", recovered)
-	}
-	pending, err := store.InFlightReviewOperations(ctx)
-	if err != nil || len(pending) != 1 || pending[0].ID != operationID {
-		t.Fatalf("pending request-changes operations=%+v err=%v", pending, err)
 	}
 }
 
-func TestRequestChangesBeforeSubmitDoesNotBecomeRoutePending(t *testing.T) {
+func TestRequestChangesBeforeSubmitRecoversFailed(t *testing.T) {
 	t.Parallel()
 	store, _, project, _ := newAdmissionStore(t, RoleOrchestrator, 2)
 	defer store.Close()
@@ -274,11 +270,8 @@ func TestRequestChangesBeforeSubmitDoesNotBecomeRoutePending(t *testing.T) {
 	if err := json.Unmarshal(document, &recovered); err != nil {
 		t.Fatal(err)
 	}
-	if recovered["state"] != "failed" || recovered["route_pending"] == true {
+	if recovered["state"] != "failed" || recovered["retryable"] != false {
 		t.Fatalf("pre-submit operation became routable=%v", recovered)
-	}
-	if pending, err := store.InFlightReviewOperations(ctx); err != nil || len(pending) != 0 {
-		t.Fatalf("pre-submit pending operations=%+v err=%v", pending, err)
 	}
 }
 
@@ -633,7 +626,7 @@ func TestProductionCanonicalizesLegacyRuntimeDestinationsAndDeduplicates(t *test
 	}
 }
 
-func TestCorrectedHeadSupersedesOlderInFlightReview(t *testing.T) {
+func TestCorrectedHeadSupersedesOlderReview(t *testing.T) {
 	t.Parallel()
 	store, _, project, _ := newAdmissionStore(t, RoleOrchestrator, 2)
 	defer store.Close()
@@ -652,19 +645,13 @@ func TestCorrectedHeadSupersedesOlderInFlightReview(t *testing.T) {
 	}
 	fresh := map[string]any{"id": "fresh", "state": "running", "request": map[string]any{"Repository": "example/factory", "PullNumber": 7, "Head": newHead}}
 	corrected := ProductionObservation{Repository: "example/factory", ObservedAt: 20, PullRequests: []ProductionPullRequest{{Number: 7, Title: "A machine", Head: newHead, State: "open"}}}
-	if err := store.RecordProductionObservationWithReviewOperations(ctx, project.ID, corrected, []ProductionReviewOperation{{ID: "fresh", Document: fresh}}, mustTime(t, 20)); err != nil {
+	if err := errors.Join(store.RecordProductionObservation(ctx, project.ID, corrected, mustTime(t, 20)), store.RecordReviewOperation(ctx, project.ID, "example/factory", "fresh", fresh, mustTime(t, 20))); err != nil {
 		t.Fatal(err)
 	}
-	pending, err := store.InFlightReviewOperations(ctx)
-	if err != nil {
-		t.Fatal(err)
-	}
-	var live []string
-	for _, op := range pending {
-		live = append(live, op.ID)
-	}
-	if strings.Join(live, ",") != "fresh,other" && strings.Join(live, ",") != "other,fresh" {
-		t.Fatalf("in-flight=%v, want the corrected head's claim and the untouched pull", live)
+	// The open pull's reconciler reads only the operations at its head.
+	open, err := store.OpenPulls(ctx)
+	if err != nil || len(open) != 1 || open[0].Pull.Number != 7 || len(open[0].Operations) != 1 || !strings.Contains(string(open[0].Operations[0]), `"id":"fresh"`) {
+		t.Fatalf("open pulls = %+v, %v; want #7 with the corrected head's claim", open, err)
 	}
 	if err := store.RecordReviewOperation(ctx, project.ID, "example/factory", "stale", stale, mustTime(t, 21)); !errors.Is(err, ErrSuperseded) {
 		t.Fatalf("revive superseded err=%v, want ErrSuperseded", err)

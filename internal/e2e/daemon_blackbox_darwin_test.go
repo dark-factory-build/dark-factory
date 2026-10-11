@@ -281,7 +281,14 @@ func newBlackBoxFixture(t *testing.T) *blackBoxFixture {
 			t.Fatalf("socket path is %d bytes, over the %d-byte budget: %q", len(socket), install.MaxSocketPathBytes, socket)
 		}
 	}
-	if err := os.Mkdir(fixture.repo, 0o700); err != nil {
+	initRepository(t, fixture.repo)
+	fixture.runFactoryctl(t, 0, "init", "--home", fixture.home)
+	return fixture
+}
+
+func initRepository(t *testing.T, repository string) {
+	t.Helper()
+	if err := os.Mkdir(repository, 0o700); err != nil {
 		t.Fatal(err)
 	}
 	for _, arguments := range [][]string{
@@ -289,13 +296,11 @@ func newBlackBoxFixture(t *testing.T) *blackBoxFixture {
 		{"-c", "user.name=black-box", "-c", "user.email=black-box@invalid", "commit", "--quiet", "--allow-empty", "--message", "seed"},
 	} {
 		command := exec.Command(blackBoxGit, arguments...)
-		command.Dir = fixture.repo
+		command.Dir = repository
 		if output, err := command.CombinedOutput(); err != nil {
 			t.Fatalf("git %v: %v (%s)", arguments, err, output)
 		}
 	}
-	fixture.runFactoryctl(t, 0, "init", "--home", fixture.home)
-	return fixture
 }
 
 func (fixture *blackBoxFixture) startFactoryd(t *testing.T) (*factorydProcess, *syncBuffer) {
@@ -325,6 +330,11 @@ func (fixture *blackBoxFixture) start(t *testing.T, command *exec.Cmd) (*factory
 	t.Cleanup(func() {
 		_ = command.Process.Kill()
 		<-daemon.exited
+		if t.Failed() {
+			tail := output.String()
+			tail = tail[max(0, len(tail)-maxStartupDiagnosticBytes):]
+			t.Logf("factoryd stderr tail: %q", tail)
+		}
 	})
 	fixture.daemon = daemon
 	return daemon, output
@@ -441,7 +451,7 @@ func (fixture *blackBoxFixture) operatorID(t *testing.T, output string) string {
 	return payload.ID
 }
 
-func (fixture *blackBoxFixture) taskStatus(t *testing.T, client *api.OperatorClient, taskID string) string {
+func (fixture *blackBoxFixture) task(t *testing.T, client *api.OperatorClient, taskID string) api.TaskSummary {
 	t.Helper()
 	callContext, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
@@ -451,11 +461,33 @@ func (fixture *blackBoxFixture) taskStatus(t *testing.T, client *api.OperatorCli
 	}
 	for _, task := range snapshot.Tasks {
 		if task.ID == taskID {
-			return task.Status
+			return task
 		}
 	}
 	t.Fatalf("task %s is not in the snapshot", taskID)
-	return ""
+	return api.TaskSummary{}
+}
+
+func (fixture *blackBoxFixture) taskStatus(t *testing.T, client *api.OperatorClient, taskID string) string {
+	t.Helper()
+	return fixture.task(t, client, taskID).Status
+}
+
+// taskOutcome is the operator's bounded read of a task's durable result,
+// blocked reason or failure cause: the evidence a failed transition keeps.
+func (fixture *blackBoxFixture) taskOutcome(t *testing.T, client *api.OperatorClient, taskID string) string {
+	t.Helper()
+	revision := fixture.task(t, client, taskID).Revision
+	callContext, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	text, err := client.ReadTask(callContext, api.TaskReadInput{TaskID: taskID, ExpectedRevision: revision})
+	if err != nil {
+		return "unreadable: " + err.Error()
+	}
+	if text.Outcome == nil {
+		return ""
+	}
+	return *text.Outcome
 }
 
 func (fixture *blackBoxFixture) awaitTaskStatus(t *testing.T, client *api.OperatorClient, taskID, want string, patience time.Duration) {
@@ -469,11 +501,11 @@ func (fixture *blackBoxFixture) awaitTaskStatus(t *testing.T, client *api.Operat
 		}
 		switch status {
 		case "blocked", "succeeded", "failed", "cancelled":
-			t.Fatalf("task %s status = %q, want %q", taskID, status, want)
+			t.Fatalf("task %s status = %q, want %q; outcome %q", taskID, status, want, fixture.taskOutcome(t, client, taskID))
 		}
 		time.Sleep(50 * time.Millisecond)
 	}
-	t.Fatalf("task %s status = %q, want %q", taskID, status, want)
+	t.Fatalf("task %s status = %q, want %q; outcome %q", taskID, status, want, fixture.taskOutcome(t, client, taskID))
 }
 
 // awaitOrphanArtifact waits for the orphaned attempt tree to converge after
