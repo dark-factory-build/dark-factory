@@ -220,10 +220,13 @@ eligible same-project handoffs can be read in one attempt.
 - Close a superseded pull request with `update_pull_request_body` and
   `close: true`, naming its successor in the body, then cancel its task.
 - Never record a review verdict yourself. The review is a separate headless
-  session started by factoryd; you read its App receipt. A BLOCK you have
-  checked against the source and found wrong gets one fresh exact-head review
-  with `attempt review`. After a second BLOCK on the same task, close its pull
-  request and re-scope the work instead of sending it back again.
+  session started by factoryd; you read its App receipt. A BLOCK of record
+  stands at its exact head (#1300): no fresh review clears it, only a new head
+  does. `attempt review` requests one fresh exact-head review of a head with
+  no verdict of record, such as one whose review failed or never ran. A BLOCK
+  you have checked and found wrong goes back once with that evidence, for a
+  change that moves the head. After a second BLOCK on the same task, close
+  its pull request and re-scope the work instead of sending it back again.
 - `attempt intake list` reads the project's intake sources and sync health.
   Do not run a nested provider or grant local commands Maintainer credentials.
 - Publish through the App yourself. Never delegate publication to a worker:

@@ -74,7 +74,7 @@ const (
   factoryctl attempt peer answer --question ID --revision REVISION --idempotency-key HEX32 --answer TEXT
   factoryctl attempt terminal observe --project ID --task ID --run ID [--cursor N] [--max-bytes N]
   factoryctl attempt status | human list | intake list|config [--project ID] | task read --task ID --revision REVISION [--offset N] (a specialist's review run only; an overseer may list intake)
-  factoryctl attempt review --project ID --repository OWNER/REPO --pull N --head SHA --base SHA --base-ref REF (an overseer only: one fresh exact-head review)
+  factoryctl attempt review --project ID --repository OWNER/REPO --pull N --head SHA --base SHA --base-ref REF (an overseer only: one fresh review of a head with no verdict of record; a same-head BLOCK stands)
   factoryctl terminal observe --project ID --task ID --run ID [--cursor N] [--max-bytes N] [--text]
   factoryctl attempt send-back --task ID [--head SHA] --note TEXT
   factoryctl overseer status [--task ID] [--offset N --head HEAD] [--text-offset RUNES --head HEAD]
