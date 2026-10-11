@@ -568,6 +568,7 @@ func TestHumanQuestionCorruptChronologyFailsClosed(t *testing.T) {
 	if _, err := store.writer.Exec(`PRAGMA ignore_check_constraints = OFF`); err != nil {
 		t.Fatal(err)
 	}
+	_ = store.Validate(ctx)
 	if _, err := store.Snapshot(ctx); !errors.Is(err, ErrCorruptState) {
 		t.Fatalf("corrupt delivery chronology snapshot = %v", err)
 	}
@@ -935,6 +936,7 @@ func TestHumanQuestionImpossibleAdmittedRunPhasesFailClosed(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
+			_ = store.Validate(ctx)
 			if _, err := store.Snapshot(ctx); !errors.Is(err, ErrCorruptState) {
 				t.Fatalf("%s request attached to admitted run = %v", status, err)
 			}

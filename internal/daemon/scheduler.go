@@ -165,7 +165,7 @@ func (daemon *Daemon) RunScheduler(ctx context.Context, spec SupervisorSpec) err
 			if !stopping {
 				if !tick.Before(daemon.validationDue) {
 					daemon.validationDue = tick.Add(storeValidationInterval)
-					if err := daemon.store.Validate(ownedCtx); err != nil {
+					if err := daemon.store.Validate(ownedCtx); errors.Is(err, kernel.ErrCorruptState) {
 						daemon.releaseHold.Store(true)
 						LogFactoryd(daemon.log, "factoryd: durable validation hold: %v\n", err)
 					}

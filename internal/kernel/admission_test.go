@@ -1086,7 +1086,7 @@ func TestEmptyAdmissionDoesNotValidateUnrelatedHistoryOrWrite(t *testing.T) {
 	t.Parallel()
 	store, _, _, _ := newAdmissionStore(t, RoleWorker, 2)
 	defer store.Close()
-	corruptSQL(t, store, `UPDATE invalidations SET sequence = 100 WHERE sequence = 1`)
+	corruptSQLUnvalidated(t, store, `UPDATE invalidations SET sequence = 100 WHERE sequence = 1`)
 	before := captureWriteFootprint(t, store)
 	result, err := store.AdmitNext(context.Background(), admissionKeys(t, 30, nil), mustTime(t, 6))
 	if err != nil || result.Admitted() || result.Reason != NoAdmissionQueueEmpty {

@@ -31,6 +31,9 @@ type Store struct {
 	closed      atomic.Bool
 	close       sync.Once
 	closeErr    error
+	// held is the corruption the last whole-store validation found. Validated
+	// writes and snapshot reads refuse while it is set (see Validate).
+	held atomic.Pointer[error]
 
 	repositoryBase string // Boot-owned initial binding default; protected by writerGate.
 }
@@ -337,8 +340,26 @@ func (store *Store) validateOpen(ctx context.Context) error {
 }
 
 // Validate checks one coherent durable snapshot without holding the writer.
+// Corruption it finds becomes a hold that refuses validated writes and
+// snapshot reads until a later validation passes; a timeout or interruption
+// is not corruption and leaves the hold as it was.
 func (store *Store) Validate(ctx context.Context) error {
-	return store.validateOpen(ctx)
+	err := store.validateOpen(ctx)
+	switch {
+	case err == nil:
+		store.held.Store(nil)
+	case errors.Is(err, ErrCorruptState):
+		store.held.Store(&err)
+	}
+	return err
+}
+
+// heldCorruption is the hold Validate recorded, if any.
+func (store *Store) heldCorruption() error {
+	if err := store.held.Load(); err != nil {
+		return *err
+	}
+	return nil
 }
 
 func validateDatabaseSnapshot(ctx context.Context, connection *sql.Conn) error {
@@ -423,6 +444,9 @@ type writeTx struct {
 }
 
 func (store *Store) beginValidatedWrite(ctx context.Context) (*writeTx, error) {
+	if err := store.heldCorruption(); err != nil {
+		return nil, err
+	}
 	return store.beginUncheckedWrite(ctx)
 }
 

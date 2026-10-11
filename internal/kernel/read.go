@@ -366,6 +366,9 @@ func (tx *readTx) Close() error {
 }
 
 func (store *Store) Snapshot(ctx context.Context) (DashboardSnapshot, error) {
+	if err := store.heldCorruption(); err != nil {
+		return DashboardSnapshot{}, err
+	}
 	tx, err := store.beginRead(ctx)
 	if err != nil {
 		return DashboardSnapshot{}, err

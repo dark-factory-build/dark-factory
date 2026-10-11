@@ -82,6 +82,9 @@ const PublicPeerQuestionLimit = 32
 // result. It never truncates: exceeding the entity bound is a finite
 // ErrSnapshotTooLarge failure.
 func (store *Store) ReadPublicSnapshot(ctx context.Context) (PublicSnapshot, error) {
+	if err := store.heldCorruption(); err != nil {
+		return PublicSnapshot{}, err
+	}
 	tx, err := store.beginRead(ctx)
 	if err != nil {
 		return PublicSnapshot{}, err
