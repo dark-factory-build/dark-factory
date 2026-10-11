@@ -405,6 +405,12 @@ func TestExternalPublicationRefusalRetriesWhenItClears(t *testing.T) {
 	}
 }
 
+func TestIndeterminatePublicationRetries(t *testing.T) {
+	if !publicationFailureRetryable(fmt.Errorf("indeterminate: The operation outcome is indeterminate and was not repeated.")) {
+		t.Fatal("indeterminate publication outcome became terminal")
+	}
+}
+
 func TestUnavailablePublicationRetriesWhenServiceRecovers(t *testing.T) {
 	fixture, c, source, app, checkout := publishFixture(t, 1, false)
 	app.unavailable = true

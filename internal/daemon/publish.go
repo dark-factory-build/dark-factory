@@ -144,8 +144,7 @@ func (daemon *Daemon) publishFailed(ctx context.Context, c kernel.PublishableCha
 	return durableReviewStore{store: daemon.store, project: c.Task.ProjectID, repository: repo, now: daemon.now}.Create(ctx, failed)
 }
 
-// publicationFailureRetryable distinguishes a Maintainer refusal from a
-// change-caused validation failure. The former can be a branch or worker
+// publicationFailureRetryable distinguishes Maintainer refusals from terminal validation failures. The former can be a branch or worker
 // precondition that changes outside factoryd; invalid_input is the App's
 // deterministic rejection of this Change and must remain terminal.
 func publicationFailureRetryable(err error) bool {
@@ -153,6 +152,7 @@ func publicationFailureRetryable(err error) bool {
 	return strings.Contains(text, "review: Maintainer rejected operation: refused:") ||
 		strings.Contains(text, "review: Maintainer rejected operation: conflict:") ||
 		strings.Contains(text, "review: Maintainer rejected operation: unavailable:") ||
+		strings.Contains(text, "indeterminate:") ||
 		strings.Contains(text, "repository disabled for new work")
 }
 
