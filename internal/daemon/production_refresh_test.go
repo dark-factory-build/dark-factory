@@ -23,13 +23,14 @@ func TestRefreshRereadsOnlyPullsLastSeenOpen(t *testing.T) {
 func TestRefreshExactReadsNewOrChangedPulls(t *testing.T) {
 	head := strings.Repeat("a", 40)
 	base := strings.Repeat("b", 40)
+	mergeable := true
 	if pullRequestNeedsExactRead(maintainerPullRequest{Number: 1, Head: head, Base: "main", BaseSHA: base}, map[uint64]kernel.ProductionPullRequest{
-		1: {Number: 1, Head: head, Base: "main", BaseSHA: base},
+		1: {Number: 1, Head: head, Base: "main", BaseSHA: base, Mergeable: &mergeable},
 	}) {
 		t.Fatal("unchanged pull needs an exact read")
 	}
 	if !pullRequestNeedsExactRead(maintainerPullRequest{Number: 1, Head: strings.Repeat("c", 40), Base: "main", BaseSHA: base}, map[uint64]kernel.ProductionPullRequest{
-		1: {Number: 1, Head: head, Base: "main", BaseSHA: base},
+		1: {Number: 1, Head: head, Base: "main", BaseSHA: base, Mergeable: &mergeable},
 	}) {
 		t.Fatal("changed head was not selected for an exact read")
 	}
@@ -41,6 +42,7 @@ func TestRefreshExactReadsNewOrChangedPulls(t *testing.T) {
 func TestRefreshPreservesMergeabilityWhenListOmitsIt(t *testing.T) {
 	head := strings.Repeat("a", 40)
 	baseSHA := strings.Repeat("b", 40)
+	exactReads := 0
 	call := func(_ context.Context, request json.RawMessage, _ map[string]uint64) (json.RawMessage, error) {
 		var value struct {
 			Params struct {
@@ -52,14 +54,17 @@ func TestRefreshPreservesMergeabilityWhenListOmitsIt(t *testing.T) {
 		}
 		pull := `{"number":7,"head_sha":"` + head + `","base_ref":"main","base_sha":"` + baseSHA + `","state":"open"}`
 		if _, exact := value.Params.Arguments["pull_number"]; exact {
-			pull = `{"number":7,"head_sha":"` + head + `","base_ref":"main","base_sha":"` + baseSHA + `","state":"open","mergeable":false,"merge_state_status":"dirty"}`
+			exactReads++
+			if exactReads > 1 {
+				pull = `{"number":7,"head_sha":"` + head + `","base_ref":"main","base_sha":"` + baseSHA + `","state":"open","mergeable":false,"merge_state_status":"dirty"}`
+			}
 		}
 		return json.RawMessage(`{"jsonrpc":"2.0","id":1,"result":{"structuredContent":{"pull_requests":[` + pull + `],"next_page":null}}}`), nil
 	}
 	settled := map[kernel.ProductionHead]bool{{Number: 7, Head: head}: true}
 	first, err := pullRequestObservation(context.Background(), call, "o/r", 1, nil, settled, func(error) {})
-	if err != nil || len(first.PullRequests) != 1 || first.PullRequests[0].Mergeable == nil || *first.PullRequests[0].Mergeable {
-		t.Fatalf("exact mergeability = %+v, %v", first.PullRequests, err)
+	if err != nil || len(first.PullRequests) != 1 || first.PullRequests[0].Mergeable != nil {
+		t.Fatalf("initial unsettled mergeability = %+v, %v", first.PullRequests, err)
 	}
 	second, err := pullRequestObservation(context.Background(), call, "o/r", 1, first.PullRequests, settled, func(error) {})
 	if err != nil || len(second.PullRequests) != 1 || second.PullRequests[0].Mergeable == nil || *second.PullRequests[0].Mergeable || second.PullRequests[0].MergeState != "dirty" {

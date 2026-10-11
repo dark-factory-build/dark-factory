@@ -407,7 +407,7 @@ func pullRequestObservation(ctx context.Context, call maintainerMCP, repository 
 
 func pullRequestNeedsExactRead(pull maintainerPullRequest, known map[uint64]kernel.ProductionPullRequest) bool {
 	prior, ok := known[pull.Number]
-	return !ok || !strings.EqualFold(prior.Head, pull.Head) || !strings.EqualFold(prior.Base, pull.Base) || !strings.EqualFold(prior.BaseSHA, pull.BaseSHA)
+	return !ok || prior.Mergeable == nil || !strings.EqualFold(prior.Head, pull.Head) || !strings.EqualFold(prior.Base, pull.Base) || !strings.EqualFold(prior.BaseSHA, pull.BaseSHA)
 }
 
 func readMaintainerMergeQueue(ctx context.Context, call maintainerMCP, repository string, githubID uint64, pr kernel.ProductionPullRequest) (string, error) {
