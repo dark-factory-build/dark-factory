@@ -1483,9 +1483,7 @@ func TestAttemptCallWaitsOutDaemonRestart(t *testing.T) {
 		done <- serve(replacement, successResponse(`{"task":"after restart"}`), func() error { return nil })
 	}()
 	started := time.Now()
-	ctx, cancel := context.WithTimeout(context.Background(), RestartRetryWindow)
-	defer cancel()
-	task, err := client.Task(ctx)
+	task, err := client.Task(context.Background())
 	if err != nil || task.Task != "after restart" {
 		t.Fatalf("task across restart = %+v, %v", task, err)
 	}

@@ -747,7 +747,11 @@ func (client client) call(ctx context.Context, method string, params, output any
 	// wait for its bounded native terminal effect instead of being cut off at 5s.
 	cancel := func() {}
 	if _, bounded := ctx.Deadline(); !bounded {
-		ctx, cancel = context.WithTimeout(ctx, requestTimeout)
+		timeout := requestTimeout
+		if client.domain == attemptDomain {
+			timeout = RestartRetryWindow
+		}
+		ctx, cancel = context.WithTimeout(ctx, timeout)
 	}
 	defer cancel()
 	// An attempt outlives factoryd generations. A restart unbinds the socket
