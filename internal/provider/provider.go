@@ -661,6 +661,9 @@ func Build(request Request) (Launch, error) {
 		// are allowed; account configuration and Change-local .mcp.json cannot
 		// add servers.
 		argv = append(argv, "--strict-mcp-config")
+		if request.role == kernel.RoleWorker {
+			argv = append(argv, "--agents", claudeSweepAgent)
+		}
 		servers := map[string]any{
 			"factory_attempt": map[string]any{
 				"command": request.runtime.factoryctl,
@@ -879,8 +882,18 @@ func CodexReadOnly(paths ...string) []string {
 // ponytail: a home or volume mounted elsewhere needs its own entry.
 var claudeDeniedReads = []string{"//Users", "//Volumes", "//Network", "//private/tmp", "//private/var/folders", "//private/var/root"}
 
+// claudeSweepAgent is the one sub-agent a Claude worker may start: a bounded,
+// read-only sweep on a cheaper model that returns a short summary, so the
+// worker keeps the judgment and spends less of its own context. It runs in the
+// worker's process under the same sandbox and rules, with no edit tool and no
+// factory server; its transcript and telemetry count against the worker's run.
+const claudeSweepAgent = `{"sweep":{"description":"Read-only mechanical sweep on a cheaper model: read CI logs or transcripts, run scripts/hotspots.sh, deadcode, dupl or history greps, and return a short structured summary. Use it for bulk reading; keep the judgment yourself.","prompt":"You run a bounded, read-only sweep for another agent. Never edit, write, commit, or change any file. Run only the reads and commands asked for, then reply in at most 30 lines: each finding as path:line or command: result, then anything you could not check.","tools":["Read","Grep","Glob","Bash"],"model":"haiku"}}`
+
 func claudeSettings(request Request, servers []string) (string, error) {
 	allow := []string{"Bash", "WebFetch", "WebSearch"}
+	if request.role == kernel.RoleWorker {
+		allow = append(allow, "Agent(sweep)")
+	}
 	for _, server := range servers {
 		allow = append(allow, "mcp__"+server)
 	}

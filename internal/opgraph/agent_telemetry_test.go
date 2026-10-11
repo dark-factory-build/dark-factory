@@ -66,6 +66,11 @@ func TestAgentExportsDecodeToRunCountsOnly(t *testing.T) {
 			{EventName: "gen_ai.api_request"},
 			{Attributes: []*commonv1.KeyValue{text("event.name", "codex.tool_result_ready")}},
 			{Attributes: []*commonv1.KeyValue{text("event.name", "user_prompt"), text("prompt", "secret")}},
+			// A sub-agent runs from its accepted Agent call to that call's result.
+			{Attributes: []*commonv1.KeyValue{text("event.name", "tool_decision"), text("tool_name", "Agent"), text("decision", "accept")}},
+			{Attributes: []*commonv1.KeyValue{text("event.name", "tool_decision"), text("tool_name", "Agent"), text("decision", "reject")}},
+			{Attributes: []*commonv1.KeyValue{text("event.name", "tool_decision"), text("tool_name", "Bash"), text("decision", "accept")}},
+			{Attributes: []*commonv1.KeyValue{text("event.name", "tool_result"), text("tool_name", "Agent")}},
 		}}}},
 		{Resource: &resourcev1.Resource{Attributes: []*commonv1.KeyValue{text("service.name", "claude-code")}}, ScopeLogs: []*logsv1.ScopeLogs{{LogRecords: []*logsv1.LogRecord{
 			{Attributes: []*commonv1.KeyValue{text("event.name", "tool_result")}},
@@ -79,7 +84,7 @@ func TestAgentExportsDecodeToRunCountsOnly(t *testing.T) {
 		t.Fatal(err)
 	}
 	got = fmt.Sprint(points)
-	if want := "[{r1 tool_call 1 } {r1 tool_call 1 } {r1 api_request 1 }]"; got != want {
+	if want := "[{r1 tool_call 1 } {r1 tool_call 1 } {r1 api_request 1 } {r1 subagent_start 1 } {r1 tool_call 1 } {r1 subagent_end 1 }]"; got != want {
 		t.Fatalf("logs decoded to %s, want %s", got, want)
 	}
 	// The OTLP JSON mapping decodes the same way.

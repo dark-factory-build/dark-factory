@@ -230,4 +230,13 @@ test("a standing specialist is known by what it does on the floor, never by a sy
   assert.match(markup, /aria-label="operations, Operations specialist, reviewing: make delivery reliable/);
   assert.match(markup, /data-tooltip="security · Security specialist · waiting: waiting for a free background slot\nNext review /);
   assert.match(markup, /data-floor-inbox="1"/, "the tray holds the one ordinary queued task; a queued specialist review is its own");
+  // Between reviews it sleeps in the break room until its next one.
+  assert.match(markup, /data-tooltip="security · [^"]*\nNext review [^"]*\nAsleep in the break room until its next review/);
+  // Its running sub-agents work beside it as smaller sprites, and its tooltip counts them.
+  const telemetry = { tokens_in: 1, tokens_out: 1, cost_micro_usd: 0, tool_calls: 1, api_requests: 1, subagents: 2 };
+  const helped = renderToStaticMarkup(createElement(FactoryScene, { graph: scene.graph, workers: scene.workers.map((item) => item.id === operationsSpecialistID ? { ...item, telemetry } : item), tasks: scene.tasks, onOpenTasks() {} }));
+  assert.equal(helped.match(new RegExp(`data-subagent-of="${operationsSpecialistID}"`, "g"))?.length, 2);
+  assert.match(helped, /aria-label="Sub-agent of operations, read-only sweep"[^>]*><use href="#df-frame-person\.skin\./);
+  assert.match(helped, /2 sub-agents running/);
+  assert.doesNotMatch(markup, /data-subagent-of/, "none without a running sub-agent");
 });
