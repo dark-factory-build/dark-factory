@@ -347,7 +347,7 @@ func (daemon *Daemon) publishPull(ctx context.Context, c kernel.PublishableChang
 	if err != nil {
 		return err
 	}
-	return daemon.recordPublishedPull(ctx, c.Task.ProjectID, c.Task.ID, repo, kernel.ProductionPullRequest{Number: pull.Number, Title: message, URL: pull.URL, Head: pull.Head, HeadRepository: repo, Branch: branch, Base: "main", State: "open", Review: kernel.ProductionReview{Head: pull.Head, State: "unknown"}}, body, pull.Base)
+	return daemon.recordPublishedPull(ctx, c.Task.ProjectID, c.Task.ID, repo, kernel.ProductionPullRequest{Number: pull.Number, Title: message, URL: pull.URL, Head: pull.Head, HeadRepository: repo, Branch: branch, Base: "main", State: "open", Review: kernel.ProductionReview{Head: pull.Head, State: "unknown"}}, body, pull.Base, len(changes) == 0)
 }
 
 // publicationTitle is the accepted title on one line, within the App's
