@@ -518,15 +518,16 @@ with the replacement; this metadata write has no atomic expected-head
 condition. If that head differs from `HEAD_SHA`, rebuild the cumulative body
 from the returned head under its own `body-HEAD8` operation.
 
-Intake work factoryd does not publish is yours (section 3):
-reuse its accepted source, never create an issue. For a GitHub source pass
-`issue_number` and `source_repository` (fully qualified) from the accepted
-snapshot, with `close_on_merge = true` only on the pull request that completes
-the issue (`Closes #N`; `false` renders `Refs #N`). For a Linear source pass
-`external_source_url` with `issue_number = 0` and `close_on_merge = false`.
-Skip `create_issue` for both.
+factoryd publishes every settled intake Change (section 3), including
+cross-repository and split work. It reuses the accepted source and never
+creates an issue. For a GitHub source it passes `issue_number` and
+`source_repository` (fully qualified) from the accepted snapshot; only the
+acceptance's completion-owner task uses `close_on_merge = true` (`Closes
+owner/source#N`), while split work uses `false` (`Refs owner/source#N`). For a
+Linear source it passes `external_source_url` with `issue_number = 0` and
+`close_on_merge = false`. The overseer does not publish either form.
 
-Work without a source issue needs one: `create_pull_request` needs an issue. `create_issue` with `opid "$change_id" issue`, the
+Work without a source issue needs one: `create_pull_request` needs an issue. factoryd creates it with `opid "$change_id" issue`, the
 task title (cut to 256 characters, the App's bound), and a body of the task
 text plus the change id; it returns the issue number. Then read
 `observe_ref` for `main` again, immediately before the call, and use that

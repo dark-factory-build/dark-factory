@@ -159,7 +159,7 @@ func publishFixture(t *testing.T, files int, workflow bool) (*dispatchFixture, k
 		t.Fatal(err)
 	}
 	candidate := kernel.PublishableChange{Task: task, Change: changeID, Revision: revision, Base: base, Head: head,
-		Accepted: kernel.IntakeAcceptance{SourceRepository: "team/repo", Snapshot: kernel.IntakeIssueSnapshot{GitHubRepositoryID: 42, IssueNumber: 9, Title: "Fix  the\nthing"}}}
+		Accepted: kernel.IntakeAcceptance{SourceRepository: "team/repo", TaskID: task.ID, Snapshot: kernel.IntakeIssueSnapshot{GitHubRepositoryID: 42, IssueNumber: 9, Title: "Fix  the\nthing"}}}
 	fixture.daemon.reviewBackend = func(string, uint64) review.Backend { return &publicReviewBackend{} }
 	checkout := func(context.Context, string, string) (string, func(), error) {
 		clone := filepath.Join(t.TempDir(), "clone")
@@ -196,7 +196,7 @@ func TestFactorydPublishesASettledIntakeChange(t *testing.T) {
 		t.Fatalf("commit chain: first=%v second=%v", first["expected_head_sha"], second["expected_head_sha"])
 	}
 	body := pull["body"].(string)
-	if pull["head_sha"] != secondCommit || pull["issue_number"] != uint64(9) || pull["source_repository"] != nil || pull["close_on_merge"] != true || pull["base_sha"] != c.Base ||
+	if pull["head_sha"] != secondCommit || pull["issue_number"] != uint64(9) || pull["source_repository"] != "team/repo" || pull["close_on_merge"] != true || pull["base_sha"] != c.Base ||
 		strings.Contains(body, "example.com") || strings.Contains(body, "/Users/") || !strings.Contains(body, "Implemented it") || !strings.Contains(body, secondCommit) || !strings.Contains(body, "+51 -1 across 52 files") || !strings.HasSuffix(body, "The merge queue runs the gate.") {
 		t.Fatalf("pull request = %+v", pull)
 	}
@@ -214,6 +214,39 @@ func TestFactorydPublishesASettledIntakeChange(t *testing.T) {
 	}
 	if op := waitForDurableReview(t, fixture.store, c.Task.ProjectID, func(op review.Operation) bool { return op.State == "enqueued" }); op.State != "enqueued" || op.Request.PullNumber != 31 || op.Request.Head != secondCommit {
 		t.Fatalf("review = %+v", op)
+	}
+}
+
+func TestIntakePublicationQualifiesCrossRepositoryAndSplitIssueLinks(t *testing.T) {
+	fixture, c, source, app, checkout := publishFixture(t, 1, false)
+	ctx := context.Background()
+	c.Accepted.SourceRepository = "owner/source"
+	c.Accepted.TaskID = mustTaskID(t, testID(249))
+	if err := fixture.daemon.publishChange(ctx, c, "owner/destination", source, app.call, checkout); err != nil {
+		t.Fatal(err)
+	}
+	pull := app.writes[len(app.writes)-1]["arguments"].(map[string]any)
+	if pull["source_repository"] != "owner/source" || pull["close_on_merge"] != false {
+		t.Fatalf("split cross-repository pull = %+v", pull)
+	}
+
+	app.writes = nil
+	app.journal = map[string]json.RawMessage{}
+	c.Pull = 31
+	app.tip = c.Head
+	withTip := func(ctx context.Context, ref, head string) (string, func(), error) {
+		gitDir, cleanup, err := checkout(ctx, ref, head)
+		if err == nil {
+			_, err = gitOutput(ctx, gitDir, "-c", "protocol.file.allow=always", "fetch", "--quiet", source, c.Head)
+		}
+		return gitDir, cleanup, err
+	}
+	if err := fixture.daemon.publishChange(ctx, c, "owner/destination", source, app.call, withTip); err != nil {
+		t.Fatal(err)
+	}
+	body := app.writes[len(app.writes)-1]["arguments"].(map[string]any)["body"].(string)
+	if !strings.HasSuffix(body, "\n\nRefs owner/source#9") {
+		t.Fatalf("split correction body = %q", body)
 	}
 }
 

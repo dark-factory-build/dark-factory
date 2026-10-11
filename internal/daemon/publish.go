@@ -293,6 +293,21 @@ func (daemon *Daemon) publishPull(ctx context.Context, c kernel.PublishableChang
 	result := string(redactTerminalText([]byte(c.Task.Result)))
 	result = strings.ToValidUTF8(result[:min(len(result), 24000)], "")
 	body := fmt.Sprintf("%s\n\nPublished by factoryd from Change %s at %s: +%d -%d across %d files from %s.\n\nThe merge queue runs the gate.", result, c.Change, head, added, deleted, files, from)
+	closeOnMerge := c.Accepted.TaskID == c.Task.ID
+	issueReference := func() string {
+		if c.Accepted.Snapshot.IssueNumber == 0 {
+			return ""
+		}
+		issue := fmt.Sprintf("#%d", c.Accepted.Snapshot.IssueNumber)
+		if source := c.Accepted.SourceRepository; source != "" && !strings.EqualFold(source, repo) {
+			issue = source + issue
+		}
+		verb := "Refs"
+		if closeOnMerge {
+			verb = "Closes"
+		}
+		return fmt.Sprintf("\n\n%s %s", verb, issue)
+	}
 	if c.Pull != 0 {
 		// The corrected body keeps its closing line; factoryd's refresh
 		// reviews a new head. One settlement's body is written once.
@@ -301,8 +316,8 @@ func (daemon *Daemon) publishPull(ctx context.Context, c kernel.PublishableChang
 			done, err := completed(step, new(json.RawMessage))
 			if err == nil && !done {
 				updatedBody := body
-				if c.Accepted.Snapshot.IssueNumber != 0 {
-					updatedBody = fmt.Sprintf("%s\n\nCloses #%d", body, c.Accepted.Snapshot.IssueNumber)
+				if reference := issueReference(); reference != "" {
+					updatedBody = body + reference
 				}
 				_, err = call(ctx, "update_pull_request_body", map[string]any{"repository": repo, "operation_id": operation(step), "pull_number": c.Pull, "body": updatedBody})
 			}
@@ -337,7 +352,10 @@ func (daemon *Daemon) publishPull(ctx context.Context, c kernel.PublishableChang
 	}
 	if err == nil && !done {
 		arguments := map[string]any{"repository": repo, "operation_id": operation(step), "head": branch, "head_sha": head, "base": "main", "base_sha": base, "title": message, "body": body, "draft": false,
-			"issue_number": c.Accepted.Snapshot.IssueNumber, "close_on_merge": c.Accepted.Snapshot.IssueNumber != 0}
+			"issue_number": c.Accepted.Snapshot.IssueNumber, "close_on_merge": closeOnMerge}
+		if c.Accepted.SourceRepository != "" {
+			arguments["source_repository"] = c.Accepted.SourceRepository
+		}
 		var response json.RawMessage
 		if response, err = call(ctx, "create_pull_request", arguments); err == nil {
 			err = json.Unmarshal(response, &pull)
