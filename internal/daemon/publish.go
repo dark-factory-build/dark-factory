@@ -237,10 +237,20 @@ func (daemon *Daemon) publishPull(ctx context.Context, c kernel.PublishableChang
 	if tip != "" {
 		// The runbook's parent rule: a worker that integrated main newer
 		// than the branch publishes the merge it made.
-		if diffFrom, err = publicationFrom(ctx, gitDir, tip, c.Head, main); err != nil {
+		if c.Pull != 0 && tip != c.Head {
+			// A correction is the Change's new commit, not a replay of the
+			// branch's older worker tree. Diffing from the branch tip would
+			// include main changes made after the first publication.
+			var parent []byte
+			parent, err = gitOutput(ctx, gitDir, "rev-parse", c.Head+"^")
+			if err != nil {
+				return err
+			}
+			diffFrom = strings.TrimSpace(string(parent))
+		} else if diffFrom, err = publicationFrom(ctx, gitDir, tip, c.Head, main); err != nil {
 			return err
 		}
-		if head = tip; diffFrom != tip {
+		if head = tip; c.Pull == 0 && diffFrom != tip {
 			mergeParent = diffFrom
 		}
 	}
