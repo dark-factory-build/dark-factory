@@ -1537,7 +1537,7 @@ impl AppAuthority {
             .await?;
         revalidate_enqueue_pull(&pull, &request)?;
         if queueless {
-            return self.0.merge_head(&token, &pull.node_id, &request).await;
+            return self.0.merge_head(&token, &pull, &request).await;
         }
         match self.0.enqueue_entry(&token, &pull.node_id, &request).await {
             Err(OperationError::Refused(reason)) => Err(OperationError::Refused(reason)),
@@ -3333,13 +3333,33 @@ impl Authority {
     }
 
     /// A base with no merge queue merges the exact head directly, once every
-    /// check at that head has passed: no queue reruns them.
+    /// check at that head has passed: no queue reruns them. A head already
+    /// merged is this operation's effect, so a repeat answers it unchanged.
     async fn merge_head(
+        &self,
+        token: &RepositoryToken,
+        pull: &PullRequest,
+        request: &EnqueuePullRequest,
+    ) -> Result<EnqueueResult, OperationError> {
+        if direct_merge_due(pull) {
+            self.merge_exact_head(token, &pull.node_id, request).await?;
+        }
+        Ok(EnqueueResult {
+            pull_number: request.pull_number,
+            head_sha: request.head_sha.clone(),
+            entry_id: self
+                .merged_pull_commit(token, request.pull_number, &request.head_sha)
+                .await?,
+            state_when_recorded: "MERGED".to_owned(),
+        })
+    }
+
+    async fn merge_exact_head(
         &self,
         token: &RepositoryToken,
         pull_node_id: &str,
         request: &EnqueuePullRequest,
-    ) -> Result<EnqueueResult, OperationError> {
+    ) -> Result<(), OperationError> {
         let checks = ObservePullRequestChecks {
             repository: request.repository.clone(),
             pull_number: request.pull_number,
@@ -3362,19 +3382,13 @@ impl Authority {
             &serde_json::json!({"pull": pull_node_id, "head": request.head_sha}),
         )
         .await?;
-        if let Some(GraphQlFailure::Rejected(kinds)) = failure {
-            return Err(OperationError::Refused(RefusalReason::Rejected(kinds)));
+        // Otherwise the pull request says whether this head merged.
+        match failure {
+            Some(GraphQlFailure::Rejected(kinds)) => {
+                Err(OperationError::Refused(RefusalReason::Rejected(kinds)))
+            }
+            _ => Ok(()),
         }
-        // Whatever the mutation answered, the pull request says whether this
-        // head merged.
-        Ok(EnqueueResult {
-            pull_number: request.pull_number,
-            head_sha: request.head_sha.clone(),
-            entry_id: self
-                .merged_pull_commit(token, request.pull_number, &request.head_sha)
-                .await?,
-            state_when_recorded: "MERGED".to_owned(),
-        })
     }
 
     async fn merged_pull_commit(
@@ -4492,6 +4506,13 @@ fn revalidate_enqueue_pull(
         return Err(OperationError::Conflict);
     }
     Ok(())
+}
+
+/// Whether a queueless enqueue still has to merge: a pull already merged at
+/// the verified head needs no second mutation.
+#[cfg(any(target_arch = "wasm32", test))]
+fn direct_merge_due(pull: &PullRequest) -> bool {
+    !pull.merged
 }
 
 #[cfg(target_arch = "wasm32")]
@@ -6303,6 +6324,14 @@ mod tests {
             revalidate_enqueue_pull(&pull("edited after review"), &request),
             Err(OperationError::Conflict)
         );
+
+        // Repeating a queueless enqueue after its direct merge landed still
+        // revalidates and answers the merge without a second mutation.
+        let mut merged = pull("reviewed body");
+        assert!(direct_merge_due(&merged));
+        (merged.state, merged.merged) = ("closed".into(), true);
+        assert_eq!(revalidate_enqueue_pull(&merged, &request), Ok(()));
+        assert!(!direct_merge_due(&merged));
     }
 
     /// Ensure-queued carries no operation id and journals nothing, and a
