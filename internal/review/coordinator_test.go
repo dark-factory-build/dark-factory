@@ -402,16 +402,16 @@ func TestOwnerApprovalRefusalEscalatesOnce(t *testing.T) {
 	backend := &fakeBackend{pull: &Pull{Head: reviewRequest().Head, State: "open", MergeStateStatus: "BLOCKED"}, enqueueErr: fmt.Errorf("%w (required approval is missing for .github/workflows/ci.yml)", ErrOwnerApproval)}
 	c := Coordinator{Store: store, Backend: backend, Now: func() time.Time { return time.Unix(20, 0) }}
 	op, err := c.Advance(context.Background(), Operation{ID: "op", Request: reviewRequest(), State: "enqueued", Verdict: "allow", Submitted: true})
-	if !errors.Is(err, ErrOwnerApproval) || !op.Refused || !op.OwnerApproval || backend.enqueues != 0 || !strings.Contains(op.Escalation, "#7") || !strings.Contains(op.Escalation, ".github/workflows/ci.yml") {
+	if !errors.Is(err, ErrOwnerApproval) || !op.Refused || !op.OwnerApproval || backend.enqueues != 0 || backend.enqueueAttempts != 1 || !strings.Contains(op.Escalation, "#7") || !strings.Contains(op.Escalation, ".github/workflows/ci.yml") {
 		t.Fatalf("owner approval refusal = %+v err=%v enqueues=%d", op, err, backend.enqueues)
 	}
 	backend.enqueueErr = nil
 	// #1698: the same observation waits for the owner, still escalated, without another enqueue.
-	if waiting, err := c.Advance(context.Background(), op); err != nil || backend.enqueues != 0 || !waiting.OwnerApproval || waiting.Escalation != op.Escalation {
+	if waiting, err := c.Advance(context.Background(), op); err != nil || backend.enqueues != 0 || backend.enqueueAttempts != 1 || !waiting.OwnerApproval || waiting.Escalation != op.Escalation {
 		t.Fatalf("owner approval retried before approval: %+v err=%v enqueues=%d", waiting, err, backend.enqueues)
 	}
 	backend.pull.Review, backend.pull.MergeStateStatus = "APPROVED", "CLEAN"
-	if next, err := c.Advance(context.Background(), op); err != nil || backend.enqueues != 1 || next.Refused || next.OwnerApproval || next.Enqueues != 1 {
+	if next, err := c.Advance(context.Background(), op); err != nil || backend.enqueues != 1 || backend.enqueueAttempts != 2 || next.Refused || next.OwnerApproval || next.Enqueues != 1 {
 		t.Fatalf("owner approval did not recover: %+v err=%v enqueues=%d", next, err, backend.enqueues)
 	}
 }
