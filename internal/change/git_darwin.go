@@ -1430,11 +1430,12 @@ func RebaseWorktree(ctx context.Context, selection Selection, path string) (Work
 			return WorktreeFacts{}, newGitError(gitFailureProcess)
 		}
 	}
+	restoreArgs := append([]string{}, gitArgs...)
 	restore := func() error {
 		if !stashed {
 			return nil
 		}
-		popped, popErr := authority.run(ctx, maxGitSelectionOutput, append(gitArgs, "stash", "pop", "--index")...)
+		popped, popErr := authority.run(ctx, maxGitSelectionOutput, append(restoreArgs, "stash", "pop", "--index")...)
 		if popErr != nil {
 			return popErr
 		}
