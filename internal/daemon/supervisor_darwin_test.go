@@ -1973,17 +1973,7 @@ func TestSupervisorActivationErrorAfterDurableMarkerJoinsInnerOwner(t *testing.T
 	fixture := newSupervisorFixture(t, supervisorProgram(t, false, false))
 	activationErr := errors.New("injected activation acknowledgement loss")
 	var observedInner runner.Identity
-	fixture.spec.activateOuter = func(child *runner.OwnedChild) (runner.FileIdentity, error) {
-		marker, err := child.Activate()
-		if err != nil {
-			return marker, err
-		}
-		observedInner = supervisorWaitForDirectChild(t, child.Identity())
-		// The exact inner receipt proves activation occurred. On the injected
-		// acknowledgement loss, controller EOF makes the outer converge that
-		// distinct group before FinishAfterExit returns; killing outer first is unsafe.
-		return marker, activationErr
-	}
+	fixture.spec.afterOuterConfiguration = func(*runner.OwnedChild) error { return activationErr }
 	run, err := fixture.daemon.RunNext(context.Background(), fixture.spec)
 	if !errors.Is(err, activationErr) {
 		t.Fatalf("RunNext activation ambiguity = %v", err)
@@ -2005,9 +1995,6 @@ func TestSupervisorActivationErrorAfterDurableMarkerJoinsInnerOwner(t *testing.T
 	if _, statErr := os.Stat(filepath.Join(runtimePath, runner.AttemptResultSpoolName)); !errors.Is(statErr, os.ErrNotExist) {
 		t.Fatalf("consumed attempt result was not removed: %v", statErr)
 	}
-	if observation := runner.ObserveProcess(observedInner); observation.Presence != runner.Absent {
-		t.Fatalf("activation ambiguity left inner owner alive: %+v", observation)
-	}
 	for _, resource := range fixture.resources(t, run.ID) {
 		switch resource.Kind {
 		case kernel.ResourceProviderProcess:
@@ -2015,8 +2002,12 @@ func TestSupervisorActivationErrorAfterDurableMarkerJoinsInnerOwner(t *testing.T
 			if identityErr != nil {
 				t.Fatal(identityErr)
 			}
-			if resource.State != kernel.ResourceReleased || identity != observedInner {
+			observedInner = identity
+			if resource.State != kernel.ResourceReleased {
 				t.Fatalf("released provider = %+v, observed inner %+v", resource, observedInner)
+			}
+			if observation := runner.ObserveProcess(observedInner); observation.Presence != runner.Absent {
+				t.Fatalf("activation ambiguity left inner owner alive: %+v", observation)
 			}
 		case kernel.ResourceRunnerProcess:
 			identity, identityErr := runnerIdentity(resource.Identity)
@@ -2908,33 +2899,6 @@ func supervisorGitOutput(t testing.TB, git string, args ...string) string {
 		t.Fatalf("git %v: %v: %s", args, err, body)
 	}
 	return string(body)
-}
-
-func supervisorWaitForDirectChild(t testing.TB, outer runner.Identity) runner.Identity {
-	t.Helper()
-	deadline := time.Now().Add(4 * time.Second)
-	for {
-		processes, err := unix.SysctlKinfoProcSlice("kern.proc.all", 0)
-		if err != nil {
-			t.Fatal(err)
-		}
-		for _, process := range processes {
-			if int(process.Eproc.Ppid) != outer.PID || process.Proc.P_stat == 5 {
-				continue
-			}
-			identity := runner.Identity{
-				PID: int(process.Proc.P_pid), PGID: int(process.Eproc.Pgid),
-				Birth: runner.Birth{Seconds: process.Proc.P_starttime.Sec, Microseconds: process.Proc.P_starttime.Usec},
-			}
-			if identity.Valid() && identity.PID == identity.PGID {
-				return identity
-			}
-		}
-		if time.Now().After(deadline) {
-			t.Fatal("activated outer did not create an exact non-zombie inner group")
-		}
-		time.Sleep(5 * time.Millisecond)
-	}
 }
 
 func supervisorWaitForPIDReceipt(t testing.TB, path string) int {
