@@ -24,6 +24,8 @@ import (
 	"time"
 
 	"golang.org/x/sys/unix"
+
+	"github.com/dark-factory-build/dark-factory/internal/runner"
 )
 
 type localGitFixture struct {
@@ -811,7 +813,7 @@ func mustID(t testing.TB, format ObjectFormat, raw []byte) ObjectID {
 
 func secureTempDir(t testing.TB) string {
 	t.Helper()
-	path, err := os.MkdirTemp("/private/tmp", "dark-factory-change-")
+	path, err := os.MkdirTemp(runner.ShortTempDir(), "dark-factory-change-")
 	if err != nil {
 		t.Fatal(err)
 	}

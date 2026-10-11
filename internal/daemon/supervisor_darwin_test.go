@@ -2271,7 +2271,7 @@ func newSupervisorFixture(t *testing.T, program string) *supervisorFixture {
 func newSupervisorRoleFixture(t *testing.T, program string, role kernel.AgentRole) *supervisorFixture {
 	t.Helper()
 	baselineFDs := supervisorFDCount(t)
-	root, err := os.MkdirTemp("/private/tmp", "dark-factory-supervisor-")
+	root, err := os.MkdirTemp(runner.ShortTempDir(), "dark-factory-supervisor-")
 	if err != nil {
 		t.Fatal(err)
 	}

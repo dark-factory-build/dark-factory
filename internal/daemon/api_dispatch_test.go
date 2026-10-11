@@ -22,6 +22,7 @@ import (
 	"github.com/dark-factory-build/dark-factory/internal/api"
 	"github.com/dark-factory-build/dark-factory/internal/install"
 	"github.com/dark-factory-build/dark-factory/internal/kernel"
+	"github.com/dark-factory-build/dark-factory/internal/runner"
 )
 
 type dispatchFixture struct {
@@ -36,7 +37,7 @@ type dispatchFixture struct {
 
 func newDispatchFixture(t *testing.T) *dispatchFixture {
 	t.Helper()
-	return newDispatchFixtureAt(t, "/private/tmp")
+	return newDispatchFixtureAt(t, runner.ShortTempDir())
 }
 
 func TestBackupCreateOperatorAPI(t *testing.T) {

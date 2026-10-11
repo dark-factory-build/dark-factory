@@ -15,6 +15,7 @@ import (
 
 	"github.com/dark-factory-build/dark-factory/internal/change"
 	"github.com/dark-factory-build/dark-factory/internal/kernel"
+	"github.com/dark-factory-build/dark-factory/internal/runner"
 )
 
 func readinessProject(t *testing.T, root, base string) (*dispatchFixture, kernel.RepositoryID) {
@@ -37,7 +38,7 @@ func TestRepositoryReadinessFetchesExactNondefaultBranchWithoutChangingCheckout(
 	ctx := context.Background()
 	git := change.TrustedGitExecutable
 	seed := contentRepositoryFixture(t)
-	parent, err := os.MkdirTemp("/private/tmp", "dark-factory-readiness-")
+	parent, err := os.MkdirTemp(runner.ShortTempDir(), "dark-factory-readiness-")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -126,7 +127,7 @@ func TestRepositoryReadinessLocalBaseRepinsOnlyAFetchableOrigin(t *testing.T) {
 	ctx := context.Background()
 	git := change.TrustedGitExecutable
 	root := contentRepositoryFixture(t)
-	parent, err := os.MkdirTemp("/private/tmp", "dark-factory-readiness-")
+	parent, err := os.MkdirTemp(runner.ShortTempDir(), "dark-factory-readiness-")
 	if err != nil {
 		t.Fatal(err)
 	}

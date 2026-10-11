@@ -17,14 +17,27 @@ import (
 // testStragglerPass replaces one sweep scan in package tests; production is nil.
 var testStragglerPass func(pass int) (bool, error)
 
+// PrivateTemp is the short TMPDIR the Change worker gives a run, named from its
+// runtime directory. Worker sandboxes deny the shared /private/tmp (a grant
+// beneath it still applies), and the runtime's own tmp is too deep for a test
+// fixture's Unix socket to fit the sun_path budget.
+// ponytail: two live runs whose ids share 8 hex characters (about one in four
+// billion) share this name, and the later run's sweep would reach the earlier
+// run's processes; widen the name if run counts ever make that plausible.
+func PrivateTemp(runtime string) string {
+	name := filepath.Base(runtime)
+	return "/private/tmp/df-" + name[:min(8, len(name))]
+}
+
 // killRunStragglers kills every process of this user whose TMPDIR is inside
-// the run's private runtime root: descendants that left the
-// provider's group and session (setsid, double fork) and now live on under
-// launchd (#1403). Only the run's own processes are given those paths.
+// the run's private runtime root or PrivateTemp, then removes the latter:
+// descendants that left the provider's group and session (setsid, double
+// fork) and now live on under launchd (#1403). Only the run's own processes are given those paths.
 // ARCHITECTURE.md records why this numeric-PID sweep stays Darwin-only. Every
 // error is unresolved: cleanup was not proved, so no result may be published.
 func killRunStragglers(runtime *os.File) error {
 	root, err := fdPath(runtime)
+	roots := []string{root, PrivateTemp(root)}
 	for pass := 0; err == nil && pass < 100; pass++ {
 		var processes []unix.KinfoProc
 		found := false
@@ -35,12 +48,15 @@ func killRunStragglers(runtime *os.File) error {
 		}
 		for _, process := range processes {
 			pid := int(process.Proc.P_pid)
-			if pid != os.Getpid() && process.Proc.P_stat != darwinZombieState && environmentNames(pid, root) {
+			if pid != os.Getpid() && process.Proc.P_stat != darwinZombieState && environmentNames(pid, roots) {
 				found = true
 				_ = unix.Kill(pid, unix.SIGKILL)
 			}
 		}
 		if err == nil && !found {
+			// Best effort: what a failed removal leaves is the system's
+			// periodic temporary-file cleanup's.
+			_ = os.RemoveAll(roots[1])
 			return nil
 		}
 		time.Sleep(10 * time.Millisecond)
@@ -51,9 +67,9 @@ func killRunStragglers(runtime *os.File) error {
 	return fmt.Errorf("%w: run-process sweep: %v", ErrUnresolved, err)
 }
 
-// environmentNames reports whether pid's exec-time TMPDIR resolves inside root. kern.procargs2 is argc, the exec path and its NUL
+// environmentNames reports whether pid's exec-time TMPDIR resolves inside one of roots. kern.procargs2 is argc, the exec path and its NUL
 // padding, argc arguments, then the environment up to an empty string.
-func environmentNames(pid int, root string) bool {
+func environmentNames(pid int, roots []string) bool {
 	raw, err := unix.SysctlRaw("kern.procargs2", pid)
 	if err != nil || len(raw) < 4 {
 		return false
@@ -75,11 +91,12 @@ func environmentNames(pid int, root string) bool {
 		// token file, for one) may sit in the environment of a process that
 		// merely talks to the run, factoryd included.
 		name, value, _ := strings.Cut(string(entry), "=")
-		if name != "TMPDIR" || !strings.Contains(value, "/"+filepath.Base(root)) {
-			continue
-		}
-		if real, err := filepath.EvalSymlinks(value); err == nil && (real == root || strings.HasPrefix(real, root+"/")) {
-			return true
+		for _, root := range roots {
+			if name == "TMPDIR" && strings.Contains(value, "/"+filepath.Base(root)) {
+				if real, err := filepath.EvalSymlinks(value); err == nil && (real == root || strings.HasPrefix(real, root+"/")) {
+					return true
+				}
+			}
 		}
 	}
 }

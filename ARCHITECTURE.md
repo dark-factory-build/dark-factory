@@ -309,7 +309,8 @@ can be supported.
 
 One Darwin compatibility sweep (#1403) predates that rule: after group
 convergence the live runner kills same-user processes whose exec-time `TMPDIR`
-lies in the run's runtime root, signalling their numeric PIDs. Replacing it
+lies in the run's runtime root or short private `TMPDIR`, signalling their
+numeric PIDs, then removes that `TMPDIR`. Replacing it
 needs proof of current providers' Mac detached-process behavior, and Linux
 does not copy it. Any sweep failure counts as unproved cleanup, so the runner
 publishes no result and the attempt's resources stay unresolved.

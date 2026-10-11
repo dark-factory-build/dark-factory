@@ -16,6 +16,7 @@ import (
 	"github.com/dark-factory-build/dark-factory/internal/install"
 	"github.com/dark-factory-build/dark-factory/internal/kernel"
 	"github.com/dark-factory-build/dark-factory/internal/maintainer"
+	"github.com/dark-factory-build/dark-factory/internal/runner"
 )
 
 type roundTripFunc func(*http.Request) (*http.Response, error)
@@ -27,7 +28,7 @@ func (f roundTripFunc) RoundTrip(request *http.Request) (*http.Response, error) 
 // tenth before its reset, the polls that spent it (#1510) wait: pull request
 // refresh, the merge stage's observation and GitHub issue intake.
 func TestLowGitHubQuotaHoldsBackPolling(t *testing.T) {
-	parent, err := os.MkdirTemp("/private/tmp", "df-quota-test-")
+	parent, err := os.MkdirTemp(runner.ShortTempDir(), "df-quota-test-")
 	if err != nil {
 		t.Fatal(err)
 	}

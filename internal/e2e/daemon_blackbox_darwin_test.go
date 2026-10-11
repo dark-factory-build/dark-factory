@@ -260,7 +260,7 @@ func newBlackBoxFixture(t *testing.T) *blackBoxFixture {
 	// Short prefix: a runner binds takeover.sock inside a runtime directory,
 	// and a run's 32-character name plus that basename has to stay inside the
 	// same sun_path budget as the local API socket.
-	root, err := os.MkdirTemp("/private/tmp", "df-e2e-")
+	root, err := os.MkdirTemp(runner.ShortTempDir(), "e2e-")
 	if err != nil {
 		t.Fatal(err)
 	}
