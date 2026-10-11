@@ -5,6 +5,7 @@ import (
 	"crypto/rand"
 	"database/sql"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"strings"
 	"unicode/utf8"
@@ -192,7 +193,7 @@ func createContentTx(ctx context.Context, tx *writeTx, spec NewContent, at UnixM
 
 func createSpecialistPeerQuestionTx(ctx context.Context, tx *writeTx, source TaskID, spec NewContent, at UnixMillis) error {
 	metadata, err := ParseKnowledgeMetadata(spec.SourceReferences)
-	if err != nil || (metadata.RecordType != "contribution" && metadata.RecordType != "amendment") || metadata.TaskID == "" {
+	if err != nil || (metadata.RecordType != "contribution" && metadata.RecordType != "amendment" && metadata.RecordType != "review") || metadata.TaskID == "" {
 		return nil
 	}
 	rawTarget, err := hex.DecodeString(metadata.TaskID)
@@ -210,7 +211,14 @@ func createSpecialistPeerQuestionTx(ctx context.Context, tx *writeTx, source Tas
 		}
 		return err
 	}
-	if target.ID == source {
+	// The record reaches the target's next run; a full reference list keeps
+	// the record without the attachment.
+	if target.ProjectID == spec.ProjectID && (target.Status == TaskQueued || target.Status == TaskRunning || target.Status == TaskBlocked) {
+		if err := attachContentTx(ctx, tx, target.ID, spec.ProjectID, target.WorkRevision.Int64(), spec.ID, mustRevisionValue(1), at, true); err != nil && !errors.Is(err, ErrInvalidValue) {
+			return err
+		}
+	}
+	if target.ID == source || metadata.RecordType == "review" {
 		return nil
 	}
 	if target.ProjectID != spec.ProjectID || !peerQuestionTargetStatus(target, at.Int64()) {
@@ -481,7 +489,7 @@ func (store *Store) AttachContentToTask(ctx context.Context, task TaskID, projec
 		}
 		return tx.Rollback(err)
 	}
-	if err := attachContentTx(ctx, tx, task, project, taskWorkRevision, content, revision, at); err != nil {
+	if err := attachContentTx(ctx, tx, task, project, taskWorkRevision, content, revision, at, false); err != nil {
 		return tx.Rollback(err)
 	}
 	return tx.Commit(ctx)
@@ -513,13 +521,13 @@ func (store *Store) AttachContentForOrchestrator(ctx context.Context, digest Att
 	if err := contentScope(ctx, tx.connection, authority, content, revision.Int64()); err != nil {
 		return tx.Rollback(err)
 	}
-	if err := attachContentTx(ctx, tx, task, authority.ProjectID, taskWorkRevision, content, revision, at); err != nil {
+	if err := attachContentTx(ctx, tx, task, authority.ProjectID, taskWorkRevision, content, revision, at, false); err != nil {
 		return tx.Rollback(err)
 	}
 	return tx.Commit(ctx)
 }
 
-func attachContentTx(ctx context.Context, tx *writeTx, task TaskID, project ProjectID, taskWorkRevision int64, content ContentID, revision Revision, at UnixMillis) error {
+func attachContentTx(ctx context.Context, tx *writeTx, task TaskID, project ProjectID, taskWorkRevision int64, content ContentID, revision Revision, at UnixMillis, started bool) error {
 	var contentProject []byte
 	if err := tx.connection.QueryRowContext(ctx, "SELECT project_id FROM project_content_revisions WHERE id = ? AND revision = ?", content.Bytes(), revision.Int64()).Scan(&contentProject); err != nil {
 		if err == sql.ErrNoRows {
@@ -548,7 +556,7 @@ func attachContentTx(ctx context.Context, tx *writeTx, task TaskID, project Proj
 		}
 		return err
 	}
-	if status != TaskQueued.String() {
+	if status != TaskQueued.String() && (!started || status != TaskRunning.String() && status != TaskBlocked.String()) {
 		return ErrConflict
 	}
 	var busy bool
@@ -660,7 +668,10 @@ func (store *Store) DeprecateContentForAttempt(ctx context.Context, digest Attem
 	return deprecateContentTx(ctx, tx, id, authority.ProjectID, expected, contentProvenance(authority), at)
 }
 
-func (store *Store) TaskContentReferences(ctx context.Context, project ProjectID, task TaskID, workRevision Revision) ([]TaskContentReference, error) {
+// TaskContentReferences lists one work revision's references or, carried,
+// what a run at that revision receives: every earlier revision's references,
+// deduplicated before the bound and newest first, so the oldest drop.
+func (store *Store) TaskContentReferences(ctx context.Context, project ProjectID, task TaskID, workRevision Revision, carried bool) ([]TaskContentReference, error) {
 	if project.zero() || task.zero() || workRevision.Int64() < 1 {
 		return nil, fmt.Errorf("%w: invalid task content reference", ErrInvalidValue)
 	}
@@ -669,14 +680,18 @@ func (store *Store) TaskContentReferences(ctx context.Context, project ProjectID
 		return nil, err
 	}
 	defer connection.Close()
-	return taskContentReferencesOnConnection(ctx, connection, project, task, workRevision)
+	return taskContentReferencesOnConnection(ctx, connection, project, task, workRevision, carried)
 }
 
-func taskContentReferencesOnConnection(ctx context.Context, connection *sql.Conn, project ProjectID, task TaskID, workRevision Revision) ([]TaskContentReference, error) {
+func taskContentReferencesOnConnection(ctx context.Context, connection *sql.Conn, project ProjectID, task TaskID, workRevision Revision, carried bool) ([]TaskContentReference, error) {
 	if project.zero() || task.zero() || workRevision.Int64() < 1 {
 		return nil, fmt.Errorf("%w: invalid task content reference", ErrInvalidValue)
 	}
-	rows, err := connection.QueryContext(ctx, `SELECT task_id, project_id, task_work_revision, content_id, content_revision, attached_at_ms FROM task_content_references WHERE task_id = ? AND project_id = ? AND task_work_revision = ? ORDER BY content_id, content_revision LIMIT ?`, task.Bytes(), project.Bytes(), workRevision.Int64(), contentPageSize+1)
+	query, limit := `SELECT task_id, project_id, task_work_revision, content_id, content_revision, attached_at_ms FROM task_content_references WHERE task_id = ? AND project_id = ? AND task_work_revision = ? ORDER BY content_id, content_revision LIMIT ?`, contentPageSize+1
+	if carried {
+		query, limit = `SELECT task_id, project_id, MAX(task_work_revision) AS w, content_id, content_revision, MAX(attached_at_ms) AS a FROM task_content_references WHERE task_id = ? AND project_id = ? AND task_work_revision <= ? GROUP BY content_id, content_revision ORDER BY w DESC, a DESC, content_id, content_revision LIMIT ?`, contentPageSize
+	}
+	rows, err := connection.QueryContext(ctx, query, task.Bytes(), project.Bytes(), workRevision.Int64(), limit)
 	if err != nil {
 		return nil, err
 	}
@@ -745,5 +760,5 @@ func (store *Store) TaskContentReferencesForAttempt(ctx context.Context, digest 
 	if workRevision.Int64() > selected.WorkRevision.Int64() {
 		return nil, ErrConflict
 	}
-	return taskContentReferencesOnConnection(ctx, tx.connection, authority.ProjectID, task, workRevision)
+	return taskContentReferencesOnConnection(ctx, tx.connection, authority.ProjectID, task, workRevision, false)
 }

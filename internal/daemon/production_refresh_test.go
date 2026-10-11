@@ -72,21 +72,6 @@ func TestRefreshPreservesMergeabilityWhenListOmitsIt(t *testing.T) {
 	}
 }
 
-func TestRefreshRepairsAnUnqueuedPullThatBecomesConflicting(t *testing.T) {
-	mergeable := true
-	conflicting := false
-	head := strings.Repeat("a", 40)
-	known := []kernel.ProductionPullRequest{{Number: 7, Head: head, State: "open", Mergeable: &mergeable}}
-	observed := []kernel.ProductionPullRequest{{Number: 7, Head: head, State: "open", Mergeable: &conflicting, Base: "main"}}
-	got := newProductionConflicts(known, observed)
-	if len(got) != 1 || got[0].Number != 7 || !strings.Contains(productionConflictDetail(got[0]), "Rebase this Change") {
-		t.Fatalf("conflict transition = %+v", got)
-	}
-	if got = newProductionConflicts(observed, observed); len(got) != 0 {
-		t.Fatalf("repeated conflict retriggered: %+v", got)
-	}
-}
-
 func TestRefreshReadsQueueStateForApprovedPulls(t *testing.T) {
 	head := strings.Repeat("a", 40)
 	pull := kernel.ProductionPullRequest{Number: 7, Head: head, Base: "main"}
@@ -249,7 +234,7 @@ func TestRefreshedChecksLightTheirWorkflowJobs(t *testing.T) {
 // the same record, so a passing re-run replaces the failure it retried.
 func TestARerunReplacesTheCheckItRetried(t *testing.T) {
 	head := strings.Repeat("f", 40)
-	runs := []string{`{"name":"go","status":"completed","conclusion":"failure","url":"https://github.com/o/r/actions/runs/5/job/91"}`, `{"name":"go","status":"completed","conclusion":"success","url":"https://github.com/o/r/actions/runs/6/job/97"}`}
+	runs := []string{`{"name":"go","status":"completed","conclusion":"failure","url":"https://github.com/o/r/actions/runs/5/job/91"}`, `{"name":"go","status":"completed","conclusion":"success","required":true,"url":"https://github.com/o/r/actions/runs/6/job/97"}`}
 	var got []kernel.ProductionCheck
 	for _, run := range runs {
 		call := func(context.Context, json.RawMessage, map[string]uint64) (json.RawMessage, error) {
@@ -261,7 +246,7 @@ func TestARerunReplacesTheCheckItRetried(t *testing.T) {
 		}
 		got = append(got, checks[0])
 	}
-	if got[0].ID != got[1].ID || got[1].Conclusion != "success" || got[0].URL == got[1].URL {
+	if got[0].ID != got[1].ID || got[1].Conclusion != "success" || got[0].URL == got[1].URL || got[0].Required || !got[1].Required {
 		t.Fatalf("the re-run did not replace the failure: %+v", got)
 	}
 }

@@ -1,4 +1,3 @@
-import { ProjectOutcomes } from "./project-outcomes.js";
 import { DirectQuestions, authorName } from "./project-board.js";
 import type { TaskContentChip } from "./console-sidebar.js";
 import { useEffect, useRef, useState } from "react";
@@ -29,7 +28,7 @@ type LibraryProps = {
   board?: boolean; entity?: string; repository?: string; initialID?: string; initialRevision?: number; onSource?: (entity: string) => void; onRecord?: (kind: string, id: string, project: string) => void | Promise<void>;
 };
 
-/** An intentional entry loads metadata; an unused Settings panel stays lazy. */
+/** The Library contains curated documents; outcome reading and acceptance live in Work → By mission. */
 export function ProjectLibrary({ state, call, onUseInTask, board = false, entity = "", repository = "", initialID = "", initialRevision, onSource, onRecord, open = false, initialProjectId = "" }: LibraryProps & { open?: boolean; initialProjectId?: string }) {
   const [expanded, setExpanded] = useState(false);
   const [view, setView] = useState("documents");
@@ -40,8 +39,8 @@ export function ProjectLibrary({ state, call, onUseInTask, board = false, entity
   const contents = <>
     {projects.length < 2 ? null : <label>Project <select value={projectID} onChange={(event) => setProject(event.target.value)}>{projects.map((item) => <option key={item.id} value={item.id}>{item.name}</option>)}</select></label>}
     {board ? <p className="dfProjectLibrary__purpose">Ask questions, share findings and follow replies with agents and operators. Threads are retained for anyone to read; reusable guidance belongs in the Library.</p>
-      : <nav className="dfProjectLibrary__actions dfProjectLibrary__views" aria-label="Library views">{[["documents", "Documents"], ["outcomes", "Outcomes"]].map(([value, label]) => <button key={value} type="button" aria-pressed={view === value} onClick={() => setView(value!)}>{label}</button>)}</nav>}
-    {view === "outcomes" && !board ? <ProjectOutcomes key={projectID} project={projectID} call={call} /> : <LibraryDocuments key={`${projectID}:${scoped ? `${entity}:${repository}:${initialID}:${initialRevision}` : ""}`} projectID={projectID} state={state} call={call} onUseInTask={onUseInTask} board={board} entity={scoped ? entity : ""} repository={scoped ? repository : ""} initialID={scoped ? initialID : ""} initialRevision={scoped ? initialRevision : undefined} onSource={onSource} onRecord={onRecord} />}
+      : <nav className="dfProjectLibrary__actions dfProjectLibrary__views" aria-label="Library views">{[["documents", "Documents"]].map(([value, label]) => <button key={value} type="button" aria-pressed={view === value} onClick={() => setView(value!)}>{label}</button>)}</nav>}
+    <LibraryDocuments key={`${projectID}:${scoped ? `${entity}:${repository}:${initialID}:${initialRevision}` : ""}`} projectID={projectID} state={state} call={call} onUseInTask={onUseInTask} board={board} entity={scoped ? entity : ""} repository={scoped ? repository : ""} initialID={scoped ? initialID : ""} initialRevision={scoped ? initialRevision : undefined} onSource={onSource} onRecord={onRecord} />
     {board ? <DirectQuestions state={state} projectID={projectID} onOpen={onRecord === undefined ? undefined : (id) => void Promise.resolve(onRecord("peer_question", id, projectID)).catch(() => undefined)} /> : null}
   </>;
   return open || board || initialID ? <section className="dfProjectLibrary" aria-label={board ? "Project board" : "Project library"}>{contents}</section>

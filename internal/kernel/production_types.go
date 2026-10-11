@@ -52,6 +52,7 @@ type ProductionCheck struct {
 	State        string          `json:"state"`
 	Conclusion   string          `json:"conclusion"`
 	URL          string          `json:"url"`
+	Required     bool            `json:"required"` // the merge gate counts it (review.Pull); always written, so a record without it is from before and is read again
 	PullRequests []uint64        `json:"pull_requests"`
 	Jobs         []ProductionJob `json:"jobs"`
 	Overflow     int             `json:"overflow,omitempty"`

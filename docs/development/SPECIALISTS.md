@@ -84,7 +84,17 @@ Every record carries `status` (`tentative` unless verified), `evidence`
 - The operator's read views, through your attempt: `attempt status`,
   `attempt human list`, `attempt intake list|config [--project ID]` and
   `attempt task read --task ID --revision N`. Their write forms are refused.
+- `attempt report [--since 24h] [--by half-day]` (runs, failure %, tokens by
+  worker, overseer and specialist, merges and tokens per merge, top tasks and
+  pull requests) and `attempt why --pull N | --task ID`, for your project. To
+  measure a merged fix, cite `attempt report` for buckets before and after it.
 - Your checkout. Run tests or builds only if your question needs them.
+- Measures, offline (Architecture and Operations, at least weekly):
+  `scripts/hotspots.sh --since=PRIOR_DATE -- internal cmd ':!*_test.go'`
+  (most-changed files and pairs that change together), `go tool deadcode
+  ./...` (Go unreachable outside tests) and `go tool dupl -t 100 ./internal
+  ./cmd` (duplicated blocks). Cite the numbers, and turn each finding into a
+  deletion or consolidation proposal naming what goes.
 - GitHub, unauthenticated only (60 requests an hour shared by this machine;
   never use a token; use few): issues, PRs, Actions runs, e.g.
   `curl -s https://api.github.com/repos/OWNER/REPO/actions/runs?per_page=30`.

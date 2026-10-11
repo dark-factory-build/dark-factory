@@ -107,6 +107,8 @@ type IntakeResult struct {
 	ReviewedRevision   uint64            `json:"reviewed_revision,omitempty"`
 	AcceptanceID       string            `json:"acceptance_id,omitempty"`
 	TaskID             string            `json:"task_id,omitempty"`
+	// Timing is each step's duration in a preview or poll pass.
+	Timing string `json:"timing,omitempty"`
 }
 
 func ValidIntakeInput(input IntakeInput) bool {

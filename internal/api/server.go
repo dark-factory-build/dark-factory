@@ -51,6 +51,7 @@ const (
 	CallSendBack
 	CallSendBackTask
 	CallTaskRead
+	CallProjectContent
 	CallWebStatus
 	CallWebPair
 	CallWebListClients
@@ -86,6 +87,7 @@ const (
 	CallOutcomeWrite
 	CallOutcomeRead
 	CallOutcomeList
+	CallReport
 	CallGitHubConnection
 	CallIntake
 	CallMaintainer
@@ -132,6 +134,7 @@ type Call struct {
 	peerExpectedHead   uint64
 	sendBack           SendBackInput
 	taskRead           TaskReadInput
+	projectContent     ProjectContentInput
 	overseerTask       OverseerTaskCreateInput
 	overseerSnapshot   OverseerSnapshotInput
 	overseerTaskEdit   OverseerTaskUpdateInput
@@ -153,6 +156,7 @@ type Call struct {
 	outcomeWrite       OutcomeWriteInput
 	outcomeRead        OutcomeReadInput
 	outcomeList        OutcomeListInput
+	report             ReportInput
 	release            ReleaseInput
 	webClient          WebClientRevocationInput
 	webAfter           string
@@ -169,6 +173,8 @@ type Call struct {
 }
 
 func (call Call) IntakeInput() (IntakeInput, bool) { return call.intake, call.kind == CallIntake }
+
+func (call Call) ReportInput() (ReportInput, bool) { return call.report, call.kind == CallReport }
 
 func (call Call) GitHubConnectionInput() (GitHubConnectionInput, bool) {
 	return call.githubConnection, call.kind == CallGitHubConnection
@@ -195,7 +201,7 @@ func (call Call) AttemptDigest() (AttemptDigest, bool) {
 		return AttemptDigest{}, false
 	}
 	switch call.kind {
-	case CallSnapshot, CallHumanRequests, CallTaskRead, CallIntake, CallMaintainer, CallAttemptTask, CallAttemptSource, CallSucceed, CallBlock, CallFail, CallRequestHuman, CallPeerStatus, CallPeerAsk, CallPeerAnswer, CallTerminalObserve, CallSendBack, CallOverseerSnapshot, CallOverseerEnqueueTask, CallOverseerUpdateTask, CallOverseerUpdateAgent, CallOverseerStopRun, CallOverseerReplaceRun, CallOverseerMessageWorker, CallOverseerInterruptWorker, CallOverseerReplyHuman, CallContentCreate, CallContentRevise, CallContentDeprecate, CallContentList, CallContentRead, CallContentBody, CallContentAttach, CallContentAttachments, CallOutcomeWrite, CallOutcomeRead, CallOutcomeList:
+	case CallSnapshot, CallHumanRequests, CallTaskRead, CallIntake, CallReport, CallMaintainer, CallAttemptTask, CallAttemptSource, CallSucceed, CallBlock, CallFail, CallRequestHuman, CallPeerStatus, CallPeerAsk, CallPeerAnswer, CallTerminalObserve, CallSendBack, CallOverseerSnapshot, CallOverseerEnqueueTask, CallOverseerUpdateTask, CallOverseerUpdateAgent, CallOverseerStopRun, CallOverseerReplaceRun, CallOverseerMessageWorker, CallOverseerInterruptWorker, CallOverseerReplyHuman, CallContentCreate, CallContentRevise, CallContentDeprecate, CallContentList, CallContentRead, CallContentBody, CallContentAttach, CallContentAttachments, CallOutcomeWrite, CallOutcomeRead, CallOutcomeList:
 		return call.digest, true
 	default:
 		return AttemptDigest{}, false
@@ -333,6 +339,9 @@ func (call Call) SendBackInput() (SendBackInput, bool) {
 
 func (call Call) TaskReadInput() (TaskReadInput, bool) {
 	return call.taskRead, call.kind == CallTaskRead
+}
+func (call Call) ProjectContentInput() (ProjectContentInput, bool) {
+	return call.projectContent, call.kind == CallProjectContent
 }
 
 func (call Call) WebClientRevocationInput() (WebClientRevocationInput, bool) {
@@ -499,6 +508,11 @@ func NewAttemptSourceReply(source RetainedChangeHandoff) (Reply, error) {
 func NewTaskTextReply(value TaskText) (Reply, error) {
 	if !validID(value.TaskID) || value.Revision == 0 || !validText(value.Instruction, 0, 8192) || !validText(value.Feedback, 0, 8192) || value.Outcome != nil && !validText(*value.Outcome, 0, 8192) || value.NextOffset != nil && *value.NextOffset == 0 {
 		return Reply{}, ErrInvalidInput
+	}
+	for _, question := range value.PeerQuestions {
+		if !validPeerQuestion(question) {
+			return Reply{}, ErrInvalidInput
+		}
 	}
 	return Reply{kind: replyTaskText, taskText: value}, nil
 }
@@ -896,7 +910,11 @@ func decodeCall(domain byte, bearer credential, encoded []byte) (Call, RemoteErr
 			return Call{}, RemoteInvalidRequest
 		}
 	case CallTaskRead:
-		if err := decodeExact(request.Params, &call.taskRead); err != nil || !validID(call.taskRead.TaskID) || call.taskRead.ExpectedRevision == 0 || call.taskRead.Offset > uint64(^uint64(0)>>1) {
+		if err := decodeExact(request.Params, &call.taskRead); err != nil || !validID(call.taskRead.TaskID) || call.taskRead.ExpectedRevision == 0 || call.taskRead.Offset > uint64(^uint64(0)>>1) || call.taskRead.PeerOffset > uint64(^uint64(0)>>1) || call.taskRead.PeerHead > uint64(^uint64(0)>>1) || call.taskRead.PeerOffset != 0 && call.taskRead.PeerHead == 0 {
+			return Call{}, RemoteInvalidRequest
+		}
+	case CallProjectContent:
+		if err := decodeExact(request.Params, &call.projectContent); err != nil || !validProjectContentInput(call.projectContent) {
 			return Call{}, RemoteInvalidRequest
 		}
 	case CallCompactStorage:
@@ -1004,7 +1022,7 @@ func decodeCall(domain byte, bearer credential, encoded []byte) (Call, RemoteErr
 			return Call{}, RemoteInvalidRequest
 		}
 	case CallOverseerUpdateAgent, CallOperatorUpdateAgent:
-		if err := decodeExact(request.Params, &call.overseerAgent); err != nil || !validID(call.overseerAgent.AgentID) || call.overseerAgent.ExpectedRevision == 0 || kind == CallOverseerUpdateAgent && call.overseerAgent.Appearance != nil {
+		if err := decodeExact(request.Params, &call.overseerAgent); err != nil || !validID(call.overseerAgent.AgentID) || call.overseerAgent.ExpectedRevision == 0 || kind == CallOverseerUpdateAgent && (call.overseerAgent.Appearance != nil || call.overseerAgent.IdleAfterSeconds != nil || call.overseerAgent.IdleWakeOn != nil || call.overseerAgent.Model != nil || call.overseerAgent.ReasoningEffort != nil) {
 			return Call{}, RemoteInvalidRequest
 		}
 	case CallOverseerStopRun, CallOperatorStopRun:
@@ -1072,6 +1090,10 @@ func decodeCall(domain byte, bearer credential, encoded []byte) (Call, RemoteErr
 		}
 	case CallOutcomeList:
 		if err := decodeExact(request.Params, &call.outcomeList); err != nil || !validText(call.outcomeList.ProjectID, 1, 64) || call.outcomeList.Limit > MaxContentPageItems {
+			return Call{}, RemoteInvalidRequest
+		}
+	case CallReport:
+		if err := decodeExact(request.Params, &call.report); err != nil || !validReportInput(call.report) {
 			return Call{}, RemoteInvalidRequest
 		}
 	case CallRelease:
@@ -1175,6 +1197,8 @@ func methodKind(method string) (CallKind, byte) {
 		return CallSendBackTask, operatorDomain
 	case "task_read":
 		return CallTaskRead, operatorDomain
+	case "project_content":
+		return CallProjectContent, operatorDomain
 	case "web_status":
 		return CallWebStatus, operatorDomain
 	case "web_pair":
@@ -1271,6 +1295,10 @@ func methodKind(method string) (CallKind, byte) {
 		return CallTaskRead, attemptDomain
 	case "attempt_intake":
 		return CallIntake, attemptDomain
+	case "report":
+		return CallReport, operatorDomain
+	case "attempt_report":
+		return CallReport, attemptDomain
 	case "human_reply":
 		return CallHumanReply, operatorDomain
 	case "human_cancel":
@@ -1363,6 +1391,8 @@ func replyMatches(kind CallKind, reply replyKind) bool {
 		return reply == replyWorkerOperation
 	case CallTaskRead:
 		return reply == replyTaskText
+	case CallProjectContent:
+		return reply == replyContent
 	case CallTerminalObserve:
 		return reply == replyTerminalObservation
 	case CallOperatorTerminalObserve:
@@ -1383,7 +1413,7 @@ func replyMatches(kind CallKind, reply replyKind) bool {
 		return reply == replyWebClients
 	case CallWebRevokeClient:
 		return reply == replyWebRevoke
-	case CallMaintainer, CallGitHubConnection, CallIntake, CallRelease, CallWebPair:
+	case CallMaintainer, CallGitHubConnection, CallIntake, CallReport, CallRelease, CallWebPair:
 		return reply == replyContent
 	case CallRemoteStatus:
 		return reply == replyRemoteStatus

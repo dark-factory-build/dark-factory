@@ -24,7 +24,7 @@ test("mission drafts survive state updates and creation waits for acknowledgemen
   let tree;
   const props = { state: fixtureState, projectId: project, active: true, call, onProject() {} };
   await act(async () => { tree = create(createElement(MissionsPanel, props)); });
-  assert.equal(calls[0].input.kind, "mission");
+  assert.equal(calls[0].input.limit, 1);
   await act(async () => button(tree, "New mission").props.onClick());
   await act(async () => tree.root.findAllByType("textarea")[0].props.onChange({ target: { value: "Ship the operator interface" } }));
   await act(async () => tree.root.findAllByType("textarea")[1].props.onChange({ target: { value: "Verified on desktop and phone" } }));
@@ -99,5 +99,31 @@ test("mission details lead with action and open related tasks without a nested i
   assert.equal(tree.root.findAllByProps({"aria-label": "Work details"}).length, 0);
   await act(async () => button(tree, "Back to Missions").props.onClick());
   assert.ok(tree.root.findAllByType("button").some(node => node.children[0] === mission.objective));
+  await act(async () => tree.unmount());
+});
+
+test("By mission keeps non-mission outcomes reachable and accepts them in place", async () => {
+  const outcome = { id: "outcome", kind: "outcome", objective: "Record the investigation", state: "open" };
+  const calls = [];
+  let tree;
+  const call = async (operation, input) => {
+    calls.push({ operation, input });
+    if (operation === "outcome_list") return { items: [outcome] };
+    if (operation === "outcome_read") return { ...outcome, revision: 2, document: { ...outcome, criteria: "Evidence is recorded" } };
+    if (operation === "outcome_write") return { ...outcome, revision: 3, state: "accepted", document: { ...input.document } };
+    throw new Error(`unexpected ${operation}`);
+  };
+  await act(async () => { tree = create(createElement(MissionsPanel, { state: fixtureState, projectId: project, active: true, call })); });
+  await act(async () => tree.root.findAllByType("button").find((node) => node.children[0] === outcome.objective).props.onClick());
+  assert.equal(calls.filter(({ operation }) => operation === "mission_tasks").length, 0);
+  await act(async () => button(tree, "Accept outcome").props.onClick());
+  const write = calls.find(({ operation }) => operation === "outcome_write");
+  assert.equal(write.input.id, outcome.id);
+  assert.equal(write.input.expected_revision, 2);
+  assert.equal(write.input.document.state, "accepted");
+  assert.match(write.input.document.judgment, /^authorized judgment:/);
+  assert.ok(write.input.document.conclusion);
+  await act(async () => button(tree, "Back to Missions").props.onClick());
+  assert.match(JSON.stringify(tree.toJSON()), /accepted/);
   await act(async () => tree.unmount());
 });

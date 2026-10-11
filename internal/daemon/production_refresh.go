@@ -17,7 +17,6 @@ import (
 	"github.com/dark-factory-build/dark-factory/internal/kernel"
 	"github.com/dark-factory-build/dark-factory/internal/maintainer"
 	"github.com/dark-factory-build/dark-factory/internal/opgraph"
-	"github.com/dark-factory-build/dark-factory/internal/review"
 )
 
 const productionRefreshPRLimit = 100
@@ -65,8 +64,6 @@ func (daemon *Daemon) refreshProduction(ctx context.Context, project kernel.Proj
 			LogFactoryd(daemon.log, "factoryd: refresh %s: %v\n", identity.PublicationRepository, err)
 			continue
 		}
-		corrections := changedProductionHeads(known, observation.PullRequests)
-		conflicts := newProductionConflicts(known, observation.PullRequests)
 		at, err := daemon.timestamp()
 		if err != nil {
 			return err
@@ -80,55 +77,9 @@ func (daemon *Daemon) refreshProduction(ctx context.Context, project kernel.Proj
 				daemon.setHosts("github\x00"+identity.PublicationRepository, hosts)
 			}
 		}
-		prepared := make([]review.Operation, 0, len(corrections))
-		changed := make(map[uint64]bool, len(corrections))
-		for _, correction := range corrections {
-			op, err := daemon.preparePublishedReview(ctx, project, identity.PublicationRepository, correction.Number, correction.Head)
-			if err != nil {
-				return err
-			}
-			prepared = append(prepared, op)
-			changed[correction.Number] = true
+		if err := daemon.store.RecordProductionObservation(ctx, project, observation, at); err != nil {
+			return err
 		}
-		for _, conflict := range conflicts {
-			if changed[conflict.Number] {
-				continue
-			}
-			if _, found, err := daemon.store.PublishedChangeID(ctx, project, identity.PublicationRepository, conflict.Number); err != nil {
-				return err
-			} else if !found {
-				continue
-			}
-			op, err := daemon.preparePublishedReview(ctx, project, identity.PublicationRepository, conflict.Number, conflict.Head)
-			if err != nil {
-				return err
-			}
-			op.State, op.RoutePending, op.Detail = "ejected", true, productionConflictDetail(conflict)
-			prepared = append(prepared, op)
-		}
-		if len(prepared) == 0 {
-			if err := daemon.store.RecordProductionObservation(ctx, project, observation, at); err != nil {
-				return err
-			}
-		} else {
-			claims := make([]kernel.ProductionReviewOperation, 0, len(prepared))
-			for _, op := range prepared {
-				claims = append(claims, kernel.ProductionReviewOperation{ID: op.ID, Document: op})
-			}
-			if err := daemon.store.RecordProductionObservationWithReviewOperations(ctx, project, observation, claims, at); err != nil {
-				return err
-			}
-		}
-		for _, op := range prepared {
-			if op.RoutePending && op.State == "ejected" && strings.Contains(op.Detail, "conflicts with") {
-				if err := daemon.repairPublishedConflict(ctx, project, identity.PublicationRepository, op); err != nil {
-					LogFactoryd(daemon.log, "factoryd: repair PR #%d: %v\n", op.Request.PullNumber, err)
-				}
-			} else {
-				daemon.launchReview(project, op)
-			}
-		}
-		daemon.advanceReviewOperations(ctx, false)
 		recordCIObservations(daemon.runtimeStore(), repository.ID.String(), observation, at.Int64())
 	}
 	return nil
@@ -149,47 +100,6 @@ func (daemon *Daemon) refreshProductionDetached(project kernel.ProjectID) {
 			LogFactoryd(daemon.log, "factoryd: refresh %s: %v\n", project, err)
 		}
 	}()
-}
-
-func changedProductionHeads(known []kernel.ProductionPullRequest, observed []kernel.ProductionPullRequest) []kernel.ProductionPullRequest {
-	prior := make(map[uint64]kernel.ProductionPullRequest, len(known))
-	for _, pull := range known {
-		prior[pull.Number] = pull
-	}
-	changed := make([]kernel.ProductionPullRequest, 0)
-	for _, pull := range observed {
-		old, ok := prior[pull.Number]
-		if ok && old.Head != "" && !strings.EqualFold(old.Head, pull.Head) && pull.State == "open" {
-			changed = append(changed, pull)
-		}
-	}
-	return changed
-}
-
-func newProductionConflicts(known, observed []kernel.ProductionPullRequest) []kernel.ProductionPullRequest {
-	prior := make(map[uint64]kernel.ProductionPullRequest, len(known))
-	for _, pull := range known {
-		prior[pull.Number] = pull
-	}
-	conflicts := make([]kernel.ProductionPullRequest, 0)
-	for _, pull := range observed {
-		if pull.State == "open" && productionPullConflict(pull) && !productionPullConflict(prior[pull.Number]) {
-			conflicts = append(conflicts, pull)
-		}
-	}
-	return conflicts
-}
-
-func productionPullConflict(pull kernel.ProductionPullRequest) bool {
-	return pull.Mergeable != nil && !*pull.Mergeable || strings.EqualFold(pull.MergeState, "dirty")
-}
-
-func productionConflictDetail(pull kernel.ProductionPullRequest) string {
-	base := pull.Base
-	if base == "" {
-		base = "main"
-	}
-	return fmt.Sprintf("Exact head %s conflicts with %s. Rebase this Change onto origin/%s and resolve the conflict.", pull.Head, base, base)
 }
 
 // githubQuotaLow holds back non-urgent GitHub polling (pull request refresh,
@@ -561,6 +471,7 @@ func readMaintainerChecks(ctx context.Context, call maintainerMCP, repository st
 			Status     string  `json:"status"`
 			Conclusion *string `json:"conclusion"`
 			URL        string  `json:"url"`
+			Required   bool    `json:"required"`
 		} `json:"checks"`
 	}
 	if json.Unmarshal(content, &value) != nil || !strings.EqualFold(value.Head, pr.Head) || len(value.Checks) > 100 {
@@ -580,7 +491,7 @@ func readMaintainerChecks(ctx context.Context, call maintainerMCP, repository st
 			conclusion = *check.Conclusion
 		}
 		key := sha256.Sum256([]byte(strings.ToLower(pr.Head) + "\x00" + check.Name))
-		checks = append(checks, kernel.ProductionCheck{ID: hex.EncodeToString(key[:16]), Name: check.Name, Revision: strings.ToLower(pr.Head), Scope: "head", State: check.Status, Conclusion: conclusion, URL: check.URL, PullRequests: []uint64{pr.Number}, Jobs: []kernel.ProductionJob{}})
+		checks = append(checks, kernel.ProductionCheck{ID: hex.EncodeToString(key[:16]), Name: check.Name, Revision: strings.ToLower(pr.Head), Scope: "head", State: check.Status, Conclusion: conclusion, URL: check.URL, Required: check.Required, PullRequests: []uint64{pr.Number}, Jobs: []kernel.ProductionJob{}})
 	}
 	return checks, nil
 }

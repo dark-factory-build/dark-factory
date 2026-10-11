@@ -433,7 +433,7 @@ func TestBrowserEnqueuePinsContentAtomically(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	refs, err := store.TaskContentReferences(ctx, project.ID, result.Task.ID, result.Task.WorkRevision)
+	refs, err := store.TaskContentReferences(ctx, project.ID, result.Task.ID, result.Task.WorkRevision, false)
 	if err != nil || len(refs) != 1 || refs[0].ContentID != content.ID || refs[0].ContentRevision != content.Revision {
 		t.Fatalf("pinned references: %+v %v", refs, err)
 	}

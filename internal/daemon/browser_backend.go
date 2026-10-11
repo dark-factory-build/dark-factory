@@ -722,7 +722,7 @@ func (backend *browserBackend) UpdateTask(ctx context.Context, rawClient [browse
 	}
 	var task kernel.Task
 	if retry {
-		task, err = backend.store.RetryTaskForOperator(ctx, taskID, expected, assigned, at)
+		task, err = backend.store.RetryTask(ctx, nil, taskID, expected, assigned, at, 0)
 	} else {
 		task, err = backend.store.UpdateTask(ctx, taskID, expected, patch, at)
 	}

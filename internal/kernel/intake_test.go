@@ -347,9 +347,10 @@ func TestAcceptedIntakeImportsOnceAcrossOverlappingSourcesAndWithdrawal(t *testi
 	}
 }
 
-// An intake poll replays every already-imported issue on each tick, so a
-// replay must not walk the whole store; a new import still validates first.
-func TestIntakeImportReplaySkipsWholeStoreValidation(t *testing.T) {
+// An intake poll accepts, imports, and offers a retry to each issue on every
+// tick, so none of them may walk the whole store (#1679, #1754); the operator's
+// retry still does.
+func TestIntakeSkipsWholeStoreValidation(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
 	store, _ := newTestStore(t)
@@ -400,8 +401,19 @@ func TestIntakeImportReplaySkipsWholeStoreValidation(t *testing.T) {
 	if replay, err := store.ImportIntakeAcceptanceWithPriority(ctx, imported.ID, mustTime(t, 7), source, 0); err != nil || replay.ID != task.ID {
 		t.Fatalf("replay of an imported issue = %+v, %v", replay, err)
 	}
-	if _, err := store.ImportIntakeAcceptanceWithPriority(ctx, pending.ID, mustTime(t, 7), source, 0); !errors.Is(err, ErrCorruptState) {
-		t.Fatalf("new import over corrupt history = %v, want ErrCorruptState", err)
+	if _, err := store.ImportIntakeAcceptanceWithPriority(ctx, pending.ID, mustTime(t, 7), source, 0); err != nil {
+		t.Fatalf("new import = %v", err)
+	}
+	third := intakeSnapshotForTest()
+	third.IssueNumber, third.NodeID = 9, "I_kwDOThird"
+	if _, err := store.AcceptIntakeSnapshot(ctx, source.ID, third, mustTime(t, 8)); err != nil {
+		t.Fatalf("new acceptance = %v", err)
+	}
+	if _, err := store.RetryTask(ctx, nil, task.ID, task.Revision, AgentID{}, mustTime(t, 9), IntakeRetryLimit); !errors.Is(err, ErrConflict) {
+		t.Fatalf("intake retry of a queued task = %v, want ErrConflict", err)
+	}
+	if _, err := store.RetryTask(ctx, nil, task.ID, task.Revision, AgentID{}, mustTime(t, 9), 0); !errors.Is(err, ErrCorruptState) {
+		t.Fatalf("operator retry over corrupt history = %v, want ErrCorruptState", err)
 	}
 }
 

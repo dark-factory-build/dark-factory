@@ -72,7 +72,8 @@ fixed head. This private, project-scoped view contains workers, task objective a
 result excerpts, active runs, questions and explicit intervention history. On an
 ordinary causal wake, the standing task appends a `Factory causal wake` record:
 worker task and open pull request counts, one summary line per due task, and
-each open escalation. Act on the summarized items; use `overseer status --task`
+each open escalation with its pull request's `why` line beneath it (head,
+checks, review, queue, task, and whom it waits on). Act on the summarized items; use `overseer status --task`
 only when a line is insufficient. `mode=full` is the explicit initial/overflow
 recovery signal. Do not reconstruct an unchanged project merely because the
 overseer woke. Status returns four entries from each collection. When
@@ -217,8 +218,19 @@ eligible same-project handoffs can be read in one attempt.
   and the observe tools. Never
   `git push`, never edit the operator's checkout, never write into a retained
   Change's worktree or branch.
+- Close a superseded pull request with `update_pull_request_body` and
+  `close: true`, naming its successor in the body, then cancel its task.
 - Never record a review verdict yourself. The review is a separate headless
-  session started by factoryd; you read its App receipt.
+  session started by factoryd; you read its App receipt. A BLOCK of record
+  stands at its exact head (#1300): no fresh review clears it, only a new head
+  does. `attempt review` requests one fresh exact-head review of a head with
+  no verdict of record, such as one whose review failed or never ran. A BLOCK
+  you have checked and found wrong goes back once with that evidence, for a
+  change that moves the head. After a second BLOCK on the same task, close
+  its pull request and re-scope the work instead of sending it back again.
+- `attempt intake list` reads the project's intake sources and sync health.
+  `attempt why --pull N | --task ID` says where one stands and whom it waits
+  on; `attempt report` measures runs, tokens and merges.
   Do not run a nested provider or grant local commands Maintainer credentials.
 - Publish through the App yourself. Never delegate publication to a worker:
   only your launch pre-approves the Maintainer tools, so a worker's
@@ -557,13 +569,16 @@ the full gate. The reviewer is a separate session that can read only the reviewe
 checkout (see providers.md), never the author or overseer. Never create a
 review task for a worker, record a verdict, enqueue, or wait on that pipeline.
 
+Each head goes back to its task at most once per review. A task that answers
+a REQUEST_CHANGES without a new head gets one more review of that head, which
+reads its answer; a conflicting head factoryd first rebases itself.
+
 factoryd wakes you with `Escalated: factoryd cannot advance OWNER/REPO#N at
 exact head HEAD: ...` only when it cannot advance a pull request: a review that
-failed twice, an enqueue the App refused, a send-back that reached no task, or
-a change past two repair rounds. An enqueue refusal is escalated at once and
-the operation stays live: one awaiting CODEOWNERS approval waits for it, and an
-UNPROCESSABLE one is retried up to three times, then again whenever the head's
-checks or review state change. Only invalid input is final for that head.
+failed twice, a task that answered a send-back without a new head (a disputed
+block upheld by its second review included), or an action (enqueue, send-back,
+review) that kept failing for 30 minutes and now waits for the pull request to
+change. A CODEOWNERS refusal is escalated at once and waits for the owner.
 Resolve the cause or raise it with
 `attempt request-human` naming the pull request; never start another review.
 

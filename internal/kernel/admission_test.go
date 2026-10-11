@@ -166,7 +166,7 @@ func TestAdmissionConsumesExactSuccessfulProducerRevision(t *testing.T) {
 	if err != nil || !found {
 		t.Fatalf("producer task after success: %+v, %v", producerTask, err)
 	}
-	if _, err := store.SendBackTask(ctx, producer.TaskID, producerTask.Revision, changeHead(t, store, producer.TaskID), "correct producer", mustTime(t, 64)); err != nil {
+	if _, err := store.SendBackTask(ctx, nil, producer.TaskID, producerTask.Revision, changeHead(t, store, producer.TaskID), "correct producer", mustTime(t, 64)); err != nil {
 		t.Fatal(err)
 	}
 	connection.Close()
@@ -227,7 +227,7 @@ func TestAdmissionConsumesExactSuccessfulProducerRevision(t *testing.T) {
 	if err != nil || !found {
 		t.Fatalf("consumer task after success: %+v, found=%v, err=%v", consumerTask, found, err)
 	}
-	if _, err := store.SendBackTask(ctx, consumer.ID, consumerTask.Revision, changeHead(t, store, consumer.ID), "correct consumer", mustTime(t, 106)); err != nil {
+	if _, err := store.SendBackTask(ctx, nil, consumer.ID, consumerTask.Revision, changeHead(t, store, consumer.ID), "correct consumer", mustTime(t, 106)); err != nil {
 		t.Fatal(err)
 	}
 	corrected, err := store.AdmitNext(ctx, admissionKeys(t, 240, nil), mustTime(t, 107))
@@ -1141,11 +1141,11 @@ func TestUnsucceededProducerCarriesPrerequisitePins(t *testing.T) {
 		{name: "requeue", role: RoleOrchestrator, proposal: neverStarted, requeue: func(*Store, Task) error { return nil }},
 		{name: "overseer-limit", role: RoleOrchestrator, proposal: overseerLimit, requeue: func(*Store, Task) error { return nil }},
 		{name: "retry", role: RoleWorker, proposal: failed, requeue: func(store *Store, task Task) error {
-			_, err := store.RetryTaskForOperator(context.Background(), task.ID, task.Revision, AgentID{}, mustTime(t, 70))
+			_, err := store.RetryTask(context.Background(), nil, task.ID, task.Revision, AgentID{}, mustTime(t, 70), 0)
 			return err
 		}},
 		{name: "send-back", role: RoleWorker, proposal: failed, requeue: func(store *Store, task Task) error {
-			_, err := store.SendBackTask(context.Background(), task.ID, task.Revision, changeHead(t, store, task.ID), "again", mustTime(t, 70))
+			_, err := store.SendBackTask(context.Background(), nil, task.ID, task.Revision, changeHead(t, store, task.ID), "again", mustTime(t, 70))
 			return err
 		}},
 	} {

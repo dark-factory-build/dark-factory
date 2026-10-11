@@ -11,123 +11,78 @@ import (
 	"strings"
 )
 
-// SendBackPublishedReview routes one exact REQUEST_CHANGES result to the
-// worker that owns the published pull request: the publication row that
-// carries the worker's Change wins over the overseer's that published it. The
-// operation/head marker in the retained feedback makes response loss and
-// daemon restart idempotent. A pull request that has moved past head reports
-// ErrSuperseded; one no factory task published reports ErrNotFound.
-func (store *Store) SendBackPublishedReview(ctx context.Context, project ProjectID, repository string, pull uint64, operationID, head, note string, at UnixMillis) (Task, error) {
-	if project.zero() || !productionRepository.MatchString(repository) || pull == 0 || !validOutcomeText(operationID, 128) || !productionSHA(head) || byteLen(note) < 1 || byteLen(note) > MaxSendBackNoteBytes-160 {
-		return Task{}, fmt.Errorf("%w: invalid published review send-back", ErrInvalidValue)
+// CreateRepairTask creates the one shared worker task for an open pull
+// request no factory task published (a host's, #1518), with its note in the
+// body, and records it as the pull request's task. A pull request that has
+// moved past head reports ErrSuperseded; a fork's, or one in no bound
+// repository, ErrNotFound.
+func (store *Store) CreateRepairTask(ctx context.Context, project ProjectID, repository string, pull uint64, head, note string, at UnixMillis) (Task, error) {
+	if project.zero() || !productionRepository.MatchString(repository) || pull == 0 || !productionSHA(head) || byteLen(note) < 1 || byteLen(note) > MaxSendBackNoteBytes {
+		return Task{}, fmt.Errorf("%w: invalid repair task", ErrInvalidValue)
 	}
-	marker := "review-operation: " + operationID + "\nreview-head: " + head + "\n\n"
 	tx, err := store.beginValidatedWrite(ctx)
 	if err != nil {
 		return Task{}, err
 	}
 	defer tx.Close()
 	repository = strings.ToLower(repository)
-	var taskBytes, document string
-	if err := tx.connection.QueryRowContext(ctx, `SELECT p.task_id, r.document FROM publication_tasks p JOIN production_records r ON r.project_id = p.project_id AND r.repository = p.repository AND r.kind = 'pull_request' AND r.identity = CAST(p.pull_number AS TEXT) WHERE p.project_id = ? AND p.repository = ? AND p.pull_number = ? ORDER BY p.change_id IS NOT NULL DESC, p.created_at_ms DESC LIMIT 1`, project.Bytes(), repository, pull).Scan(&taskBytes, &document); err != nil {
+	var document string
+	if err := tx.connection.QueryRowContext(ctx, `SELECT document FROM production_records WHERE project_id = ? AND repository = ? AND kind = 'pull_request' AND identity = ?`, project.Bytes(), repository, strconv.FormatUint(pull, 10)).Scan(&document); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
-			// A host-created pull request has no publication_tasks row. Reuse
-			// this repair path so a blocking verdict or queue ejection creates
-			// exactly one shared worker task for the observed head.
-			if err := tx.connection.QueryRowContext(ctx, `SELECT document FROM production_records WHERE project_id = ? AND repository = ? AND kind = 'pull_request' AND identity = ?`, project.Bytes(), repository, strconv.FormatUint(pull, 10)).Scan(&document); err != nil {
-				if errors.Is(err, sql.ErrNoRows) {
-					return Task{}, tx.Rollback(ErrNotFound)
-				}
-				return Task{}, tx.Rollback(err)
-			}
-			var observed ProductionPullRequest
-			if json.Unmarshal([]byte(document), &observed) != nil {
-				return Task{}, tx.Rollback(ErrConflict)
-			}
-			if !strings.EqualFold(observed.Head, head) {
-				return Task{}, tx.Rollback(ErrSuperseded)
-			}
-			if observed.HeadRepository != "" && !strings.EqualFold(observed.HeadRepository, repository) {
-				return Task{}, tx.Rollback(ErrNotFound)
-			}
-			var repositoryBytes []byte
-			if err := tx.connection.QueryRowContext(ctx, `SELECT r.id FROM project_repositories r JOIN repository_source_identities i ON i.repository_id = r.id WHERE r.project_id = ? AND lower(i.publication_repository) = ? LIMIT 1`, project.Bytes(), repository).Scan(&repositoryBytes); err != nil {
-				if errors.Is(err, sql.ErrNoRows) {
-					return Task{}, tx.Rollback(ErrNotFound)
-				}
-				return Task{}, tx.Rollback(err)
-			}
-			repositoryID, err := RepositoryIDFromBytes(repositoryBytes)
-			if err != nil {
-				return Task{}, tx.Rollback(err)
-			}
-			var ids [2][IDBytes]byte
-			for index := range ids {
-				if _, err := rand.Read(ids[index][:]); err != nil || ids[index] == ([IDBytes]byte{}) {
-					if err == nil {
-						err = ErrCorruptState
-					}
-					return Task{}, tx.Rollback(err)
-				}
-			}
-			taskID, _ := TaskIDFromBytes(ids[0][:])
-			incarnationID, _ := IncarnationIDFromBytes(ids[1][:])
-			instruction := fmt.Sprintf("Repair %s#%d at exact head %s.", repository, pull, head)
-			created, err := insertTaskOnConnection(ctx, tx.connection, NewTask{ID: taskID, ProjectID: project, RepositoryID: repositoryID, IncarnationID: incarnationID, Title: fmt.Sprintf("Repair %s#%d", repository, pull), Body: instruction}, at)
-			if err != nil {
-				return Task{}, tx.Rollback(err)
-			}
-			body := SentBackBody(created, marker+note)
-			if _, err := tx.connection.ExecContext(ctx, `UPDATE tasks SET body = ?, sent_back_instruction_bytes = ? WHERE id = ?`, body, byteLen(instruction), taskID.Bytes()); err != nil {
-				return Task{}, tx.Rollback(err)
-			}
-			if _, err := tx.connection.ExecContext(ctx, `INSERT INTO publication_tasks (project_id, repository, pull_number, task_id, created_at_ms) VALUES (?, ?, ?, ?, ?)`, project.Bytes(), repository, pull, taskID.Bytes(), at.Int64()); err != nil {
-				return Task{}, tx.Rollback(err)
-			}
-			sentBytes := int64(byteLen(instruction))
-			created.Body, created.SentBackInstructionBytes = body, &sentBytes
-			if err := tx.Commit(ctx); err != nil {
-				return Task{}, err
-			}
-			return created, nil
+			return Task{}, tx.Rollback(ErrNotFound)
 		}
 		return Task{}, tx.Rollback(err)
 	}
-	var published ProductionPullRequest
-	if json.Unmarshal([]byte(document), &published) != nil {
+	var observed ProductionPullRequest
+	if json.Unmarshal([]byte(document), &observed) != nil {
 		return Task{}, tx.Rollback(ErrConflict)
 	}
-	if !strings.EqualFold(published.Head, head) {
+	if !strings.EqualFold(observed.Head, head) {
 		return Task{}, tx.Rollback(ErrSuperseded)
 	}
-	taskID, err := TaskIDFromBytes([]byte(taskBytes))
-	if err != nil {
-		return Task{}, tx.Rollback(err)
+	if observed.HeadRepository != "" && !strings.EqualFold(observed.HeadRepository, repository) {
+		return Task{}, tx.Rollback(ErrNotFound)
 	}
-	task, found, err := taskByID(ctx, tx.connection, taskID)
-	if err != nil || !found {
-		if err == nil {
-			err = ErrCorruptState
+	var repositoryBytes []byte
+	if err := tx.connection.QueryRowContext(ctx, `SELECT r.id FROM project_repositories r JOIN repository_source_identities i ON i.repository_id = r.id WHERE r.project_id = ? AND lower(i.publication_repository) = ? LIMIT 1`, project.Bytes(), repository).Scan(&repositoryBytes); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return Task{}, tx.Rollback(ErrNotFound)
 		}
 		return Task{}, tx.Rollback(err)
 	}
-	if strings.Contains(TaskFeedback(task), marker) {
-		return task, tx.Rollback(nil)
-	}
-	// An operator cancellation is final. The review operation may still have
-	// route_pending set, but retrying its send-back only produces a durable
-	// conflict on every scheduler pass.
-	if task.Status == TaskCancelled {
-		return Task{}, tx.Rollback(ErrNotFound)
-	}
-	updated, err := sendBackTask(ctx, tx.connection, task, head, marker+note, at)
+	repositoryID, err := RepositoryIDFromBytes(repositoryBytes)
 	if err != nil {
 		return Task{}, tx.Rollback(err)
 	}
+	var ids [2][IDBytes]byte
+	for index := range ids {
+		if _, err := rand.Read(ids[index][:]); err != nil || ids[index] == ([IDBytes]byte{}) {
+			if err == nil {
+				err = ErrCorruptState
+			}
+			return Task{}, tx.Rollback(err)
+		}
+	}
+	taskID, _ := TaskIDFromBytes(ids[0][:])
+	incarnationID, _ := IncarnationIDFromBytes(ids[1][:])
+	instruction := fmt.Sprintf("Repair %s#%d at exact head %s.", repository, pull, head)
+	created, err := insertTaskOnConnection(ctx, tx.connection, NewTask{ID: taskID, ProjectID: project, RepositoryID: repositoryID, IncarnationID: incarnationID, Title: fmt.Sprintf("Repair %s#%d", repository, pull), Body: instruction}, at)
+	if err != nil {
+		return Task{}, tx.Rollback(err)
+	}
+	body := SentBackBody(created, note)
+	if _, err := tx.connection.ExecContext(ctx, `UPDATE tasks SET body = ?, sent_back_instruction_bytes = ? WHERE id = ?`, body, byteLen(instruction), taskID.Bytes()); err != nil {
+		return Task{}, tx.Rollback(err)
+	}
+	if _, err := tx.connection.ExecContext(ctx, `INSERT INTO publication_tasks (project_id, repository, pull_number, task_id, created_at_ms) VALUES (?, ?, ?, ?, ?)`, project.Bytes(), repository, pull, taskID.Bytes(), at.Int64()); err != nil {
+		return Task{}, tx.Rollback(err)
+	}
+	sentBytes := int64(byteLen(instruction))
+	created.Body, created.SentBackInstructionBytes = body, &sentBytes
 	if err := tx.Commit(ctx); err != nil {
 		return Task{}, err
 	}
-	return updated, nil
+	return created, nil
 }
 
 // ChangeBranchClosedToOverseer reports the task of the factory Change branch
@@ -229,9 +184,11 @@ func TaskBodyWithInstruction(task Task, instruction string) (string, *int64) {
 // may be sent back, a success included: the reviewer, not the worker, decides
 // when work is done; a cancelled task comes back the same way. A task that
 // never ran has nothing to go back to, and a shell agent's task is a
-// program, which no note can be added to. head is the Change head the note
-// was observed at; sendBackTask refuses it once the Change has moved on.
-func (store *Store) SendBackTask(ctx context.Context, id TaskID, expected Revision, head, note string, at UnixMillis) (Task, error) {
+// program, which no note can be added to. head is the head the note was
+// observed at; sendBackTask refuses it once the task's work has moved on.
+// With a digest, the sender is that attempt, which must be a running
+// orchestrator, and the task a worker's in its project other than its own.
+func (store *Store) SendBackTask(ctx context.Context, digest *AttemptDigest, id TaskID, expected Revision, head, note string, at UnixMillis) (Task, error) {
 	if id.zero() || expected.Int64() < 1 {
 		return Task{}, fmt.Errorf("%w: invalid task send-back", ErrInvalidValue)
 	}
@@ -243,12 +200,38 @@ func (store *Store) SendBackTask(ctx context.Context, id TaskID, expected Revisi
 		return Task{}, err
 	}
 	defer tx.Close()
+	var run Run
+	if digest != nil {
+		var found bool
+		run, found, err = runByDigest(ctx, tx.connection, *digest)
+		if err != nil {
+			return Task{}, tx.Rollback(err)
+		}
+		if !found || run.Phase != RunRunning || run.CredentialRevokedAt != nil || run.Role != RoleOrchestrator {
+			return Task{}, tx.Rollback(ErrUnauthorized)
+		}
+	}
 	task, found, err := taskByID(ctx, tx.connection, id)
 	if err != nil {
 		return Task{}, tx.Rollback(err)
 	}
 	if !found {
 		return Task{}, tx.Rollback(ErrNotFound)
+	}
+	if digest != nil {
+		if task.ProjectID != run.ProjectID {
+			return Task{}, tx.Rollback(ErrUnauthorized)
+		}
+		if task.ID == run.TaskID || task.AssignedAgentID.zero() {
+			return Task{}, tx.Rollback(ErrConflict)
+		}
+		agent, found, err := agentByID(ctx, tx.connection, task.AssignedAgentID)
+		if err != nil {
+			return Task{}, tx.Rollback(err)
+		}
+		if !found || agent.Role != RoleWorker {
+			return Task{}, tx.Rollback(ErrUnauthorized)
+		}
 	}
 	if task.Revision != expected {
 		return Task{}, tx.Rollback(ErrRevisionConflict)
@@ -263,89 +246,27 @@ func (store *Store) SendBackTask(ctx context.Context, id TaskID, expected Revisi
 	return updated, nil
 }
 
-// SendBackTaskForAttempt is the orchestrator's form of SendBackTask: the
-// attempt must be a running orchestrator, the task must belong to its
-// project (another project's is not its authority), be a worker's, and not
-// be the attempt's own.
-func (store *Store) SendBackTaskForAttempt(ctx context.Context, digest AttemptDigest, id TaskID, head, note string, at UnixMillis) (Task, error) {
-	if id.zero() {
-		return Task{}, fmt.Errorf("%w: invalid task send-back", ErrInvalidValue)
-	}
-	if byteLen(note) < 1 || byteLen(note) > MaxSendBackNoteBytes {
-		return Task{}, fmt.Errorf("%w: invalid send-back note", ErrInvalidValue)
-	}
-	tx, err := store.beginValidatedWrite(ctx)
-	if err != nil {
-		return Task{}, err
-	}
-	defer tx.Close()
-	run, found, err := runByDigest(ctx, tx.connection, digest)
-	if err != nil {
-		return Task{}, tx.Rollback(err)
-	}
-	if !found || run.Phase != RunRunning || run.CredentialRevokedAt != nil || run.Role != RoleOrchestrator {
-		return Task{}, tx.Rollback(ErrUnauthorized)
-	}
-	task, found, err := taskByID(ctx, tx.connection, id)
-	if err != nil {
-		return Task{}, tx.Rollback(err)
-	}
-	if !found {
-		return Task{}, tx.Rollback(ErrNotFound)
-	}
-	if task.ProjectID != run.ProjectID {
-		return Task{}, tx.Rollback(ErrUnauthorized)
-	}
-	if task.ID == run.TaskID || task.AssignedAgentID.zero() {
-		return Task{}, tx.Rollback(ErrConflict)
-	}
-	agent, found, err := agentByID(ctx, tx.connection, task.AssignedAgentID)
-	if err != nil {
-		return Task{}, tx.Rollback(err)
-	}
-	if !found || agent.Role != RoleWorker {
-		return Task{}, tx.Rollback(ErrUnauthorized)
-	}
-	updated, err := sendBackTask(ctx, tx.connection, task, head, note, at)
-	if err != nil {
-		return Task{}, tx.Rollback(err)
-	}
-	if err := tx.Commit(ctx); err != nil {
-		return Task{}, err
-	}
-	return updated, nil
-}
-
-// RetryTaskForOverseer atomically returns a settled blocked or failed worker
-// task, or one cancelled by an automatic end, to the queue under the same task
+// RetryTask atomically returns a settled blocked or failed worker task, or
+// one cancelled by an automatic end, to the queue under the same task
 // identity, reassigned when a replacement worker is named and otherwise kept
 // with its current worker. Keeping the assignment change and retry transition
 // in one validated write prevents the old worker from being admitted between
-// two operator calls. RetryTaskForOperator also retries any cancelled task,
-// including one cancelled before a worker claimed it.
-func (store *Store) RetryTaskForOverseer(ctx context.Context, digest AttemptDigest, id TaskID, expected Revision, assigned AgentID, at UnixMillis) (Task, error) {
-	return store.retryTask(ctx, &digest, id, expected, assigned, at, 0)
-}
-
-func (store *Store) RetryTaskForOperator(ctx context.Context, id TaskID, expected Revision, assigned AgentID, at UnixMillis) (Task, error) {
-	return store.retryTask(ctx, nil, id, expected, assigned, at, 0)
-}
-
-// RetryIntakeTask is an open intake issue retrying its own task: only after an
-// automatic end (a failure, a run-limit cancel, a blocked expiry), never an
-// operator's cancel, and at most IntakeRetryLimit times.
-func (store *Store) RetryIntakeTask(ctx context.Context, id TaskID, expected Revision, at UnixMillis) (Task, error) {
-	return store.retryTask(ctx, nil, id, expected, AgentID{}, at, IntakeRetryLimit)
-}
-
-// IntakeRetryLimit bounds an issue's retries; past it the task is the overseer's.
-const IntakeRetryLimit = 3
-
-func (store *Store) retryTask(ctx context.Context, digest *AttemptDigest, id TaskID, expected Revision, assigned AgentID, at UnixMillis, intakeLimit int64) (Task, error) {
+// two operator calls. With a digest the overseer retries; without one the
+// operator does, and also retries any cancelled task, including one cancelled
+// before a worker claimed it. A positive intakeLimit is an open intake issue
+// retrying its own task: only after an automatic end (a failure, a run-limit
+// cancel, a blocked expiry), never an operator's cancel, and at most
+// intakeLimit times. Every intake poll offers each ended issue task a retry,
+// so an intake retry checks only the rows it touches, never the whole store.
+func (store *Store) RetryTask(ctx context.Context, digest *AttemptDigest, id TaskID, expected Revision, assigned AgentID, at UnixMillis, intakeLimit int64) (Task, error) {
 	if id.zero() || expected.Int64() < 1 {
 		return Task{}, fmt.Errorf("%w: invalid task retry", ErrInvalidValue)
 	}
-	tx, err := store.beginValidatedWrite(ctx)
+	begin := store.beginValidatedWrite
+	if intakeLimit > 0 {
+		begin = store.beginUncheckedWrite
+	}
+	tx, err := begin(ctx)
 	if err != nil {
 		return Task{}, err
 	}
@@ -353,7 +274,10 @@ func (store *Store) retryTask(ctx context.Context, digest *AttemptDigest, id Tas
 	return store.retryTaskTx(ctx, tx, digest, id, expected, assigned, at, intakeLimit)
 }
 
-// retryTaskTx is retryTask inside tx, which it commits or rolls back.
+// IntakeRetryLimit bounds an issue's retries; past it the task is the overseer's.
+const IntakeRetryLimit = 3
+
+// retryTaskTx is RetryTask inside tx, which it commits or rolls back.
 func (store *Store) retryTaskTx(ctx context.Context, tx *writeTx, digest *AttemptDigest, id TaskID, expected Revision, assigned AgentID, at UnixMillis, intakeLimit int64) (Task, error) {
 	var project ProjectID
 	if digest != nil {
