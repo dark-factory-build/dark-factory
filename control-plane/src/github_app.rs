@@ -141,9 +141,9 @@ pub(crate) enum RefusalReason {
     /// head directly instead (#1702).
     #[error("the queue read found no merge queue on the base branch")]
     NoMergeQueue,
-    /// A base with no merge queue merges directly, and a check at the head
-    /// has not finished or did not pass.
-    #[error("a check at the head has not passed")]
+    /// A base with no merge queue merges directly, and a check run at the
+    /// head has not finished or did not pass.
+    #[error("a check run at the head has not passed")]
     ChecksNotPassed,
     /// The App is not installed on the named repository, or the installation
     /// cannot see it. Distinguished from a mutation's own `NOT_FOUND` because
@@ -3333,7 +3333,8 @@ impl Authority {
     }
 
     /// A base with no merge queue merges the exact head directly, once every
-    /// check at that head has passed: no queue reruns them. A head already
+    /// check run at that head has passed: no queue reruns them. Commit
+    /// statuses are not read: the App holds no `statuses` permission. A head already
     /// merged is this operation's effect, so a repeat answers it unchanged.
     async fn merge_head(
         &self,

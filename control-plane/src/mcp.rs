@@ -681,7 +681,7 @@ fn tools() -> Value {
     }, {
         "name": "enqueue_pull_request",
         "title": "Add a pull request to its base branch's merge queue at an exact head",
-        "description": "Enqueue one pull request only while its head is still the stated commit and its base is still the stated branch. GitHub tests the entry against the queue's latest base and merges it. A base with no merge queue instead squash-merges the exact head once every check at it has passed, and entry_id is the merge commit. It is idempotent: a head already queued is success, and a refusal names its typed reason.",
+        "description": "Enqueue one pull request only while its head is still the stated commit and its base is still the stated branch. GitHub tests the entry against the queue's latest base and merges it. A base with no merge queue instead squash-merges the exact head once every check run at it has passed (commit statuses are not read), and entry_id is the merge commit. It is idempotent: a head already queued is success, and a refusal names its typed reason.",
         "inputSchema": {
             "type": "object",
             "properties": {
