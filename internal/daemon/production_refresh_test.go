@@ -20,7 +20,7 @@ func TestRefreshRereadsOnlyPullsLastSeenOpen(t *testing.T) {
 	}
 }
 
-func TestRefreshExactReadsNewOrChangedPulls(t *testing.T) {
+func TestRefreshExactReadsNewChangedOrUnsettledPulls(t *testing.T) {
 	head := strings.Repeat("a", 40)
 	base := strings.Repeat("b", 40)
 	mergeable := true
