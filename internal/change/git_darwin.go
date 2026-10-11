@@ -1413,12 +1413,36 @@ func RebaseWorktree(ctx context.Context, selection Selection, path string) (Work
 		return WorktreeFacts{}, err
 	}
 	defer authority.close()
-	if _, err := authority.inspectWorktree(ctx, path); err != nil {
+	facts, err := authority.inspectWorktree(ctx, path)
+	if err != nil {
 		return WorktreeFacts{}, err
 	}
+	stashed := facts.Dirty()
 	// Use the linked worktree's .git indirection. Passing the private bare
 	// repository as --git-dir would select its unrelated HEAD and index.
 	gitArgs := []string{"-c", "core.hooksPath=/dev/null", "-c", "protocol.file.allow=always", "-C", path}
+	if stashed {
+		stash, stashErr := authority.run(ctx, maxGitSelectionOutput, append(gitArgs, "stash", "push", "--include-untracked", "--message", "factory retained Change rebase")...)
+		if stashErr != nil {
+			return WorktreeFacts{}, stashErr
+		}
+		if stash.exitCode != 0 {
+			return WorktreeFacts{}, newGitError(gitFailureProcess)
+		}
+	}
+	restore := func() error {
+		if !stashed {
+			return nil
+		}
+		popped, popErr := authority.run(ctx, maxGitSelectionOutput, append(gitArgs, "stash", "pop", "--index")...)
+		if popErr != nil {
+			return popErr
+		}
+		if popped.exitCode != 0 {
+			return newGitError(gitFailureProcess)
+		}
+		return nil
+	}
 	gitArgs = append(gitArgs, "rebase", "refs/remotes/origin/main")
 	result, err := authority.runWithEnvironment(ctx, maxGitSelectionOutput, []string{
 		"GIT_COMMITTER_NAME=" + gitauthor.AutomationName,
@@ -1435,9 +1459,12 @@ func RebaseWorktree(ctx context.Context, selection Selection, path string) (Work
 			return WorktreeFacts{}, abortErr
 		}
 		if aborted.exitCode == 0 {
-			return WorktreeFacts{}, ErrRebaseConflict
+			return WorktreeFacts{}, errors.Join(restore(), ErrRebaseConflict)
 		}
 		return WorktreeFacts{}, newGitError(gitFailureProcess)
+	}
+	if err := restore(); err != nil {
+		return WorktreeFacts{}, err
 	}
 	return authority.inspectWorktree(ctx, path)
 }

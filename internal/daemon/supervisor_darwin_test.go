@@ -937,9 +937,8 @@ func TestSupervisorCodexOverseerReadsMultipleExactRetainedChanges(t *testing.T) 
 }
 
 // A retry reopens the same worktree: the worker's commit on the Change
-// branch and its uncommitted edits are exactly as it left them, the
-// settled head is what the daemon recorded, and no fresh selection or
-// upstream refresh happens.
+// branch and its uncommitted edits are exactly as it left them, while the
+// branch is rebased onto the current registered base.
 func TestSupervisorRetainedRetryReopensTheSameWorktree(t *testing.T) {
 	program := "set -eu\nif [ ! -s __WITNESS__ ]; then printf committed > committed.txt; git add committed.txt; git commit -q -m committed; printf edited > edited.txt; fi\nprintf x >> __WITNESS__\nexit 0\n"
 	fixture := newSupervisorFixture(t, program)
@@ -964,9 +963,17 @@ func TestSupervisorRetainedRetryReopensTheSameWorktree(t *testing.T) {
 	if fmt.Sprintf("%x", firstChange.Selection.Commit().Bytes()) != fixture.base {
 		t.Fatalf("settled base moved: %x", firstChange.Selection.Commit().Bytes())
 	}
+	git := supervisorNativeGit(t)
+	project := filepath.Join(fixture.root, "repository")
+	baseBranch := strings.TrimSpace(supervisorGitOutput(t, git, "-C", project, "symbolic-ref", "--short", "HEAD"))
+	if err := os.WriteFile(filepath.Join(project, "main-fix.txt"), []byte("main fix\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	supervisorGit(t, git, "-C", project, "add", "main-fix.txt")
+	supervisorGit(t, git, "-C", project, "commit", "-m", "advance main")
+	mainHead := strings.TrimSpace(supervisorGitOutput(t, git, "-C", project, "rev-parse", "HEAD"))
 	queueSupervisorRetry(t, fixture, first)
-	// A retained retry must not resolve a selector again.
-	fixture.spec.BaseRevision = "refs/heads/retained-retry-must-not-resolve"
+	fixture.spec.BaseRevision = "refs/heads/" + baseBranch
 	second, err := fixture.daemon.RunNext(context.Background(), fixture.spec)
 	if err != nil {
 		t.Fatalf("retained RunNext: %v", err)
@@ -981,8 +988,16 @@ func TestSupervisorRetainedRetryReopensTheSameWorktree(t *testing.T) {
 			t.Fatalf("retained %s = %q, %v", name, body, err)
 		}
 	}
-	if got := strings.TrimSpace(supervisorGitOutput(t, supervisorNativeGit(t), "-C", changePath, "rev-parse", "HEAD")); got != head {
-		t.Fatalf("retry moved the branch to %s", got)
+	got := strings.TrimSpace(supervisorGitOutput(t, git, "-C", changePath, "rev-parse", "HEAD"))
+	if got == head {
+		t.Fatalf("retry did not rebase the branch: still at %s", got)
+	}
+	supervisorGit(t, git, "-C", changePath, "merge-base", "--is-ancestor", mainHead, got)
+	if body, err := os.ReadFile(filepath.Join(changePath, "main-fix.txt")); err != nil || string(body) != "main fix\n" {
+		t.Fatalf("rebased main fix = %q, %v", body, err)
+	}
+	if status := supervisorGitOutput(t, git, "-C", changePath, "status", "--porcelain"); status != "?? edited.txt\n" {
+		t.Fatalf("retained dirty state = %q", status)
 	}
 	if witness, err := os.ReadFile(fixture.witness); err != nil || string(witness) != "xx" {
 		t.Fatalf("retained provider witness = %q, %v", witness, err)
@@ -991,7 +1006,7 @@ func TestSupervisorRetainedRetryReopensTheSameWorktree(t *testing.T) {
 		t.Fatalf("retained retry changed canonical Change: first=%+v second=%+v", first.ChangeID, second.ChangeID)
 	}
 	secondChange, found, err := fixture.store.Change(context.Background(), *second.ChangeID)
-	if err != nil || !found || secondChange.Selection == nil || secondChange.Selection.RepositoryIdentity() != firstChange.Selection.RepositoryIdentity() || secondChange.HeadCommit == nil || fmt.Sprintf("%x", secondChange.HeadCommit.Bytes()) != head {
+	if err != nil || !found || secondChange.Selection == nil || secondChange.Selection.RepositoryIdentity() != firstChange.Selection.RepositoryIdentity() || secondChange.HeadCommit == nil || fmt.Sprintf("%x", secondChange.HeadCommit.Bytes()) != got {
 		t.Fatalf("retained retry changed identities: Change=%+v found=%v err=%v", secondChange, found, err)
 	}
 }
