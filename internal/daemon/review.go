@@ -230,6 +230,13 @@ func (daemon *Daemon) reconcilePull(ctx context.Context, open kernel.OpenPull, u
 		if err == nil {
 			err = daemon.reviewHead(ctx, coordinator, open, "")
 		}
+		if err != nil {
+			// The head's record, so later passes count its failures toward one
+			// escalation and review it from there (review.Decide).
+			now, head := daemon.now(), strings.ToLower(open.Pull.Head)
+			op = review.Operation{ID: uuid5(fmt.Sprintf("dark-factory:review:%s#%d@%s", open.Repository, open.Pull.Number, head)), Request: review.Request{Repository: open.Repository, PullNumber: open.Pull.Number, Head: head, BaseRef: open.Pull.Base}, State: "unreviewed", Failures: 1, CreatedAt: now, UpdatedAt: now}
+			err = errors.Join(err, store.Create(ctx, op))
+		}
 		return true, err
 	}
 	before, action, note := op, review.Wait, ""
@@ -270,11 +277,12 @@ func (daemon *Daemon) reconcilePull(ctx context.Context, open kernel.OpenPull, u
 				return true, nil // the reservation wrote op
 			}
 		case review.Rebase:
-			op.Rebased = true
 			var moved bool
 			if moved, err = daemon.rebaseChange(ctx, open); err == nil && moved {
+				op.Rebased = true
 				daemon.publishSettledChanges(ctx)
 			} else if err == nil {
+				op.Rebased = true
 				err = daemon.sendBackPull(ctx, open, task, op, note)
 			}
 		case review.SendBack:

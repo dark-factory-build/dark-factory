@@ -30,9 +30,13 @@ type publicReviewBackend struct {
 	observations                            map[string]review.Receipt
 	pull                                    *review.Pull
 	observeFailures                         int
+	storedErr                               error
 }
 
 func (b *publicReviewBackend) StoredPull(_ context.Context, pull uint64, head string) (review.Request, error) {
+	if b.storedErr != nil {
+		return review.Request{}, b.storedErr
+	}
 	return review.Request{Repository: "team/repo", PullNumber: pull, Head: head, Base: strings.Repeat("f", 40), BaseRef: "main", Body: "fixture body\n", Provider: "codex"}, nil
 }
 func (b *publicReviewBackend) CloneReadOnly(context.Context, review.Request) (string, func(), error) {
@@ -934,6 +938,26 @@ func TestStuckSubmitEscalatesOnceAndKeepsResuming(t *testing.T) {
 	}
 	if op := tick(3 * time.Minute); op.State != "submitting" || !strings.Contains(op.Escalation, "401 #2") || backend.observeFailures != 4 {
 		t.Fatalf("stuck write re-escalated or stopped resuming: %+v (observes %d)", op, backend.observeFailures-1)
+	}
+}
+
+// A head with no review whose review cannot be claimed is retried within the
+// bound like any other action, then escalated once.
+func TestAnUnclaimableHeadReviewEscalatesOnce(t *testing.T) {
+	fixture, project, _, settle := publishedTask(t)
+	settle()
+	customerMode(t, fixture)
+	ctx := context.Background()
+	backend := &publicReviewBackend{storedErr: errors.New("list_pull_requests unavailable")}
+	fixture.daemon.reviewBackend = func(string, uint64) review.Backend { return backend }
+	for range review.FailuresBeforeEscalation + 2 {
+		if _, err := fixture.daemon.advanceReviewOperations(ctx, false); err != nil {
+			t.Fatal(err)
+		}
+	}
+	op := lastDurableReview(t, fixture.store, project)
+	if op.State != "unreviewed" || op.Failures != review.FailuresBeforeEscalation || backend.reviews != 0 || !strings.Contains(op.Escalation, "could not review it (attempt 6): list_pull_requests unavailable") {
+		t.Fatalf("unclaimable head = %+v reviews=%d", op, backend.reviews)
 	}
 }
 
