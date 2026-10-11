@@ -57,6 +57,16 @@ func TestReviewPromptDelimitsAuthorControlledBodyAsUntrusted(t *testing.T) {
 			t.Fatalf("check %q missing after the review context: %q", check, prompt)
 		}
 	}
+	for _, question := range []string{
+		"which other callers or paths share the condition",
+		"Do the tests exercise the real input",
+		"is there a simpler or deleting alternative",
+		"An empty diff is a concrete defect",
+	} {
+		if !strings.Contains(prompt[end:], question) {
+			t.Fatalf("review prompt missing %q: %q", question, prompt)
+		}
+	}
 	// An ALLOW must name a changed path, and codex's final message is all
 	// the verdict reader sees.
 	if !strings.Contains(prompt[end:], "name each changed file you reviewed") {

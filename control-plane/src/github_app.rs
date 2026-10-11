@@ -280,11 +280,11 @@ pub(crate) struct CreatePullRequest {
 }
 
 const fn default_close_on_merge() -> bool {
-    true
+    false
 }
 
 fn close_on_merge_is_default(value: &bool) -> bool {
-    *value
+    !*value
 }
 
 /// Replace an open pull request's body, and with `close` close it unmerged in
@@ -8242,12 +8242,12 @@ mod tests {
             request_digest(&create).unwrap(),
             "9d780d819ca647446eb71292e554d0a5f941414c2c20ff854b6e1dd5458d67e7"
         );
-        let old_request = serde_json::to_value(&create).unwrap();
+        let old_request = serde_json::to_value(&references).unwrap();
         assert!(old_request.get("close_on_merge").is_none());
         let replay = serde_json::from_value::<CreatePullRequest>(old_request).unwrap();
-        assert!(replay.close_on_merge);
+        assert!(!replay.close_on_merge);
         assert_eq!(
-            request_digest(&create).unwrap(),
+            request_digest(&references).unwrap(),
             request_digest(&replay).unwrap()
         );
         assert_eq!(

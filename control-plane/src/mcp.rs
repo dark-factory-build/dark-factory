@@ -431,7 +431,7 @@ fn tools() -> Value {
                 "title": {"type": "string", "minLength": 1, "maxLength": 256},
                 "body": {"type": "string", "maxLength": 30000},
                 "draft": {"type": "boolean"},
-                "close_on_merge": {"type": "boolean", "default": true}
+                "close_on_merge": {"type": "boolean", "default": false}
             },
             "required": ["repository", "operation_id", "issue_number", "head", "head_sha", "base", "base_sha", "title", "body", "draft"],
             "additionalProperties": false

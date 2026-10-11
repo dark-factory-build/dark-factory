@@ -539,7 +539,7 @@ text plus the change id; it returns the issue number. Then read
 `observe_ref` for `main` again, immediately before the call, and use that
 answer: `create_pull_request` with `opid "$change_id" pr`, `issue_number` from that
 result, `head = branch`, `head_sha` = the last published commit, `base =
-main`, `close_on_merge` as above (`true` for a new issue), `base_sha` = main's head as just read (the App verifies the base
+main`, `close_on_merge = false` for a new issue, `base_sha` = main's head as just read (the App verifies the base
 branch is at that commit at that moment; `base_commit` is wrong whenever
 main moved, and a stale read is wrong whenever main moves between the read
 and the call), `draft = false`, the same title, and a body in this
@@ -575,6 +575,11 @@ review task for a worker, record a verdict, enqueue, or wait on that pipeline.
 Each head goes back to its task at most once per review. A task that answers
 a REQUEST_CHANGES without a new head gets one more review of that head, which
 reads its answer; a conflicting head factoryd first rebases itself.
+Merge is not proof that an issue is fixed. For each linked issue, the issue
+steward checks the installed revision and records the live acceptance signal,
+quoting the observation; it closes the issue when the signal passes and
+reopens it when the fix is absent or regresses. A claimed cost, speed, or
+failure-rate gain must include the baseline query so the steward can rerun it.
 
 factoryd wakes you with `Escalated: factoryd cannot advance OWNER/REPO#N at
 exact head HEAD: ...` only when it cannot advance a pull request: a review that
