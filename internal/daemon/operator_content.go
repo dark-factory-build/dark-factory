@@ -79,7 +79,7 @@ func (daemon *Daemon) projectContent(ctx context.Context, call api.Call) api.Rep
 		}
 		tasks := make([]api.TaskSummary, 0, len(page.Tasks))
 		for _, task := range page.Tasks {
-			tasks = append(tasks, api.TaskSummary{ID: task.ID.String(), ProjectID: task.ProjectID.String(), AssignedAgentID: task.AssignedAgentID.String(), IncarnationID: task.IncarnationID.String(), WorkRevision: uint64(task.WorkRevision.Int64()), Title: task.Title, Status: task.Status.String(), Priority: task.Priority, Revision: uint64(task.Revision.Int64())})
+			tasks = append(tasks, api.TaskSummary{ID: task.ID.String(), ProjectID: task.ProjectID.String(), AssignedAgentID: task.AssignedAgentID.String(), IncarnationID: task.IncarnationID.String(), WorkRevision: uint64(task.WorkRevision.Int64()), Title: task.Title, Status: task.Status, Priority: task.Priority, Revision: uint64(task.Revision.Int64())})
 		}
 		nextCursor := ""
 		if page.HasMore && len(page.Tasks) > 0 {

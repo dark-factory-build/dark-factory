@@ -634,7 +634,7 @@ func (daemon *Daemon) taskRead(ctx context.Context, call api.Call) api.Reply {
 	if err != nil {
 		return newErrorReply(remoteErrorCode(err))
 	}
-	questions, _, _, err := daemon.store.PeerQuestionsForTask(ctx, task.ID, 0, 0)
+	questions, _, _, err := daemon.store.PeerQuestionsForTask(ctx, task.ID, 0, kernel.EventSequence{})
 	if err != nil {
 		return newErrorReply(remoteErrorCode(err))
 	}
