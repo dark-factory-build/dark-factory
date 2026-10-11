@@ -402,6 +402,50 @@ func TestCorrectionKeepsWorkerCommitsAndMainChanges(t *testing.T) {
 	}
 }
 
+func TestCorrectionKeepsWorkerChangeMatchingMain(t *testing.T) {
+	fixture, c, source, app, checkout := publishFixture(t, 2, false)
+	ctx := context.Background()
+	root, git := filepath.Dir(source), change.TrustedGitExecutable
+	workerHead := c.Head
+	registered := strings.TrimSpace(supervisorGitOutput(t, git, "-C", root, "remote", "get-url", "origin"))
+	supervisorGit(t, git, "-C", registered, "fetch", "-q", "--update-head-ok", root, "HEAD:worker")
+	app.tip = workerHead
+	if err := os.WriteFile(filepath.Join(registered, "f00.txt"), []byte("main\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	supervisorGit(t, git, "-C", registered, "-c", "user.name=fixture", "-c", "user.email=fixture@example.invalid", "add", "f00.txt")
+	supervisorGit(t, git, "-C", registered, "-c", "user.name=fixture", "-c", "user.email=fixture@example.invalid", "commit", "-q", "-m", "main")
+	m1 := strings.TrimSpace(supervisorGitOutput(t, git, "-C", registered, "rev-parse", "HEAD"))
+	app.main = m1
+	supervisorGit(t, git, "-C", root, "fetch", "-q", "origin", "main")
+	supervisorGit(t, git, "-C", root, "merge", "-q", "--no-ff", "-s", "ours", m1, "-m", "integrate main")
+	if err := os.WriteFile(filepath.Join(root, "f00.txt"), []byte("main\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "f01.txt"), []byte("correction\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	supervisorGit(t, git, "-C", root, "-c", "user.name=fixture", "-c", "user.email=fixture@example.invalid", "add", "f00.txt", "f01.txt")
+	supervisorGit(t, git, "-C", root, "-c", "user.name=fixture", "-c", "user.email=fixture@example.invalid", "commit", "-q", "-m", "correction")
+	c.Head = strings.TrimSpace(supervisorGitOutput(t, git, "-C", root, "rev-parse", "HEAD"))
+	app.journal[uuid5("dark-factory:"+c.Change.String()+":publish-"+workerHead[:8]+"-1")] = json.RawMessage(`{"commit_sha":"published","parent_sha":"` + c.Base + `"}`)
+	c.Pull = 31
+	if err := fixture.daemon.publishChange(ctx, c, "team/repo", source, app.call, checkout); err != nil {
+		t.Fatal(err)
+	}
+	if len(app.writes) < 1 || app.writes[0]["name"] != "publish_commit" {
+		t.Fatalf("matching-main writes = %+v", app.writes)
+	}
+	changes := app.writes[0]["arguments"].(map[string]any)["changes"].([]map[string]any)
+	paths := map[string]bool{}
+	for _, entry := range changes {
+		paths[entry["path"].(string)] = true
+	}
+	if len(paths) != 2 || !paths["f00.txt"] || !paths["f01.txt"] {
+		t.Fatalf("matching-main changes = %+v", changes)
+	}
+}
+
 func TestCorrectionExcludesImportedMainCommits(t *testing.T) {
 	fixture, c, source, app, checkout := publishFixture(t, 1, false)
 	ctx := context.Background()
