@@ -560,19 +560,27 @@ func (store *Store) ImportIntakeAcceptanceWithPriority(ctx context.Context, id I
 
 // importIntakeAcceptance checks only the rows it reads and writes: every
 // intake poll replays each imported issue, and a whole-store walk per issue
-// overran the poll as the store grew (#1679, #1754).
+// overran the poll as the store grew (#1679, #1754). A replay writes nothing,
+// so it is answered from a reader: queueing on the writer once per listed
+// issue made one poll's issue phase take 35s.
 func (store *Store) importIntakeAcceptance(ctx context.Context, id IntakeAcceptanceID, at UnixMillis, priority int64, expectedSource ...IntakeSource) (Task, error) {
+	read, err := store.beginRead(ctx)
+	if err != nil {
+		return Task{}, err
+	}
+	_, existing, replay, err := intakeImportReplay(ctx, read.connection, id, expectedSource)
+	read.Close()
+	if err != nil || replay {
+		return existing, err
+	}
 	tx, err := store.beginValidatedWrite(ctx)
 	if err != nil {
 		return Task{}, err
 	}
 	defer tx.Close()
-	accepted, found, err := intakeAcceptanceByID(ctx, tx.connection, id)
-	if err != nil || !found {
-		if err == nil {
-			err = ErrNotFound
-		}
-		return Task{}, tx.Rollback(err)
+	accepted, existing, replay, err := intakeImportReplay(ctx, tx.connection, id, expectedSource)
+	if err != nil || replay {
+		return existing, tx.Rollback(err)
 	}
 	if accepted.WithdrawnAt != nil {
 		// Importing a withdrawn receipt again lifts its withdrawal (for the
@@ -595,44 +603,11 @@ func (store *Store) importIntakeAcceptance(ctx context.Context, id IntakeAccepta
 		}
 		return store.retryTaskTx(ctx, tx, nil, task.ID, task.Revision, AgentID{}, at, 0)
 	}
-	if len(expectedSource) > 1 {
-		return Task{}, tx.Rollback(ErrInvalidValue)
-	}
-	if len(expectedSource) == 1 {
-		source, found, err := intakeSourceByID(ctx, tx.connection, expectedSource[0].ID)
-		if err != nil {
-			return Task{}, tx.Rollback(err)
-		}
-		if !found || !source.Enabled || source.Revision != expectedSource[0].Revision || source.LinearTeamID != accepted.Snapshot.LinearTeamID || source.GitHubRepositoryID != accepted.Snapshot.GitHubRepositoryID || source.ProjectID != accepted.ProjectID || source.TargetRepositoryID != accepted.RepositoryID {
-			return Task{}, tx.Rollback(ErrRevisionConflict)
-		}
-	}
-	var permitted int
-	if err := tx.connection.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM intake_sources WHERE github_repository_id = ? AND linear_team_id = ? AND project_id = ? AND target_repository_id = ? AND enabled = 1)`, int64(accepted.Snapshot.GitHubRepositoryID), accepted.Snapshot.LinearTeamID, accepted.ProjectID.Bytes(), accepted.RepositoryID.Bytes()).Scan(&permitted); err != nil || permitted == 0 {
-		if err == nil {
-			err = ErrConflict
-		}
-		return Task{}, tx.Rollback(err)
-	}
 	// Accepted work goes straight to any idle worker; the overseer wakes only
 	// for its outcome (overseer_wakeup.go).
 	spec := NewTask{Priority: priority, ID: accepted.TaskID, IncarnationID: accepted.IncarnationID, ProjectID: accepted.ProjectID, RepositoryID: accepted.RepositoryID, Title: accepted.Snapshot.Title, Body: intakeTaskBody(accepted)}
 	if err := validateNonCarrierTask(spec); err != nil {
 		return Task{}, tx.Rollback(err)
-	}
-	existing, replay, err := intakeTaskReplay(ctx, tx.connection, spec)
-	if err != nil {
-		return Task{}, tx.Rollback(err)
-	}
-	if replay {
-		binding, found, err := intakeAcceptanceForTask(ctx, tx.connection, existing.ID)
-		if err != nil || !found || binding.ID != accepted.ID {
-			if err == nil {
-				err = ErrConflict
-			}
-			return Task{}, tx.Rollback(err)
-		}
-		return existing, tx.Rollback(nil)
 	}
 	latest, found, err := latestIntakeAcceptance(ctx, tx.connection, accepted.Snapshot, accepted.ProjectID, accepted.RepositoryID)
 	if err == nil && (!found || latest.ID != accepted.ID) {
@@ -652,6 +627,52 @@ func (store *Store) importIntakeAcceptance(ctx context.Context, id IntakeAccepta
 		return Task{}, err
 	}
 	return value, nil
+}
+
+// intakeImportReplay reads the receipt and, unless it is withdrawn, checks
+// that it may still import and whether its bound task already exists.
+func intakeImportReplay(ctx context.Context, connection *sql.Conn, id IntakeAcceptanceID, expectedSource []IntakeSource) (IntakeAcceptance, Task, bool, error) {
+	accepted, found, err := intakeAcceptanceByID(ctx, connection, id)
+	if err != nil || !found {
+		if err == nil {
+			err = ErrNotFound
+		}
+		return accepted, Task{}, false, err
+	}
+	if accepted.WithdrawnAt != nil {
+		return accepted, Task{}, false, nil
+	}
+	if len(expectedSource) > 1 {
+		return accepted, Task{}, false, ErrInvalidValue
+	}
+	if len(expectedSource) == 1 {
+		source, found, err := intakeSourceByID(ctx, connection, expectedSource[0].ID)
+		if err != nil {
+			return accepted, Task{}, false, err
+		}
+		if !found || !source.Enabled || source.Revision != expectedSource[0].Revision || source.LinearTeamID != accepted.Snapshot.LinearTeamID || source.GitHubRepositoryID != accepted.Snapshot.GitHubRepositoryID || source.ProjectID != accepted.ProjectID || source.TargetRepositoryID != accepted.RepositoryID {
+			return accepted, Task{}, false, ErrRevisionConflict
+		}
+	}
+	var permitted int
+	if err := connection.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM intake_sources WHERE github_repository_id = ? AND linear_team_id = ? AND project_id = ? AND target_repository_id = ? AND enabled = 1)`, int64(accepted.Snapshot.GitHubRepositoryID), accepted.Snapshot.LinearTeamID, accepted.ProjectID.Bytes(), accepted.RepositoryID.Bytes()).Scan(&permitted); err != nil || permitted == 0 {
+		if err == nil {
+			err = ErrConflict
+		}
+		return accepted, Task{}, false, err
+	}
+	existing, replay, err := intakeTaskReplay(ctx, connection, NewTask{ID: accepted.TaskID, IncarnationID: accepted.IncarnationID, ProjectID: accepted.ProjectID, RepositoryID: accepted.RepositoryID})
+	if err != nil || !replay {
+		return accepted, Task{}, false, err
+	}
+	binding, found, err := intakeAcceptanceForTask(ctx, connection, existing.ID)
+	if err != nil || !found || binding.ID != accepted.ID {
+		if err == nil {
+			err = ErrConflict
+		}
+		return accepted, Task{}, false, err
+	}
+	return accepted, existing, true, nil
 }
 
 // intakeTaskReplay recognizes the immutable receipt even after ordinary task
