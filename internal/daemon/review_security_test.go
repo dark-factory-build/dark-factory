@@ -176,6 +176,26 @@ func TestAnAllowThatNamesNoChangedPathIsNoVerdict(t *testing.T) {
 	}
 }
 
+// A head whose tree equals its base (#1600) is allowed without a reviewer,
+// whose ALLOW could name no changed path and so would exhaust its retries.
+func TestAnEmptyChangeIsAllowedWithoutAReviewer(t *testing.T) {
+	// No daemon: looking up a reviewer login would panic.
+	backend := &daemonReviewBackend{}
+	checkout, request := reviewCheckout(t)
+	output, err := exec.Command("git", "-C", checkout, "-c", "user.name=review", "-c", "user.email=review@example.invalid", "commit", "-q", "--allow-empty", "-m", "empty").CombinedOutput()
+	if err != nil {
+		t.Fatalf("git commit: %v %s", err, output)
+	}
+	if output, err = exec.Command("git", "-C", checkout, "rev-parse", "HEAD~1").Output(); err != nil {
+		t.Fatal(err)
+	}
+	request.Base = strings.TrimSpace(string(output))
+	verdict, err := backend.Review(context.Background(), checkout, request)
+	if err != nil || verdict.Event != "ALLOW" || !strings.Contains(verdict.Body, "changes no path") {
+		t.Fatalf("verdict=%+v err=%v, want a reviewerless ALLOW of the empty change", verdict, err)
+	}
+}
+
 // A path is named only as a whole path: a changed file named go is not named
 // by "looks good", but is by "`go`" or by a sentence ending "go.". The fake,
 // like codex, repeats its transcript and token count on stderr.

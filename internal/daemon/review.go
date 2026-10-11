@@ -578,6 +578,20 @@ func (b *daemonReviewBackend) Review(ctx context.Context, checkout string, reque
 	if request.Provider == "claude" {
 		kind = kernel.ProviderClaudeCode
 	}
+	ctx, cancel := context.WithTimeout(ctx, reviewDeadline)
+	defer cancel()
+	// The Claude reviewer has no shell (Bash would read the whole home), so
+	// factoryd writes the complete diff where its Read tool can reach it:
+	// inside the checkout, untracked under .git.
+	diff := filepath.Join(checkout, ".git", "change.diff")
+	command := exec.CommandContext(ctx, change.TrustedGitExecutable, "-C", checkout, "diff", "--no-ext-diff", "--no-textconv", request.Base+"...HEAD")
+	command.Env = reviewEnvironment(filepath.Dir(checkout))
+	if out, err := command.Output(); err != nil || os.WriteFile(diff, out, 0o600) != nil {
+		return review.Verdict{}, fmt.Errorf("review: diff: %v", err)
+	} else if len(out) == 0 {
+		// An empty change has no path an ALLOW could name, and merging it changes nothing.
+		return review.Verdict{Event: "ALLOW", Body: "git diff " + request.Base + "...HEAD is empty: this exact head changes no path."}, nil
+	}
 	homes, err := b.daemon.store.ReviewerAccountHomes(ctx, b.project, kind)
 	if err != nil {
 		return review.Verdict{}, err
@@ -589,17 +603,6 @@ func (b *daemonReviewBackend) Review(ctx context.Context, checkout string, reque
 	tool, err := provider.WalkToolPath(b.daemon.toolPath, request.Provider)
 	if err != nil {
 		return review.Verdict{}, fmt.Errorf("review: %s not on the tool path: %w", request.Provider, err)
-	}
-	ctx, cancel := context.WithTimeout(ctx, reviewDeadline)
-	defer cancel()
-	// The Claude reviewer has no shell (Bash would read the whole home), so
-	// factoryd writes the complete diff where its Read tool can reach it:
-	// inside the checkout, untracked under .git.
-	diff := filepath.Join(checkout, ".git", "change.diff")
-	command := exec.CommandContext(ctx, change.TrustedGitExecutable, "-C", checkout, "diff", "--no-ext-diff", "--no-textconv", request.Base+"...HEAD")
-	command.Env = reviewEnvironment(filepath.Dir(checkout))
-	if out, err := command.Output(); err != nil || os.WriteFile(diff, out, 0o600) != nil {
-		return review.Verdict{}, fmt.Errorf("review: diff: %v", err)
 	}
 	prompt := reviewPrompt(checkout, request.Base, request.Body, diff)
 	for _, home := range homes {
