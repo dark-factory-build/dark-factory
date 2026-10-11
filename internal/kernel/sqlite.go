@@ -392,7 +392,10 @@ func (store *Store) Close() error {
 		store.waitForCheckedOutConnections()
 		// The existing binding fence must complete before checkpointing or
 		// closing the pools; checkpointing is maintenance, not a new fence.
-		store.closeErr = errors.Join(store.closeErr, store.checkpointWAL(context.Background(), "TRUNCATE"))
+		// A reader outside this Store can make TRUNCATE return ErrBusy. That
+		// does not make the resource closure uncertain, so checkpoint failure
+		// must not poison the stable Close result.
+		_ = store.checkpointWAL(context.Background(), "TRUNCATE")
 		poolErr := errors.Join(closeSQLitePool("reader", store.readers), closeSQLitePool("writer", store.writer))
 		if poolErr != nil {
 			store.closeErr = fmt.Errorf("%w: close retained sqlite pools: %w", ErrCorruptState, poolErr)
