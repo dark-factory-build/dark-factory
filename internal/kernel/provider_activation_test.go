@@ -7,6 +7,7 @@ import (
 )
 
 func TestProviderResourcesActivateOnlyAsExactPair(t *testing.T) {
+	t.Parallel()
 	store, run, _ := admittedOrchestratorRun(t)
 	defer store.Close()
 	resources := resourcesForRunTest(t, store, run.ID)
@@ -29,6 +30,7 @@ func TestProviderResourcesActivateOnlyAsExactPair(t *testing.T) {
 }
 
 func TestProviderResourceActivationSuppressedRowRollsBackPair(t *testing.T) {
+	t.Parallel()
 	for _, kind := range []ResourceKind{ResourceProviderProcess, ResourceProviderGroup} {
 		t.Run(kind.String(), func(t *testing.T) {
 			store, run, _ := admittedOrchestratorRun(t)
@@ -55,6 +57,7 @@ func TestProviderResourceActivationSuppressedRowRollsBackPair(t *testing.T) {
 }
 
 func TestProviderResourceCommitAmbiguityIsBothOrNeither(t *testing.T) {
+	t.Parallel()
 	for _, test := range []struct {
 		name         string
 		fault        storeFaultKind
@@ -87,6 +90,7 @@ func TestProviderResourceCommitAmbiguityIsBothOrNeither(t *testing.T) {
 }
 
 func TestProviderIdentityPairCorruptionFailsClosed(t *testing.T) {
+	t.Parallel()
 	for _, test := range []struct {
 		name       string
 		corruptSQL string

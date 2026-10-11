@@ -69,6 +69,7 @@ func escalate(t *testing.T, store *Store, project ProjectID, number, state, head
 // escalated head, and only once settled: its newest item a minute old, or its
 // oldest five minutes old.
 func TestOverseerEscalationWake(t *testing.T) {
+	t.Parallel()
 	head, moved := strings.Repeat("a", 40), strings.Repeat("b", 40)
 	settle, maxDelay := overseerWakeSettle.Milliseconds(), overseerWakeMaxDelay.Milliseconds()
 	for _, test := range []struct {
@@ -105,23 +106,203 @@ func TestOverseerEscalationWake(t *testing.T) {
 	}
 }
 
-// A Change factoryd could not publish has no pull request; its escalation
-// wakes the overseer once all the same.
-func TestOverseerPublishFailureWake(t *testing.T) {
+// #1698: a pull request waiting on its code owner wakes the overseer once,
+// never re-wakes, and becomes one NEEDS YOU card naming it.
+func TestOverseerOwnerApprovalEscalationIsOneCard(t *testing.T) {
+	t.Parallel()
 	store, worker, _ := wakeFixture(t)
-	insert := `INSERT INTO production_records (project_id, repository, kind, identity, visual_id, document, observed_at_ms) VALUES (?, 'example/factory', 'reviewer', 'publish-x-1', '', ?, 1000)`
-	if _, err := store.writer.ExecContext(context.Background(), insert, worker.ProjectID.Bytes(), `{"id":"publish-x-1","state":"publish_failed","handled":true,"request":{"PullNumber":0,"Head":""},"escalation":"factoryd cannot publish change x for task t: refused"}`); err != nil {
+	head := strings.Repeat("a", 40)
+	escalate(t, store, worker.ProjectID, "7", "open", head, head, 1000)
+	if _, err := store.writer.ExecContext(context.Background(), `UPDATE production_records SET document = json_set(document, '$.owner_approval', json('true')) WHERE kind = 'reviewer'`); err != nil {
 		t.Fatal(err)
 	}
-	bodies := wakeBodies(t, store, 1000+overseerWakeSettle.Milliseconds())
-	if len(bodies) != 1 || strings.Count(bodies[0], "Escalated: ") != 1 || !strings.Contains(bodies[0], "\nEscalated: factoryd cannot publish change x for task t: refused") {
+	at := 1000 + overseerWakeSettle.Milliseconds()
+	if bodies := wakeBodies(t, store, at); len(bodies) != 1 || !strings.Contains(bodies[0], "Escalated: stuck 7") {
 		t.Fatalf("wake = %q", bodies)
+	}
+	settleCarrier(t, store, at+1, 31, "ran")
+	for rewake := range int64(3) {
+		if bodies := wakeBodies(t, store, at+(rewake+1)*OverseerRewakeAfter.Milliseconds()+10); len(bodies) != 0 {
+			t.Fatalf("re-wake %d = %q", rewake+1, bodies)
+		}
+	}
+	if requests, err := store.OperatorHumanRequests(context.Background()); err != nil || len(requests) != 1 || !strings.Contains(requests[0].QuestionText, "Escalated: stuck 7 [reviewer:op7]") {
+		t.Fatalf("owner card = %+v, %v", requests, err)
+	}
+}
+
+// A Change factoryd could not publish has no pull request; its escalation
+// wakes the overseer exactly once, the unpublished Change it names is not
+// re-woken while that refusal stands, and it becomes one NEEDS YOU card.
+func TestOverseerPublishFailureWake(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	succeeded, _ := NewSuccessProposal("done")
+	store, finalizing := finalizingReleasedRun(t, RoleWorker, succeeded)
+	defer store.Close()
+	change, _, err := store.Change(ctx, *finalizing.ChangeID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	moved, _ := NewCommitID(change.Selection.format, bytes.Repeat([]byte{0xd2}, change.Selection.format.oidLength()))
+	settlement, _ := NewRetainedChangeSettlement(change.Revision, &moved)
+	if _, err := store.FinalizeWorkerRun(ctx, finalizing.ID, finalizing.Revision, settlement, mustTime(t, 80)); err != nil {
+		t.Fatal(err)
+	}
+	if change, _, err = store.Change(ctx, change.ID); err != nil {
+		t.Fatal(err)
+	}
+	id := PublishFailureID(change.ID, change.Revision)
+	refusal := "factoryd cannot publish change " + change.ID.String() + " for task " + finalizing.TaskID.String() + ": the created commit is not verified by GitHub"
+	// factoryd's record of the refusal; its hourly repeat drops the escalation.
+	failed := func(escalation string) string {
+		return `{"id":"` + id + `","state":"publish_failed","handled":true,"detail":"the created commit is not verified by GitHub","request":{"PullNumber":0,"Head":""}` + escalation + `}`
+	}
+	// The intake binding is all the rule reads; its acceptance row is not.
+	for _, statement := range []struct {
+		sql  string
+		args []any
+	}{
+		{`PRAGMA foreign_keys = OFF`, nil},
+		{`INSERT INTO intake_task_bindings(task_id, acceptance_id) VALUES (?, zeroblob(16))`, []any{finalizing.TaskID.Bytes()}},
+		{`PRAGMA foreign_keys = ON`, nil},
+		{`INSERT INTO production_records (project_id, repository, kind, identity, visual_id, document, observed_at_ms) VALUES (?, 'example/factory', 'reviewer', ?, '', ?, 90)`, []any{finalizing.ProjectID.Bytes(), id, failed(`,"escalation":"` + refusal + `"`)}},
+	} {
+		if _, err := store.writer.ExecContext(ctx, statement.sql, statement.args...); err != nil {
+			t.Fatal(err)
+		}
+	}
+	overseer, err := store.CreateAgent(ctx, NewAgent{ID: agentID(t, 3), ProjectID: finalizing.ProjectID, Name: "overseer", Role: RoleOrchestrator, Provider: ProviderCodex, ToolBudgetLimit: 2}, mustTime(t, 82))
+	if err != nil {
+		t.Fatal(err)
+	}
+	policy, after, instruction := IdleStandingInstruction, uint32(1), "Supervise."
+	if _, err := store.UpdateAgent(ctx, overseer.ID, overseer.Revision, AgentPatch{IdlePolicy: &policy, IdleAfterSeconds: &after, IdleInstruction: &instruction}, mustTime(t, 83)); err != nil {
+		t.Fatal(err)
+	}
+	at := 80 + PublicationAttentionAfter.Milliseconds()
+	tasks, err := store.EnqueueOverseerWakeups(ctx, mustTime(t, at))
+	if err != nil || len(tasks) != 1 || strings.Count(tasks[0].Body, "Escalated: ") != 1 || strings.Contains(tasks[0].Body, "\n- ") ||
+		!strings.Contains(tasks[0].Body, "\nEscalated: "+refusal) {
+		t.Fatalf("wake = %+v, %v", tasks, err)
+	}
+	settleCarrier(t, store, at+1, 90, "ran")
+	for rewake := range 4 {
+		if _, err := store.writer.ExecContext(ctx, `UPDATE production_records SET document = ?, observed_at_ms = ? WHERE identity = ?`, failed(""), at+int64(rewake+1)*OverseerRewakeAfter.Milliseconds(), id); err != nil {
+			t.Fatal(err)
+		}
+		if bodies := wakeBodies(t, store, at+1+int64(rewake+1)*OverseerRewakeAfter.Milliseconds()); len(bodies) != 0 {
+			t.Fatalf("re-wake %d for the same refusal = %q", rewake+1, bodies)
+		}
+	}
+	// The refusal is the operator's: one NEEDS YOU card naming it.
+	if requests, err := store.OperatorHumanRequests(ctx); err != nil || len(requests) != 1 || requests[0].TaskID != tasks[0].ID ||
+		!strings.Contains(requests[0].QuestionText, "Escalated: "+refusal+" [reviewer:"+id+"]") {
+		t.Fatalf("operator escalation = %+v, %v", requests, err)
+	}
+	// A later retry publishes it: the card closes by itself.
+	head := hex.EncodeToString(moved.Bytes())
+	pr := ProductionPullRequest{Number: 7, Title: "Ship", URL: "https://github.com/example/factory/pull/7", Head: head, Branch: "factory/" + change.ID.String()[:12], Base: "main", State: "open", Review: ProductionReview{Head: head, State: "unknown"}}
+	if err := store.RecordPublication(ctx, finalizing.ProjectID, finalizing.TaskID, "example/factory", pr, mustTime(t, at+5*OverseerRewakeAfter.Milliseconds())); err != nil {
+		t.Fatal(err)
+	}
+	wakeBodies(t, store, at+5*OverseerRewakeAfter.Milliseconds()+1)
+	if requests, err := store.OperatorHumanRequests(ctx); err != nil || len(requests) != 0 {
+		t.Fatalf("published Change kept its card = %+v, %v", requests, err)
+	}
+}
+
+// #1561: a failed self-release wakes the overseer once and becomes exactly one
+// NEEDS YOU card naming the release, its phase and its reason; a retry failing
+// for the same cause escalates nothing more, and a new cause wakes again.
+func TestOverseerFailedReleaseEscalatesOncePerCause(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	store, worker, _ := wakeFixture(t)
+	release := func(sha byte, state, phase, reason string, at int64) {
+		t.Helper()
+		delivery := ProductionDelivery{ID: "release:" + strings.Repeat(string(sha), 40), Kind: "runtime", Destination: "factoryd", Revision: strings.Repeat(string(sha), 40), State: state, Phase: phase, Reason: reason, PullRequests: []uint64{}}
+		if err := store.RecordDelivery(ctx, worker.ProjectID, "dark-factory-build/dark-factory", delivery, mustTime(t, at)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	rewake, settle := OverseerRewakeAfter.Milliseconds(), overseerWakeSettle.Milliseconds()
+	// An unrelated full wake that ran before the failure does not count for it.
+	if _, err := store.EnqueueTask(ctx, NewTask{ID: taskID(t, 88), IncarnationID: incarnationID(t, 89), ProjectID: worker.ProjectID, AssignedAgentID: agentID(t, 3), Title: overseerWakeTitle, Body: "Factory causal wake: mode=full"}, mustTime(t, 500)); err != nil {
+		t.Fatal(err)
+	}
+	settleCarrier(t, store, 501, 10, "ran")
+	at := int64(1000)
+	release('a', "failed", "drain", "drain_timeout: run 1 is admitted", at)
+	at += settle
+	escalation := "Escalated: factoryd release:" + strings.Repeat("a", 40) + " failed in phase drain: drain_timeout: run 1 is admitted"
+	if bodies := wakeBodies(t, store, at); len(bodies) != 1 || !strings.Contains(bodies[0], escalation) {
+		t.Fatalf("wake = %q", bodies)
+	}
+	settleCarrier(t, store, at+1, 31, "ran")
+	// The retries, including a manual one of the same commit, which overwrites
+	// its record, fail the same way behind other runs: no wake, one card.
+	for round, sha := range []byte{'a', 'b', 'c'} {
+		at += rewake
+		release(sha, "running", "build", "", at)
+		// A tick while the retry runs neither wakes nor drops the card.
+		if bodies := wakeBodies(t, store, at); len(bodies) != 0 {
+			t.Fatalf("running retry %d woke = %q", round+1, bodies)
+		}
+		release(sha, "failed", "drain", fmt.Sprintf("drain_timeout: run %d is admitted", round+2), at+1)
+		if bodies := wakeBodies(t, store, at+settle); len(bodies) != 0 {
+			t.Fatalf("retry %d re-woke = %q", round+1, bodies)
+		}
+	}
+	if requests, err := store.OperatorHumanRequests(ctx); err != nil || len(requests) != 1 || !strings.Contains(requests[0].QuestionText, "failed in phase drain") {
+		t.Fatalf("operator escalation = %+v, %v", requests, err)
+	}
+	at += rewake
+	release('d', "failed", "trial", "the new build was not promoted (answered false): it exited", at)
+	if bodies := wakeBodies(t, store, at+settle); len(bodies) != 1 || !strings.Contains(bodies[0], "factoryd release:"+strings.Repeat("d", 40)+" failed in phase trial") {
+		t.Fatalf("new cause wake = %q", bodies)
+	}
+	// A manual retry of that commit fails with the first cause again: its
+	// record no longer shows the change of cause, but the wake naming it does.
+	settleCarrier(t, store, at+settle+1, 52, "ran")
+	at += rewake
+	release('d', "failed", "drain", "drain_timeout: run 4 is admitted", at)
+	if bodies := wakeBodies(t, store, at+settle); len(bodies) != 1 || !strings.Contains(bodies[0], "factoryd release:"+strings.Repeat("d", 40)+" failed in phase drain") {
+		t.Fatalf("returning cause wake = %q", bodies)
+	}
+	// Causes that differ only after a long shared prefix (a temporary
+	// directory's generated name), or only in a bracket, are distinct, even
+	// on a same-commit retry.
+	for round, directory := range []string{"1", "2", "]", ")"} {
+		settleCarrier(t, store, at+settle+1, byte(73+21*round), "ran")
+		at += rewake
+		release('d', "failed", "build", "mkdir "+strings.Repeat("/x", 50)+"/dark-factory-release-"+directory+": no space left on device", at)
+		if bodies := wakeBodies(t, store, at+settle); len(bodies) != 1 || !strings.Contains(bodies[0], "dark-factory-release-"+directory+": no space") {
+			t.Fatalf("long cause %s wake = %q", directory, bodies)
+		}
+	}
+	// A full wake that named no item (one overflowing with older items)
+	// handled a failure too: a same-commit retry failing the same way does
+	// not wake again.
+	settleCarrier(t, store, at+settle+1, 157, "ran")
+	at += rewake
+	release('e', "failed", "stage", "backup: disk full", at)
+	if _, err := store.EnqueueTask(ctx, NewTask{ID: taskID(t, 90), IncarnationID: incarnationID(t, 91), ProjectID: worker.ProjectID, AssignedAgentID: agentID(t, 3), Title: overseerWakeTitle, Body: "Factory causal wake: mode=full"}, mustTime(t, at+1)); err != nil {
+		t.Fatal(err)
+	}
+	settleCarrier(t, store, at+2, 178, "ran")
+	at += rewake
+	release('e', "running", "build", "", at)
+	release('e', "failed", "stage", "backup: disk still full", at+1)
+	if bodies := wakeBodies(t, store, at+1+settle); len(bodies) != 0 {
+		t.Fatalf("retry after a full wake re-woke = %q", bodies)
 	}
 }
 
 // A cancelled worker task is informational; a blocked one wakes the overseer
 // with one summary line and project counts.
 func TestOverseerWakeSummarisesTasks(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	store, worker, _ := wakeFixture(t)
 	cancelled, err := store.EnqueueTask(ctx, NewTask{ID: taskID(t, 10), IncarnationID: incarnationID(t, 11), ProjectID: worker.ProjectID, AssignedAgentID: worker.ID, Title: "cancelled"}, mustTime(t, 5))
@@ -164,8 +345,8 @@ func TestOverseerWakeSummarisesTasks(t *testing.T) {
 		t.Fatal(err)
 	}
 	bodies := wakeBodies(t, store, 80+overseerWakeSettle.Milliseconds())
-	want := "Supervise.\n\nFactory causal wake: mode=full; prior_task_id=; worker tasks queued=1 running=0; open PRs=1. mode=full requires fixed-head reconciliation.\n- " +
-		finalizing.TaskID.String() + ` "verify" blocked rev=1 change=` + change.ID.String()[:12] + `@d2d2d2d2 PR #7 open/unknown: needs a decision`
+	want := "Supervise.\n\nFactory causal wake: mode=full; prior_task_id=; worker tasks queued=1 running=0; open factory PRs conflicting=0 failing=0 approved-not-queued=0. mode=full requires fixed-head reconciliation.\n- " +
+		finalizing.TaskID.String() + ` "verify" blocked rev=1 change=` + change.ID.String()[:12] + `@` + strings.Repeat("d2", 20) + ` PR #7 open/unknown: needs a decision`
 	if len(bodies) != 1 || bodies[0] != want {
 		t.Fatalf("wake = %q\nwant %q", bodies, want)
 	}
@@ -173,6 +354,7 @@ func TestOverseerWakeSummarisesTasks(t *testing.T) {
 
 // Lines that overflow the provider bound are dropped first, then escalations.
 func TestOverseerWakeInstructionFallsBackToFull(t *testing.T) {
+	t.Parallel()
 	line := "- " + strings.Repeat("x", 200)
 	lines := make([]string, 50) // > 8 KiB with Codex
 	for index := range lines {
@@ -188,10 +370,13 @@ func TestOverseerWakeInstructionFallsBackToFull(t *testing.T) {
 	}
 }
 
-// A succeeded intake task with a diff is factoryd's to publish; any other
-// success still gets the overseer's one look.
+// A succeeded intake task with a diff is factoryd's to publish, and stays so
+// once its merged Change is reclaimed; any other success, an empty intake one
+// whose Change was reclaimed included, still gets the overseer's one look.
 func TestOverseerWakeSkipsPublishedIntakeSuccess(t *testing.T) {
-	for _, intake := range []bool{false, true} {
+	t.Parallel()
+	for _, mode := range []string{"plain", "intake", "reclaimed", "empty"} {
+		intake := mode != "plain"
 		ctx := context.Background()
 		succeeded, _ := NewSuccessProposal("done")
 		store, finalizing := finalizingReleasedRun(t, RoleWorker, succeeded)
@@ -201,6 +386,9 @@ func TestOverseerWakeSkipsPublishedIntakeSuccess(t *testing.T) {
 			t.Fatal(err)
 		}
 		moved, _ := NewCommitID(change.Selection.format, bytes.Repeat([]byte{0xd2}, change.Selection.format.oidLength()))
+		if mode == "empty" {
+			moved = change.Selection.commit
+		}
 		settlement, _ := NewRetainedChangeSettlement(change.Revision, &moved)
 		if _, err := store.FinalizeWorkerRun(ctx, finalizing.ID, finalizing.Revision, settlement, mustTime(t, 80)); err != nil {
 			t.Fatal(err)
@@ -223,12 +411,19 @@ func TestOverseerWakeSkipsPublishedIntakeSuccess(t *testing.T) {
 			t.Fatal(err)
 		}
 		head := hex.EncodeToString(moved.Bytes())
-		pr := ProductionPullRequest{Number: 7, Title: "Ship", URL: "https://github.com/example/factory/pull/7", Head: head, Branch: "factory/" + change.ID.String()[:12], Base: "main", State: "open", Review: ProductionReview{Head: head, State: "unknown"}}
-		if err := store.RecordPublication(ctx, finalizing.ProjectID, finalizing.TaskID, "example/factory", pr, mustTime(t, 84)); err != nil {
-			t.Fatal(err)
+		pr := ProductionPullRequest{Number: 7, Title: "Ship", URL: "https://github.com/example/factory/pull/7", Head: head, Branch: "factory/" + change.ID.String()[:12], Base: "main", State: map[bool]string{false: "open", true: "merged"}[mode == "reclaimed"], Review: ProductionReview{Head: head, State: "unknown"}}
+		if mode != "empty" {
+			if err := store.RecordPublication(ctx, finalizing.ProjectID, finalizing.TaskID, "example/factory", pr, mustTime(t, 84)); err != nil {
+				t.Fatal(err)
+			}
 		}
-		if bodies := wakeBodies(t, store, 1_000_000); len(bodies) != map[bool]int{false: 1, true: 0}[intake] {
-			t.Fatalf("intake=%v wake = %q", intake, bodies)
+		if mode == "reclaimed" || mode == "empty" {
+			if _, err := store.ReclaimChange(ctx, change.ID, mustRevision(t, change.Revision.Int64()+1), false, mustTime(t, 85)); err != nil {
+				t.Fatal(err)
+			}
+		}
+		if bodies := wakeBodies(t, store, 1_000_000); len(bodies) != map[bool]int{false: 1, true: 0}[intake && mode != "empty"] {
+			t.Fatalf("%s wake = %q", mode, bodies)
 		}
 	}
 }
@@ -237,6 +432,7 @@ func TestOverseerWakeSkipsPublishedIntakeSuccess(t *testing.T) {
 // not use them up, while a bare instruction (the causal record overflowed) or
 // a full wake counts for every item. Each wake here ran.
 func TestOverseerRewakesCountPerItem(t *testing.T) {
+	t.Parallel()
 	for other, due := range map[string]bool{"Factory causal wake: mode=targeted; \nEscalated: stuck 8": true, "Supervise.": false} {
 		ctx := context.Background()
 		store, worker, overseer := wakeFixture(t)
@@ -270,9 +466,10 @@ func TestOverseerRewakesCountPerItem(t *testing.T) {
 // OverseerRewakeAfter like any wake, but only one that started counts toward
 // the item's re-wakes (stalledCard drives that count to the item's card).
 func TestOverseerNeverStartedWakeLeavesItemDue(t *testing.T) {
+	t.Parallel()
 	for _, detail := range []string{NeverStartedRunDetail, "provider exited"} {
 		ctx := context.Background()
-		neverStarted, _ := NewFailureProposal(FailureProtocol, NeverStartedRunDetail)
+		neverStarted, _ := NewFailureProposal(FailureTransient, NeverStartedRunDetail)
 		store, finalizing := finalizingReleasedRun(t, RoleOrchestrator, neverStarted)
 		defer store.Close()
 		if _, err := finalizeTestRun(t, store, finalizing, 60); err != nil {
@@ -307,7 +504,7 @@ func TestOverseerNeverStartedWakeLeavesItemDue(t *testing.T) {
 			t.Fatal(err)
 		}
 		var wakes int
-		if err := read.connection.QueryRowContext(ctx, overseerItems+`SELECT wakes FROM counted WHERE item_key = '[reviewer:op7]' AND ?6 + ?7 + ?8 >= 0`, overseerItemArgs(agent, 2+overseerWakeSettle.Milliseconds())...).Scan(&wakes); err != nil {
+		if err := read.connection.QueryRowContext(ctx, overseerItems+`SELECT wakes FROM counted WHERE item_key = '[reviewer:op7]' AND ?6 + ?7 + ?8 >= 0`, overseerItemArgs(agent, 2+overseerWakeSettle.Milliseconds(), nil)...).Scan(&wakes); err != nil {
 			t.Fatal(err)
 		}
 		read.Close()
@@ -337,7 +534,11 @@ func settleCarrier(t *testing.T, store *Store, at int64, seed byte, detail strin
 	if run, err = store.ActivateRun(ctx, run.ID, session.ID, run.Revision, session.Revision, mustTime(t, at+5)); err != nil {
 		t.Fatal(err)
 	}
-	failure, err := NewFailureProposal(FailureProtocol, detail)
+	code := FailureProtocol
+	if detail == NeverStartedRunDetail {
+		code = FailureTransient
+	}
+	failure, err := NewFailureProposal(code, detail)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -364,6 +565,7 @@ func settleCarrier(t *testing.T, store *Store, at int64, seed byte, detail strin
 // OverseerRewakeAfter. An item past its re-wakes becomes one NEEDS YOU card,
 // raised once, whose reply resumes the last carrier with the question.
 func TestOverseerRewakesCountPerItemAndStartedOnly(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	store, _, last, card, at, _ := stalledCard(t)
 	delivery, _ := HumanRequestDeliveryIDFromBytes(bytes.Repeat([]byte{7}, IDBytes))
@@ -374,7 +576,7 @@ func TestOverseerRewakesCountPerItemAndStartedOnly(t *testing.T) {
 		t.Fatalf("resumed carrier = %+v, %v", resumed, err)
 	}
 	var resolution string
-	if err := store.writer.QueryRowContext(ctx, `SELECT resolution_detail FROM continuations WHERE condition_id = ?`, card.ID.Bytes()).Scan(&resolution); err != nil ||
+	if err := store.writer.QueryRowContext(ctx, `SELECT continuation_reply FROM human_requests WHERE id = ?`, card.ID.Bytes()).Scan(&resolution); err != nil ||
 		!strings.HasPrefix(resolution, "Operator reply to: "+card.QuestionText) || !strings.HasSuffix(resolution, "\nclose #7") {
 		t.Fatalf("resumed context = %q, %v", resolution, err)
 	}
@@ -383,6 +585,7 @@ func TestOverseerRewakesCountPerItemAndStartedOnly(t *testing.T) {
 // Only a human answers a stalled-item card: the overseer neither sees it in
 // its snapshot nor resolves it.
 func TestStalledCardIsTheOperatorsAlone(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	store, worker, _, card, at, next := stalledCard(t)
 	overseer, _, err := store.Agent(ctx, agentID(t, 3))
@@ -415,6 +618,7 @@ func TestStalledCardIsTheOperatorsAlone(t *testing.T) {
 // A stalled-item card closes once its items (every escalated PR it names)
 // resolve on their own.
 func TestStalledCardClosesWhenItsItemResolves(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	store, _, last, _, at, _ := stalledCard(t)
 	if _, err := store.writer.ExecContext(ctx, `UPDATE production_records SET document = json_set(document, '$.state', 'closed') WHERE kind = 'pull_request'`); err != nil {
@@ -433,6 +637,7 @@ func TestStalledCardClosesWhenItsItemResolves(t *testing.T) {
 // whether it is stalled: the item's card stays open rather than closing and
 // leaving the item neither woken nor carded.
 func TestStalledCardSurvivesANeverStartedWake(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	store, worker, _, card, at, next := stalledCard(t)
 	if _, err := store.EnqueueTask(ctx, NewTask{ID: taskID(t, 88), IncarnationID: incarnationID(t, 89), ProjectID: worker.ProjectID, AssignedAgentID: agentID(t, 3), Title: overseerWakeTitle, Body: "Factory causal wake: mode=full"}, mustTime(t, at)); err != nil {
@@ -448,6 +653,7 @@ func TestStalledCardSurvivesANeverStartedWake(t *testing.T) {
 
 // A card the operator cancelled is not raised again on the same wake run.
 func TestCancelledStalledCardStaysCancelled(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	store, _, _, card, at, _ := stalledCard(t)
 	tx, err := store.beginValidatedWrite(ctx)
@@ -458,15 +664,7 @@ func TestCancelledStalledCardStaysCancelled(t *testing.T) {
 	if err != nil {
 		t.Fatal(tx.Rollback(err))
 	}
-	run, _, err := runByID(ctx, tx.connection, request.RunID)
-	if err != nil {
-		t.Fatal(tx.Rollback(err))
-	}
-	continuation, _, err := humanRequestContinuation(ctx, tx.connection, request, run)
-	if err != nil {
-		t.Fatal(tx.Rollback(err))
-	}
-	if err := cancelHumanContinuationOnConnection(ctx, tx, request, continuation, mustTime(t, at+1)); err != nil {
+	if err := cancelHumanContinuationOnConnection(ctx, tx, request, mustTime(t, at+1)); err != nil {
 		t.Fatal(tx.Rollback(err))
 	}
 	if err := tx.Commit(ctx); err != nil {
@@ -545,4 +743,59 @@ func stalledCard(t *testing.T) (*Store, Agent, Task, OperatorHumanRequest, int64
 		t.Fatalf("stalled card projection = %+v, %v, %v", projection, found, err)
 	}
 	return store, worker, last, requests[0], at, next
+}
+
+// A health condition factoryd holds only in memory wakes the overseer of its
+// project (or of every project) once settled, with when it began; it re-wakes
+// like an escalation, stalls into the operator's card, and the card closes
+// once factoryd stops holding it.
+func TestOverseerHealthWake(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	store, _, _ := wakeFixture(t)
+	health := []OverseerHealth{{Key: "github-quota", Detail: "GitHub quota 12/5000", Since: mustTime(t, 1000)},
+		{Project: projectID(t, 9), Key: "intake:x", Detail: "another project's intake", Since: mustTime(t, 1000)}}
+	at, seed := 1000+overseerWakeSettle.Milliseconds(), byte(10)
+	if tasks, err := store.EnqueueOverseerWakeups(ctx, mustTime(t, at-1), health...); err != nil || len(tasks) != 0 {
+		t.Fatalf("unsettled wake = %+v, %v", tasks, err)
+	}
+	for wake := 0; wake <= 3; wake++ {
+		tasks, err := store.EnqueueOverseerWakeups(ctx, mustTime(t, at), health...)
+		if err != nil || len(tasks) != 1 || !strings.Contains(tasks[0].Body, "\nHealth since 1970-01-01T00:00:01Z: GitHub quota 12/5000 [health:github-quota]") || strings.Contains(tasks[0].Body, "another project") {
+			t.Fatalf("wake %d = %+v, %v", wake, tasks, err)
+		}
+		seed += 21
+		settleCarrier(t, store, at+1, seed, "ran")
+		at += OverseerRewakeAfter.Milliseconds()
+	}
+	if tasks, err := store.EnqueueOverseerWakeups(ctx, mustTime(t, at), health...); err != nil || len(tasks) != 0 {
+		t.Fatalf("stalled condition woke again = %+v, %v", tasks, err)
+	}
+	if requests, err := store.OperatorHumanRequests(ctx); err != nil || len(requests) != 1 || !strings.Contains(requests[0].QuestionText, "GitHub quota 12/5000 [health:github-quota]") {
+		t.Fatalf("stalled card = %+v, %v", requests, err)
+	}
+	wakeBodies(t, store, at+1)
+	if requests, err := store.OperatorHumanRequests(ctx); err != nil || len(requests) != 0 {
+		t.Fatalf("cleared condition kept its card = %+v, %v", requests, err)
+	}
+}
+
+// The operator reads a due item as the overseer's next wake names it, and
+// each stalled item (7, and 20 to 23 the re-wakes of 7 also named) with the
+// carrier that last named it.
+func TestOverseerItemsShowStalledAndDue(t *testing.T) {
+	t.Parallel()
+	store, worker, last, _, at, _ := stalledCard(t)
+	head := strings.Repeat("a", 40)
+	escalate(t, store, worker.ProjectID, "30", "open", head, head, at)
+	items, err := store.OverseerItems(context.Background(), worker.ProjectID, mustTime(t, at+overseerWakeMaxDelay.Milliseconds()))
+	if err != nil || len(items) != 6 || !items[0].Due || items[0].Line != "Escalated: stuck 30 [reviewer:op30]" {
+		t.Fatalf("items = %+v, %v", items, err)
+	}
+	for index, item := range items[1:] {
+		want := fmt.Sprintf("Escalated: stuck %d [reviewer:op%[1]d]", map[bool]int{true: 7, false: 19 + index}[index == 0])
+		if item.Due || item.Line != want || !bytes.Equal(item.Carrier, last.ID.Bytes()) {
+			t.Fatalf("stalled item %d = %+v, want %q", index, item, want)
+		}
+	}
 }

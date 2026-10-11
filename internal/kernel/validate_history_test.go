@@ -134,7 +134,7 @@ func retainedHistoryStore(t *testing.T, tasks, runs int) *Store {
 				if err != nil || !found {
 					t.Fatalf("task = %+v, %v", current, err)
 				}
-				if _, err := store.SendBackTask(ctx, task.ID, current.Revision, "again", mustTime(t, at)); err != nil {
+				if _, err := store.SendBackTask(ctx, task.ID, current.Revision, changeHead(t, store, task.ID), "again", mustTime(t, at)); err != nil {
 					t.Fatal(err)
 				}
 			}
@@ -183,6 +183,7 @@ func validationStatements(t *testing.T, store *Store) (int, time.Duration) {
 // adds a fixed number of statements, never one more walk of the task's
 // history per run already recorded.
 func TestDurableValidationCostIsLinearInRetainedHistory(t *testing.T) {
+	t.Parallel()
 	const tasks, maxRuns = 2, 4
 	var counts []int
 	var last *Store

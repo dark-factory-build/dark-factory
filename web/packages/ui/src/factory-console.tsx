@@ -293,7 +293,7 @@ export function FactoryConsole({
               if (state === undefined || onSetDispatch === undefined || dispatchPending) return;
               setDispatchPending(true); setDispatchError(""); setDispatchNotice("");
               void onSetDispatch(state.factory.revision, !state.factory.dispatch_enabled).then((result) => setDispatchNotice(result.enabled ? "New work resumed." : "New work paused. Active processes continue."), () => setDispatchError("The admission change could not be confirmed. Check connection and administrator access, then refresh before retrying.")).finally(() => setDispatchPending(false));
-            }}>{dispatchPending ? "Waiting…" : state?.factory.dispatch_enabled ? "Pause new work" : "Resume new work"}</IconButton>
+            }}>{dispatchPending ? "Waiting…" : state?.factory.dispatch_enabled ? "Pause new work" : state ? "Resume new work" : "New work"}</IconButton>
             <IconButton icon="gear" aria-label="Settings" aria-pressed={settingsOpen === true} disabled={onToggleSettings === undefined} onClick={onToggleSettings} />
           </div>
           <div
@@ -397,6 +397,8 @@ export function FactoryConsole({
                 panel={agentPanel}
                 onPanel={onAgentPanel}
                 telemetry={agentTelemetry(agent, scopedState, runPaths)}
+                contributions={knowledgeActivity.recent}
+                onOpenActivity={ready ? openActivity : undefined}
               />}
               </div>
             </div>

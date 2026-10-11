@@ -11,13 +11,16 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"strconv"
 	"strings"
 	"time"
 
+	"github.com/dark-factory-build/dark-factory/internal/api"
 	"github.com/dark-factory-build/dark-factory/internal/browser"
 	"github.com/dark-factory-build/dark-factory/internal/browserprotocol"
 	"github.com/dark-factory-build/dark-factory/internal/change"
 	"github.com/dark-factory-build/dark-factory/internal/kernel"
+	"github.com/dark-factory-build/dark-factory/internal/maintainer"
 	"github.com/dark-factory-build/dark-factory/internal/opgraph"
 )
 
@@ -272,8 +275,22 @@ func (transport observedTransport) RoundTrip(request *http.Request) (*http.Respo
 	}
 	started := time.Now()
 	response, err := next.RoundTrip(request)
-	transport.daemon.observe("client", map[string]string{"http.request.method": request.Method},
+	attributes := map[string]string{"http.request.method": request.Method}
+	operation := maintainer.Operation(request.Context())
+	if operation != "" {
+		attributes["rpc.method"] = operation
+	}
+	transport.daemon.observe("client", attributes,
 		map[string]string{"server.address": strings.ToLower(request.URL.Hostname())}, err != nil || response.StatusCode >= 500, time.Since(started))
+	// The broker reports the owner-token GitHub calls a Maintainer request
+	// cost, so each operation's share of the owner's quota is known (#1510).
+	if err == nil && operation != "" {
+		if calls, _ := strconv.ParseUint(response.Header.Get("X-Github-Requests"), 10, 16); calls > 0 {
+			now := transport.daemon.now().UnixMilli()
+			transport.daemon.runtimeStore().Record(opgraph.Observation{Source: "factoryd", Environment: "local", Kind: "client", Start: now, End: now + 1, Count: calls,
+				Attributes: map[string]string{"service.name": "factoryd", "rpc.method": operation}, Peer: map[string]string{"server.address": "api.github.com"}})
+		}
+	}
 	return response, err
 }
 
@@ -291,6 +308,52 @@ func (daemon *Daemon) runtimeStore() *opgraph.Runtime {
 		daemon.runtime = opgraph.NewRuntime(time.Hour)
 	}
 	return daemon.runtime
+}
+
+// factorydHealth projects only the daemon work that is useful to an
+// overseer. Browser frames also carry rpc.method, but they are not local API
+// calls: unlike the API listener they have no unix transport attribute.
+func (daemon *Daemon) factorydHealth() api.FactorydHealth {
+	byName := map[string]api.FactorydCall{}
+	now := daemon.now()
+	observations, _ := daemon.runtimeStore().Snapshot(now.UnixMilli())
+	for _, item := range observations {
+		if item.Source != "factoryd" || item.Attributes["service.name"] != "factoryd" || item.End <= now.Add(-runtimeWindow).UnixMilli() {
+			continue
+		}
+		name := ""
+		switch {
+		case item.Kind == "internal" && item.Attributes["code.function.name"] == schedulerFunction:
+			name = schedulerFunction
+		case item.Kind == "server" && item.Attributes["network.transport"] == "unix":
+			name = item.Attributes["rpc.method"]
+		}
+		if name == "" {
+			continue
+		}
+		call := byName[name]
+		call.Name, call.Count = name, call.Count+item.Count
+		call.Errors += item.Errors
+		call.LatencyP95MS = max(call.LatencyP95MS, item.LatencyP95)
+		byName[name] = call
+	}
+	calls := make([]api.FactorydCall, 0, len(byName))
+	for _, call := range byName {
+		calls = append(calls, call)
+	}
+	slices.SortFunc(calls, func(left, right api.FactorydCall) int {
+		if left.LatencyP95MS != right.LatencyP95MS {
+			if left.LatencyP95MS > right.LatencyP95MS {
+				return -1
+			}
+			return 1
+		}
+		return strings.Compare(left.Name, right.Name)
+	})
+	if len(calls) > 32 {
+		calls = calls[:32]
+	}
+	return api.FactorydHealth{Calls: calls}
 }
 
 // Self-observation claims exactly what factoryd instruments: its browser

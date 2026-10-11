@@ -30,7 +30,14 @@ func repeatBytes(value byte, count int) []byte {
 	return result
 }
 
+func TestMissionBindingIgnoresNonDecisionContent(t *testing.T) {
+	if err := bindMissionDecision(context.Background(), nil, ProjectID{}, ContentAcceptanceScenario, `{"record_type":"proposal","record_id":"00000000000000000000000000000000","task_id":"00000000000000000000000000000000"}`, mustTime(t, 1)); err != nil {
+		t.Fatalf("non-decision content reached mission binding: %v", err)
+	}
+}
+
 func TestContentRevisionReplayAndHistoryRemainCASBound(t *testing.T) {
+	t.Parallel()
 	store, run, _ := runningWorkerRun(t)
 	defer store.Close()
 	ctx := context.Background()
@@ -65,6 +72,7 @@ func TestContentRevisionReplayAndHistoryRemainCASBound(t *testing.T) {
 }
 
 func TestAttemptContentUsesLiveProjectAndProvenance(t *testing.T) {
+	t.Parallel()
 	store, run, _ := runningWorkerRun(t)
 	defer store.Close()
 	ctx := context.Background()
@@ -94,6 +102,7 @@ func TestAttemptContentUsesLiveProjectAndProvenance(t *testing.T) {
 }
 
 func TestContentAttachmentsEnforceAttemptRoleAndPinWork(t *testing.T) {
+	t.Parallel()
 	store, worker, _ := runningWorkerRun(t)
 	defer store.Close()
 	ctx := context.Background()
@@ -133,6 +142,7 @@ func TestContentAttachmentsEnforceAttemptRoleAndPinWork(t *testing.T) {
 }
 
 func TestAttemptContentRejectsRevokedCredentialWithoutMutation(t *testing.T) {
+	t.Parallel()
 	store, run, keys := runningWorkerRun(t)
 	defer store.Close()
 	ctx := context.Background()
@@ -153,6 +163,7 @@ func TestAttemptContentRejectsRevokedCredentialWithoutMutation(t *testing.T) {
 }
 
 func TestContentDeprecationReplayUsesExpectedRevisionAfterLaterRevision(t *testing.T) {
+	t.Parallel()
 	store, run, _ := runningWorkerRun(t)
 	defer store.Close()
 	ctx := context.Background()
@@ -178,6 +189,7 @@ func TestContentDeprecationReplayUsesExpectedRevisionAfterLaterRevision(t *testi
 }
 
 func TestTaskContentAttachmentBoundIsEnforced(t *testing.T) {
+	t.Parallel()
 	store, run, _ := runningWorkerRun(t)
 	defer store.Close()
 	ctx := context.Background()
@@ -202,6 +214,7 @@ func TestTaskContentAttachmentBoundIsEnforced(t *testing.T) {
 }
 
 func TestOrchestratorTaskContentAttachmentBoundIsEnforced(t *testing.T) {
+	t.Parallel()
 	store, overseer, _ := runningOrchestratorRun(t)
 	defer store.Close()
 	ctx := context.Background()
@@ -225,6 +238,7 @@ func TestOrchestratorTaskContentAttachmentBoundIsEnforced(t *testing.T) {
 }
 
 func TestContentActivityListsRecordedWritesAndReadsOnly(t *testing.T) {
+	t.Parallel()
 	store, run, _ := runningWorkerRun(t)
 	defer store.Close()
 	ctx := context.Background()

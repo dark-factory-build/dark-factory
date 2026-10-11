@@ -23,6 +23,7 @@ func knowledgeSpec(t *testing.T, project ProjectID, seed byte, kind ContentKind,
 }
 
 func TestKnowledgeMetadataRequiresCanonicalKeys(t *testing.T) {
+	t.Parallel()
 	for _, raw := range []string{
 		`{"status":"tentative","Branch":"other"}`,
 		`{"status":"tentative","Environment":"private"}`,
@@ -38,6 +39,7 @@ func TestKnowledgeMetadataRequiresCanonicalKeys(t *testing.T) {
 }
 
 func TestKnowledgeAuthorityScopeAndImmutableThreads(t *testing.T) {
+	t.Parallel()
 	store, run, _ := runningWorkerRun(t)
 	defer store.Close()
 	ctx := context.Background()
@@ -141,6 +143,7 @@ func TestKnowledgeAuthorityScopeAndImmutableThreads(t *testing.T) {
 }
 
 func TestKnowledgeFilterBeforePaginationAndAccessFreeze(t *testing.T) {
+	t.Parallel()
 	store, run, _ := runningWorkerRun(t)
 	defer store.Close()
 	ctx := context.Background()
@@ -196,6 +199,7 @@ func TestKnowledgeFilterBeforePaginationAndAccessFreeze(t *testing.T) {
 }
 
 func TestKnowledgeEmptyContextSurvivesRestart(t *testing.T) {
+	t.Parallel()
 	store, run, _, path := runningWorkerRunWithPath(t)
 	ctx := context.Background()
 	if _, err := store.FreezeKnowledgeContext(ctx, run.ID, nil, mustTime(t, 40)); err != nil {
@@ -219,6 +223,7 @@ func TestKnowledgeEmptyContextSurvivesRestart(t *testing.T) {
 }
 
 func TestKnowledgeOpenThreadsFilterBeforePagination(t *testing.T) {
+	t.Parallel()
 	store, run, _ := runningWorkerRun(t)
 	defer store.Close()
 	ctx := context.Background()
@@ -241,6 +246,7 @@ func TestKnowledgeOpenThreadsFilterBeforePagination(t *testing.T) {
 }
 
 func TestKnowledgeAttachmentScopeAndLifecycle(t *testing.T) {
+	t.Parallel()
 	store, run, _ := runningWorkerRun(t)
 	defer store.Close()
 	ctx := context.Background()
@@ -275,9 +281,26 @@ func TestKnowledgeAttachmentScopeAndLifecycle(t *testing.T) {
 			t.Fatalf("queued pin/replay: %v", err)
 		}
 	}
+	// Pins given at enqueue get the same scope checks, and a refused one
+	// refuses the whole enqueue.
+	pinned := NewTask{ID: taskID(t, 145), ProjectID: run.ProjectID, RepositoryID: other.ID, IncarnationID: incarnationID(t, 146), Title: "pinned"}
+	if _, err := store.EnqueueTask(ctx, pinned, mustTime(t, 47), TaskContentReference{ContentID: local.ID, ContentRevision: local.Revision}, TaskContentReference{ContentID: content.ID, ContentRevision: content.Revision}); !errors.Is(err, ErrConflict) {
+		t.Fatalf("cross-repository enqueue pin: %v", err)
+	}
+	if _, found, err := store.Task(ctx, pinned.ID); err != nil || found {
+		t.Fatalf("refused enqueue left a task: %v %v", found, err)
+	}
+	created, err := store.EnqueueTask(ctx, pinned, mustTime(t, 48), TaskContentReference{ContentID: local.ID, ContentRevision: local.Revision})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if refs, err := store.TaskContentReferences(ctx, run.ProjectID, created.ID, created.WorkRevision); err != nil || len(refs) != 1 || refs[0].ContentID != local.ID {
+		t.Fatalf("enqueue pins: %+v %v", refs, err)
+	}
 }
 
 func TestKnowledgeProjectScopeAcrossRepositories(t *testing.T) {
+	t.Parallel()
 	store, run, _ := runningWorkerRun(t)
 	defer store.Close()
 	ctx := context.Background()

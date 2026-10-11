@@ -2,6 +2,8 @@ package daemon
 
 import (
 	"context"
+	"crypto/ed25519"
+	"encoding/base64"
 	"encoding/hex"
 	"errors"
 	"fmt"
@@ -151,7 +153,15 @@ func (daemon *Daemon) OpenBrowser(ctx context.Context) (string, error) {
 	if _, err := daemon.store.CreateBrowserPairingChallenge(ctx, digest, runtime.backend.boot, webProductionOrigin, webCapabilities, at, expires); err != nil {
 		return "", err
 	}
-	return webProductionOrigin + "/#df_pair=" + hex.EncodeToString(challenge[:]), nil
+	link := webProductionOrigin + "/#df_pair=" + hex.EncodeToString(challenge[:])
+	// The page pins this key and runs only a console bundle it signed.
+	daemon.browserMu.Lock()
+	console := daemon.console
+	daemon.browserMu.Unlock()
+	if len(console) >= ed25519.PublicKeySize {
+		link += "&df_key=" + base64.RawURLEncoding.EncodeToString(console[:ed25519.PublicKeySize])
+	}
+	return link, nil
 }
 
 func (daemon *Daemon) WebListClients(ctx context.Context, after string) (api.WebClientPage, error) {

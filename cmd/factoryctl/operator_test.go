@@ -6,7 +6,6 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
-	"fmt"
 	"strings"
 	"testing"
 
@@ -27,6 +26,8 @@ func TestParseExactOperatorCommands(t *testing.T) {
 		{name: "agent idle policy", args: []string{"agent", "idle-policy", "--agent", id, "--revision", "7", "--policy", "standing_instruction", "--after-seconds", "60", "--instruction", "review retained changes", "--run-budget", "3"}},
 		{name: "agent idle policy legacy zero budget", args: []string{"agent", "idle-policy", "--agent", id, "--revision", "7", "--policy", "standing_instruction", "--after-seconds", "60", "--instruction", "legacy scope"}},
 		{name: "agent idle wait", args: []string{"agent", "idle-policy", "--agent", id, "--revision", "7", "--policy", "wait"}},
+		{name: "specialist wake-on", args: []string{"agent", "idle-policy", "--agent", id, "--revision", "7", "--policy", "standing_instruction", "--after-seconds", "60", "--instruction", "review", "--wake-on", "failures,merges"}},
+		{name: "project specialist limits", args: []string{"project", "limits", "--project", id, "--revision", "7", "--run-budget", "0", "--max-run-seconds", "0", "--specialist-runs", "2", "--specialist-open-proposals", "5"}},
 		{name: "account discover", args: []string{"account", "discover"}},
 		{name: "account list", args: []string{"account", "list"}},
 		{name: "account link", args: []string{"account", "link", "--provider", "codex", "--home", "/Users/operator/.codex-dogfood", "--label", "dogfood"}},
@@ -37,6 +38,7 @@ func TestParseExactOperatorCommands(t *testing.T) {
 		{name: "task add supplied identities", args: []string{"task", "add", "--project", id, "--agent", id, "--title", "t", "--task-id", id, "--incarnation-id", strings.Repeat("cd", 16)}},
 		{name: "task add any eligible worker", args: []string{"task", "add", "--project", id, "--agent", "any", "--title", "t"}},
 		{name: "status", args: []string{"status"}},
+		{name: "project oversight", args: []string{"status", "--project", id}},
 		{name: "task send back", args: []string{"task", "send-back", "--task", id, "--note", "five findings"}},
 		{name: "dispatch on", args: []string{"dispatch", "on"}},
 		{name: "dispatch off", args: []string{"dispatch", "off"}},
@@ -91,6 +93,8 @@ func TestParseExactOperatorCommands(t *testing.T) {
 		{"agent", "idle-policy", "--agent", id, "--revision", "7", "--after-seconds", "60", "--instruction", "x", "--run-budget", "1"},
 		{"agent", "idle-policy", "--agent", id, "--revision", "7", "--policy", "standing_instruction", "--after-seconds", "0", "--instruction", "x", "--run-budget", "1"},
 		{"agent", "idle-policy", "--agent", id, "--revision", "7", "--policy", "wait", "--run-budget", "1"},
+		{"agent", "idle-policy", "--agent", id, "--revision", "7", "--policy", "wait", "--wake-on", "failures"},
+		{"project", "limits", "--project", id, "--revision", "1", "--run-budget", "1", "--max-run-seconds", "1", "--specialist-runs", "17"},
 		{"account", "link", "--provider", "shell", "--home", "/Users/operator/.shell", "--label", "shell"},
 		{"account", "link", "--provider", "codex", "--home", "relative", "--label", "codex"},
 		{"agent", "select-account", "--agent", id, "--revision", "0", "--account", id},
@@ -108,6 +112,8 @@ func TestParseExactOperatorCommands(t *testing.T) {
 		{"task", "send-back", "--task", id, "--note", ""},
 		{"task", "send-back", "--task", "short", "--note", "n"},
 		{"task", "send-back", "--task", id, "--note", strings.Repeat("n", 8193)},
+		{"status", "--project"},
+		{"status", "--project", "short"},
 		{"dispatch", "toggle"},
 		{"dispatch", "on", "--revision", "0"},
 		{"dispatch", "on", "--revision", "01"},
@@ -345,12 +351,12 @@ func TestTaskAddMintsDistinctTaskAndIncarnationIdentities(t *testing.T) {
 		return reply
 	})
 	var stdout, stderr bytes.Buffer
-	exit := run(context.Background(), []string{"task", "add", "--project", projectID, "--agent", agentID, "--title", "Probe the flaky gate", "--body", "private body", "--priority", "-3"}, webEnvironment(fixture), &stdout, &stderr)
+	exit := run(context.Background(), []string{"task", "add", "--project", projectID, "--agent", agentID, "--title", "Probe the flaky gate", "--body", "private body", "--priority", "-3", "--content", strings.Repeat("44", 16) + ":2," + strings.Repeat("55", 16) + ":1"}, webEnvironment(fixture), &stdout, &stderr)
 	awaitServer(t, done)
 	if exit != 0 || stderr.Len() != 0 {
 		t.Fatalf("task add = exit %d stderr %q", exit, stderr.String())
 	}
-	if received.ProjectID != projectID || received.AssignedAgentID != agentID || received.Title != "Probe the flaky gate" || received.Body != "private body" || received.Priority != -3 {
+	if received.ProjectID != projectID || received.AssignedAgentID != agentID || received.Title != "Probe the flaky gate" || received.Body != "private body" || received.Priority != -3 || len(received.Content) != 2 || received.Content[0] != (api.ContentPinInput{ContentID: strings.Repeat("44", 16), ContentRevision: 2}) || received.Content[1].ContentRevision != 1 {
 		t.Fatalf("daemon received %+v", received)
 	}
 	if !validHumanRequestKey(received.ID) || !validHumanRequestKey(received.IncarnationID) || received.ID == received.IncarnationID {
@@ -553,6 +559,39 @@ func TestAgentSelectModelCarriesRevisionCheckedControls(t *testing.T) {
 	}
 }
 
+func TestAgentAppearanceUsesOperatorAgentUpdate(t *testing.T) {
+	agentID := strings.Repeat("22", 16)
+	for _, args := range [][]string{{"--appearance", "1/2/3"}, {"--appearance", ""}, {"--appearance", "auto"}} {
+		_, _, ok := parse(append([]string{"agent", "appearance", "--agent", agentID}, args...))
+		if ok {
+			t.Fatalf("parse %q accepted", args)
+		}
+	}
+	for look, want := range map[string]string{"auto": "", "1/2/3/4/5/6/7/8/9": "1/2/3/4/5/6/7/8/9"} {
+		fixture := newAPIFixture(t)
+		var received api.OverseerAgentUpdateInput
+		done := serveOne(fixture.listener, func(call api.Call) api.Reply {
+			var ok bool
+			received, ok = call.OverseerAgentUpdateInput()
+			if !ok || call.Kind() != api.CallOperatorUpdateAgent {
+				t.Errorf("call = %v, ok = %v", call.Kind(), ok)
+			}
+			reply, err := api.NewMutationReply(api.MutationResult{Head: 10, Revision: 8})
+			if err != nil {
+				t.Fatal(err)
+			}
+			return reply
+		})
+		var stdout, stderr bytes.Buffer
+		exit := run(context.Background(), []string{"agent", "appearance", "--agent", agentID, "--revision", "7", "--appearance", look}, webEnvironment(fixture), &stdout, &stderr)
+		awaitServer(t, done)
+		fixture.close(t)
+		if exit != 0 || stderr.Len() != 0 || received.AgentID != agentID || received.ExpectedRevision != 7 || received.Paused != nil || received.Archived != nil || received.Appearance == nil || *received.Appearance != want {
+			t.Fatalf("appearance %q = exit %d stderr %q received %+v", look, exit, stderr.String(), received)
+		}
+	}
+}
+
 func TestAccountDiscoverCLICollectsPagesAndRejectsRepeatedCursor(t *testing.T) {
 	for _, repeated := range []bool{false, true} {
 		t.Run(map[bool]string{false: "complete", true: "repeated cursor"}[repeated], func(t *testing.T) {
@@ -610,24 +649,32 @@ func TestAccountDiscoverCLICollectsPagesAndRejectsRepeatedCursor(t *testing.T) {
 func TestHumanCommandsUseOperatorClient(t *testing.T) {
 	id := strings.Repeat("11", 16)
 	operation := strings.Repeat("22", 16)
-	for _, reply := range []bool{false, true} {
-		t.Run(fmt.Sprint(reply), func(t *testing.T) {
+	for _, verb := range []string{"list", "reply", "cancel"} {
+		t.Run(verb, func(t *testing.T) {
 			fixture := newAPIFixture(t)
 			defer fixture.close(t)
-			args := []string{"human", "list"}
-			if reply {
-				args = []string{"human", "reply", "--operation-id", operation, "--request", id, "--revision", "3", "--reply", "Proceed"}
-			}
+			args := map[string][]string{
+				"list":   {"human", "list"},
+				"reply":  {"human", "reply", "--operation-id", operation, "--request", id, "--revision", "3", "--reply", "Proceed"},
+				"cancel": {"human", "cancel", "--request", id, "--revision", "3", "--run-revision", "5"},
+			}[verb]
 			done := serveOne(fixture.listener, func(call api.Call) api.Reply {
-				if !reply {
+				switch verb {
+				case "list":
 					if call.Kind() != api.CallHumanRequests {
 						t.Errorf("wrong list call %v", call.Kind())
 					}
 					return api.NewHumanRequestListReply(api.HumanRequestList{Requests: []api.HumanRequest{}})
-				}
-				input, ok := call.HumanReplyInput()
-				if !ok || input.RequestID != id || input.OperationID != operation || input.ExpectedRevision != 3 || input.Reply != "Proceed" {
-					t.Errorf("wrong reply input %+v", input)
+				case "reply":
+					input, ok := call.HumanReplyInput()
+					if !ok || input.RequestID != id || input.OperationID != operation || input.ExpectedRevision != 3 || input.Reply != "Proceed" {
+						t.Errorf("wrong reply input %+v", input)
+					}
+				default:
+					input, ok := call.HumanCancelInput()
+					if !ok || input.RequestID != id || input.ExpectedRevision != 3 || input.ExpectedRunRevision != 5 {
+						t.Errorf("wrong cancel input %+v", input)
+					}
 				}
 				result, err := api.NewMutationReply(api.MutationResult{Head: 7, Revision: 4})
 				if err != nil {

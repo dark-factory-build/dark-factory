@@ -461,7 +461,7 @@ func (daemon *Daemon) recoverWithoutResult(ctx context.Context, run kernel.Run, 
 		code, detail := kernel.FailureInternal, "recovered active attempt without an attempt result"
 		if run.Phase == kernel.RunAdmitted {
 			// It never started (a release restart can land here): requeue it.
-			code, detail = kernel.FailureProtocol, kernel.NeverStartedRunDetail
+			code, detail = kernel.FailureTransient, kernel.NeverStartedRunDetail
 		}
 		failure, err := kernel.NewFailureProposal(code, detail)
 		if err != nil {

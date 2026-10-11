@@ -8,10 +8,11 @@
     "build": "corepack pnpm run packages:build",
     "test": "corepack pnpm run packages:build && node --test packages/client/test/*.test.mjs packages/ui/test/*.test.mjs packages/ui/src/factory-scene/*.test.mjs packages/ui/src/production-*.test.mjs",
     "check": "corepack pnpm run packages:build && node --test packages/client/test/*.test.mjs packages/ui/test/*.test.mjs packages/ui/src/factory-scene/*.test.mjs packages/ui/src/production-*.test.mjs",
-    "artifact:test": "./scripts/package-artifacts test",
+    "console": "node scripts/console.mjs",
     "preview:floor": "corepack pnpm run packages:build && node packages/ui/examples/floor-preview.mjs"
   },
   "devDependencies": {
+    "esbuild": "0.28.2",
     "typescript": "5.8.3",
     "ws": "8.21.0"
   }

@@ -16,6 +16,9 @@ type Host struct {
 	home       *install.OperationalHome
 	client     *Client
 	connection connectionRecord
+	// delegations is the last delegation observed connected; nil until
+	// observed and after anything that may change it.
+	delegations []Delegation
 }
 type connectionRecord struct {
 	ID       string             `json:"id"`
@@ -65,7 +68,7 @@ func (host *Host) save(record connectionRecord) error {
 	if err := host.home.WriteMaintainerCredential(data); err != nil {
 		return err
 	}
-	host.connection = record
+	host.connection, host.delegations = record, nil
 	return nil
 }
 
@@ -110,7 +113,21 @@ func (host *Host) Status(ctx context.Context) (Status, error) {
 	if err != nil {
 		return Status{}, err
 	}
-	return host.status(ctx, credential)
+	status, err := host.status(ctx, credential)
+	if err != nil {
+		return Status{}, err
+	}
+	status.Quota = host.client.quota.Load()
+	return status, nil
+}
+
+// Quota is the owner's GitHub quota the broker last reported, if any.
+func (host *Host) Quota() (Quota, bool) {
+	quota := host.client.quota.Load()
+	if quota == nil {
+		return Quota{}, false
+	}
+	return *quota, true
 }
 
 func (host *Host) Confirm(ctx context.Context, code string) error {
@@ -147,6 +164,7 @@ func (host *Host) Delegate(ctx context.Context, repositories []Delegation) error
 	if err != nil {
 		return err
 	}
+	host.delegations = nil
 	return host.client.Delegate(ctx, credential, repositories)
 }
 func (host *Host) Disconnect(ctx context.Context) error {
@@ -207,6 +225,10 @@ func (host *Host) status(ctx context.Context, credential Credential) (Status, er
 		if err := host.save(record); err != nil {
 			return Status{}, err
 		}
+	}
+	host.delegations = nil
+	if status.State == "connected" {
+		host.delegations = status.Repositories
 	}
 	return status, nil
 }

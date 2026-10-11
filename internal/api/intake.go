@@ -3,7 +3,6 @@ package api
 import (
 	"context"
 	"encoding/hex"
-	"regexp"
 	"strings"
 )
 
@@ -163,7 +162,7 @@ func ValidIntakeInput(input IntakeInput) bool {
 
 func validReviewRequest(value ReviewRequest) bool {
 	if value.RetryOperation != "" {
-		return (reviewUUID(value.RetryOperation) || publishFailureID.MatchString(value.RetryOperation)) && value.Repository == "" && value.PullNumber == 0 && value.Head == "" && value.Base == "" && value.BaseRef == "" && value.Provider == ""
+		return reviewUUID(value.RetryOperation) && value.Repository == "" && value.PullNumber == 0 && value.Head == "" && value.Base == "" && value.BaseRef == "" && value.Provider == ""
 	}
 	return validText(value.Repository, 3, 140) && value.PullNumber > 0 && validHex(value.Head, 20) && validHex(value.Base, 20) && validText(value.BaseRef, 1, 240) && !strings.ContainsAny(value.BaseRef, "\x00\r\n") && (value.Provider == "codex" || value.Provider == "claude")
 }
@@ -178,9 +177,6 @@ func (client *OperatorClient) Intake(ctx context.Context, input IntakeInput) (In
 	}
 	return result, nil
 }
-
-// publishFailureID is kernel.PublishFailureID's spelling.
-var publishFailureID = regexp.MustCompile(`^publish-[0-9a-f]{32}-[1-9][0-9]{0,18}$`)
 
 func reviewUUID(value string) bool {
 	if len(value) != 36 || value[8] != '-' || value[13] != '-' || value[18] != '-' || value[23] != '-' {

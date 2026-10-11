@@ -15,6 +15,7 @@ func (store *Store) BeginResourceRelease(ctx context.Context, runID RunID, resou
 }
 
 func TestCredentialAuthorityExistsOnlyWhileExactRunIsRunning(t *testing.T) {
+	t.Parallel()
 	store, run, keys := admittedOrchestratorRun(t)
 	defer store.Close()
 	ctx := context.Background()
@@ -61,6 +62,7 @@ func TestCredentialAuthorityExistsOnlyWhileExactRunIsRunning(t *testing.T) {
 }
 
 func TestExactBearerRefusedProposalsDoNotPersistOutcome(t *testing.T) {
+	t.Parallel()
 	store, run, keys := runningOrchestratorRun(t)
 	defer store.Close()
 	ctx := context.Background()
@@ -86,6 +88,7 @@ func TestExactBearerRefusedProposalsDoNotPersistOutcome(t *testing.T) {
 }
 
 func TestAttemptAuthorityUsesExactEffectiveTask(t *testing.T) {
+	t.Parallel()
 	for _, test := range []struct {
 		name     string
 		provider Provider
@@ -141,6 +144,7 @@ func TestAttemptAuthorityUsesExactEffectiveTask(t *testing.T) {
 }
 
 func TestCompletionExitOrderPreservesFirstOutcomeAndExactExit(t *testing.T) {
+	t.Parallel()
 	t.Run("completion then exit", func(t *testing.T) {
 		store, run, keys := runningOrchestratorRun(t)
 		defer store.Close()
@@ -173,6 +177,7 @@ func TestCompletionExitOrderPreservesFirstOutcomeAndExactExit(t *testing.T) {
 }
 
 func TestResourceGraphAndFinalizerAreOneWay(t *testing.T) {
+	t.Parallel()
 	store, run, keys := admittedOrchestratorRun(t)
 	defer store.Close()
 	ctx := context.Background()
@@ -233,6 +238,7 @@ func TestResourceGraphAndFinalizerAreOneWay(t *testing.T) {
 }
 
 func TestFinalizerRequiresEveryReleasedResourceAndExactTask(t *testing.T) {
+	t.Parallel()
 	store, admitted, keys := runningOrchestratorRun(t)
 	defer store.Close()
 	proposal, _ := NewSuccessProposal("verified result")
@@ -281,6 +287,7 @@ func TestFinalizerRequiresEveryReleasedResourceAndExactTask(t *testing.T) {
 }
 
 func TestAttemptRequestedFailureHasOneTypedDurableCode(t *testing.T) {
+	t.Parallel()
 	store, running, keys := runningOrchestratorRun(t)
 	defer store.Close()
 
@@ -317,6 +324,7 @@ func TestAttemptRequestedFailureHasOneTypedDurableCode(t *testing.T) {
 }
 
 func TestTerminalCorruptionFailClosed(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name   string
 		mutate string
@@ -349,6 +357,7 @@ func TestTerminalCorruptionFailClosed(t *testing.T) {
 }
 
 func TestFinalizingConsumesFactoryCapacity(t *testing.T) {
+	t.Parallel()
 	store, _, project, firstAgent := newAdmissionStore(t, RoleOrchestrator, 1)
 	defer store.Close()
 	firstTask, _ := store.EnqueueTask(context.Background(), NewTask{ID: taskID(t, 120), ProjectID: project.ID, AssignedAgentID: firstAgent.ID, IncarnationID: incarnationID(t, 121), Title: "first"}, mustTime(t, 5))
@@ -372,6 +381,7 @@ func TestFinalizingConsumesFactoryCapacity(t *testing.T) {
 }
 
 func TestCancelRunIsFirstOutcomeAndRevokesAdmittedAuthority(t *testing.T) {
+	t.Parallel()
 	store, run, keys := admittedOrchestratorRun(t)
 	defer store.Close()
 	runtime := resourceOfKind(t, resourcesForRunTest(t, store, run.ID), ResourceRuntimeRoot)
@@ -396,6 +406,7 @@ func TestCancelRunIsFirstOutcomeAndRevokesAdmittedAuthority(t *testing.T) {
 }
 
 func TestFailRunRevokesRunningAuthorityAndPreservesFirstOutcome(t *testing.T) {
+	t.Parallel()
 	store, run, keys := runningOrchestratorRun(t)
 	defer store.Close()
 	failure, _ := NewFailureProposal(FailureProtocol, "daemon control failed")
@@ -426,6 +437,7 @@ func TestFailRunRevokesRunningAuthorityAndPreservesFirstOutcome(t *testing.T) {
 }
 
 func TestFailRunRacesAttemptSuccessAndCancellationWithoutOverwrite(t *testing.T) {
+	t.Parallel()
 	for _, test := range []struct {
 		name string
 		race func(*Store, Run, AdmissionKeys) error
@@ -481,6 +493,7 @@ func TestFailRunRacesAttemptSuccessAndCancellationWithoutOverwrite(t *testing.T)
 }
 
 func TestResourceIdentityCannotBeReusedAcrossRuns(t *testing.T) {
+	t.Parallel()
 	store, _, project, firstAgent := newAdmissionStore(t, RoleWorker, 4)
 	defer store.Close()
 	secondAgent, err := store.CreateAgent(context.Background(), NewAgent{ID: agentID(t, 211), ProjectID: project.ID, Name: "second", Role: RoleWorker, Provider: ProviderCodex, ToolBudgetLimit: 2}, mustTime(t, 4))
@@ -544,6 +557,7 @@ func TestResourceIdentityCannotBeReusedAcrossRuns(t *testing.T) {
 }
 
 func TestProviderIdentityPairIsTheOnlySameRunProcessAlias(t *testing.T) {
+	t.Parallel()
 	store, run, _ := admittedOrchestratorRun(t)
 	path := storePath(t, store)
 	resources := resourcesForRunTest(t, store, run.ID)
@@ -586,6 +600,7 @@ func TestProviderIdentityPairIsTheOnlySameRunProcessAlias(t *testing.T) {
 }
 
 func TestResourceTransitionsAreCoupledToRunPhaseAndCredential(t *testing.T) {
+	t.Parallel()
 	store, run, keys := runningOrchestratorRun(t)
 	defer store.Close()
 	resource := resourceOfKind(t, resourcesForRunTest(t, store, run.ID), ResourceRuntimeRoot)
@@ -623,6 +638,7 @@ func TestResourceTransitionsAreCoupledToRunPhaseAndCredential(t *testing.T) {
 }
 
 func TestImpossibleRunningResourceLedgerFailsAuthenticationAndOpen(t *testing.T) {
+	t.Parallel()
 	store, run, keys := runningOrchestratorRun(t)
 	path := storePath(t, store)
 	resource := resourceOfKind(t, resourcesForRunTest(t, store, run.ID), ResourceRuntimeRoot)
@@ -641,6 +657,7 @@ func TestImpossibleRunningResourceLedgerFailsAuthenticationAndOpen(t *testing.T)
 }
 
 func TestWorkerRunCannotActivateBeforeExactChangeIsAvailable(t *testing.T) {
+	t.Parallel()
 	store, _, project, agent := newAdmissionStore(t, RoleWorker, 2)
 	defer store.Close()
 	_, _ = store.EnqueueTask(context.Background(), NewTask{ID: taskID(t, 130), ProjectID: project.ID, AssignedAgentID: agent.ID, IncarnationID: incarnationID(t, 131), Title: "worker"}, mustTime(t, 5))
@@ -672,6 +689,7 @@ func TestWorkerRunCannotActivateBeforeExactChangeIsAvailable(t *testing.T) {
 }
 
 func TestTaskGuardAndPermanentDigestUniquenessRollbackTerminalOrAdmission(t *testing.T) {
+	t.Parallel()
 	t.Run("stale task work revision", func(t *testing.T) {
 		store, run, keys := runningOrchestratorRun(t)
 		defer store.Close()
@@ -739,6 +757,7 @@ func TestTaskGuardAndPermanentDigestUniquenessRollbackTerminalOrAdmission(t *tes
 }
 
 func TestConcurrentCompletionAndExitHaveOneImmutableWinner(t *testing.T) {
+	t.Parallel()
 	store, run, keys := runningOrchestratorRun(t)
 	path := storePath(t, store)
 	second, err := Open(context.Background(), path)
@@ -789,6 +808,7 @@ func TestConcurrentCompletionAndExitHaveOneImmutableWinner(t *testing.T) {
 }
 
 func TestRecoverableRunsAreCanonicalOrderedAndPrivateStateStaysOutOfPublicProjection(t *testing.T) {
+	t.Parallel()
 	store, _, project, firstAgent := newAdmissionStore(t, RoleWorker, 4)
 	defer store.Close()
 	secondAgent, _ := store.CreateAgent(context.Background(), NewAgent{ID: agentID(t, 141), ProjectID: project.ID, Name: "second", Role: RoleWorker, Provider: ProviderCodex, Model: "MODEL_SENTINEL", ToolBudgetLimit: 2}, mustTime(t, 4))
@@ -816,6 +836,7 @@ func TestRecoverableRunsAreCanonicalOrderedAndPrivateStateStaysOutOfPublicProjec
 }
 
 func TestResourcesReturnsCanonicalSetAfterTerminalization(t *testing.T) {
+	t.Parallel()
 	proposal, err := NewFailureProposal(FailureInternal, "terminal resource read")
 	if err != nil {
 		t.Fatal(err)

@@ -13,6 +13,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/dark-factory-build/dark-factory/internal/api"
 	"github.com/dark-factory-build/dark-factory/internal/change"
 	"github.com/dark-factory-build/dark-factory/internal/kernel"
 	"github.com/dark-factory-build/dark-factory/internal/maintainer"
@@ -29,16 +30,22 @@ type publishCheckout func(ctx context.Context, ref, head string) (string, func()
 
 // errPublishLater is a failure of the connection or the checkout, not of the
 // Change: the next pass retries it.
-var errPublishLater = errors.New("publication waits for the next pass")
+var errPublishLater, errRepositoryDisabled = errors.New("publication waits for the next pass"), errors.New("repository disabled for new work")
 
 // publishSettledChanges publishes each succeeded intake worker's settled
 // Change as one pull request through the project's Maintainer connection,
 // records it against the worker task and launches factoryd's review; a
-// corrected Change goes onto that pull request, whose refresh reviews it. A
-// Change it cannot publish is escalated to the overseer once and not retried
-// at that revision; only an unreachable connection waits for the next pass.
+// corrected Change goes onto that pull request, whose refresh reviews it, or,
+// changing nothing, is an answer reviewed once more at the same head. A
+// Change it cannot publish is escalated to the overseer once and retried at
+// that revision only after kernel.PublishRetryAfter; an unreachable
+// connection waits for the next pass.
 func (daemon *Daemon) publishSettledChanges(ctx context.Context) {
-	candidates, err := daemon.store.PublishableChanges(ctx)
+	at, err := daemon.timestamp()
+	var candidates []kernel.PublishableChange
+	if err == nil {
+		candidates, err = daemon.store.PublishableChanges(ctx, at)
+	}
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "factoryd: publishable changes: %v\n", err)
 	}
@@ -50,11 +57,15 @@ func (daemon *Daemon) publishSettledChanges(ctx context.Context) {
 }
 
 func (daemon *Daemon) publishSettledChange(ctx context.Context, c kernel.PublishableChange) error {
-	target, verified, err := daemon.store.RepositorySourceIdentity(ctx, c.Accepted.RepositoryID)
+	repositoryID := c.Accepted.RepositoryID
+	if repositoryID == (kernel.RepositoryID{}) {
+		repositoryID = c.Repository
+	}
+	target, verified, err := daemon.store.RepositorySourceIdentity(ctx, repositoryID)
 	if err != nil {
 		return err
 	}
-	id, pinned, err := daemon.store.RepositoryGitHubID(ctx, c.Accepted.RepositoryID)
+	id, pinned, err := daemon.store.RepositoryGitHubID(ctx, repositoryID)
 	if err != nil {
 		return err
 	}
@@ -64,8 +75,8 @@ func (daemon *Daemon) publishSettledChange(ctx context.Context, c kernel.Publish
 	repo := strings.ToLower(target.PublicationRepository)
 	// Accepted work keeps its destination, but a disabled repository is
 	// neither cloned nor reviewed: the overseer or operator decides.
-	if repository, found, err := daemon.store.ProjectRepository(ctx, c.Accepted.RepositoryID); err != nil || !found || !repository.Enabled {
-		return daemon.publishFailed(ctx, c, repo, errors.Join(err, errors.New("repository disabled for new work")))
+	if repository, found, err := daemon.store.ProjectRepository(ctx, repositoryID); err != nil || !found || !repository.Enabled {
+		return daemon.publishFailed(ctx, c, repo, errors.Join(err, errRepositoryDisabled))
 	}
 	backend := &daemonReviewBackend{daemon: daemon, project: c.Task.ProjectID, repository: repo, repositoryID: id}
 	checkout := func(ctx context.Context, ref, head string) (string, func(), error) {
@@ -114,18 +125,32 @@ func (daemon *Daemon) publishChange(ctx context.Context, c kernel.PublishableCha
 }
 
 // publishFailed records why c cannot be published: the reviewer record
-// kernel.PublishFailureID, handled, whose escalation is due to the overseer.
-// A failure the next pass may not repeat is only returned.
+// kernel.PublishFailureID, handled, whose escalation is due to the overseer
+// the first time; a repeat refreshes it without one. A failure the next pass
+// may not repeat is only returned.
 func (daemon *Daemon) publishFailed(ctx context.Context, c kernel.PublishableChange, repo string, err error) error {
 	if err == nil || ctx.Err() != nil || errors.Is(err, errPublishLater) || errors.Is(err, maintainer.ErrUnavailable) || errors.Is(err, maintainer.ErrDenied) {
 		return err
 	}
 	why := err.Error()
 	why = strings.ToValidUTF8(why[:min(len(why), 1000)], "")
-	now := daemon.now()
-	failed := review.Operation{ID: kernel.PublishFailureID(c.Change, c.Revision), State: "publish_failed", Handled: true, Detail: why,
-		Escalation: fmt.Sprintf("factoryd cannot publish change %s for task %s: %s", c.Change, c.Task.ID, why), CreatedAt: now, UpdatedAt: now}
+	now, id := daemon.now(), kernel.PublishFailureID(c.Change, c.Revision)
+	_, repeat, readErr := daemon.store.ReviewOperation(ctx, c.Task.ProjectID, id)
+	if readErr != nil {
+		return errors.Join(err, readErr)
+	}
+	failed := review.Operation{ID: id, State: "publish_failed", Retryable: publicationFailureRetryable(err), Handled: true, Detail: why, CreatedAt: now, UpdatedAt: now}
+	if !repeat {
+		failed.Escalation = fmt.Sprintf("factoryd cannot publish change %s for task %s: %s", c.Change, c.Task.ID, why)
+	}
 	return durableReviewStore{store: daemon.store, project: c.Task.ProjectID, repository: repo, now: daemon.now}.Create(ctx, failed)
+}
+
+// publicationFailureRetryable: a Maintainer rejection that can pass outside
+// factoryd, unlike a permanent one or a change-caused local failure.
+func publicationFailureRetryable(err error) bool {
+	var rejection maintainerRejection
+	return errors.As(err, &rejection) && !errors.Is(err, review.ErrPermanent) || errors.Is(err, errRepositoryDisabled)
 }
 
 // publishPull is the overseer runbook's publication, made deterministic:
@@ -136,7 +161,7 @@ func (daemon *Daemon) publishFailed(ctx context.Context, c kernel.PublishableCha
 // stale write. They go on the Change's branch head when the branch exists (on
 // replay the first one's parent), carrying only what differs from it, or
 // start a new branch; a correction (c.Pull set) then replaces the body under
-// body-<HEAD8 of the new head>.
+// body-<HEAD8 of the new head>-<Change revision>.
 func (daemon *Daemon) publishPull(ctx context.Context, c kernel.PublishableChange, repo, source string, call publishCall, checkout publishCheckout) error {
 	operation := func(step string) string { return uuid5("dark-factory:" + c.Change.String() + ":" + step) }
 	state := "" // completed's last observation
@@ -156,6 +181,9 @@ func (daemon *Daemon) publishPull(ctx context.Context, c kernel.PublishableChang
 		return true, json.Unmarshal(observed.Result, result)
 	}
 	branch := "factory/" + c.Change.String()[:12]
+	if c.Repair && c.Branch != "" {
+		branch = c.Branch
+	}
 	refHead := func(branch string) (string, error) {
 		response, err := call(ctx, "observe_ref", map[string]any{"repository": repo, "branch": branch})
 		var ref struct {
@@ -221,11 +249,11 @@ func (daemon *Daemon) publishPull(ctx context.Context, c kernel.PublishableChang
 		return err
 	}
 	// A branch an earlier attempt already brought to this tree only lacks
-	// its pull request.
-	if len(changes) == 0 && (c.Pull != 0 || diffFrom != tip) {
+	// its pull request; a correction changing nothing is an answer in its body.
+	if len(changes) == 0 && c.Pull == 0 && diffFrom != tip {
 		return errors.New("nothing to publish: its head " + c.Head + " changes no file from " + diffFrom)
 	}
-	message := publicationTitle(c.Accepted.Snapshot.Title)
+	message := publicationMessage(c)
 	for i := 0; i*50 < len(changes); i++ {
 		step := prefix + strconv.Itoa(i+1)
 		var commit struct {
@@ -268,14 +296,27 @@ func (daemon *Daemon) publishPull(ctx context.Context, c kernel.PublishableChang
 	body := fmt.Sprintf("%s\n\nPublished by factoryd from Change %s at %s: +%d -%d across %d files from %s.\n\nThe merge queue runs the gate.", result, c.Change, head, added, deleted, files, from)
 	if c.Pull != 0 {
 		// The corrected body keeps its closing line; factoryd's refresh
-		// reviews the new head.
-		step := "body-" + head[:8]
-		done, err := completed(step, new(json.RawMessage))
-		if err == nil && !done {
-			_, err = call(ctx, "update_pull_request_body", map[string]any{"repository": repo, "operation_id": operation(step), "pull_number": c.Pull, "body": fmt.Sprintf("%s\n\nCloses #%d", body, c.Accepted.Snapshot.IssueNumber)})
+		// reviews a new head. One settlement's body is written once.
+		if !c.Repair {
+			step := fmt.Sprintf("body-%s-%d", head[:8], c.Revision.Int64())
+			done, err := completed(step, new(json.RawMessage))
+			if err == nil && !done {
+				_, err = call(ctx, "update_pull_request_body", map[string]any{"repository": repo, "operation_id": operation(step), "pull_number": c.Pull, "body": fmt.Sprintf("%s\n\nCloses #%d", body, c.Accepted.Snapshot.IssueNumber)})
+			}
+			if err != nil {
+				return err
+			}
 		}
-		if err != nil {
-			return err
+		// A worker that answers a verdict with evidence and no change moves
+		// no head, so it gets one fresh review of the same head, which reads
+		// that answer in the body. ponytail: a crash before the record below
+		// claims a second review on replay; bind its id to the step if it bites.
+		if len(changes) == 0 {
+			op, err := daemon.claimReview(ctx, c.Task.ProjectID, api.ReviewRequest{Repository: repo, PullNumber: c.Pull, Head: head, Base: main, BaseRef: "main", Provider: "codex"})
+			if err != nil {
+				return err
+			}
+			daemon.launchReview(c.Task.ProjectID, op)
 		}
 		at, err := daemon.timestamp()
 		if err != nil {
@@ -314,7 +355,7 @@ func (daemon *Daemon) publishPull(ctx context.Context, c kernel.PublishableChang
 	if err != nil {
 		return err
 	}
-	return daemon.recordPublishedPull(ctx, c.Task.ProjectID, c.Task.ID, repo, kernel.ProductionPullRequest{Number: pull.Number, Title: message, URL: pull.URL, Head: pull.Head, HeadRepository: repo, Branch: branch, Base: "main", State: "open", Review: kernel.ProductionReview{Head: pull.Head, State: "unknown"}}, body, pull.Base)
+	return daemon.recordPublishedPull(ctx, c.Task.ProjectID, c.Task.ID, repo, kernel.ProductionPullRequest{Number: pull.Number, Title: message, URL: pull.URL, Head: pull.Head, HeadRepository: repo, Branch: branch, Base: "main", State: "open", Review: kernel.ProductionReview{Head: pull.Head, State: "unknown"}}, body, pull.Base, len(changes) == 0)
 }
 
 // publicationTitle is the accepted title on one line, within the App's
@@ -322,6 +363,14 @@ func (daemon *Daemon) publishPull(ctx context.Context, c kernel.PublishableChang
 func publicationTitle(title string) string {
 	title = strings.Join(strings.Fields(title), " ")
 	return strings.ToValidUTF8(title[:min(len(title), 256)], "")
+}
+
+func publicationMessage(c kernel.PublishableChange) string {
+	title := c.Accepted.Snapshot.Title
+	if title == "" {
+		title = c.Task.Title
+	}
+	return publicationTitle(title)
 }
 
 // publicationFrom is where a first publication's commits go: the Change's

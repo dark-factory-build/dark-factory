@@ -39,7 +39,7 @@ const (
 	pnpmVersion      = "11.19.0"
 	// bootstrapPrompt is both native providers' fixed positional prompt: the
 	// exact task is read through the attempt API, never typed into the PTY.
-	bootstrapPrompt = `Use the factory_attempt.factory tool with argv ["attempt","task"] before doing anything else. The returned JSON task field is the exact task: complete only that task. Use this tool for every factoryctl attempt or overseer command, passing argv without the executable; shell commands cannot access the attempt API. Peer collaboration is asynchronous: use argv ["attempt","peer","status"] to read or answer task-linked questions, but it grants no task or terminal control. For a stale paged peer status, restart from the first page. Before exiting, report the durable outcome with attempt succeed, block, or fail through this tool. When assigned a writable task checkout, read and edit it directly, including corrections after send-back. Never substitute another task or private Change path. Scope file discovery to the task checkout and private runtime home. Locate tools with command -v and the checkout's documented setup. Never recursively search the user home, Library, Documents, Desktop, Music or Photos for tools or instructions. If a required path is not provided or present, report the missing prerequisite instead of widening the search. In UI review, screenshots are illustrative only and never blocking evidence; judge correctness from render tests and source behavior.`
+	bootstrapPrompt = `Use the factory_attempt.factory tool with argv ["attempt","task"] before doing anything else. The returned JSON task field is the exact task: complete only that task. When it reports an observed problem, rerun its cited commands or read its cited file:line before editing, and quote each with what you saw in your attempt succeed result; if the problem does not reproduce, end with attempt fail and a detail starting "premise not reproduced:" that quotes them instead. Use this tool for every factoryctl attempt or overseer command, passing argv without the executable; shell commands cannot access the attempt API. Peer collaboration is asynchronous: use argv ["attempt","peer","status"] to read or answer task-linked questions, but it grants no task or terminal control. For a stale paged peer status, restart from the first page. Before exiting, report the durable outcome with attempt succeed, block, or fail through this tool. When assigned a writable task checkout, read and edit it directly, including corrections after send-back; never add Git remotes or fetch from the network inside it. Never substitute another task or private Change path. Scope file discovery to the task checkout and private runtime home. Locate tools with command -v and the checkout's documented setup. Never recursively search the user home, Library, Documents, Desktop, Music or Photos for tools or instructions. If a required path is not provided or present, report the missing prerequisite instead of widening the search. In UI review, screenshots are illustrative only and never blocking evidence; judge correctness from render tests and source behavior.`
 )
 
 var (
@@ -215,6 +215,9 @@ type RuntimePaths struct {
 	// environment still has no Git credential helper, SSH or prompt.
 	gitCommonDir         string
 	gitCommonDirWritable bool
+	// projectGitDirs are the project's other repositories' Git directories,
+	// read by an orchestrator publishing a Change made in one of them.
+	projectGitDirs []string
 	// traceReceiverPort is factoryd's loopback OTLP listener; zero exports
 	// nothing. telemetryRunID names the run in the agent CLI's own telemetry
 	// resource; empty leaves that telemetry off.
@@ -234,12 +237,15 @@ func (runtime RuntimePaths) WithLocalCILeaseDirectory(path string) (RuntimePaths
 
 // WithGitCommonDirectory grants the project repository's Git directory to
 // local commands: writable for a worker committing on its Change branch,
-// read-only for an orchestrator reading a settled Change's commits.
-func (runtime RuntimePaths) WithGitCommonDirectory(path string, writable bool) (RuntimePaths, error) {
-	if !validAbsolute(path, maxPathBytes) || filepath.Base(path) != ".git" || path == runtime.home || path == runtime.temp {
-		return RuntimePaths{}, ErrInvalid
+// read-only for an orchestrator reading a settled Change's commits. The
+// project's other repositories' Git directories are granted read-only.
+func (runtime RuntimePaths) WithGitCommonDirectory(path string, writable bool, project ...string) (RuntimePaths, error) {
+	for _, dir := range append([]string{path}, project...) {
+		if !validAbsolute(dir, maxPathBytes) || filepath.Base(dir) != ".git" || dir == runtime.home || dir == runtime.temp {
+			return RuntimePaths{}, ErrInvalid
+		}
 	}
-	runtime.gitCommonDir, runtime.gitCommonDirWritable = path, writable
+	runtime.gitCommonDir, runtime.gitCommonDirWritable, runtime.projectGitDirs = path, writable, slices.Clone(project)
 	return runtime, nil
 }
 
@@ -662,7 +668,6 @@ func Build(request Request) (Launch, error) {
 			},
 		}
 		environment := request.runtime.environmentForRole(request.provider, request.role)
-		environment = append(environment, "DISABLE_AUTOUPDATER=1")
 		if browser != "" {
 			servers["factory_browser"] = map[string]any{"command": browser, "args": browserArgs}
 		}
@@ -711,8 +716,9 @@ func Build(request Request) (Launch, error) {
 		// runtime. The runner's committed cwd is request.workingDirectory, so
 		// select that authorized current directory through Codex's native
 		// resume configuration before any prompt can be shown.
-		notify := "notify=[" + tomlBasicString(request.runtime.factoryctl) + ", \"attempt\", \"turn-complete\"]"
-		argv = append(argv, "-c", notify, "--strict-config", "--no-alt-screen", "-c", "tui.resume_cwd=\"current\"", "-c", "check_for_update_on_startup=false", "-c", "tool_output_token_limit=32768", "-c", codexUntrustedProjectConfig(request.workingDirectory), "-c", "default_permissions="+tomlBasicString(codexPermissionName(request.runtime)), "-c", `approval_policy="never"`, "-c", permissions, "--disable", "computer_use", "--disable", "browser_use", "--disable", "plugins")
+		stop := "'" + strings.ReplaceAll(request.runtime.factoryctl, "'", `'\''`) + "' attempt turn-complete"
+		hooks := "hooks.Stop=[{hooks=[{type=\"command\",command=" + tomlBasicString(stop) + "}]}]"
+		argv = append(argv, "-c", hooks, "--strict-config", "--dangerously-bypass-hook-trust", "--no-alt-screen", "-c", "tui.resume_cwd=\"current\"", "-c", "check_for_update_on_startup=false", "-c", "tool_output_token_limit=32768", "-c", codexUntrustedProjectConfig(request.workingDirectory), "-c", "default_permissions="+tomlBasicString(codexPermissionName(request.runtime)), "-c", `approval_policy="never"`, "-c", permissions, "--disable", "computer_use", "--disable", "browser_use", "--disable", "plugins")
 		attemptServer := codexAttemptServerName(request.runtime)
 		argv = append(argv, "-c", "mcp_servers."+attemptServer+"={command="+tomlBasicString(request.runtime.factoryctl)+`,args=["attempt","mcp"],env_vars=["DARK_FACTORY_SOCKET","DARK_FACTORY_ATTEMPT_TOKEN_FILE"],enabled=true,required=true,tools={factory={approval_mode="approve"}}}`)
 		if browser != "" {
@@ -815,6 +821,9 @@ func sandboxGrants(request Request) []grant {
 			// the worktree) so its index, HEAD and logs stay writable for commits.
 			grants = append(grants, grant{filepath.Join(request.runtime.gitCommonDir, "worktrees", filepath.Base(request.workingDirectory)), true})
 		}
+	}
+	for _, path := range request.runtime.projectGitDirs {
+		grants = append(grants, grant{path, false})
 	}
 	return grants
 }
@@ -1111,18 +1120,17 @@ func (runtime RuntimePaths) valid() bool {
 }
 
 func (runtime RuntimePaths) environmentForRole(kind kernel.Provider, role kernel.AgentRole) []string {
-	home := runtime.home
-	if kind == kernel.ProviderClaudeCode {
-		home = runtime.accountHome
-	}
 	environment := []string{
 		"DARK_FACTORY_TASK_ATTACHMENTS=" + filepath.Join(runtime.home, "task-attachments"),
 		"DARK_FACTORY_SOCKET=" + runtime.socket,
 		"DARK_FACTORY_ATTEMPT_TOKEN_FILE=" + runtime.token,
 		"DARK_FACTORY_FACTORYCTL=" + runtime.factoryctl,
-		"HOME=" + home,
 		"TMPDIR=" + runtime.temp,
 		"PATH=" + runtime.toolPath,
+	}
+	// Claude Code's HOME is its account's, from AccountEnvironment below.
+	if kind != kernel.ProviderClaudeCode {
+		environment = append(environment, "HOME="+runtime.home)
 	}
 	if role == kernel.RoleWorker {
 		// A bare /usr/bin/git is Apple's xcrun shim. Pin its developer
@@ -1178,28 +1186,9 @@ func (runtime RuntimePaths) environmentForRole(kind kernel.Provider, role kernel
 					"OTEL_EXPORTER_OTLP_LOGS_ENDPOINT="+receiver+"/v1/logs")
 			}
 		}
-		if kind == kernel.ProviderClaudeCode {
-			environment = append(environment, "DF_CI_CACHE_ROOT="+filepath.Join(runtime.home, ".cache", "dark-factory", "local-ci", "trusted"))
-		}
+		environment = append(environment, "DF_CI_CACHE_ROOT="+filepath.Join(runtime.home, ".cache", "dark-factory", "local-ci", "trusted"))
 	}
-	switch kind {
-	case kernel.ProviderCodex:
-		environment = append(environment, "CODEX_HOME="+codexConfigHome(runtime))
-	case kernel.ProviderClaudeCode:
-		// Only a directory beside the default one is named. The default is
-		// what the CLI already reaches through HOME, and its OAuth account
-		// lives in $HOME/.claude.json rather than inside it, so naming it
-		// would point the CLI at the flags-only file it does contain and
-		// launch the run with no login at all.
-		if configDir := claudeConfigHome(runtime); configDir != ConfigHome(kernel.ProviderClaudeCode, runtime.accountHome) {
-			environment = append(environment, "CLAUDE_CONFIG_DIR="+configDir)
-		}
-		// The CLI finds its keychain login under $USER; without it a
-		// logged-in account launches as "Not logged in" (#1107).
-		if account, err := user.Current(); err == nil {
-			environment = append(environment, "USER="+account.Username)
-		}
-	}
+	environment = append(environment, AccountEnvironment(kind, runtime.accountHome, runtime.accountConfig)...)
 	if runtime.localCILeaseDir != "" {
 		environment = append(environment, "DARK_FACTORY_LOCAL_CI_DIRECTORY="+runtime.localCILeaseDir)
 	}
@@ -1225,6 +1214,35 @@ func (runtime RuntimePaths) environmentForRole(kind kernel.Provider, role kernel
 	)
 }
 
+// AccountEnvironment selects one provider login, configuration directory
+// accountConfig ("" for the default) under accountHome, and sets the CLI's
+// fixed switches. Worker launches and factoryd's reviewer both take it, so
+// their provider environments cannot drift apart.
+func AccountEnvironment(kind kernel.Provider, accountHome, accountConfig string) []string {
+	runtime := RuntimePaths{accountHome: accountHome, accountConfig: accountConfig}
+	switch kind {
+	case kernel.ProviderCodex:
+		return []string{"CODEX_HOME=" + codexConfigHome(runtime)}
+	case kernel.ProviderClaudeCode:
+		environment := []string{"HOME=" + accountHome, "DISABLE_AUTOUPDATER=1"}
+		// Only a directory beside the default one is named. The default is
+		// what the CLI already reaches through HOME, and its OAuth account
+		// lives in $HOME/.claude.json rather than inside it, so naming it
+		// would point the CLI at the flags-only file it does contain and
+		// launch the run with no login at all.
+		if configDir := claudeConfigHome(runtime); configDir != ConfigHome(kernel.ProviderClaudeCode, accountHome) {
+			environment = append(environment, "CLAUDE_CONFIG_DIR="+configDir)
+		}
+		// The CLI finds its keychain login under $USER; without it a
+		// logged-in account launches as "Not logged in" (#1107).
+		if account, err := user.Current(); err == nil {
+			environment = append(environment, "USER="+account.Username)
+		}
+		return environment
+	}
+	return nil
+}
+
 // PrepareWebDependencies installs the locked web workspace into a Change
 // from the factory-maintained, read-only pnpm store. It runs before the
 // provider sandbox is built because pnpm must create the Change's
@@ -1235,10 +1253,26 @@ func (runtime RuntimePaths) PrepareWebDependencies(ctx context.Context, workingD
 		return ErrInvalid
 	}
 	web := filepath.Join(workingDirectory, "web")
-	if _, err := os.Stat(filepath.Join(web, "package.json")); errors.Is(err, os.ErrNotExist) {
+	webInfo, err := os.Lstat(web)
+	if errors.Is(err, os.ErrNotExist) {
 		return nil
-	} else if err != nil {
+	}
+	if err != nil {
 		return err
+	}
+	if webInfo.Mode()&os.ModeSymlink != 0 || !webInfo.IsDir() {
+		return fmt.Errorf("provider: web workspace is not a directory")
+	}
+	packagePath := filepath.Join(web, "package.json")
+	packageInfo, err := os.Lstat(packagePath)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	if packageInfo.Mode()&os.ModeSymlink != 0 || !packageInfo.Mode().IsRegular() {
+		return fmt.Errorf("provider: web package manifest is not a regular file")
 	}
 	if err := validatePnpmStoreDirectory(runtime.accountHome); err != nil {
 		return err
@@ -1266,7 +1300,7 @@ func (runtime RuntimePaths) PrepareWebDependencies(ctx context.Context, workingD
 }
 
 func prepareCorepackPnpm(accountHome, runtimeHome string) error {
-	source := filepath.Join(accountHome, ".cache", "node", "corepack", "v1", "pnpm", pnpmVersion)
+	source := filepath.Join(accountHome, "Library", "Caches", "dark-factory", "local-ci", "trusted", "corepack", "v1", "pnpm", pnpmVersion)
 	packagePath := filepath.Join(source, "package.json")
 	packageStat, err := os.Lstat(packagePath)
 	if err != nil || packageStat.Mode()&os.ModeSymlink != 0 || !packageStat.Mode().IsRegular() {
@@ -1325,7 +1359,7 @@ func prepareCorepackPnpm(accountHome, runtimeHome string) error {
 }
 
 // goModuleCachePath is the one shared-cache path native workers may see. It
-// matches local-ci-environment.sh's trusted cache layout and deliberately
+// matches local-ci.sh's trusted cache layout and deliberately
 // leaves the rest of the account home outside the provider grant.
 func goModuleCachePath(accountHome string) string {
 	return filepath.Join(accountHome, "Library", "Caches", "dark-factory", "local-ci", "trusted", "go-mod")

@@ -218,7 +218,7 @@ func terminalObservationTargetAllowed(authority kernel.AttemptAuthority, project
 	}
 	switch authority.Role {
 	case kernel.RoleWorker:
-		return taskID == authority.TaskID && run.ID == authority.RunID
+		return taskID == authority.TaskID && run.ID == authority.RunID || authority.Specialist && run.Role == kernel.RoleWorker
 	case kernel.RoleOrchestrator:
 		return run.Role == kernel.RoleWorker
 	default:
@@ -255,7 +255,9 @@ func (daemon *Daemon) terminalObserve(ctx context.Context, call api.Call) api.Re
 	if err != nil {
 		return newErrorReply(api.RemoteInvalidRequest)
 	}
-	if project != authority.ProjectID || (authority.Role != kernel.RoleOrchestrator && (task != authority.TaskID || runID != authority.RunID)) {
+	// An overseer, or a specialist, observes any worker run in its project.
+	observer := authority.Role == kernel.RoleOrchestrator || authority.Specialist
+	if project != authority.ProjectID || (!observer && (task != authority.TaskID || runID != authority.RunID)) {
 		return newErrorReply(api.RemoteForbidden)
 	}
 	run, found, err := daemon.store.Run(ctx, runID)
@@ -269,7 +271,7 @@ func (daemon *Daemon) terminalObserve(ctx context.Context, call api.Call) api.Re
 		return newErrorReply(api.RemoteConflict)
 	}
 	if run.Phase == kernel.RunTerminal {
-		if authority.Role != kernel.RoleOrchestrator || run.Role != kernel.RoleWorker {
+		if !observer || run.Role != kernel.RoleWorker {
 			return newErrorReply(api.RemoteForbidden)
 		}
 		return daemon.readStoredTerminalObservation(ctx, input, run.ID)

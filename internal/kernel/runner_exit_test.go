@@ -7,6 +7,7 @@ import (
 )
 
 func TestRecoveredRunnerAbsenceRequiresRegisteredRunner(t *testing.T) {
+	t.Parallel()
 	store, run, _ := admittedOrchestratorRun(t)
 	defer store.Close()
 	exit, err := NewProcessExitRecoveredAbsence(1, mustTime(t, 20))
@@ -32,6 +33,7 @@ func TestRecoveredRunnerAbsenceRequiresRegisteredRunner(t *testing.T) {
 }
 
 func TestRecoveredAbsenceExitCannotBeEqualledByAnyForgedResult(t *testing.T) {
+	t.Parallel()
 	store, run, keys := runningOrchestratorRun(t)
 	defer store.Close()
 	proposal, _ := NewFailureProposal(FailureInternal, "owner disappeared")
@@ -89,6 +91,7 @@ func TestRecoveredAbsenceExitCannotBeEqualledByAnyForgedResult(t *testing.T) {
 }
 
 func TestDeclaredNoStartFailureClosesWithoutInventedExit(t *testing.T) {
+	t.Parallel()
 	store, run, _ := admittedOrchestratorRun(t)
 	defer store.Close()
 	failure, _ := NewFailureProposal(FailureSpawn, "did not start")
@@ -113,6 +116,7 @@ func TestDeclaredNoStartFailureClosesWithoutInventedExit(t *testing.T) {
 }
 
 func TestRecoveredRunnerAbsenceFromRunningRunRevokesAuthorityAndRoundTrips(t *testing.T) {
+	t.Parallel()
 	store, run, keys := runningOrchestratorRun(t)
 	path := storePath(t, store)
 	if _, err := store.AuthenticateAttempt(context.Background(), keys.AttemptDigest); err != nil {
@@ -180,6 +184,7 @@ func TestRecoveredRunnerAbsenceFromRunningRunRevokesAuthorityAndRoundTrips(t *te
 }
 
 func TestTypedOutcomeRemainsFirstWhenRecoveredAbsenceArrives(t *testing.T) {
+	t.Parallel()
 	store, run, keys := runningOrchestratorRun(t)
 	defer store.Close()
 	proposal, _ := NewSuccessProposal("first")
@@ -195,6 +200,7 @@ func TestTypedOutcomeRemainsFirstWhenRecoveredAbsenceArrives(t *testing.T) {
 }
 
 func TestRunnerExitKindSchemaAndScannerFailClosed(t *testing.T) {
+	t.Parallel()
 	updates := []struct {
 		name      string
 		statement string

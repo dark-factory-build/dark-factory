@@ -6,6 +6,37 @@ export type AgentActivity = "busy" | "waiting" | "needs-you" | "idle";
 /** The operator-facing state has one name for each actionable condition. */
 export type AgentStatus = "working" | "ready" | "needs-you" | "paused";
 
+/** A specialist is an ordinary worker whose idle rule is a standing instruction; its reviews carry this title. */
+export const isSpecialist = (agent: AgentItem | undefined) => agent?.role === "worker" && agent.idle_policy === "standing_instruction";
+export const STANDING_TITLE = "Standing instruction";
+
+const WAITING: Record<string, string> = { budget: "review budget used", queued: "queued behind other work", capacity: "waiting for a free background slot" };
+const clock = (ms: number) => new Date(ms).toLocaleString([], { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" });
+
+/**
+ * What a specialist is and is doing, from what the factory serves: its specialty
+ * is the remit's first line up to a colon ("Operations: make delivery reliable"),
+ * and a running review is its remit at work. Nothing here is inferred beyond that.
+ */
+export function specialistStatus(agent: AgentItem, state: StateView) {
+  const remit = agent.idle_instruction.split("\n", 1)[0]!.trim();
+  const colon = remit.indexOf(":");
+  const specialty = colon > 0 && colon <= 32 ? remit.slice(0, colon).trim() : "";
+  const aim = (specialty === "" ? remit : remit.slice(colon + 1)).trim();
+  const info = agent.specialist, status = agentStatus(agent, state);
+  const failed = info !== undefined && state.tasks.get(info.last_review_task_id)?.status === "failed";
+  const [stage, text] = agent.archived ? ["stopped", "stopped"]
+    : status === "working" ? ["working", aim === "" ? "reviewing" : `reviewing: ${aim.length <= 48 ? aim : `${aim.slice(0, 47).trimEnd()}…`}`]
+    : status === "needs-you" ? ["needs-you", "needs you"]
+    : agent.paused ? ["paused", "paused: no new reviews"]
+    : failed ? ["failed", "failed: its latest review failed; open it under Recent work"]
+    : info?.waiting && WAITING[info.waiting] ? ["waiting", `waiting: ${WAITING[info.waiting]}`]
+    : ["ready", "ready: between reviews"];
+  const wake = (agent.idle_wake_on ?? "") === "" ? "" : ` or sooner on ${(agent.idle_wake_on ?? "").replace(",", " and ")}`;
+  const next = agent.archived || agent.paused || info === undefined || info.next_review_at_ms === 0 ? "" : `Next review ${clock(info.next_review_at_ms)}${info.next_reason === "" ? "" : ` (${info.next_reason})`}${wake}`;
+  return { title: specialty === "" ? "Specialist" : `${specialty} specialist`, remit: remit.slice(0, 120), stage, text, next };
+}
+
 /** Tasks an agent is on right now (durable assignment, live statuses). */
 export function agentCurrentTask(agent: AgentItem, state: StateView): TaskItem | undefined {
 	if (agent.archived) return undefined;
@@ -73,7 +104,7 @@ export function workRows(state: StateView | undefined, inProgress: readonly Prod
   const inbox = sources.flatMap((source) => (source.sync?.waiting ?? []).map((candidate): WorkRow => ({ key: `${source.id}:${candidate.number}`, state: "inbox", title: candidate.title, origin: `#${candidate.number}`, intake: { source, candidate } })));
   return [...inbox, ...[...rows.values()].map(({ task, request, pr, key }): WorkRow => {
     const terminal = task === undefined || task.status === "succeeded" || task.status === "failed" || task.status === "cancelled";
-    const origin = task === undefined ? undefined : task.issue_number !== undefined ? `#${task.issue_number}` : task.mission_id !== undefined ? "mission" : state.agents.get(task.assigned_agent_id)?.role === "orchestrator" ? "overseer" : undefined;
+    const origin = task === undefined ? undefined : task.issue_number !== undefined ? `#${task.issue_number}` : task.mission_id !== undefined ? "mission" : state.agents.get(task.assigned_agent_id)?.role === "orchestrator" ? "overseer" : task.title === STANDING_TITLE && isSpecialist(state.agents.get(task.assigned_agent_id)) ? "specialist" : undefined;
     return { key, task, request, pr, origin, title: task?.title ?? pr?.pullRequest?.title ?? `Question from ${state.agents.get(request?.agent_id ?? "")?.name ?? "Agent"}`,
       state: request !== undefined || task?.status === "blocked" ? "needs-you" : terminal ? "in-review" : task.status === "running" ? "running" : "queued" };
   })].sort((a, b) => rank[a.state] - rank[b.state]);
@@ -97,6 +128,7 @@ export function orderTasksForHome(state: StateView): readonly TaskItem[] {
 
 /** Routes fold into a manifold past six per unit; zooming in lists them inside it. */
 const MAX_DOCKS = 6;
+const MAX_UNFLOWS = 100;
 
 export type FloorScene = Readonly<{
   graph: SceneGraph;
@@ -168,13 +200,21 @@ export function projectGraph(graphs: ReadonlyMap<string, OperationalGraphView> |
       const own = graph.nodes.filter((node) => node.unit === unit.id && staticNode(node)).sort((left, right) => compareText(left.label, right.label) || compareText(left.id, right.id));
       const machines: SceneMachine[] = [];
       const docks = own.filter((node) => node.kind === "ingress" && node.trigger !== "timer");
-      const foldDocks = docks.length > MAX_DOCKS;
+      const connected = new Set(graph.edges.flatMap((edge) => [edge.from, edge.to]));
+      const foldOwned = own.length > MAX_UNFLOWS && own.every((node) => !connected.has(node.id));
+      const foldDocks = !foldOwned && docks.length > MAX_DOCKS;
+      if (foldOwned) {
+        const id = `${unit.id}:owned`;
+        machines.push({ id, kind: "job", label: `${own.length} owned nodes`, represented: own.map((node) => node.id), reading: combine(own.map(reading)) });
+        for (const node of own) where.set(node.id, { unit: unit.id, machine: id });
+      }
       if (foldDocks) {
         const id = `${unit.id}:docks`;
         machines.push({ id, kind: "ingress", label: `${docks.length} routes`, represented: docks.map((node) => node.id), routes: docks.map((node) => node.label), reading: combine(docks.map(reading)) });
         for (const node of docks) where.set(node.id, { unit: unit.id, machine: id });
       }
       for (const node of own) {
+        if (foldOwned) continue;
         if (foldDocks && docks.includes(node)) continue;
         machines.push({ id: node.id, kind: node.kind, label: node.label, ...(node.trigger === undefined ? {} : { trigger: node.trigger }), reading: reading(node) });
         where.set(node.id, { unit: unit.id, machine: node.id });
@@ -263,7 +303,7 @@ export function projectFloor(state: StateView | undefined, prepared: ReturnType<
     const location: SceneWorker["location"] = task === undefined ? last === undefined ? "resting" : "last-observed" : live !== undefined ? "working" : "unobserved";
     const at = location === "working" ? live : location === "last-observed" ? last : undefined;
     return {
-      id: agent.id, name: agent.name, role: agent.role, provider: agent.provider,
+      id: agent.id, name: agent.name, role: agent.role, provider: agent.provider, ...(isSpecialist(agent) ? { specialist: specialistStatus(agent, state) } : {}),
       ...(agent.appearance === undefined ? {} : { appearance: agent.appearance }),
       activity: activity === "busy" && (telemetry?.quiet_seconds ?? 0) >= QUIET_SECONDS ? "waiting" : activity, paused: agent.paused, location,
       ...(telemetry === undefined ? {} : { telemetry }),

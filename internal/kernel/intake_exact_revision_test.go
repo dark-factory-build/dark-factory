@@ -39,6 +39,7 @@ func requireIntakeTaskUnchanged(t *testing.T, store *Store, want Task) {
 }
 
 func TestIntakeEditAfterAcceptanceNeverChangesQueuedOrRunningTaskBody(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	store, source := intakeExactRevisionStore(t)
 	reviewed := intakeSnapshotForTest()
@@ -93,6 +94,7 @@ func TestIntakeEditAfterAcceptanceNeverChangesQueuedOrRunningTaskBody(t *testing
 }
 
 func TestIntakeStaleSnapshotCannotReimportOrAmendAcceptedWork(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	store, source := intakeExactRevisionStore(t)
 	older := intakeSnapshotForTest()
@@ -146,6 +148,7 @@ func TestIntakeStaleSnapshotCannotReimportOrAmendAcceptedWork(t *testing.T) {
 }
 
 func TestIntakeWithdrawnAcceptanceCannotMaterialize(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	store, source := intakeExactRevisionStore(t)
 	snapshot := intakeSnapshotForTest()

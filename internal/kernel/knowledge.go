@@ -33,6 +33,7 @@ type KnowledgeMetadata struct {
 	ChangeID       string   `json:"change_id,omitempty"`
 	RecordType     string   `json:"record_type,omitempty"`
 	RecordID       string   `json:"record_id,omitempty"`
+	MissionID      string   `json:"mission_id,omitempty"`
 	Mentions       []string `json:"mentions,omitempty"`
 	Resolved       bool     `json:"resolved,omitempty"`
 	Pinned         bool     `json:"pinned,omitempty"`
@@ -78,7 +79,7 @@ func ParseKnowledgeMetadata(raw string) (KnowledgeMetadata, error) {
 		// SQL applicability filters and browser metadata use exact JSON keys.
 		// encoding/json otherwise accepts case-insensitive field aliases.
 		switch name {
-		case "scope", "status", "evidence", "entities", "source_revision", "branch", "environment", "thread_id", "task_id", "change_id", "record_type", "record_id", "mentions", "resolved", "pinned", "supersedes":
+		case "scope", "status", "evidence", "entities", "source_revision", "branch", "environment", "thread_id", "task_id", "change_id", "record_type", "record_id", "mission_id", "mentions", "resolved", "pinned", "supersedes":
 		default:
 			return m, ErrInvalidValue
 		}
@@ -104,7 +105,7 @@ func ParseKnowledgeMetadata(raw string) (KnowledgeMetadata, error) {
 	default:
 		return m, ErrInvalidValue
 	}
-	for _, s := range []string{m.SourceRevision, m.Branch, m.Environment, m.ThreadID, m.TaskID, m.ChangeID, m.RecordID, m.Supersedes} {
+	for _, s := range []string{m.SourceRevision, m.Branch, m.Environment, m.ThreadID, m.TaskID, m.ChangeID, m.RecordID, m.MissionID, m.Supersedes} {
 		if len(s) > 1024 {
 			return m, ErrInvalidValue
 		}
@@ -306,7 +307,8 @@ func validateKnowledge(ctx context.Context, c *sql.Conn, spec NewContent, expect
 			return ErrInvalidValue
 		}
 	}
-	if (m.RecordType == "") != (m.RecordID == "") {
+	// Specialist records (validateSpecialistRecord) check their own record_id.
+	if m.RecordType == "" && m.RecordID != "" || m.RecordID == "" && (m.RecordType == "human_request" || m.RecordType == "peer_question") {
 		return ErrInvalidValue
 	}
 	switch m.RecordType {
@@ -320,11 +322,14 @@ func validateKnowledge(ctx context.Context, c *sql.Conn, spec NewContent, expect
 		if err := c.QueryRowContext(ctx, `SELECT count(*) FROM production_records WHERE project_id=? AND kind='reviewer' AND identity=?`, spec.ProjectID.Bytes(), m.RecordID).Scan(&n); err != nil {
 			return err
 		}
-		if n == 0 {
+		if n == 0 && m.RecordID != "" {
 			return ErrInvalidValue
 		}
+		fallthrough
 	default:
-		return ErrInvalidValue
+		if err := validateSpecialistRecord(ctx, c, spec, m, a); err != nil {
+			return err
+		}
 	}
 	for _, entity := range m.Entities {
 		if err := validateKnowledgeEntity(ctx, c, spec.ProjectID, entity); err != nil {
@@ -346,6 +351,30 @@ func validateKnowledgeEntity(ctx context.Context, c *sql.Conn, project ProjectID
 	}
 	if _, err := hex.DecodeString(raw); err != nil {
 		return ErrInvalidValue
+	}
+	return nil
+}
+
+func validateMissionRecord(ctx context.Context, c *sql.Conn, project ProjectID, m KnowledgeMetadata, a *AttemptAuthority, decision bool) error {
+	raw, err := knowledgeID(m.MissionID)
+	if err != nil {
+		return err
+	}
+	var document string
+	if err := c.QueryRowContext(ctx, `SELECT document FROM project_outcome_revisions WHERE id=? AND project_id=? AND revision=(SELECT MAX(revision) FROM project_outcome_revisions WHERE id=?)`, raw, project.Bytes(), raw).Scan(&document); err != nil {
+		return err
+	}
+	mission, err := DecodeOutcomeDocument(document)
+	if err != nil || mission.Kind != "mission" {
+		return ErrInvalidValue
+	}
+	if a == nil {
+		return nil
+	}
+	if mission.DriverAgentID == "" || mission.DriverAgentID != a.AgentID.String() {
+		if !decision || a.Role != RoleOrchestrator {
+			return ErrUnauthorized
+		}
 	}
 	return nil
 }

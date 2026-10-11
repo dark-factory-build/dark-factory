@@ -173,6 +173,25 @@ func newWorkerConfigFixture(t *testing.T) (*WorkerControl, *os.File) {
 	return worker, peer
 }
 
+// A provider release slower than the control read deadline made the worker
+// exit 70 and the daemon's release write fail with a broken pipe (#1082).
+func TestWorkerAwaitsSlowReleaseWithoutDeadline(t *testing.T) {
+	shortenWait(t, &attemptControlTimeout)
+	worker, peer := newWorkerConfigFixture(t)
+	worker.state = workerPopulationReported
+	delay := 2 * attemptControlTimeout
+	written := make(chan error, 1)
+	time.AfterFunc(delay, func() {
+		written <- writeFrame(peer, attemptFrame{Version: 1, Kind: "release", Stage: StageProvider}, maxFrameBytes)
+	})
+	if err := worker.AwaitProvider(); err != nil {
+		t.Fatalf("release after %s = %v", delay, err)
+	}
+	if err := <-written; err != nil {
+		t.Fatal(err)
+	}
+}
+
 func writeRawWorkerConfigFrame(t *testing.T, peer *os.File, body []byte) {
 	t.Helper()
 	var header [4]byte
@@ -2480,6 +2499,13 @@ func TestAttemptProtocolSurfaceIsClosed(t *testing.T) {
 	if strings.Index(finishBody, "reads.processOnly()") < 0 || strings.Index(finishBody, "reads.processOnly()") > strings.Index(finishBody, "waitForAttemptChild(child)") {
 		t.Fatal("process cleanup begins before protocol read filters are retired")
 	}
+	// Every terminal path shares this one sweep, and its evidence gates the
+	// result before anything is published.
+	sweep := strings.Index(finishBody, "cause = errors.Join(cause, killRunStragglers(dir))")
+	gate := strings.Index(finishBody, "if errors.Is(cause, ErrUnresolved) {")
+	if strings.Count(string(attemptSource), "killRunStragglers(") != 1 || sweep < 0 || gate < sweep || gate > strings.Index(finishBody, "publishAttemptResult(dir, result)") {
+		t.Fatal("run-process sweep evidence does not gate the shared result path")
+	}
 	waitBody := string(attemptSource)[waitStart:]
 	for _, lifecycleCase := range []string{"case stateBlocked:", "case stateActivated:", "case stateExited:", "case stateWaited:"} {
 		if !strings.Contains(waitBody, lifecycleCase) {
@@ -2637,6 +2663,91 @@ func TestAttemptPermanentCleanupUncertaintyPublishesNothing(t *testing.T) {
 		t.Fatalf("restored cleanup published terminal after uncertainty: %v", err)
 	}
 	waitExactAbsence(t, identity)
+}
+
+// TestAttemptRunSweepEvidenceGatesResult drives both terminal paths (the
+// pre-provider failure path and the post-provider finish with a live daemon)
+// through every run-process sweep outcome. Only a proved sweep may publish,
+// and then even for a failed provider.
+func TestAttemptRunSweepEvidenceGatesResult(t *testing.T) {
+	providerErr := errors.New("provider failed")
+	sweeps := map[string]func(pass int) (bool, error){
+		"proved":       func(int) (bool, error) { return false, nil },
+		"proved-after": func(pass int) (bool, error) { return pass == 0, nil },
+		"scan-denied":  func(int) (bool, error) { return false, unix.EPERM },
+		"timeout":      func(int) (bool, error) { return true, nil },
+		"partial": func(pass int) (bool, error) {
+			if pass == 0 {
+				return true, nil
+			}
+			return false, unix.EPERM
+		},
+	}
+	for name, sweep := range sweeps {
+		for _, path := range []string{"failure", "finish"} {
+			t.Run(name+"/"+path, func(t *testing.T) {
+				previous := testStragglerPass
+				passes := 0
+				testStragglerPass = func(pass int) (bool, error) {
+					passes++
+					return sweep(pass)
+				}
+				t.Cleanup(func() { testStragglerPass = previous })
+				f := newFixture(t)
+				child := f.start("/bin/sh", []string{"-c", "exit 3"}, nil, nil)
+				if _, err := child.Activate(); err != nil {
+					t.Fatal(err)
+				}
+				identity := child.Identity()
+				daemon, daemonPeer, err := newControlPair("test-daemon", "test-daemon-peer")
+				if err != nil {
+					t.Fatal(err)
+				}
+				t.Cleanup(func() { _ = daemon.Close(); _ = daemonPeer.Close() })
+				cfg := attemptConfig{AttemptID: "attempt-sweep", ResultName: AttemptResultSpoolName, ResultProof: testResultProofHex()}
+				var finishErr error
+				if path == "failure" {
+					finishErr = finishAttemptFailure(child, f.dir, cfg, nil, providerErr)
+				} else {
+					finishErr = finishAttemptWithExit(child, f.dir, cfg, nil, daemon, true, providerErr)
+				}
+				if child.state != stateWaited || passes == 0 || !errors.Is(finishErr, providerErr) {
+					t.Fatalf("finish state=%d passes=%d err=%v", child.state, passes, finishErr)
+				}
+				waitExactAbsence(t, identity)
+				if err := daemonPeer.SetReadDeadline(time.Now().Add(200 * time.Millisecond)); err != nil {
+					t.Fatal(err)
+				}
+				var notice attemptFrame
+				noticeErr := readFrame(daemonPeer, &notice, maxFrameBytes)
+				if !strings.HasPrefix(name, "proved") {
+					if !errors.Is(finishErr, ErrUnresolved) {
+						t.Fatalf("unproved sweep result=%v, want unresolved evidence", finishErr)
+					}
+					if err := unix.Fstatat(int(f.dir.Fd()), cfg.ResultName, new(unix.Stat_t), unix.AT_SYMLINK_NOFOLLOW); !errors.Is(err, os.ErrNotExist) {
+						t.Fatalf("unproved sweep published result: %v", err)
+					}
+					if noticeErr == nil {
+						t.Fatalf("unproved sweep notified daemon: %+v", notice)
+					}
+					return
+				}
+				if errors.Is(finishErr, ErrUnresolved) {
+					t.Fatalf("proved cleanup with failed provider unresolved: %v", finishErr)
+				}
+				record, err := AuthenticateAttemptResult(f.dir, cfg.AttemptID, nil)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if process, ok := record.Result().Process(); !ok || process != identity || record.Result().Kind() != AttemptResultInnerConverged {
+					t.Fatalf("failed provider result=%+v", record.Result())
+				}
+				if path == "finish" && (noticeErr != nil || notice.Kind != string(AttemptResultReady)) {
+					t.Fatalf("daemon result notice=%+v err=%v", notice, noticeErr)
+				}
+			})
+		}
+	}
 }
 
 func TestAttemptControllerRejectsResultNoticeWithContentAuthority(t *testing.T) {

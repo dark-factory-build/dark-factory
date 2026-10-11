@@ -54,7 +54,10 @@ factoryctl service install --home "$HOME/.dark-factory"
 
 A fresh installation opens the console in your default browser, already
 paired. If you lose every paired browser, `factoryctl web pair` opens your
-default browser already paired; see [installation](docs/install.md).
+default browser already paired; see [installation](docs/install.md). It also
+covers [provider setup](docs/install.md#set-up-a-provider-and-start-your-first-worker),
+including a Claude Code worker, and [stopping and restarting the
+service](docs/install.md#stop-start-and-upgrade-the-service).
 
 ## Your first task
 

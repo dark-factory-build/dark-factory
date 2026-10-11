@@ -77,6 +77,9 @@ type Config struct {
 	// IngestKey is the SHA-256 of the factory's telemetry ingest secret, or
 	// nil when none is minted. SetIngestKey replaces it.
 	IngestKey []byte
+	// Console is the signed console bundle the relay serves to phones; nil
+	// or past MaxConsoleBytes publishes none.
+	Console []byte
 
 	// Dialer, Now, BaseBackoff, MaxBackoff, PingInterval and PongTimeout are
 	// the test seams. The timing members are configurable because a test that
@@ -392,6 +395,9 @@ func (connector *Connector) serve(relay *websocket.Conn) {
 	// A new relay socket starts with no digest, so only a minted one is sent.
 	if connector.ingestKey != nil {
 		queue.push(nil, Record{Type: RecordIngestKey, Payload: connector.ingestKey})
+	}
+	if len(connector.config.Console) != 0 && len(connector.config.Console) <= MaxConsoleBytes {
+		queue.push(nil, Record{Type: RecordConsole, Payload: connector.config.Console})
 	}
 	connector.mu.Unlock()
 

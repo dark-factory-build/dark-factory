@@ -54,6 +54,7 @@ type AgentUpdate struct {
 	IdleAfterSeconds *uint32 `json:"idle_after_seconds,omitempty"`
 	IdleInstruction  *string `json:"idle_instruction,omitempty"`
 	IdleRunBudget    *uint32 `json:"idle_run_budget,omitempty"`
+	IdleWakeOn       *string `json:"idle_wake_on,omitempty"`
 }
 
 type AgentUpdateResult struct {

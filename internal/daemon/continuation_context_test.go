@@ -11,18 +11,14 @@ import (
 )
 
 func TestAttemptTaskReturnsExactProviderLimitWithCausalContext(t *testing.T) {
-	condition := kernel.ContinuationConditionID{}
-	copy(condition[:], bytes.Repeat([]byte{0x42}, len(condition)))
-	revision, err := kernel.NewRevision(7)
+	request, err := kernel.HumanRequestIDFromBytes(bytes.Repeat([]byte{0x42}, kernel.IDBytes))
 	if err != nil {
 		t.Fatal(err)
 	}
 	context := kernel.ContinuationContext{
-		ConditionKind:     kernel.ConditionHumanRequest,
-		ConditionID:       condition,
-		ConditionRevision: revision,
-		ContextDigest:     [kernel.DigestBytes]byte{0x24},
-		ResolutionDetail:  strings.Repeat("r", kernel.MaxHumanRequestReplyBytes),
+		RequestID:        request,
+		ContextDigest:    [kernel.DigestBytes]byte{0x24},
+		ResolutionDetail: strings.Repeat("r", kernel.MaxHumanRequestReplyBytes),
 	}
 	for _, test := range []struct {
 		name     string

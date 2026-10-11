@@ -11,6 +11,7 @@ import (
 )
 
 func TestActivateRunRejectsCausallyEarlyResources(t *testing.T) {
+	t.Parallel()
 	store, run, _ := admittedOrchestratorRun(t)
 	defer store.Close()
 	run = activateResourcesAt(t, store, run, 20)
@@ -28,6 +29,7 @@ func TestActivateRunRejectsCausallyEarlyResources(t *testing.T) {
 }
 
 func TestFactoryTimestampAndRevisionGuardEveryControlIntent(t *testing.T) {
+	t.Parallel()
 	store, _ := newTestStore(t)
 	defer store.Close()
 	initial, err := store.Factory(context.Background())
@@ -57,6 +59,7 @@ func TestFactoryTimestampAndRevisionGuardEveryControlIntent(t *testing.T) {
 }
 
 func TestAdmitNextRejectsBeforeFactoryTimestamp(t *testing.T) {
+	t.Parallel()
 	store, _, project, agent := newAdmissionStore(t, RoleOrchestrator, 2)
 	defer store.Close()
 	if _, err := store.EnqueueTask(context.Background(), NewTask{ID: taskID(t, 220), ProjectID: project.ID, AssignedAgentID: agent.ID, IncarnationID: incarnationID(t, 221), Title: "factory"}, mustTime(t, 5)); err != nil {
@@ -84,6 +87,7 @@ func TestAdmitNextRejectsBeforeFactoryTimestamp(t *testing.T) {
 }
 
 func TestFinalizeRunRejectsBeforeFactoryTimestamp(t *testing.T) {
+	t.Parallel()
 	failure, _ := NewFailureProposal(FailureInternal, "cleanup")
 	store, finalizing := finalizingReleasedRun(t, RoleOrchestrator, failure)
 	defer store.Close()
@@ -107,6 +111,7 @@ func TestFinalizeRunRejectsBeforeFactoryTimestamp(t *testing.T) {
 }
 
 func TestFinalizingRejectsCausallyEarlyResourceUpdate(t *testing.T) {
+	t.Parallel()
 	store, run, _ := admittedOrchestratorRun(t)
 	defer store.Close()
 	runtime := resourceOfKind(t, resourcesForRunTest(t, store, run.ID), ResourceRuntimeRoot)
@@ -125,6 +130,7 @@ func TestFinalizingRejectsCausallyEarlyResourceUpdate(t *testing.T) {
 }
 
 func TestExitDrivenFinalizingRejectsCausallyEarlyResourceUpdate(t *testing.T) {
+	t.Parallel()
 	store, run, _ := admittedOrchestratorRun(t)
 	defer store.Close()
 	runner := resourceOfKind(t, resourcesForRunTest(t, store, run.ID), ResourceRunnerProcess)
@@ -139,6 +145,7 @@ func TestExitDrivenFinalizingRejectsCausallyEarlyResourceUpdate(t *testing.T) {
 }
 
 func TestReleaseProviderRejectsBeforeExit(t *testing.T) {
+	t.Parallel()
 	proposal, _ := NewSuccessProposal("done")
 	store, run, keys := runningOrchestratorRun(t)
 	defer store.Close()
@@ -177,6 +184,7 @@ func TestReleaseProviderRejectsBeforeExit(t *testing.T) {
 }
 
 func TestFinalizeRunRejectsBeforeResourceCleanupTime(t *testing.T) {
+	t.Parallel()
 	failure, _ := NewFailureProposal(FailureInternal, "cleanup")
 	store, run := finalizingReleasedRun(t, RoleOrchestrator, failure)
 	defer store.Close()
@@ -193,6 +201,7 @@ func TestFinalizeRunRejectsBeforeResourceCleanupTime(t *testing.T) {
 }
 
 func TestRetryAdmissionCannotPrecedeQueuedTaskUpdate(t *testing.T) {
+	t.Parallel()
 	store, terminal, _, keys := retryQueuedWorker(t, 50)
 	defer store.Close()
 	before := captureWriteFootprint(t, store)
@@ -212,6 +221,7 @@ func TestRetryAdmissionCannotPrecedeQueuedTaskUpdate(t *testing.T) {
 // work revision with the note in its body, the store stays valid, and the
 // retry is admitted on the task's own Change.
 func TestSuccessfulTerminalCanBeSentBackAndRetried(t *testing.T) {
+	t.Parallel()
 	success, _ := NewSuccessProposal("finished")
 	store, finalizing := finalizingReleasedRun(t, RoleWorker, success)
 	defer store.Close()
@@ -228,13 +238,13 @@ func TestSuccessfulTerminalCanBeSentBackAndRetried(t *testing.T) {
 	if err != nil || !found || task.Status != TaskSucceeded {
 		t.Fatalf("finished task = %+v, found=%v, %v", task, found, err)
 	}
-	if _, err := store.SendBackTask(ctx, task.ID, task.Revision, "", mustTime(t, 90)); !errors.Is(err, ErrInvalidValue) {
+	if _, err := store.SendBackTask(ctx, task.ID, task.Revision, "", "", mustTime(t, 90)); !errors.Is(err, ErrInvalidValue) {
 		t.Fatalf("empty note = %v", err)
 	}
-	if _, err := store.SendBackTask(ctx, task.ID, task.Revision, strings.Repeat("x", MaxSendBackNoteBytes+1), mustTime(t, 90)); !errors.Is(err, ErrInvalidValue) {
+	if _, err := store.SendBackTask(ctx, task.ID, task.Revision, "", strings.Repeat("x", MaxSendBackNoteBytes+1), mustTime(t, 90)); !errors.Is(err, ErrInvalidValue) {
 		t.Fatalf("oversized note = %v", err)
 	}
-	if _, err := store.SendBackTask(ctx, task.ID, task.Revision, "later", mustTime(t, task.UpdatedAt.Int64()-1)); !errors.Is(err, ErrRevisionConflict) {
+	if _, err := store.SendBackTask(ctx, task.ID, task.Revision, "", "later", mustTime(t, task.UpdatedAt.Int64()-1)); !errors.Is(err, ErrRevisionConflict) {
 		t.Fatalf("send-back before the terminal run = %v", err)
 	}
 	// A v4 task may quote the heading in its instruction. Its NULL boundary
@@ -242,7 +252,11 @@ func TestSuccessfulTerminalCanBeSentBackAndRetried(t *testing.T) {
 	if task.Body != legacyInstruction || task.SentBackInstructionBytes != nil {
 		t.Fatalf("fixture task = %+v", task)
 	}
-	sent, err := store.SendBackTask(ctx, task.ID, task.Revision, "the review wants a test", mustTime(t, 90))
+	// A note observed at any other head than the Change's is refused (#1673).
+	if _, err := store.SendBackTask(ctx, task.ID, task.Revision, strings.Repeat("ab", 20), "stale", mustTime(t, 90)); !errors.Is(err, ErrSuperseded) || !errors.Is(err, ErrConflict) {
+		t.Fatalf("stale head send-back = %v", err)
+	}
+	sent, err := store.SendBackTask(ctx, task.ID, task.Revision, changeHead(t, store, task.ID), "the review wants a test", mustTime(t, 90))
 	if err != nil || sent.Status != TaskQueued || sent.WorkRevision.Int64() != task.WorkRevision.Int64()+1 || sent.Result != "" || sent.CompletedAt != nil || sent.BlockedReason != "" ||
 		sent.Body != legacyInstruction+"\n\n## Sent back for work revision 2\n\nthe review wants a test" || sent.Body != SentBackBody(task, "the review wants a test") || sent.SentBackInstructionBytes == nil || *sent.SentBackInstructionBytes != int64(byteLen(legacyInstruction)) {
 		t.Fatalf("sent back task = %+v, %v", sent, err)
@@ -264,10 +278,10 @@ func TestSuccessfulTerminalCanBeSentBackAndRetried(t *testing.T) {
 	if _, _, err := store.Run(ctx, terminal.ID); err != nil {
 		t.Fatalf("store after send-back = %v", err)
 	}
-	if _, err := store.SendBackTask(ctx, task.ID, task.Revision, "again", mustTime(t, 91)); !errors.Is(err, ErrRevisionConflict) {
+	if _, err := store.SendBackTask(ctx, task.ID, task.Revision, "", "again", mustTime(t, 91)); !errors.Is(err, ErrRevisionConflict) {
 		t.Fatalf("stale revision = %v", err)
 	}
-	if _, err := store.SendBackTask(ctx, sent.ID, sent.Revision, "again", mustTime(t, 92)); !errors.Is(err, ErrConflict) {
+	if _, err := store.SendBackTask(ctx, sent.ID, sent.Revision, "", "again", mustTime(t, 92)); !errors.Is(err, ErrConflict) {
 		t.Fatalf("queued task sent back = %v", err)
 	}
 	// Requirements belong in the editable instruction, not the replaceable note.
@@ -310,7 +324,7 @@ func TestSuccessfulTerminalCanBeSentBackAndRetried(t *testing.T) {
 	if err != nil || !found {
 		t.Fatalf("second terminal task = %+v, found=%v, %v", retried, found, err)
 	}
-	second, err := store.SendBackTask(ctx, retried.ID, retried.Revision, "the second note", mustTime(t, 160))
+	second, err := store.SendBackTask(ctx, retried.ID, retried.Revision, changeHead(t, store, retried.ID), "the second note", mustTime(t, 160))
 	if err != nil || second.Body != durableInstruction+"\n\n## Sent back for work revision 3\n\nthe second note" || second.SentBackInstructionBytes == nil || *second.SentBackInstructionBytes != int64(byteLen(durableInstruction)) {
 		t.Fatalf("second send-back = %+v, %v", second, err)
 	}
@@ -318,6 +332,7 @@ func TestSuccessfulTerminalCanBeSentBackAndRetried(t *testing.T) {
 
 // A task that never ran has no run to go back to.
 func TestSendBackRefusesATaskWithoutARun(t *testing.T) {
+	t.Parallel()
 	store, _, project, agent := newAdmissionStore(t, RoleWorker, 2)
 	defer store.Close()
 	ctx := context.Background()
@@ -329,7 +344,7 @@ func TestSendBackRefusesATaskWithoutARun(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := store.SendBackTask(ctx, cancelled.ID, cancelled.Revision, "try again", mustTime(t, 7)); !errors.Is(err, ErrConflict) {
+	if _, err := store.SendBackTask(ctx, cancelled.ID, cancelled.Revision, "", "try again", mustTime(t, 7)); !errors.Is(err, ErrConflict) {
 		t.Fatalf("send-back without a run = %v", err)
 	}
 	// A shell agent's task is a program: no note can be appended to it,
@@ -342,7 +357,7 @@ func TestSendBackRefusesATaskWithoutARun(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := store.SendBackTask(ctx, program.ID, program.Revision, "a note", mustTime(t, 10)); !errors.Is(err, ErrInvalidValue) {
+	if _, err := store.SendBackTask(ctx, program.ID, program.Revision, "", "a note", mustTime(t, 10)); !errors.Is(err, ErrInvalidValue) {
 		t.Fatalf("send-back of a shell task = %v", err)
 	}
 }
@@ -351,6 +366,7 @@ func TestSendBackRefusesATaskWithoutARun(t *testing.T) {
 // task back; before it runs, its own task, another project's task, an
 // unknown credential and (below) a worker's credential may not.
 func TestOrchestratorAttemptSendsBackAWorkerTask(t *testing.T) {
+	t.Parallel()
 	success, _ := NewSuccessProposal("finished")
 	store, finalizing := finalizingReleasedRun(t, RoleWorker, success)
 	defer store.Close()
@@ -372,7 +388,7 @@ func TestOrchestratorAttemptSendsBackAWorkerTask(t *testing.T) {
 	if err != nil || !admission.Admitted() || admission.Run.Role != RoleOrchestrator {
 		t.Fatalf("orchestrator admission = %+v, %v", admission, err)
 	}
-	if _, err := store.SendBackTaskForAttempt(ctx, keys.AttemptDigest, terminal.TaskID, "not yet running", mustTime(t, 84)); !errors.Is(err, ErrUnauthorized) {
+	if _, err := store.SendBackTaskForAttempt(ctx, keys.AttemptDigest, terminal.TaskID, "", "not yet running", mustTime(t, 84)); !errors.Is(err, ErrUnauthorized) {
 		t.Fatalf("admitted but not running orchestrator = %v", err)
 	}
 	activated := activateAllResourcesUnique(t, store, *admission.Run, 90, 7)
@@ -380,10 +396,10 @@ func TestOrchestratorAttemptSendsBackAWorkerTask(t *testing.T) {
 	if _, err := store.ActivateRun(ctx, admission.Run.ID, session.ID, activated.Revision, session.Revision, mustTime(t, 100)); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := store.SendBackTaskForAttempt(ctx, keys.AttemptDigest, own.ID, "myself", mustTime(t, 101)); !errors.Is(err, ErrConflict) {
+	if _, err := store.SendBackTaskForAttempt(ctx, keys.AttemptDigest, own.ID, "", "myself", mustTime(t, 101)); !errors.Is(err, ErrConflict) {
 		t.Fatalf("own task = %v", err)
 	}
-	if _, err := store.SendBackTaskForAttempt(ctx, keys.AttemptDigest, taskID(t, 99), "missing", mustTime(t, 101)); !errors.Is(err, ErrNotFound) {
+	if _, err := store.SendBackTaskForAttempt(ctx, keys.AttemptDigest, taskID(t, 99), "", "missing", mustTime(t, 101)); !errors.Is(err, ErrNotFound) {
 		t.Fatalf("missing task = %v", err)
 	}
 	elsewhere, err := store.CreateProject(ctx, NewProject{ID: projectID(t, 60), Name: "elsewhere", Root: "/elsewhere"}, mustTime(t, 101))
@@ -398,7 +414,7 @@ func TestOrchestratorAttemptSendsBackAWorkerTask(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := store.SendBackTaskForAttempt(ctx, keys.AttemptDigest, foreign.ID, "another project", mustTime(t, 101)); !errors.Is(err, ErrUnauthorized) {
+	if _, err := store.SendBackTaskForAttempt(ctx, keys.AttemptDigest, foreign.ID, "", "another project", mustTime(t, 101)); !errors.Is(err, ErrUnauthorized) {
 		t.Fatalf("another project's task = %v", err)
 	}
 	sibling, err := store.CreateAgent(ctx, NewAgent{ID: agentID(t, 64), ProjectID: terminal.ProjectID, Name: "sibling", Role: RoleOrchestrator, Provider: ProviderCodex, ToolBudgetLimit: 2}, mustTime(t, 101))
@@ -409,7 +425,7 @@ func TestOrchestratorAttemptSendsBackAWorkerTask(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := store.SendBackTaskForAttempt(ctx, keys.AttemptDigest, siblingTask.ID, "not a worker's", mustTime(t, 101)); !errors.Is(err, ErrUnauthorized) {
+	if _, err := store.SendBackTaskForAttempt(ctx, keys.AttemptDigest, siblingTask.ID, "", "not a worker's", mustTime(t, 101)); !errors.Is(err, ErrUnauthorized) {
 		t.Fatalf("a sibling orchestrator's task = %v", err)
 	}
 	task, found, err := store.Task(ctx, terminal.TaskID)
@@ -425,39 +441,41 @@ func TestOrchestratorAttemptSendsBackAWorkerTask(t *testing.T) {
 	if err != nil || !archived.Archived {
 		t.Fatalf("archive terminal worker = %+v, %v", archived, err)
 	}
-	if _, err := store.SendBackTaskForAttempt(ctx, keys.AttemptDigest, terminal.TaskID, "archived", mustTime(t, 102)); !errors.Is(err, ErrConflict) {
+	if _, err := store.SendBackTaskForAttempt(ctx, keys.AttemptDigest, terminal.TaskID, "", "archived", mustTime(t, 102)); !errors.Is(err, ErrConflict) {
 		t.Fatalf("orchestrator send-back archived worker = %v", err)
 	}
 	restore := false
 	if _, err := store.UpdateAgent(ctx, archived.ID, archived.Revision, AgentPatch{Archived: &restore}, mustTime(t, 102)); err != nil {
 		t.Fatal(err)
 	}
-	sent, err := store.SendBackTaskForAttempt(ctx, keys.AttemptDigest, terminal.TaskID, "five findings", mustTime(t, 102))
+	sent, err := store.SendBackTaskForAttempt(ctx, keys.AttemptDigest, terminal.TaskID, changeHead(t, store, terminal.TaskID), "five findings", mustTime(t, 102))
 	if err != nil || sent.Status != TaskQueued || sent.WorkRevision.Int64() != 2 || sent.Body != SentBackBody(task, "five findings") {
 		t.Fatalf("orchestrator send-back = %+v, %v", sent, err)
 	}
-	if _, err := store.SendBackTaskForAttempt(ctx, keys.AttemptDigest, terminal.TaskID, "twice", mustTime(t, 103)); !errors.Is(err, ErrConflict) {
+	if _, err := store.SendBackTaskForAttempt(ctx, keys.AttemptDigest, terminal.TaskID, "", "twice", mustTime(t, 103)); !errors.Is(err, ErrConflict) {
 		t.Fatalf("queued task sent back again = %v", err)
 	}
 	unknown, err := AttemptDigestFromBytes(bytes.Repeat([]byte{9}, DigestBytes))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := store.SendBackTaskForAttempt(ctx, unknown, terminal.TaskID, "stranger", mustTime(t, 104)); !errors.Is(err, ErrUnauthorized) {
+	if _, err := store.SendBackTaskForAttempt(ctx, unknown, terminal.TaskID, "", "stranger", mustTime(t, 104)); !errors.Is(err, ErrUnauthorized) {
 		t.Fatalf("unknown credential = %v", err)
 	}
 }
 
 // A worker's credential is never a send-back authority.
 func TestWorkerAttemptCannotSendBack(t *testing.T) {
+	t.Parallel()
 	store, run, keys := runningWorkerRun(t)
 	defer store.Close()
-	if _, err := store.SendBackTaskForAttempt(context.Background(), keys.AttemptDigest, run.TaskID, "myself", mustTime(t, 200)); !errors.Is(err, ErrUnauthorized) {
+	if _, err := store.SendBackTaskForAttempt(context.Background(), keys.AttemptDigest, run.TaskID, "", "myself", mustTime(t, 200)); !errors.Is(err, ErrUnauthorized) {
 		t.Fatalf("worker send-back = %v", err)
 	}
 }
 
 func TestNonSuccessTerminalAllowsQueuedRetry(t *testing.T) {
+	t.Parallel()
 	blocked, _ := NewBlockedProposal("retry")
 	failed, _ := NewFailureProposal(FailureInternal, "retry")
 	cancelled, _ := NewCancelledProposal("retry")
@@ -489,6 +507,7 @@ func TestNonSuccessTerminalAllowsQueuedRetry(t *testing.T) {
 }
 
 func TestQueuedRetryMustFollowPredecessorTerminal(t *testing.T) {
+	t.Parallel()
 	t.Run("before", func(t *testing.T) {
 		store, terminal, _, keys := retryQueuedWorker(t, 32)
 		path := storePath(t, store)
@@ -531,6 +550,7 @@ func TestQueuedRetryMustFollowPredecessorTerminal(t *testing.T) {
 }
 
 func TestHistoricalRetryMustFollowEveryPredecessor(t *testing.T) {
+	t.Parallel()
 	store, predecessor, successor := retryAdmittedWorker(t, 33, 33)
 	path := storePath(t, store)
 	corruptSQL(t, store, `UPDATE runs SET terminal_at_ms = 100, updated_at_ms = 100 WHERE id = ?`, predecessor.ID.Bytes())
@@ -540,6 +560,7 @@ func TestHistoricalRetryMustFollowEveryPredecessor(t *testing.T) {
 // A successful run may precede later history: a send-back returns a finished
 // task, a success included, to its queue.
 func TestEarlierSuccessfulRunMayPrecedeLaterHistory(t *testing.T) {
+	t.Parallel()
 	store, predecessor, successor := retryAdmittedWorker(t, 33, 33)
 	defer store.Close()
 	corruptSQL(t, store, `UPDATE runs SET proposal_kind = 'succeeded', proposal_code = NULL, proposal_detail = NULL, proposal_result = 'hidden success', terminal_kind = 'succeeded', terminal_code = NULL, terminal_detail = NULL, terminal_result = 'hidden success' WHERE id = ?`, predecessor.ID.Bytes())
@@ -555,6 +576,7 @@ func TestEarlierSuccessfulRunMayPrecedeLaterHistory(t *testing.T) {
 // abandons the available Change, keeps the store valid, and lets the task
 // retry fresh on a reserved Change four revisions on.
 func TestRefusedPublicationAbandonsTheAvailableChangeAndRetriesFresh(t *testing.T) {
+	t.Parallel()
 	success, _ := NewSuccessProposal("finished")
 	store, finalizing := finalizingReleasedRun(t, RoleWorker, success)
 	defer store.Close()
@@ -609,6 +631,7 @@ func TestRefusedPublicationAbandonsTheAvailableChangeAndRetriesFresh(t *testing.
 // A refusal is only for a published tree: an unpublished Change abandons
 // the ordinary way, and a refused settlement on it is a conflict.
 func TestRefusedSettlementNeedsAnAvailableChange(t *testing.T) {
+	t.Parallel()
 	store, run, _ := admittedWorkerRun(t)
 	defer store.Close()
 	ctx := context.Background()
@@ -640,6 +663,7 @@ func TestRefusedSettlementNeedsAnAvailableChange(t *testing.T) {
 // retries two revisions on, and one that failed with FailureSource while
 // its Change was available retains it and retries on the retained tree.
 func TestSourceFailuresThatAreNotRefusalsRetryAsBefore(t *testing.T) {
+	t.Parallel()
 	t.Run("reserved", func(t *testing.T) {
 		store, run, _ := admittedWorkerRun(t)
 		defer store.Close()
@@ -703,6 +727,7 @@ func TestSourceFailuresThatAreNotRefusalsRetryAsBefore(t *testing.T) {
 // A refusal on a retry's reopened retained Change abandons it one revision
 // on, and the next retry starts fresh two revisions later.
 func TestRefusedPublicationOnARetainedRetryAbandonsAndRetriesFresh(t *testing.T) {
+	t.Parallel()
 	blocked, _ := NewBlockedProposal("retry")
 	store, finalizing := finalizingReleasedRun(t, RoleWorker, blocked)
 	defer store.Close()
@@ -779,6 +804,7 @@ func TestRefusedPublicationOnARetainedRetryAbandonsAndRetriesFresh(t *testing.T)
 }
 
 func TestRetryHistoryAllowsMultipleNonSuccessRuns(t *testing.T) {
+	t.Parallel()
 	store, predecessor, _, keys := retryQueuedWorker(t, 33)
 	defer store.Close()
 	second, err := store.AdmitNext(context.Background(), keys, mustTime(t, 33))
@@ -857,6 +883,7 @@ func assertCorruptTaskHistory(t *testing.T, store *Store, path string, runIDs ..
 }
 
 func TestFinalizingResourceActivationMustNotFollowFinalizing(t *testing.T) {
+	t.Parallel()
 	t.Run("after finalizing", func(t *testing.T) {
 		store, run, _ := admittedOrchestratorRun(t)
 		path := storePath(t, store)
@@ -941,6 +968,7 @@ func TestFinalizingResourceActivationMustNotFollowFinalizing(t *testing.T) {
 }
 
 func TestRunningWorkerChangeCausalitySurvivesLaterPhases(t *testing.T) {
+	t.Parallel()
 	t.Run("finalizing", func(t *testing.T) {
 		store, run, keys := runningWorkerRun(t)
 		path := storePath(t, store)
@@ -1028,6 +1056,7 @@ func runningOverseerKeys(t *testing.T, store *Store, projectID ProjectID, base i
 // the ordinary recovery of a run that ended without an attempt outcome needs
 // no second agent.
 func TestRetryTaskForOverseerKeepsCurrentWorkerWithoutReplacement(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	store, terminal, _ := terminalPreRunningWorker(t)
 	defer store.Close()
@@ -1043,6 +1072,7 @@ func TestRetryTaskForOverseerKeepsCurrentWorkerWithoutReplacement(t *testing.T) 
 }
 
 func TestRetryTaskForOverseerAtomicallyReassignsSettledTask(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	store, terminal, _ := terminalPreRunningWorker(t)
 	defer store.Close()
@@ -1094,6 +1124,7 @@ func TestRetryTaskForOverseerAtomicallyReassignsSettledTask(t *testing.T) {
 // update must be refused, atomically, with no row changed, rather than
 // committing invalid chronology later validation would reject.
 func TestRetryTaskForOverseerRefusesCausallyEarlyTimestamp(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	store, terminal, _ := terminalPreRunningWorker(t)
 	defer store.Close()
@@ -1174,6 +1205,7 @@ func queueRetryForTerminalSeed(t *testing.T, store *Store, terminal Run, taskUpd
 }
 
 func TestTaskRunTopologyRejectsRevisionSkip(t *testing.T) {
+	t.Parallel()
 	store, terminal, _ := terminalPreRunningWorker(t)
 	defer store.Close()
 	corruptSQL(t, store, `UPDATE tasks SET work_revision = work_revision + 2, status = 'queued', result = NULL, completed_at_ms = NULL WHERE id = ?`, terminal.TaskID.Bytes())
@@ -1183,6 +1215,7 @@ func TestTaskRunTopologyRejectsRevisionSkip(t *testing.T) {
 }
 
 func TestOrphanTaskRevisionRejectedEveryBoundary(t *testing.T) {
+	t.Parallel()
 	store, path, project, agent := newAdmissionStore(t, RoleOrchestrator, 2)
 	task, err := store.EnqueueTask(context.Background(), NewTask{
 		ID: taskID(t, 240), ProjectID: project.ID, AssignedAgentID: agent.ID,
@@ -1220,6 +1253,7 @@ func TestOrphanTaskRevisionRejectedEveryBoundary(t *testing.T) {
 }
 
 func TestFreshQueuedTaskWithoutRunRemainsValidAndAdmissible(t *testing.T) {
+	t.Parallel()
 	store, path, project, agent := newAdmissionStore(t, RoleOrchestrator, 2)
 	task, err := store.EnqueueTask(context.Background(), NewTask{
 		ID: taskID(t, 243), ProjectID: project.ID, AssignedAgentID: agent.ID,
@@ -1250,6 +1284,7 @@ func TestFreshQueuedTaskWithoutRunRemainsValidAndAdmissible(t *testing.T) {
 }
 
 func TestNoRunNonQueuedTaskRejected(t *testing.T) {
+	t.Parallel()
 	store, path, project, agent := newAdmissionStore(t, RoleOrchestrator, 2)
 	task, err := store.EnqueueTask(context.Background(), NewTask{
 		ID: taskID(t, 246), ProjectID: project.ID, AssignedAgentID: agent.ID,
@@ -1277,6 +1312,7 @@ func TestNoRunNonQueuedTaskRejected(t *testing.T) {
 }
 
 func TestRunsRejectDuplicateAdmittedTaskWorkRevision(t *testing.T) {
+	t.Parallel()
 	store, terminal, _ := terminalPreRunningWorker(t)
 	defer store.Close()
 	_, err := store.writer.Exec(`INSERT INTO runs(
@@ -1303,6 +1339,7 @@ func TestRunsRejectDuplicateAdmittedTaskWorkRevision(t *testing.T) {
 }
 
 func TestTerminalRunRejectsSameRevisionLateChangeCheckpoint(t *testing.T) {
+	t.Parallel()
 	store, terminal := terminalPreRunningAvailableWorker(t)
 	defer store.Close()
 	corruptSQL(t, store, `UPDATE changes SET available_at_ms = 90, updated_at_ms = 90 WHERE id = ?`, terminal.ChangeID.Bytes())
@@ -1401,6 +1438,7 @@ func admittedWorkerRun(t *testing.T) (*Store, Run, AdmissionKeys) {
 }
 
 func TestChronologyScannersRejectImpossibleRows(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name  string
 		setup func(*testing.T) (*Store, func() error)
@@ -1548,6 +1586,7 @@ func activateResourcesAt(t *testing.T, store *Store, run Run, at int64) Run {
 // A cancelled worker task can be retried: one that ran starts its next work
 // revision; shared work cancelled before admission is queued again as it was.
 func TestRetryTaskRequeuesCancelledTask(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	cancelled, err := NewCancelledProposal("expired")
 	if err != nil {
@@ -1581,6 +1620,7 @@ func TestRetryTaskRequeuesCancelledTask(t *testing.T) {
 // cancel, a blocked expiry), never an operator's cancel, and stops at its
 // bound of recorded retries.
 func TestRetryIntakeTaskOnlyAfterAutomaticEndWithinBound(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	failed, _ := NewFailureProposal(FailureInternal, "crashed")
 	limited, _ := NewCancelledProposal(RunLimitDetail)
@@ -1656,6 +1696,7 @@ func TestRetryIntakeTaskOnlyAfterAutomaticEndWithinBound(t *testing.T) {
 // A task a continuation waits on keeps its work revision: neither a retry, a
 // send-back nor a blocked cancel may strand the continuation.
 func TestAwaitedTaskRefusesRetryAndSendBack(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	blocked, _ := NewBlockedProposal("waits on a card")
 	store, finalizing := finalizingReleasedRun(t, RoleWorker, blocked)
@@ -1671,7 +1712,8 @@ func TestAwaitedTaskRefusesRetryAndSendBack(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := insertWaitingContinuation(ctx, tx.connection, task, ConditionHumanRequest, ContinuationConditionID(humanKey(9)), mustRevision(t, 1), mustTime(t, 61)); err != nil {
+	request := humanKey(9)
+	if _, err := tx.connection.ExecContext(ctx, `INSERT INTO human_requests(id, run_id, idempotency_key, kind, reason_code, question_text, status, revision, created_at_ms, updated_at_ms, continuation) VALUES(?1, ?2, ?1, 'question', 'provider_question', 'card', 'open', 1, 61, 61, 'waiting')`, request[:], finalizing.ID.Bytes()); err != nil {
 		t.Fatal(tx.Rollback(err))
 	}
 	if err := tx.Commit(ctx); err != nil {
@@ -1681,7 +1723,7 @@ func TestAwaitedTaskRefusesRetryAndSendBack(t *testing.T) {
 	if _, err := store.RetryTaskForOperator(ctx, task.ID, task.Revision, AgentID{}, mustTime(t, 62)); !errors.Is(err, ErrConflict) {
 		t.Fatalf("retry of an awaited task: %v", err)
 	}
-	if _, err := store.SendBackTask(ctx, task.ID, task.Revision, "again", mustTime(t, 62)); !errors.Is(err, ErrConflict) {
+	if _, err := store.SendBackTask(ctx, task.ID, task.Revision, "", "again", mustTime(t, 62)); !errors.Is(err, ErrConflict) {
 		t.Fatalf("send-back of an awaited task: %v", err)
 	}
 	if _, err := store.UpdateTaskForOperator(ctx, task.ID, task.Revision, TaskPatch{Cancel: true}, mustTime(t, 62)); !errors.Is(err, ErrConflict) {
@@ -1695,6 +1737,7 @@ func TestAwaitedTaskRefusesRetryAndSendBack(t *testing.T) {
 // The overseer retries automatic ends only: an operator's cancel is the
 // operator's to undo.
 func TestOverseerRetryLeavesAnOperatorCancel(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	store, terminal, _ := terminalPreRunningWorker(t)
 	defer store.Close()
@@ -1725,6 +1768,7 @@ func TestOverseerRetryLeavesAnOperatorCancel(t *testing.T) {
 // the operator, retried again. The last retry must see the operator's cancel,
 // not the earlier expiry, for intake and the overseer alike.
 func TestRetryAfterExpiryLeavesTheOperatorsLaterCancel(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	blocked, _ := NewBlockedProposal("needs a decision")
 	for _, overseer := range []bool{false, true} {
@@ -1764,6 +1808,7 @@ func TestRetryAfterExpiryLeavesTheOperatorsLaterCancel(t *testing.T) {
 
 // The overseer leaves a withdrawn issue's task alone, even after a failure.
 func TestOverseerRetryLeavesAWithdrawnIssue(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	store, source := intakeExactRevisionStore(t)
 	if _, err := store.SetIntakeSourceEnabled(ctx, source.ID, source.Revision, true, mustTime(t, 6)); err != nil {
@@ -1837,4 +1882,14 @@ func runningOverseerDigest(t *testing.T, store *Store, project ProjectID, at int
 		t.Fatal(err)
 	}
 	return keys.AttemptDigest
+}
+
+// changeHead is the Change head a send-back of task is observed at.
+func changeHead(t testing.TB, store *Store, task TaskID) string {
+	t.Helper()
+	var head string
+	if err := store.readers.QueryRow(`SELECT COALESCE((SELECT lower(hex(head_commit)) FROM changes WHERE task_id = ?), '')`, task.Bytes()).Scan(&head); err != nil {
+		t.Fatal(err)
+	}
+	return head
 }

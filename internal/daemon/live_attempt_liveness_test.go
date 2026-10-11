@@ -100,7 +100,7 @@ func TestRunLivenessFailsAttemptThatNeverBecomesReady(t *testing.T) {
 	}
 	tick(firstOutputBudget)
 	run, found, err := fixture.store.Run(ctx, active.run.ID)
-	if err != nil || !found || run.Phase != kernel.RunFinalizing || run.Proposal == nil || run.Proposal.Code() != kernel.FailureProtocol || run.Proposal.Detail() != kernel.NeverStartedRunDetail {
+	if err != nil || !found || run.Phase != kernel.RunFinalizing || run.Proposal == nil || run.Proposal.Code() != kernel.FailureTransient || run.Proposal.Detail() != kernel.NeverStartedRunDetail {
 		t.Fatalf("never-ready run = %+v found=%v err=%v", run, found, err)
 	}
 }

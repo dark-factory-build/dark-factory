@@ -7,6 +7,7 @@ import (
 )
 
 func TestPeerQuestionCorruptProjectFailsClosed(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	store, source, _ := runningWorkerRun(t)
 	defer store.Close()

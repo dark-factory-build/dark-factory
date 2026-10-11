@@ -1751,8 +1751,8 @@ func finishAttemptWithExit(child *OwnedChild, dir *os.File, cfg attemptConfig, r
 	}
 	cause = errors.Join(cause, killRunStragglers(dir))
 	// An AttemptResult is evidence that the complete owner cleanup path was
-	// observed. Protocol or kill errors marked unresolved must never be turned
-	// into durable convergence evidence merely because Wait eventually returned.
+	// observed. Sweep, protocol or kill errors (all unresolved) must never be
+	// turned into durable convergence evidence merely because Wait returned.
 	if errors.Is(cause, ErrUnresolved) {
 		return cause
 	}

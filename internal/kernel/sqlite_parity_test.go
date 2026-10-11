@@ -298,6 +298,7 @@ func installSealedFaultWriter(t *testing.T, store *Store, path string) *storeFau
 }
 
 func TestVerifiedConnectionCancellationRetainsSealedWriter(t *testing.T) {
+	t.Parallel()
 	for _, test := range []struct {
 		name     string
 		deadline bool
@@ -348,6 +349,7 @@ func TestVerifiedConnectionCancellationRetainsSealedWriter(t *testing.T) {
 }
 
 func TestVerifiedConnectionNonCancellationFailuresDiscardSealedWriter(t *testing.T) {
+	t.Parallel()
 	for _, test := range []struct {
 		name string
 		err  error
@@ -379,6 +381,7 @@ func TestVerifiedConnectionNonCancellationFailuresDiscardSealedWriter(t *testing
 }
 
 func TestVerifiedConnectionConfigurationMismatchDiscardsSealedWriter(t *testing.T) {
+	t.Parallel()
 	path, _ := walSnapshotFixture(t, "")
 	store, err := Open(context.Background(), path)
 	if err != nil {
@@ -510,6 +513,7 @@ func assertFaultConnectionRetained(t *testing.T, plan *storeFaultPlan, currentID
 }
 
 func TestConcreteStoreFailedBeginAndAmbiguousCommitAreNotReplayed(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name             string
 		fault            storeFaultKind
@@ -556,6 +560,7 @@ func TestConcreteStoreFailedBeginAndAmbiguousCommitAreNotReplayed(t *testing.T) 
 }
 
 func TestConcreteStoreAmbiguousRollbackResolvesByAutocommitWithoutStateFootprint(t *testing.T) {
+	t.Parallel()
 	for _, test := range []struct {
 		name         string
 		fault        storeFaultKind
@@ -594,6 +599,7 @@ func TestConcreteStoreAmbiguousRollbackResolvesByAutocommitWithoutStateFootprint
 }
 
 func TestConcreteStoreAmbiguousReadLifecycleResolvesByAutocommit(t *testing.T) {
+	t.Parallel()
 	for _, test := range []struct {
 		name         string
 		fault        storeFaultKind
@@ -650,6 +656,7 @@ func TestConcreteStoreAmbiguousReadLifecycleResolvesByAutocommit(t *testing.T) {
 }
 
 func TestConcreteStoresReturnBusyAfterBoundedWait(t *testing.T) {
+	t.Parallel()
 	first, path := newTestStore(t)
 	defer first.Close()
 	second, err := Open(context.Background(), path)

@@ -19,6 +19,7 @@ import (
 // lock, because an already-cancelled context is refused earlier, at writer
 // admission. A second store holds that lock to make the window deterministic.
 func TestCallerCancellationDuringBeginKeepsTheRetainedWriterSet(t *testing.T) {
+	t.Parallel()
 	path, _ := walSnapshotFixture(t, "")
 	store, err := Open(context.Background(), path)
 	if err != nil {

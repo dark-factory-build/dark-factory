@@ -14,6 +14,8 @@ import (
 
 func TestRunLimitWatchdogTerminatesOwnedProvider(t *testing.T) {
 	fixture := newSupervisorFixture(t, "set -eu\nprintf x >> __WITNESS__\nsleep 30\n")
+	var skew atomic.Int64
+	fixture.daemon.now = func() time.Time { return time.Now().Add(time.Duration(skew.Load())) }
 	project, found, err := fixture.store.Project(context.Background(), supervisorProjectID(t, 1))
 	if err != nil || !found {
 		t.Fatalf("project = %+v, found=%v, err=%v", project, found, err)
@@ -43,7 +45,8 @@ func TestRunLimitWatchdogTerminatesOwnedProvider(t *testing.T) {
 	if _, err := fixture.store.SetDispatch(context.Background(), state.Revision, false, supervisorTime()); err != nil {
 		t.Fatal(err)
 	}
-	time.Sleep(1100 * time.Millisecond)
+	// Step past the one-second run limit instead of waiting it out.
+	skew.Store(int64(1100 * time.Millisecond))
 	if err := fixture.daemon.enforceRunLiveness(context.Background(), SupervisorSpec{}); err != nil {
 		t.Fatal(err)
 	}
@@ -155,7 +158,12 @@ func stallNextRun(t *testing.T, fixture *supervisorFixture, output bool) kernel.
 	case <-time.After(12 * time.Second):
 		t.Fatal("stall did not stop the provider")
 	}
-	if result.err != nil || result.run.Phase != kernel.RunTerminal || result.run.Proposal == nil || result.run.Proposal.Code() != kernel.FailureProtocol {
+	// A stall after output is a protocol failure; one before is transient.
+	code := kernel.FailureTransient
+	if output {
+		code = kernel.FailureProtocol
+	}
+	if result.err != nil || result.run.Phase != kernel.RunTerminal || result.run.Proposal == nil || result.run.Proposal.Code() != code {
 		t.Fatalf("stalled run = %+v, err=%v", result.run, result.err)
 	}
 	return result.run
@@ -195,7 +203,7 @@ func TestCodexModelCapacityRequeuesOnce(t *testing.T) {
 		ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 		run, err := fixture.daemon.RunNext(ctx, fixture.spec)
 		cancel()
-		if err != nil || run.Proposal == nil || run.Proposal.Code() != kernel.FailureProviderExit || run.Proposal.Detail() != kernel.ProviderCapacityRunDetail {
+		if err != nil || run.Proposal == nil || run.Proposal.Code() != kernel.FailureTransient || run.Proposal.Detail() != kernel.ProviderCapacityRunDetail {
 			t.Fatalf("capacity run = %v, err=%v", run.Proposal, err)
 		}
 		fixture.assertReleased(t, run)

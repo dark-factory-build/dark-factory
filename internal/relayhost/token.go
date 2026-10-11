@@ -15,6 +15,8 @@ const (
 	// base64url payload text, so verification never re-serialises JSON.
 	hostDomain   = "dark-factory-relay/host\n"
 	ticketDomain = "dark-factory-relay/ticket\n"
+	// consoleDomain prefixes the signed console bundle.
+	consoleDomain = "dark-factory-console\n"
 
 	// PurposePair names a single-use pairing ticket. It carries no device
 	// proof: the browser has no key yet, and the pairing challenge inside the
@@ -103,6 +105,18 @@ func ControlTicket(identity Identity, clientID [ControllerIDSize]byte, deviceSEC
 		Ticket:     newTicketID(),
 		Expires:    expires.Unix(),
 	})
+}
+
+// SignConsole frames a gzipped console bundle the way every page shell
+// verifies it: the 32-byte node public key, its Ed25519 signature over
+// consoleDomain and the bundle, then the bundle. A shell accepts it only for
+// the key it pinned at pairing, or whose node or public id it already holds.
+func SignConsole(identity Identity, bundle []byte) []byte {
+	if !identity.valid() || len(bundle) == 0 {
+		return nil
+	}
+	signature := ed25519.Sign(identity.private, append([]byte(consoleDomain), bundle...))
+	return append(append(identity.PublicKey(), signature...), bundle...)
 }
 
 func sign[Payload any](identity Identity, domain string, payload Payload) string {

@@ -63,7 +63,6 @@ type HumanRequestDeliveryID struct{ identifier }
 type TaskInterventionID struct{ identifier }
 type PeerQuestionID struct{ identifier }
 type PeerDeliveryID struct{ identifier }
-type ContinuationID struct{ identifier }
 type ContentID struct{ identifier }
 type IntakeSourceID struct{ identifier }
 type IntakeAcceptanceID struct{ identifier }
@@ -151,10 +150,6 @@ func TaskInterventionIDFromBytes(value []byte) (TaskInterventionID, error) {
 	return TaskInterventionID{id}, err
 }
 
-func ContinuationIDFromBytes(value []byte) (ContinuationID, error) {
-	id, err := identifierFromBytes(value)
-	return ContinuationID{id}, err
-}
 func PeerQuestionIDFromBytes(value []byte) (PeerQuestionID, error) {
 	id, err := identifierFromBytes(value)
 	return PeerQuestionID{id}, err
@@ -409,7 +404,6 @@ const (
 	EntityHumanRequest
 	EntityAccount
 	EntityPeerQuestion
-	EntityContinuation
 )
 
 func parseEntityKind(value string) (EntityKind, error) {
@@ -432,8 +426,6 @@ func parseEntityKind(value string) (EntityKind, error) {
 		return EntityAccount, nil
 	case "peer_question":
 		return EntityPeerQuestion, nil
-	case "continuation":
-		return EntityContinuation, nil
 	default:
 		return 0, corruptControl("entity kind", value)
 	}
@@ -459,8 +451,6 @@ func (value EntityKind) String() string {
 		return "account"
 	case EntityPeerQuestion:
 		return "peer_question"
-	case EntityContinuation:
-		return "continuation"
 	default:
 		return ""
 	}
@@ -570,9 +560,13 @@ type Project struct {
 	RunBudgetLimit uint64
 	RunsUsed       uint64
 	MaxRunSeconds  uint32
-	Revision       Revision
-	CreatedAt      UnixMillis
-	UpdatedAt      UnixMillis
+	// SpecialistRuns bounds the project's specialist reviews running at once;
+	// SpecialistOpenProposals bounds each agent's open proposals.
+	SpecialistRuns          uint32
+	SpecialistOpenProposals uint32
+	Revision                Revision
+	CreatedAt               UnixMillis
+	UpdatedAt               UnixMillis
 }
 
 // IdlePolicy is what an agent does with no run: wait for work, or enqueue a
@@ -600,6 +594,9 @@ type IdleRule struct {
 	Instruction  string
 	RunBudget    uint32
 	RunsUsed     uint32
+	// WakeOn is a specialist's event classes: "", "failures", "merges" or
+	// "failures,merges".
+	WakeOn string
 }
 
 type Agent struct {
@@ -622,6 +619,12 @@ type Agent struct {
 	UpdatedAt       UnixMillis
 }
 
+// Specialist is a worker that runs a standing instruction: it reviews on its
+// own schedule (specialistSchedule) and never claims shared work.
+func (a Agent) Specialist() bool {
+	return a.Role == RoleWorker && a.Idle.Policy == IdleStandingInstruction
+}
+
 type Task struct {
 	ID                       TaskID
 	ProjectID                ProjectID
@@ -642,13 +645,15 @@ type Task struct {
 }
 
 type ProjectSummary struct {
-	ID             ProjectID
-	Name           string
-	RunBudgetLimit uint64
-	RunsUsed       uint64
-	MaxRunSeconds  uint32
-	Tokens         ProjectTokens
-	Revision       Revision
+	ID                      ProjectID
+	Name                    string
+	RunBudgetLimit          uint64
+	RunsUsed                uint64
+	MaxRunSeconds           uint32
+	Tokens                  ProjectTokens
+	SpecialistRuns          uint32
+	SpecialistOpenProposals uint32
+	Revision                Revision
 }
 
 type AgentSummary struct {
@@ -677,7 +682,10 @@ type AgentSummary struct {
 	ToolBudgetLimit uint64 `json:"-"`
 	ToolCallsUsed   uint64 `json:"-"`
 	Idle            IdleRule
-	Revision        Revision
+	// Specialist is a specialist's review schedule. It changes without the
+	// agent revision, as the tasks and content it reads change.
+	Specialist *SpecialistState
+	Revision   Revision
 }
 
 // AccountSummary is the served account fact: which login it is and where its

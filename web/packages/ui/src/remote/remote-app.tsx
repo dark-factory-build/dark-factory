@@ -19,6 +19,8 @@ import {
 import { AgentStrip, StageMeter } from "../console-screens.js";
 import { AnswerControls } from "../console-interactions.js";
 import { HumanRequestFlow, type HumanRequestFlowSelection } from "../human-request-flow.js";
+import { Badge, SectionHeader, Status, formatTime } from "../console-kit.js";
+import { IconButton } from "../icons.js";
 import {
   FACTORY_UNREACHABLE,
   INVITATION_SPENT,
@@ -67,7 +69,7 @@ function browserInstallHint(): InstallHint {
 }
 
 const ALERTS_NEED_INSTALL = "On iPhone, add this page to the Home Screen first: Share, then Add to Home Screen, and open Dark Factory from there.";
-const ALERTS_REFUSED = "ALERTS WERE REFUSED BY THIS BROWSER. ALLOW NOTIFICATIONS FOR THIS SITE TO TURN THEM ON.";
+const ALERTS_REFUSED = "Alerts were refused by this browser. Allow notifications for this site to turn them on.";
 
 /**
  * The browser half of alerts: permission, then one push subscription made with
@@ -109,7 +111,7 @@ type Detail = HumanRequestFlowSelection<RemoteScope>;
 type Confirm = Readonly<{ kind: "factory"; nodeId: string }> | Readonly<{ kind: "device" }>;
 
 const INVITATION_KEY = /(?:^|[?#&])df_remote(?:[&=]|$)/i;
-const CANCEL_PHRASE = "CANCEL RUN";
+const CANCEL_PHRASE = "cancel run";
 const IDLE: Pairing = { phase: "idle" };
 
 /**
@@ -281,7 +283,7 @@ export function RemoteApp(props: RemoteAppProps = {}) {
   useEffect(() => { if (detail !== undefined && !question.current?.open) question.current?.showModal(); }, [detail === undefined]);
   const changeReply = (value: string) => human.current?.setReply(value);
   const cancelRun = () => {
-    if (cancelPhrase?.trim().toUpperCase() !== CANCEL_PHRASE) return;
+    if (cancelPhrase?.trim().toLowerCase() !== CANCEL_PHRASE) return;
     setCancelPhrase(undefined);
     human.current?.cancel();
   };
@@ -337,7 +339,7 @@ export function RemoteApp(props: RemoteAppProps = {}) {
 
   const installCard = install === undefined ? null : (
     <section className="dfFactoryConsole__section dfRemote__install" aria-label="Install the app">
-      <div className="dfFactoryConsole__sectionHeading"><h2>INSTALL THE APP</h2></div>
+      <SectionHeader as="h2" title="Install the app" />
       <p className="dfRemote__prose">
         {install === "safari"
           ? "Tap Share in the toolbar, then Add to Home Screen."
@@ -346,7 +348,7 @@ export function RemoteApp(props: RemoteAppProps = {}) {
       </p>
       {held === undefined ? null : (
         <p className="dfRemote__prose">
-          Copy your invitation first, then paste it under SETUP in the app. It lasts five minutes.
+          Copy your invitation first, then paste it under setup in the app. It lasts five minutes.
         </p>
       )}
       <div className="dfRemote__actions">
@@ -354,12 +356,12 @@ export function RemoteApp(props: RemoteAppProps = {}) {
           <button
             type="button"
             className="dfRemote__copyInvitation"
-            onClick={() => { void globalThis.navigator.clipboard.writeText(held.link).then(() => setHeld((current) => current === undefined ? current : { ...current, copied: true }), () => { /* a refused clipboard leaves PAIR IN THIS TAB */ }); }}
+            onClick={() => { void globalThis.navigator.clipboard.writeText(held.link).then(() => setHeld((current) => current === undefined ? current : { ...current, copied: true }), () => { /* a refused clipboard leaves pair in this tab */ }); }}
           >
-            {held.copied ? "COPIED" : "COPY INVITATION"}
+            {held.copied ? "Copied" : "Copy invitation"}
           </button>
         )}
-        {install === "safari" ? null : <a className="dfRemote__openSafari" href="x-safari-https://app.darkfactory.build/remote">OPEN IN SAFARI</a>}
+        {install === "safari" ? null : <a className="dfRemote__openSafari" href="x-safari-https://app.darkfactory.build/remote">Open in Safari</a>}
         {held === undefined ? null : (
           <button
             type="button"
@@ -372,7 +374,7 @@ export function RemoteApp(props: RemoteAppProps = {}) {
               else if (target !== undefined) void pairWith(target, held.invitation);
             }}
           >
-            PAIR IN THIS TAB
+            Pair in this tab
           </button>
         )}
       </div>
@@ -383,14 +385,14 @@ export function RemoteApp(props: RemoteAppProps = {}) {
     <div id="dfRemoteSetup" className="dfRemote__setup">
         <section className="dfRemote__pair" aria-label="Pair a factory">
           {pairing.phase === "pairing" ? (
-            <p className="dfRemote__pairing" role="status">PAIRING FACTORY…</p>
+            <p className="dfRemote__pairing" role="status">Pairing factory…</p>
           ) : null}
           {pairing.phase === "failed" ? (
             <p className="dfRemote__pairError" role="alert">{pairing.copy}</p>
           ) : null}
           {pasting ? (
             <div className="dfRemote__paste">
-              <label htmlFor="dfRemoteInvitation">INVITATION LINK</label>
+              <label htmlFor="dfRemoteInvitation">Invitation link</label>
               <textarea
                 id="dfRemoteInvitation"
                 className="dfRemote__link"
@@ -405,7 +407,7 @@ export function RemoteApp(props: RemoteAppProps = {}) {
                   disabled={!online || pairing.phase === "pairing" || link.trim().length === 0}
                   onClick={pairPasted}
                 >
-                  PAIR
+                  Pair
                 </button>
                 <button
                   type="button"
@@ -413,7 +415,7 @@ export function RemoteApp(props: RemoteAppProps = {}) {
                   disabled={pairing.phase === "pairing"}
                   onClick={() => { setPasting(false); setLink(""); }}
                 >
-                  NOT NOW
+                  Not now
                 </button>
               </div>
             </div>
@@ -424,16 +426,16 @@ export function RemoteApp(props: RemoteAppProps = {}) {
               disabled={!online || pairing.phase === "pairing"}
               onClick={() => { setPasting(true); setPairing(IDLE); }}
             >
-              {factories.length === 0 ? "PAIR A FACTORY" : "PAIR ANOTHER FACTORY"}
+              {factories.length === 0 ? "Pair a factory" : "Pair another factory"}
             </button>
           )}
         </section>
 
-{factories.length === 0 ? (
+        {factories.length === 0 ? (
           <section className="dfFactoryConsole__section dfRemote__none" aria-label="No factories">
-            <div className="dfFactoryConsole__sectionHeading"><h2>NO FACTORY ON THIS DEVICE</h2></div>
+            <SectionHeader as="h2" title="No factory on this device" />
             <p className="dfRemote__prose">
-              In the desktop console choose PAIR A PHONE and scan the code on this phone, or paste
+              In the desktop console choose Pair a phone and scan the code on this phone, or paste
               its link above. The link works once.
             </p>
           </section>
@@ -456,8 +458,8 @@ export function RemoteApp(props: RemoteAppProps = {}) {
                     >
                       <span className="dfRemote__factoryGlyph" aria-hidden="true">{REMOTE_STATUS_GLYPH[factory.status]}</span>
                       <span className="dfRemote__factoryLabel">{nameOf(factory)}</span>
-                      <span className="dfRemote__factoryStatus">{factory.status}</span>
-                      <span className="dfRemote__factoryCount">{waiting} NEEDS YOU</span>
+                      <span className="dfRemote__factoryStatus"><Status stage={factory.status} /></span>
+                      {waiting === 0 ? null : <span className="dfRemote__factoryCount"><Badge n={waiting} /> needs you</span>}
                     </button>
                   </li>
                 );
@@ -476,7 +478,7 @@ export function RemoteApp(props: RemoteAppProps = {}) {
               disabled={!online || alerts.phase === "working"}
               onClick={alertsOn ? disableAlerts : enableAlerts}
             >
-              ALERTS <span>{alerts.phase === "working" ? "…" : alertsOn ? "ON" : "OFF"}</span>
+              Alerts <span>{alerts.phase === "working" ? "…" : alertsOn ? "On" : "Off"}</span>
             </button>
             {alerts.phase === "failed" ? <p className="dfRemote__pairError" role="alert">{alerts.copy}</p> : null}
           </div>
@@ -485,8 +487,8 @@ export function RemoteApp(props: RemoteAppProps = {}) {
         {selected === undefined || factories.length < 2 ? null : (
           <ConfirmAction
             className="dfRemote__forgetFactory"
-            label="FORGET THIS FACTORY"
-            confirmLabel={`FORGET ${nameOf(selected)}`}
+            label="Forget this factory"
+            confirmLabel={`Forget ${nameOf(selected)}`}
             open={confirm?.kind === "factory" && confirm.nodeId === selected.nodeId}
             disabled={false}
             onOpen={() => setConfirm({ kind: "factory", nodeId: selected.nodeId })}
@@ -497,8 +499,8 @@ export function RemoteApp(props: RemoteAppProps = {}) {
         {factories.length === 0 ? null : (
           <ConfirmAction
             className="dfRemote__forgetDevice"
-            label="FORGET THIS DEVICE"
-            confirmLabel="FORGET EVERYTHING"
+            label="Forget this device"
+            confirmLabel="Forget everything"
             open={confirm?.kind === "device"}
             disabled={false}
             onOpen={() => setConfirm({ kind: "device" })}
@@ -517,13 +519,13 @@ export function RemoteApp(props: RemoteAppProps = {}) {
         <div inert={detail !== undefined}>
         <nav className="dfRemote__bar" aria-label="Remote console">
           <a className="dfRemote__barName" href="#dfRemoteTop">
-            <span aria-hidden="true">{selected === undefined ? "·" : REMOTE_STATUS_GLYPH[selected.status]}</span> {selected === undefined ? "DARK FACTORY" : nameOf(selected)}
+            <span aria-hidden="true">{selected === undefined ? "·" : REMOTE_STATUS_GLYPH[selected.status]}</span> {selected === undefined ? "Dark Factory" : nameOf(selected)}
           </a>
           {needsYou.length === 0 ? null : <a className="dfRemote__barAlert" href="#dfRemoteTop" aria-label={`${needsYou.length} needs you`}>! {needsYou.length}</a>}
-          <a href="#dfRemoteSetup">SETUP</a>
+          <a href="#dfRemoteSetup">Setup</a>
         </nav>
         {online ? null : (
-          <p className="dfRemote__banner dfRemote__banner--device" role="status">DEVICE OFFLINE</p>
+          <p className="dfRemote__banner dfRemote__banner--device" role="status">Device offline</p>
         )}
         {banner === undefined || selected === undefined ? null : (
           <p className={`dfRemote__banner dfRemote__banner--${selected.status === "offline" || selected.status === "connecting" ? "offline" : selected.status}`} role="status">
@@ -535,7 +537,8 @@ export function RemoteApp(props: RemoteAppProps = {}) {
         {factories.length === 0 ? setup : null}
 
         {factories.length === 0 ? null : (
-          <section className="dfRemote__needsYou" aria-label="NEEDS YOU">
+          <section className="dfRemote__needsYou" aria-label="Needs you">
+            <SectionHeader as="h2" title="Needs you" count={needsYou.length} />
             {needsYou.length === 0 ? (
               <p className="dfFactoryConsole__empty">nothing needs you</p>
             ) : (
@@ -543,19 +546,18 @@ export function RemoteApp(props: RemoteAppProps = {}) {
                 {needsYou.map((item) => (
                   <li className="dfFactoryConsole__card dfRemote__question" key={`${item.nodeId}:${item.request.id}`}>
                     <div className="dfFactoryConsole__cardTitle">
-                      <strong>{entityName(byNode.get(item.nodeId)?.state?.agents, item.request.agent_id, "AGENT")} asks</strong>
+                      <strong>{entityName(byNode.get(item.nodeId)?.state?.agents, item.request.agent_id, "agent")} asks</strong>
                       {factories.length < 2 ? null : <span className="dfRemote__tag">{nameOf(byNode.get(item.nodeId) ?? selected!)}</span>}
                     </div>
-                    <p>{entityName(byNode.get(item.nodeId)?.state?.tasks, item.request.task_id, "TASK")}</p>
-                    <button
-                      type="button"
+                    <p>{entityName(byNode.get(item.nodeId)?.state?.tasks, item.request.task_id, "task")}</p>
+                    <IconButton
+                      icon={item.request.can_reply ? "inbox" : "list"}
                       className="dfRemote__answer"
                       aria-pressed={detail !== undefined && detail.scope.nodeId === item.nodeId && detail.request.id === item.request.id}
+                      aria-label={item.request.can_reply ? "Answer" : "View"}
                       disabled={!actionable(item.nodeId) || working}
                       onClick={() => open(item.nodeId, item.label, item.request)}
-                    >
-                      {item.request.can_reply ? "ANSWER" : "VIEW"}
-                    </button>
+                    >{item.request.can_reply ? "Answer" : "View"}</IconButton>
                   </li>
                 ))}
               </ul>
@@ -582,27 +584,24 @@ export function RemoteApp(props: RemoteAppProps = {}) {
 
         {detail === undefined ? null : (
           <dialog ref={question} className="dfFactoryConsole__section dfRemote__detail" aria-label="Selected question" aria-live="polite" onCancel={(event) => { if (busy(detail)) event.preventDefault(); }} onClose={() => { setCancelPhrase(undefined); human.current?.clear(true); }}>
-            <button
-              type="button"
+            <IconButton
+              icon="close"
               className="dfRemote__close"
+              aria-label="Close"
               autoFocus
               disabled={busy(detail)}
               onClick={() => question.current?.close()}
-            >
-              CLOSE
-            </button>
-            <div className="dfFactoryConsole__sectionHeading">
-              <h2>{entityName(byNode.get(detail.scope.nodeId)?.state?.agents, detail.request.agent_id, "AGENT")} asks</h2>
-            </div>
+            />
+            <SectionHeader as="h2" title={`${entityName(byNode.get(detail.scope.nodeId)?.state?.agents, detail.request.agent_id, "agent")} asks`} />
             {detail.notice === undefined ? null : (
               <p className="dfRemote__notice" role="status">{detail.notice}</p>
             )}
-            {detail.phase === "loading" ? <p className="dfFactoryConsole__empty">LOADING THE QUESTION…</p> : null}
+            {detail.phase === "loading" ? <p className="dfFactoryConsole__empty">Loading the question…</p> : null}
             {detail.detail === undefined ? null : (
               <>
                 <p className="dfRemote__questionText">{detail.detail.question}</p>
-                <AnswerControls surface="remote" options={detail.detail.options} canReply={detail.detail.canReply} reply={detail.reply} replyMaxBytes={detail.detail.replyMaxBytes} busy={busy(detail)} disabled={!actionable(detail.scope.nodeId)} onReplyChange={changeReply} onReply={reply} submitLabel="REPLY" submittingLabel="REPLYING…" />
-                {detail.detail.canReply ? null : <p className="dfFactoryConsole__empty">{detail.request.status === "open" ? "THIS CANNOT BE ANSWERED RIGHT NOW." : `THIS DECISION IS ${detail.request.status.replaceAll("_", " ").toUpperCase()}.`}</p>}
+                <AnswerControls surface="remote" options={detail.detail.options} canReply={detail.detail.canReply} reply={detail.reply} replyMaxBytes={detail.detail.replyMaxBytes} busy={busy(detail)} disabled={!actionable(detail.scope.nodeId)} onReplyChange={changeReply} onReply={reply} submitLabel="Reply" submittingLabel="Replying…" />
+                {detail.detail.canReply ? null : <p className="dfFactoryConsole__empty">{detail.request.status === "open" ? "This cannot be answered right now." : `This decision is ${detail.request.status.replaceAll("_", " ")}.`}</p>}
                 {detail.detail.cancelRun === null ? null : cancelPhrase === undefined ? (
                   <button
                     type="button"
@@ -610,11 +609,11 @@ export function RemoteApp(props: RemoteAppProps = {}) {
                     disabled={busy(detail) || !actionable(detail.scope.nodeId)}
                     onClick={() => setCancelPhrase("")}
                   >
-                    CANCEL RUN
+                    Cancel run
                   </button>
                 ) : (
                   <div className="dfRemote__cancel">
-                    <label htmlFor="dfRemoteCancel">TYPE {CANCEL_PHRASE} TO STOP THIS RUN</label>
+                    <label htmlFor="dfRemoteCancel">Type {CANCEL_PHRASE.toLowerCase()} to stop this run</label>
                     <input
                       id="dfRemoteCancel"
                       className="dfRemote__cancelText"
@@ -626,10 +625,10 @@ export function RemoteApp(props: RemoteAppProps = {}) {
                       <button
                         type="button"
                         className="dfRemote__cancelAction"
-                        disabled={busy(detail) || !actionable(detail.scope.nodeId) || cancelPhrase.trim().toUpperCase() !== CANCEL_PHRASE}
+                        disabled={busy(detail) || !actionable(detail.scope.nodeId) || cancelPhrase.trim().toLowerCase() !== CANCEL_PHRASE}
                         onClick={cancelRun}
                       >
-                        {detail.phase === "cancelling" ? "CANCELLING…" : CANCEL_PHRASE}
+                        {detail.phase === "cancelling" ? "Cancelling…" : "Cancel run"}
                       </button>
                       <button
                         type="button"
@@ -637,7 +636,7 @@ export function RemoteApp(props: RemoteAppProps = {}) {
                         disabled={busy(detail)}
                         onClick={() => setCancelPhrase(undefined)}
                       >
-                        KEEP RUNNING
+                        Keep running
                       </button>
                     </div>
                   </div>
@@ -671,12 +670,14 @@ function ProjectsSection({ state }: { state: StateView | undefined }) {
       <div className="dfConsoleRow">
         <span className="dfConsoleRow__title">{task.title}</span>
         <span className="dfConsoleRow__agent">{task.assigned_agent_id === "" ? "any eligible worker" : entityName(state?.agents, task.assigned_agent_id, "agent")}</span>
+        {formatTime(task.updated_at_ms) === "" ? null : <time>{formatTime(task.updated_at_ms)}</time>}
         <StageMeter stage={task.status} />
       </div>
     </li>
   );
   return (
     <section className="dfFactoryConsole__section dfRemote__projects" aria-label="Work">
+      <SectionHeader as="h2" title="Work" />
       {state === undefined ? <p className="dfFactoryConsole__empty">waiting for the factory</p>
         : groups.length === 0 ? <p className="dfFactoryConsole__empty">no projects yet</p> : (
         <ul className="dfRemote__projectList">
@@ -733,7 +734,7 @@ function ConfirmAction({
       <button type="button" className={`${className} ${className}--confirm`} onClick={onConfirm}>
         {confirmLabel}
       </button>
-      <button type="button" className="dfRemote__keep" onClick={onKeep}>KEEP</button>
+      <button type="button" className="dfRemote__keep" onClick={onKeep}>Keep</button>
     </div>
   );
 }

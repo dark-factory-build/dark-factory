@@ -37,6 +37,18 @@ test("request docks fold into one manifold past six, carrying their labels", () 
   assert.equal(folded.locate(project.id, "internal/alpha/r13.go").machine, auto[0].id);
 });
 
+test("only large ownership-only units fold; observed flows keep their members", () => {
+  const owned = (count) => [...base(0), ...Array.from({ length: count }, (_, index) => graphNode(100 + index, "job", `job-${index}`, { unit: hex(1) }))];
+   const hundred = prepare(graphWith(owned(99))).graph.units.find((item) => item.id === hex(1));
+  assert.equal(hundred.machines.length, 100, "the cap is not reached at one hundred members");
+   const folded = prepare(graphWith(owned(101))).graph.units.find((item) => item.id === hex(1));
+  assert.equal(folded.machines.length, 1);
+  assert.equal(folded.machines[0].represented.length, 102);
+  const edges = Array.from({ length: 150 }, (_, index) => ({ from: hex(100 + index), to: hex(1), kind: "runs", evidence: "static", observation: "unobserved", state: "unknown" }));
+   const connected = prepare(graphWith(owned(150), edges)).graph.units.find((item) => item.id === hex(1));
+  assert.equal(connected.machines.length, 151, "flow-linked members remain individually placed");
+});
+
 test("runtime-only and unknown nodes stay unexplained, externals become gates, and shared stores belong to no unit", () => {
   const { graph, where } = prepare(graphWith(base(2)));
   assert.deepEqual(ids(graph.quarantine), [hex(60)]);
@@ -196,4 +208,26 @@ test("a repository nothing recognised is one unit with its marker beside it, not
   assert.equal(prepared.graph.quarantine.length, 0);
   const layout = layoutScene(prepared.graph);
   assert.deepEqual(layout.stations.map((station) => [station.entityId, station.unit, station.shape]), [[hex(1), hex(1), "line"], [hex(2), hex(1), "crate"]]);
+});
+
+test("a standing specialist is known by what it does on the floor, never by a symbol, and says what it is really doing", async () => {
+  const { fixtureFloorState, fixtureGraphs, fixtureRunPaths, operationsSpecialistID, securitySpecialistID } = await import("../../../fixtures/state.mjs");
+  const { FactoryScene } = await import("../dist/src/factory-scene/factory-scene.js");
+  const { renderToStaticMarkup } = await import("react-dom/server");
+  const state = { ...fixtureFloorState, humanRequests: new Map() };
+  const scene = projectFloor(state, projectGraph(fixtureGraphs, [...state.projects.keys()].sort()), fixtureRunPaths);
+  const worker = (id) => scene.workers.find((item) => item.id === id);
+  assert.deepEqual(worker(operationsSpecialistID).specialist, { title: "Operations specialist", remit: "Operations: make delivery reliable and every failure diagnosable.", stage: "working", text: "reviewing: make delivery reliable and every failure diagno…", next: "" });
+  assert.equal(worker(securitySpecialistID).specialist.text, "waiting: waiting for a free background slot");
+  assert.match(worker(securitySpecialistID).specialist.next, /^Next review .* \(scheduled\)$/);
+  assert.equal(worker(fixtureFloorState.tasks.get("31".repeat(16)).assigned_agent_id).specialist, undefined, "an ordinary worker is not one");
+  const markup = renderToStaticMarkup(createElement(FactoryScene, { graph: scene.graph, workers: scene.workers, tasks: scene.tasks, onOpenTasks() {} }));
+  // Its review is inspection, board in hand; between reviews it is an ordinary sprite. Nothing is drawn over either.
+  const sprite = (id) => { const from = markup.slice(markup.indexOf(`data-worker-id="${id}"`)); return from.slice(0, from.indexOf("</g></g>")); };
+  assert.match(sprite(operationsSpecialistID), /person\.skin\.\d\.inspect\.\d.*person\.held\.(clipboard|tablet)\./);
+  assert.doesNotMatch(sprite(securitySpecialistID), /inspect/);
+  assert.doesNotMatch(markup, /data-specialist-mark|<circle[^>]*#80ddff/, "no lens or other symbol marks a specialist");
+  assert.match(markup, /aria-label="operations, Operations specialist, reviewing: make delivery reliable/);
+  assert.match(markup, /data-tooltip="security · Security specialist · waiting: waiting for a free background slot\nNext review /);
+  assert.match(markup, /data-floor-inbox="1"/, "the tray holds the one ordinary queued task; a queued specialist review is its own");
 });

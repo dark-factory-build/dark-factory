@@ -99,8 +99,30 @@ func validRemoteDetail(value string) bool {
 	return true
 }
 
+// HealthStatus is factoryd's readiness and, for a project, what it waits on:
+// the held health conditions, the overseers' due and stalled items, the
+// Changes reclaim keeps by reason, and each repository's readiness.
 type HealthStatus struct {
-	Ready bool `json:"ready"`
+	Ready         bool                `json:"ready"`
+	Conditions    []HealthCondition   `json:"conditions,omitempty"`
+	OverseerItems []OverseerItem      `json:"overseer_items,omitempty"`
+	KeptChanges   map[string]int      `json:"kept_changes,omitempty"`
+	Repositories  []ProjectRepository `json:"repositories,omitempty"`
+}
+
+type HealthCondition struct {
+	Key     string `json:"key"`
+	Detail  string `json:"detail"`
+	SinceMS int64  `json:"since_ms"`
+}
+
+// OverseerItem is due in its overseer's next wake, or stalled since the
+// carrier task that last named it.
+type OverseerItem struct {
+	AgentID       string `json:"agent_id"`
+	State         string `json:"state"`
+	Line          string `json:"line"`
+	CarrierTaskID string `json:"carrier_task_id,omitempty"`
 }
 
 // AgentPaths is the live worker's sampled modified-directory view. Paths are
@@ -269,14 +291,15 @@ type OverseerHumanReplyResult struct {
 }
 
 type HumanRequest struct {
-	ID       string   `json:"id"`
-	RunID    string   `json:"run_id"`
-	TaskID   string   `json:"task_id"`
-	AgentID  string   `json:"agent_id"`
-	Status   string   `json:"status"`
-	Revision uint64   `json:"revision"`
-	Question string   `json:"question"`
-	Options  []string `json:"options"`
+	ID          string   `json:"id"`
+	RunID       string   `json:"run_id"`
+	TaskID      string   `json:"task_id"`
+	AgentID     string   `json:"agent_id"`
+	Status      string   `json:"status"`
+	Revision    uint64   `json:"revision"`
+	RunRevision uint64   `json:"run_revision"`
+	Question    string   `json:"question"`
+	Options     []string `json:"options"`
 }
 
 type HumanRequestList struct {
@@ -288,7 +311,7 @@ func validHumanRequestList(value HumanRequestList) bool {
 		return false
 	}
 	for _, request := range value.Requests {
-		if !validID(request.ID) || !validID(request.RunID) || !validID(request.TaskID) || !validID(request.AgentID) || request.Revision == 0 || !validText(request.Question, 1, 8192) || request.Status != "open" && request.Status != "delivering" && request.Status != "delivery_unknown" || request.Options == nil || kernel.ValidateHumanOptions(request.Options) != nil {
+		if !validID(request.ID) || !validID(request.RunID) || !validID(request.TaskID) || !validID(request.AgentID) || request.Revision == 0 || request.RunRevision == 0 || !validText(request.Question, 1, 8192) || request.Status != "open" && request.Status != "delivering" && request.Status != "delivery_unknown" || request.Options == nil || kernel.ValidateHumanOptions(request.Options) != nil {
 			return false
 		}
 	}
@@ -607,14 +630,16 @@ type FactorySummary struct {
 }
 
 type ProjectSummary struct {
-	ID             string `json:"id"`
-	Name           string `json:"name"`
-	RunBudgetLimit uint64 `json:"run_budget_limit"`
-	RunsUsed       uint64 `json:"runs_used"`
-	MaxRunSeconds  uint32 `json:"max_run_seconds"`
-	TokenLimit     uint64 `json:"token_limit"`
-	TokensUsed     uint64 `json:"tokens_used"`
-	Revision       uint64 `json:"revision"`
+	ID                      string `json:"id"`
+	Name                    string `json:"name"`
+	RunBudgetLimit          uint64 `json:"run_budget_limit"`
+	RunsUsed                uint64 `json:"runs_used"`
+	MaxRunSeconds           uint32 `json:"max_run_seconds"`
+	TokenLimit              uint64 `json:"token_limit"`
+	TokensUsed              uint64 `json:"tokens_used"`
+	Revision                uint64 `json:"revision"`
+	SpecialistRuns          uint32 `json:"specialist_runs"`
+	SpecialistOpenProposals uint32 `json:"specialist_open_proposals"`
 }
 
 type AgentSummary struct {
@@ -635,6 +660,7 @@ type AgentSummary struct {
 	IdleInstruction  string `json:"idle_instruction"`
 	IdleRunBudget    uint32 `json:"idle_run_budget"`
 	IdleRunsUsed     uint32 `json:"idle_runs_used"`
+	IdleWakeOn       string `json:"idle_wake_on"`
 	Revision         uint64 `json:"revision"`
 }
 
@@ -692,6 +718,19 @@ type OverseerSnapshot struct {
 	PeerQuestions  []PeerQuestion          `json:"peer_questions"`
 	History        []OverseerIntervention  `json:"history"`
 	Handoffs       []RetainedChangeHandoff `json:"retained_change_handoffs"`
+	Factoryd       FactorydHealth          `json:"factoryd"`
+}
+
+// FactorydHealth is the daemon's bounded, in-memory health view.
+type FactorydHealth struct {
+	Calls []FactorydCall `json:"calls"`
+}
+
+type FactorydCall struct {
+	Name         string  `json:"name"`
+	Count        uint64  `json:"count"`
+	Errors       uint64  `json:"errors,omitempty"`
+	LatencyP95MS float64 `json:"latency_p95_ms,omitempty"`
 }
 
 // RetainedChangeHandoff identifies one settled worker Change by its Git
@@ -847,6 +886,8 @@ type OverseerAgentUpdateInput struct {
 	ExpectedRevision uint64 `json:"expected_revision"`
 	Paused           *bool  `json:"paused,omitempty"`
 	Archived         *bool  `json:"archived,omitempty"`
+	// Appearance is operator-only, in the stored slot form; empty is automatic.
+	Appearance *string `json:"appearance,omitempty"`
 }
 
 // AgentIdlePolicyInput is the operator-only standing supervision edit. It
@@ -858,13 +899,15 @@ type AgentIdlePolicyInput struct {
 	AfterSeconds     uint32 `json:"after_seconds"`
 	Instruction      string `json:"instruction"`
 	RunBudget        uint64 `json:"run_budget"`
+	// WakeOn is a specialist's event classes; empty is none.
+	WakeOn string `json:"wake_on,omitempty"`
 }
 
 func validAgentIdlePolicyInput(input AgentIdlePolicyInput) bool {
 	if !validID(input.AgentID) || input.ExpectedRevision == 0 || input.AfterSeconds > kernel.MaxIdleAfterSeconds || input.RunBudget > uint64(kernel.MaxIdleRunBudget) || !validText(input.Instruction, 0, 32768) {
 		return false
 	}
-	return input.Policy == "wait" && input.AfterSeconds == 0 && input.Instruction == "" && input.RunBudget == 0 || input.Policy == "standing_instruction" && input.AfterSeconds > 0 && input.Instruction != ""
+	return input.Policy == "wait" && input.AfterSeconds == 0 && input.Instruction == "" && input.RunBudget == 0 && input.WakeOn == "" || input.Policy == "standing_instruction" && input.AfterSeconds > 0 && input.Instruction != ""
 }
 
 type OverseerRunStopInput struct {
@@ -904,6 +947,17 @@ type OverseerHumanReplyInput struct {
 	RequestID        string `json:"request_id"`
 	ExpectedRevision uint64 `json:"expected_revision"`
 	Reply            string `json:"reply"`
+}
+
+// HumanCancelInput carries the exact revisions listed by human list.
+type HumanCancelInput struct {
+	RequestID           string `json:"request_id"`
+	ExpectedRevision    uint64 `json:"expected_revision"`
+	ExpectedRunRevision uint64 `json:"expected_run_revision"`
+}
+
+func validHumanCancelInput(value HumanCancelInput) bool {
+	return validID(value.RequestID) && value.ExpectedRevision != 0 && value.ExpectedRunRevision != 0
 }
 
 type CreateProjectInput struct {
@@ -951,6 +1005,9 @@ type ProjectLimitsInput struct {
 	// TokenBudget permits this many more provider tokens than are already
 	// recorded; zero removes the ceiling and absent leaves it as it is.
 	TokenBudget *uint64 `json:"token_budget,omitempty"`
+	// The specialist limits; absent leaves each as it is.
+	SpecialistRuns          *uint32 `json:"specialist_runs,omitempty"`
+	SpecialistOpenProposals *uint32 `json:"specialist_open_proposals,omitempty"`
 }
 
 type CreateAgentInput struct {
@@ -990,6 +1047,13 @@ type EnqueueTaskInput struct {
 	Priority        int64                   `json:"priority"`
 	Prerequisites   []TaskPrerequisiteInput `json:"prerequisites,omitempty"`
 	ConflictPaths   []string                `json:"conflict_paths,omitempty"`
+	// Content pins project content revisions in the enqueue transaction.
+	Content []ContentPinInput `json:"content,omitempty"`
+}
+
+type ContentPinInput struct {
+	ContentID       string `json:"content_id"`
+	ContentRevision uint64 `json:"content_revision"`
 }
 
 // HumanQuestionInput is the bounded provider-authored portion of a
@@ -1092,9 +1156,11 @@ func validPeerAvailability(value string) bool {
 
 // SendBackInput returns a finished task to its worker's queue with a note.
 // An orchestrator's attempt names a task of its own project; the operator
-// names any task.
+// names any task. Head is the Change head the note was observed at; once the
+// task has a Change head, a note about any other head is refused.
 type SendBackInput struct {
 	TaskID string `json:"task_id"`
+	Head   string `json:"head,omitempty"`
 	Note   string `json:"note"`
 }
 

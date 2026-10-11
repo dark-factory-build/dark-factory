@@ -462,7 +462,7 @@ func (backend *browserBackend) UpdateAgent(ctx context.Context, rawClient [brows
 		policy := kernel.IdlePolicy(*request.IdlePolicy)
 		patch.IdlePolicy = &policy
 	}
-	patch.IdleAfterSeconds, patch.IdleInstruction, patch.IdleRunBudget = request.IdleAfterSeconds, request.IdleInstruction, request.IdleRunBudget
+	patch.IdleAfterSeconds, patch.IdleInstruction, patch.IdleRunBudget, patch.IdleWakeOn = request.IdleAfterSeconds, request.IdleInstruction, request.IdleRunBudget, request.IdleWakeOn
 	agent, err := backend.store.UpdateAgent(ctx, agentID, expected, patch, at)
 	if err != nil {
 		return browserprotocol.AgentUpdateResult{}, consoleUpdateError(err)
@@ -1392,7 +1392,7 @@ func projectFactory(item kernel.FactorySummary) browserprotocol.FactoryItem {
 }
 
 func projectProject(item kernel.ProjectSummary) browserprotocol.ProjectItem {
-	return browserprotocol.ProjectItem{ID: item.ID.String(), Name: item.Name, RunBudgetLimit: browserprotocol.Decimal(item.RunBudgetLimit), RunsUsed: browserprotocol.Decimal(item.RunsUsed), MaxRunSeconds: item.MaxRunSeconds, Revision: decimalRevision(item.Revision)}
+	return browserprotocol.ProjectItem{ID: item.ID.String(), Name: item.Name, RunBudgetLimit: browserprotocol.Decimal(item.RunBudgetLimit), RunsUsed: browserprotocol.Decimal(item.RunsUsed), MaxRunSeconds: item.MaxRunSeconds, SpecialistRuns: item.SpecialistRuns, SpecialistOpenProposals: item.SpecialistOpenProposals, Revision: decimalRevision(item.Revision)}
 }
 
 // projectAgentForClient resolves what the agent will actually run with. An agent that
@@ -1418,9 +1418,13 @@ func projectAgentForClient(item kernel.AgentSummary, configHome string, provider
 		source = ""
 	}
 	projected := browserprotocol.AgentItem{ID: item.ID.String(), ProjectID: item.ProjectID.String(), Name: item.Name, Role: item.Role, Provider: item.Provider, Paused: browserprotocol.Bool(item.Paused), Archived: browserprotocol.Bool(item.Archived), Appearance: browserprotocol.SpriteAppearance{Automatic: browserprotocol.Bool(item.Appearance.Automatic), Skin: item.Appearance.Skin, Hair: item.Appearance.Hair, HairColour: item.Appearance.HairColour, Face: item.Appearance.Face, Outfit: item.Appearance.Outfit, ClothesColour: item.Appearance.ClothesColour, Shoes: item.Appearance.Shoes, Tool: item.Appearance.Tool, Headwear: item.Appearance.Headwear}, Model: item.Model, ReasoningEffort: item.ReasoningEffort, EffectiveModel: effectiveModel, EffectiveReasoningEffort: effectiveEffort, ModelSource: source, Revision: decimalRevision(item.Revision),
-		IdlePolicy: string(item.Idle.Policy), IdleAfterSeconds: item.Idle.AfterSeconds, IdleInstruction: item.Idle.Instruction, IdleRunBudget: item.Idle.RunBudget, IdleRunsUsed: item.Idle.RunsUsed}
+		IdlePolicy: string(item.Idle.Policy), IdleAfterSeconds: item.Idle.AfterSeconds, IdleInstruction: item.Idle.Instruction, IdleRunBudget: item.Idle.RunBudget, IdleRunsUsed: item.Idle.RunsUsed, IdleWakeOn: item.Idle.WakeOn}
 	if (item.AccountID != kernel.AccountID{}) {
 		projected.AccountID = item.AccountID.String()
+	}
+	if state := item.Specialist; state != nil {
+		projected.Specialist = &browserprotocol.SpecialistItem{NextReviewAtMillis: uint64(max(state.NextReviewAt, 0)), NextReason: state.NextReason, Waiting: state.Waiting,
+			QuietReviews: uint8(state.QuietReviews), OpenProposals: uint16(state.OpenProposals), OpenProposalLimit: uint16(state.OpenProposalLimit), LastReviewTaskID: state.LastReviewTaskID}
 	}
 	return projected
 }

@@ -486,7 +486,11 @@ func TestIntakeTickRetriesAnAutomaticEnd(t *testing.T) {
 	}
 	issue := maintainer.Issue{ID: 82, NodeID: "I_automatic", Number: 8, Title: "Fix it", Body: "Exact instructions", State: "open", Labels: []string{"factory:ready"}}
 	issue.Author.Login, issue.Author.Type = "outsider", "User"
-	fixture.daemon.intakeIssues = func(context.Context, string, uint64, uint32, string, uint64) (maintainer.IssuePage, error) {
+	exactReads := 0
+	fixture.daemon.intakeIssues = func(_ context.Context, _ string, _ uint64, _ uint32, _ string, number uint64) (maintainer.IssuePage, error) {
+		if number != 0 {
+			exactReads++
+		}
 		return maintainer.IssuePage{RepositoryID: 42, Issues: []maintainer.Issue{issue}}, nil
 	}
 	hash := intakeSnapshot(source, issue).ContentHash()
@@ -501,9 +505,15 @@ func TestIntakeTickRetriesAnAutomaticEnd(t *testing.T) {
 		t.Fatalf("settled task = %+v, %v", task, err)
 	}
 	fixture.daemon.now = func() time.Time { return time.Unix(2000, 0) }
+	exactReads = 0
 	fixture.daemon.Intake(ctx, tick)
 	if task, _, err = fixture.store.Task(ctx, task.ID); err != nil || task.Status != kernel.TaskQueued || task.WorkRevision.Int64() != 2 {
 		t.Fatalf("automatic end not retried: %+v, %v", task, err)
+	}
+	// The tick reuses the issue it listed; one read per accepted issue per
+	// tick spent the connection's GitHub quota.
+	if exactReads != 0 {
+		t.Fatalf("tick re-read the listed issue %d times", exactReads)
 	}
 }
 

@@ -4,10 +4,12 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"testing"
 )
 
 func TestChangePreparedAndAvailableAreExactReplayableCheckpoints(t *testing.T) {
+	t.Parallel()
 	store, change := ownedReservedChange(t)
 	defer store.Close()
 	selection := testChangeSelection(t)
@@ -48,6 +50,7 @@ func TestChangePreparedAndAvailableAreExactReplayableCheckpoints(t *testing.T) {
 }
 
 func TestChangePreparedFactsSurviveRestart(t *testing.T) {
+	t.Parallel()
 	store, change := ownedReservedChange(t)
 	path := storePath(t, store)
 	selection := testChangeSelection(t)
@@ -74,6 +77,7 @@ func TestChangePreparedFactsSurviveRestart(t *testing.T) {
 // retry and settlement history proves is unchanged; a head that is not the
 // base, a second head, or a Change in any other phase is refused.
 func TestRecordChangeWorktreeFillsTheHeadOfAGitFreeChangeOnce(t *testing.T) {
+	t.Parallel()
 	blocked, _ := NewBlockedProposal("retry")
 	store, finalizing := finalizingReleasedRun(t, RoleWorker, blocked)
 	defer store.Close()
@@ -129,7 +133,36 @@ func TestRecordChangeWorktreeFillsTheHeadOfAGitFreeChangeOnce(t *testing.T) {
 	}
 }
 
+func TestRecordChangeRebasedUpdatesRetainedHeadWithoutOpeningWork(t *testing.T) {
+	t.Parallel()
+	blocked, _ := NewBlockedProposal("rebased")
+	store, finalizing := finalizingReleasedRun(t, RoleWorker, blocked)
+	defer store.Close()
+	ctx := context.Background()
+	current, found, err := store.Change(ctx, *finalizing.ChangeID)
+	if err != nil || !found || current.HeadCommit == nil {
+		t.Fatalf("settled Change = %+v, found=%v, err=%v", current, found, err)
+	}
+	settlement, err := NewRetainedChangeSettlement(current.Revision, current.HeadCommit)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.FinalizeWorkerRun(ctx, finalizing.ID, finalizing.Revision, settlement, mustTime(t, 80)); err != nil {
+		t.Fatal(err)
+	}
+	retained, _, _ := store.Change(ctx, current.ID)
+	newHead, _ := NewCommitID(retained.HeadCommit.format, bytes.Repeat([]byte{0x7a}, retained.HeadCommit.format.oidLength()))
+	updated, err := store.RecordChangeRebased(ctx, retained.ID, retained.Revision, *retained.HeadCommit, newHead, mustTime(t, 81))
+	if err != nil || updated.Phase != ChangeRetained || updated.Revision != retained.Revision || updated.HeadCommit == nil || !updated.HeadCommit.equal(newHead) {
+		t.Fatalf("rebased Change = %+v, err=%v", updated, err)
+	}
+	if _, err := store.RecordChangeRebased(ctx, current.ID, updated.Revision, *current.HeadCommit, newHead, mustTime(t, 82)); !errors.Is(err, ErrRevisionConflict) {
+		t.Fatalf("stale rebase replay = %v", err)
+	}
+}
+
 func TestChangeSchemaIsPathFreeCanonicalAndCircularlyBound(t *testing.T) {
+	t.Parallel()
 	store, _ := newTestStore(t)
 	defer store.Close()
 	rows, err := store.readers.Query(`PRAGMA table_info(changes)`)
@@ -189,6 +222,7 @@ func TestChangeSchemaIsPathFreeCanonicalAndCircularlyBound(t *testing.T) {
 }
 
 func TestPartialPreparedFactsFailClosed(t *testing.T) {
+	t.Parallel()
 	for name, mutation := range map[string]string{
 		"missing base":                `UPDATE changes SET base_commit = NULL, object_format = NULL, repository_dev = NULL, repository_inode = NULL WHERE id = ?`,
 		"missing repository identity": `UPDATE changes SET repository_inode = NULL WHERE id = ?`,
@@ -218,6 +252,7 @@ func TestPartialPreparedFactsFailClosed(t *testing.T) {
 }
 
 func TestRepositoryIdentitySchemaRequiresExactPairedStoreIntegers(t *testing.T) {
+	t.Parallel()
 	store, change := ownedReservedChange(t)
 	defer store.Close()
 	prepared, err := store.RecordChangePrepared(context.Background(), change.ID, change.Revision, testChangeSelection(t), mustTime(t, 10))
@@ -240,6 +275,7 @@ func TestRepositoryIdentitySchemaRequiresExactPairedStoreIntegers(t *testing.T) 
 }
 
 func TestRetryAdmissionUsesCanonicalChangeAndIgnoresFreshCandidate(t *testing.T) {
+	t.Parallel()
 	store, terminal, _, keys := retryQueuedWorker(t, 40)
 	defer store.Close()
 	before, found, err := store.Change(context.Background(), *terminal.ChangeID)
@@ -266,6 +302,7 @@ func TestRetryAdmissionUsesCanonicalChangeAndIgnoresFreshCandidate(t *testing.T)
 }
 
 func TestOrchestratorAdmissionIgnoresCandidateWithoutCreatingChange(t *testing.T) {
+	t.Parallel()
 	store, _, project, agent := newAdmissionStore(t, RoleOrchestrator, 2)
 	defer store.Close()
 	if _, err := store.EnqueueTask(context.Background(), NewTask{ID: taskID(t, 180), ProjectID: project.ID, AssignedAgentID: agent.ID, IncarnationID: incarnationID(t, 181), Title: "orchestrate"}, mustTime(t, 5)); err != nil {
@@ -282,6 +319,7 @@ func TestOrchestratorAdmissionIgnoresCandidateWithoutCreatingChange(t *testing.T
 }
 
 func TestWorkerSettlementIsExactAndHistoricalFinalizationReplaySurvivesRetry(t *testing.T) {
+	t.Parallel()
 	blocked, _ := NewBlockedProposal("retry")
 	store, finalizing := finalizingReleasedRun(t, RoleWorker, blocked)
 	defer store.Close()
@@ -314,6 +352,7 @@ func TestWorkerSettlementIsExactAndHistoricalFinalizationReplaySurvivesRetry(t *
 }
 
 func TestNonterminalWorkerCannotSettleChange(t *testing.T) {
+	t.Parallel()
 	failed, _ := NewFailureProposal(FailureInternal, "cleanup")
 	store, finalizing := finalizingReleasedRun(t, RoleWorker, failed)
 	defer store.Close()
@@ -365,4 +404,101 @@ func ownedReservedChange(t *testing.T) (*Store, Change) {
 		t.Fatalf("read admitted Change = %+v, %v", change, err)
 	}
 	return store, change
+}
+
+// The kernel half of the reclaim rule: which retained Changes may lose their
+// worktree, from a failed task's Change settled at 33 with an empty diff.
+func TestReclaimableChangesFollowTheRule(t *testing.T) {
+	t.Parallel()
+	day := int64(24 * 60 * 60 * 1000)
+	end, success := 33+14*day, 33+30*day
+	work := `UPDATE changes SET head_commit = randomblob(20)`
+	publish := func(state, head string, observed ...int) string {
+		at := "34"
+		if len(observed) != 0 {
+			at = fmt.Sprint(observed[0])
+		}
+		return `INSERT INTO publication_tasks (project_id, repository, pull_number, task_id, change_id, created_at_ms) SELECT project_id, 'o/r', 7, task_id, id, 34 FROM changes;
+			INSERT INTO production_records (project_id, repository, kind, identity, visual_id, document, observed_at_ms) SELECT project_id, 'o/r', 'pull_request', '7', '', json_object('state', '` + state + `', 'head', ` + head + `), ` + at + ` FROM changes`
+	}
+	for _, test := range []struct {
+		name  string
+		setup []string
+		at    int64
+		want  bool
+	}{
+		{name: "empty work", at: 34, want: true},
+		{name: "queued", setup: []string{`UPDATE tasks SET status = 'queued', completed_at_ms = NULL`}, at: end, want: false},
+		{name: "running", setup: []string{`UPDATE tasks SET status = 'running', completed_at_ms = NULL`}, at: end, want: false},
+		{name: "blocked", setup: []string{`UPDATE tasks SET status = 'blocked', blocked_reason = 'why', completed_at_ms = NULL`}, at: success, want: false},
+		{name: "failed work recently", setup: []string{work}, at: end - 1, want: false},
+		{name: "failed work long", setup: []string{work}, at: end, want: true},
+		{name: "Git-free copy recently", setup: []string{`UPDATE changes SET head_commit = NULL`}, at: end - 1, want: false},
+		{name: "Git-free copy long", setup: []string{`UPDATE changes SET head_commit = NULL`}, at: end, want: true},
+		{name: "cancelled work long", setup: []string{work, `UPDATE tasks SET status = 'cancelled'`}, at: end, want: true},
+		{name: "failed work long with an open pull request", setup: []string{work, publish("open", `lower(hex(head_commit))`)}, at: end, want: false},
+		{name: "merged after the Change last changed", setup: []string{work, publish("merged", `'00'`)}, at: 34, want: true},
+		{name: "merged before a later correction", setup: []string{work, publish("merged", `'00'`, 20)}, at: 34, want: false},
+		{name: "open", setup: []string{work, publish("open", `lower(hex(head_commit))`)}, at: 34, want: false},
+		{name: "succeeded unpublished recently", setup: []string{work, `UPDATE tasks SET status = 'succeeded', result = 'ok'`}, at: success - 1, want: false},
+		{name: "succeeded unpublished long", setup: []string{work, `UPDATE tasks SET status = 'succeeded', result = 'ok'`}, at: success, want: true},
+		{name: "succeeded published long", setup: []string{work, `UPDATE tasks SET status = 'succeeded', result = 'ok'`, publish("open", `lower(hex(head_commit))`)}, at: success, want: false},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+			store, terminal := terminalPreRunningAvailableWorker(t)
+			defer store.Close()
+			for _, statement := range test.setup {
+				corruptSQL(t, store, statement)
+			}
+			reclaimable, err := store.ReclaimableChanges(context.Background(), mustTime(t, test.at))
+			if err != nil || len(reclaimable) > 1 || (len(reclaimable) == 1) != test.want || test.want && (reclaimable[0].ID != *terminal.ChangeID || reclaimable[0].GivenUp != (len(test.setup) > 0)) {
+				t.Fatalf("reclaimable = %+v, %v; want %v", reclaimable, err, test.want)
+			}
+		})
+	}
+}
+
+// A reclaimed Change is abandoned with an invalidation, once, and the next
+// retry reopens it fresh and reserved, after a fresh or a retained
+// predecessor alike.
+func TestReclaimChangeAbandonsOnceAndTheRetryStartsFresh(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	for _, retainedPredecessor := range []bool{false, true} {
+		store, terminal := terminalPreRunningAvailableWorker(t)
+		defer store.Close()
+		gap := int64(5)
+		if retainedPredecessor {
+			terminal, _ = settleRetainedRetry(t, store, terminal)
+			gap = 3
+		}
+		retained, _, _ := store.Change(ctx, *terminal.ChangeID)
+		at := terminal.TerminalAt.Int64() + 1
+		if _, err := store.ReclaimChange(ctx, retained.ID, retained.Revision, true, mustTime(t, at)); !errors.Is(err, ErrRevisionConflict) {
+			t.Fatalf("reclaim of empty work as given up = %v", err)
+		}
+		before := captureWriteFootprint(t, store)
+		reclaimed, err := store.ReclaimChange(ctx, retained.ID, retained.Revision, false, mustTime(t, at))
+		if err != nil || reclaimed.Phase != ChangeAbandoned || reclaimed.Revision.Int64() != retained.Revision.Int64()+1 || reclaimed.SettledRunID == nil || *reclaimed.SettledRunID != terminal.ID {
+			t.Fatalf("reclaimed = %+v, %v", reclaimed, err)
+		}
+		if after := captureWriteFootprint(t, store); after.invalidations != before.invalidations+1 {
+			t.Fatalf("reclaim invalidations = %d -> %d", before.invalidations, after.invalidations)
+		}
+		if _, err := store.ReclaimChange(ctx, retained.ID, retained.Revision, false, mustTime(t, at+1)); !errors.Is(err, ErrRevisionConflict) {
+			t.Fatalf("second reclaim = %v", err)
+		}
+		_, keys := queueRetryForTerminalSeed(t, store, terminal, at+2, 230)
+		retry, err := store.AdmitNext(ctx, keys, mustTime(t, at+2))
+		if err != nil || !retry.Admitted() || *retry.Run.ChangeID != retained.ID || retry.Run.AdmittedChangeRevision.Int64() != terminal.AdmittedChangeRevision.Int64()+gap {
+			t.Fatalf("retry after reclaim (retained=%v) = %+v, %v", retainedPredecessor, retry, err)
+		}
+		if reopened, _, err := store.Change(ctx, retained.ID); err != nil || reopened.Phase != ChangeReserved {
+			t.Fatalf("reopened Change = %+v, %v", reopened, err)
+		}
+		if _, found, err := store.Run(ctx, retry.Run.ID); err != nil || !found {
+			t.Fatalf("retry history after reclaim: found=%v, %v", found, err)
+		}
+	}
 }

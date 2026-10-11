@@ -9,12 +9,20 @@ import (
 
 const (
 	applicationID = 0x4446474f
-	userVersion   = 37
+	userVersion   = 41
 
 	// SQLite reserves the exact lower-case "sqlite_" prefix. Use a literal,
 	// binary prefix test: LIKE would treat '_' as a wildcard and hide names
 	// such as sqliteXforeign from exact schema validation.
 	internalSchemaNamePredicate = "substr(name, 1, 7) = 'sqlite_' COLLATE BINARY"
+)
+
+// The v38 and v41 columns, as SQLite records them after ALTER TABLE ADD
+// COLUMN: each definition is spliced in after the last column, behind ", ".
+const (
+	agentWakeOnColumn        = `, idle_wake_on TEXT NOT NULL DEFAULT '' CHECK (idle_wake_on IN ('', 'failures', 'merges', 'failures,merges'))`
+	projectSpecialistColumns = `, specialist_runs INTEGER NOT NULL DEFAULT 1 CHECK (specialist_runs BETWEEN 0 AND 16), specialist_open_proposals INTEGER NOT NULL DEFAULT 3 CHECK (specialist_open_proposals BETWEEN 0 AND 32)`
+	humanContinuationColumns = `, continuation TEXT CHECK (continuation IS NULL OR continuation = 'waiting' AND status = 'open' OR continuation IN ('queued', 'resolved', 'cancelled') AND status IN ('resolved', 'stale')), continuation_reply TEXT CHECK ((continuation_reply IS NOT NULL) = (continuation IS NOT NULL AND continuation IN ('queued', 'resolved')) AND length(CAST(continuation_reply AS BLOB)) BETWEEN 1 AND 8192)`
 )
 
 var schemaStatements = []string{
@@ -102,7 +110,7 @@ var schemaStatements = []string{
     revision INTEGER NOT NULL CHECK (revision >= 1),
     created_at_ms INTEGER NOT NULL CHECK (created_at_ms >= 0),
     updated_at_ms INTEGER NOT NULL CHECK (updated_at_ms >= created_at_ms)
-) STRICT, WITHOUT ROWID`,
+` + projectSpecialistColumns + `) STRICT, WITHOUT ROWID`,
 	`CREATE UNIQUE INDEX projects_root_unique ON projects(root)`,
 	`CREATE TABLE project_repositories (
     id BLOB PRIMARY KEY CHECK (length(id) = 16 AND id <> zeroblob(16)),
@@ -211,7 +219,7 @@ var schemaStatements = []string{
     tool_calls_used INTEGER NOT NULL CHECK (tool_calls_used >= 0 AND tool_calls_used <= tool_budget_limit),
     revision INTEGER NOT NULL CHECK (revision >= 1),
     created_at_ms INTEGER NOT NULL CHECK (created_at_ms >= 0),
-    updated_at_ms INTEGER NOT NULL CHECK (updated_at_ms >= created_at_ms),
+    updated_at_ms INTEGER NOT NULL CHECK (updated_at_ms >= created_at_ms)` + agentWakeOnColumn + `,
     CHECK (provider <> 'shell' OR (model IS NULL AND reasoning_effort IS NULL AND account_id IS NULL)),
     CHECK (idle_policy <> 'standing_instruction' OR (idle_after_seconds >= 1 AND idle_instruction <> ''))
 ) STRICT, WITHOUT ROWID`,
@@ -360,11 +368,11 @@ var schemaStatements = []string{
 	    verification_policy TEXT NOT NULL CHECK (verification_policy IN ('none', 'rust_workspace_test', 'go_workspace_test')),
 	    phase TEXT NOT NULL CHECK (phase IN ('admitted', 'running', 'finalizing', 'terminal')),
     proposal_kind TEXT CHECK (proposal_kind IS NULL OR proposal_kind IN ('succeeded', 'blocked', 'failed', 'cancelled')),
-    proposal_code TEXT CHECK (proposal_code IS NULL OR proposal_code IN ('spawn', 'activation', 'source', 'provider_exit', 'runner_exit', 'protocol', 'internal', 'attempt')),
+    proposal_code TEXT CHECK (proposal_code IS NULL OR proposal_code IN ('spawn', 'activation', 'source', 'provider_exit', 'transient', 'protocol', 'internal', 'attempt')),
     proposal_detail TEXT CHECK (proposal_detail IS NULL OR length(CAST(proposal_detail AS BLOB)) BETWEEN 1 AND 4096),
     proposal_result TEXT CHECK (proposal_result IS NULL OR length(CAST(proposal_result AS BLOB)) <= 131072),
     terminal_kind TEXT CHECK (terminal_kind IS NULL OR terminal_kind IN ('succeeded', 'blocked', 'failed', 'cancelled')),
-	    terminal_code TEXT CHECK (terminal_code IS NULL OR terminal_code IN ('spawn', 'activation', 'source', 'provider_exit', 'runner_exit', 'protocol', 'internal', 'attempt')),
+	    terminal_code TEXT CHECK (terminal_code IS NULL OR terminal_code IN ('spawn', 'activation', 'source', 'provider_exit', 'transient', 'protocol', 'internal', 'attempt')),
     terminal_detail TEXT CHECK (terminal_detail IS NULL OR length(CAST(terminal_detail AS BLOB)) BETWEEN 1 AND 4096),
     terminal_result TEXT CHECK (terminal_result IS NULL OR length(CAST(terminal_result AS BLOB)) <= 131072),
 	    credential_digest BLOB NOT NULL CHECK (length(credential_digest) = 32),
@@ -490,14 +498,6 @@ var schemaStatements = []string{
     updated_at_ms INTEGER NOT NULL CHECK (updated_at_ms >= created_at_ms),
     revoked_at_ms INTEGER CHECK (revoked_at_ms IS NULL OR (revoked_at_ms >= created_at_ms AND revoked_at_ms <= updated_at_ms AND revoked_at_ms >= 0))
 ) STRICT, WITHOUT ROWID`,
-	`CREATE TABLE browser_security_events (
-    sequence INTEGER PRIMARY KEY AUTOINCREMENT CHECK (sequence >= 1),
-    kind TEXT NOT NULL CHECK (kind IN ('challenge_minted', 'challenge_abandoned', 'client_paired', 'duplicate_fingerprint', 'client_revoked')),
-    client_id BLOB CHECK (client_id IS NULL OR (length(client_id) = 16 AND client_id <> zeroblob(16))) REFERENCES browser_clients(id),
-    occurred_at_ms INTEGER NOT NULL CHECK (occurred_at_ms >= 0),
-    CHECK ((kind IN ('challenge_minted', 'challenge_abandoned') AND client_id IS NULL) OR (kind NOT IN ('challenge_minted', 'challenge_abandoned') AND client_id IS NOT NULL))
-) STRICT`,
-	`CREATE INDEX browser_security_events_client ON browser_security_events(client_id, sequence)`,
 	`CREATE TABLE human_requests (
     id BLOB PRIMARY KEY CHECK (length(id) = 16 AND id <> zeroblob(16)),
     run_id BLOB NOT NULL CHECK (length(run_id) = 16) REFERENCES runs(id),
@@ -513,7 +513,7 @@ var schemaStatements = []string{
     closed_at_ms INTEGER CHECK (closed_at_ms IS NULL OR closed_at_ms >= 0),
     revision INTEGER NOT NULL CHECK (revision >= 1),
     created_at_ms INTEGER NOT NULL CHECK (created_at_ms >= 0),
-    updated_at_ms INTEGER NOT NULL CHECK (updated_at_ms >= created_at_ms),
+    updated_at_ms INTEGER NOT NULL CHECK (updated_at_ms >= created_at_ms)` + humanContinuationColumns + `,
     UNIQUE(run_id, idempotency_key),
     UNIQUE(delivery_id),
     CHECK ((delivery_id IS NULL) = (delivery_started_at_ms IS NULL)),
@@ -589,33 +589,10 @@ var schemaStatements = []string{
 	`CREATE UNIQUE INDEX peer_questions_recipient_delivery_unique ON peer_questions(recipient_delivery_id) WHERE recipient_delivery_id IS NOT NULL`,
 	`CREATE UNIQUE INDEX peer_questions_answer_delivery_unique ON peer_questions(answer_delivery_id) WHERE answer_delivery_id IS NOT NULL`,
 	`CREATE INDEX peer_questions_task_history ON peer_questions(project_id, source_task_id, target_task_id, created_at_ms, id)`,
-	`CREATE TABLE continuations (
-    id BLOB PRIMARY KEY CHECK (length(id) = 16 AND id <> zeroblob(16)),
-    project_id BLOB NOT NULL CHECK (length(project_id) = 16) REFERENCES projects(id),
-    task_id BLOB NOT NULL CHECK (length(task_id) = 16) REFERENCES tasks(id),
-    task_incarnation_id BLOB NOT NULL CHECK (length(task_incarnation_id) = 16),
-    work_revision INTEGER NOT NULL CHECK (work_revision >= 1),
-    context_digest BLOB NOT NULL CHECK (length(context_digest) = 32),
-    condition_kind TEXT NOT NULL CHECK (condition_kind IN ('human_request', 'peer_question', 'handoff', 'dependency', 'invalidation')),
-    condition_id BLOB NOT NULL CHECK (length(condition_id) = 16 AND condition_id <> zeroblob(16)),
-    condition_revision INTEGER NOT NULL CHECK (condition_revision >= 1),
-    state TEXT NOT NULL CHECK (state IN ('waiting', 'queued', 'resolved', 'cancelled')),
-    resolution_detail TEXT CHECK (resolution_detail IS NULL OR length(CAST(resolution_detail AS BLOB)) BETWEEN 1 AND 8192),
-    revision INTEGER NOT NULL CHECK (revision >= 1),
-    created_at_ms INTEGER NOT NULL CHECK (created_at_ms >= 0),
-    updated_at_ms INTEGER NOT NULL CHECK (updated_at_ms >= created_at_ms),
-    resolved_at_ms INTEGER CHECK (resolved_at_ms IS NULL OR resolved_at_ms = updated_at_ms),
-    FOREIGN KEY (task_id, project_id, task_incarnation_id) REFERENCES tasks(id, project_id, incarnation_id),
-    CHECK ((state = 'waiting' AND resolution_detail IS NULL AND resolved_at_ms IS NULL) OR
-           (state = 'queued' AND resolution_detail IS NOT NULL AND resolved_at_ms IS NOT NULL) OR
-           (state IN ('resolved', 'cancelled') AND resolution_detail IS NOT NULL AND resolved_at_ms IS NOT NULL))
-) STRICT, WITHOUT ROWID`,
-	`CREATE UNIQUE INDEX continuations_one_waiting_per_condition ON continuations(task_id, task_incarnation_id, work_revision, condition_kind, condition_id) WHERE state = 'waiting'`,
-	`CREATE INDEX continuations_admission_queue ON continuations(state, updated_at_ms, id)`,
 	`CREATE TABLE invalidations (
     sequence INTEGER PRIMARY KEY CHECK (sequence >= 1),
     occurred_at_ms INTEGER NOT NULL CHECK (occurred_at_ms >= 0),
-    entity_kind TEXT NOT NULL CHECK (entity_kind IN ('factory', 'project', 'agent', 'task', 'change', 'run', 'human_request', 'account', 'peer_question', 'continuation')),
+    entity_kind TEXT NOT NULL CHECK (entity_kind IN ('factory', 'project', 'agent', 'task', 'change', 'run', 'human_request', 'account', 'peer_question')),
     entity_id BLOB NOT NULL CHECK (length(entity_id) = 16),
     revision INTEGER NOT NULL CHECK (revision >= 1),
     deleted INTEGER NOT NULL CHECK (deleted IN (0, 1))

@@ -72,6 +72,7 @@ func (daemon *Daemon) DialRelay(ctx context.Context, relayOrigin, home string, b
 	daemon.browserMu.Lock()
 	closing := daemon.browserClosing
 	existing := daemon.relay
+	console := daemon.console
 	daemon.browserMu.Unlock()
 	if closing {
 		return nil, browser.ErrUnauthorized
@@ -85,6 +86,7 @@ func (daemon *Daemon) DialRelay(ctx context.Context, relayOrigin, home string, b
 		BrowserURL:  "ws://" + browserAddress + browser.Path,
 		DeviceKey:   daemon.relayDeviceKey,
 		IngestKey:   readIngestKey(filepath.Join(home, ingestKeyFileName)),
+		Console:     console,
 	})
 	if err != nil {
 		return nil, err

@@ -97,7 +97,12 @@ func (store *Store) OverseerSnapshotForAttempt(ctx context.Context, digest Attem
 		return OverseerSnapshot{}, err
 	}
 	defer read.Close()
-	authority, err := overseerRun(ctx, read.connection, digest)
+	// A specialist reads its project's status too; every overseer write
+	// stays with the orchestrator (overseerRun).
+	authority, err := authenticateAttempt(ctx, read.connection, digest)
+	if err == nil && authority.Role != RoleOrchestrator && !authority.Specialist {
+		err = ErrUnauthorized
+	}
 	if err != nil {
 		return OverseerSnapshot{}, err
 	}
@@ -348,15 +353,9 @@ func (store *Store) OverseerSnapshotForAttempt(ctx context.Context, digest Attem
 			return OverseerSnapshot{}, ErrCorruptState
 		}
 		// A yielded run is terminal while its question stays replyable; only
-		// the waiting or queued continuation makes that state valid.
-		if run.Phase == RunTerminal {
-			continuation, yielded, err := humanRequestContinuation(ctx, read.connection, humanRequest, run)
-			if err != nil {
-				return OverseerSnapshot{}, err
-			}
-			if !yielded || continuation.State != ContinuationWaiting && continuation.State != ContinuationQueued {
-				return OverseerSnapshot{}, ErrCorruptState
-			}
+		// the waiting continuation makes that state valid.
+		if run.Phase == RunTerminal && humanRequest.Continuation != ContinuationWaiting {
+			return OverseerSnapshot{}, ErrCorruptState
 		}
 		result.Questions = append(result.Questions, OverseerQuestion{ID: humanRequest.ID, AgentID: run.AgentID, TaskID: run.TaskID, Status: humanRequest.Status, Revision: humanRequest.Revision, Question: humanRequest.QuestionText})
 	}
@@ -471,7 +470,7 @@ func overseerRun(ctx context.Context, connection *sql.Conn, digest AttemptDigest
 // orchestrator's project. The task identity remains the durable idempotency
 // key; a retry with different immutable task data conflicts.
 func (store *Store) EnqueueTaskForOverseer(ctx context.Context, digest AttemptDigest, spec NewTask, at UnixMillis) (Task, error) {
-	if err := validateNewTask(spec); err != nil {
+	if err := validateNonCarrierTask(spec); err != nil {
 		return Task{}, err
 	}
 	tx, err := store.beginValidatedWrite(ctx)

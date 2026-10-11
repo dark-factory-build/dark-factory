@@ -52,7 +52,7 @@ export function ProductionPanel({ items, selected, onSelect, state, call, connec
   };
   const project = item && state?.projects.get(item.projectId), owner = item?.tasks.map((id) => taskFor(item, id)).find(Boolean)?.assigned_agent_id, ownerAgent = owner ? state?.agents.get(owner) : undefined;
   return <section className="dfConsoleSidebar__panel dfProduction" aria-label="Production inspection">
-    {!connected || error ? <details className="dfProduction__notice"><summary>{!connected ? "Last observed state" : "Observation needs attention"}</summary>{!connected ? <p>Disconnected. This is the last observed state.</p> : null}{error ? <p role="alert">{error}</p> : null}</details> : null}
+    {(!connected && state) || error ? <details className="dfProduction__notice"><summary>{!connected && state ? "Last observed state" : "Observation needs attention"}</summary>{!connected && state ? <p>Disconnected. This is the last observed state.</p> : null}{error ? <p role="alert">{error}</p> : null}</details> : null}
     {item ? <article className="dfProduction__detail" aria-label={`Production details for ${title(item)}`}>
       <IconButton icon="chevron-left" className="dfConsoleBack" onClick={back}>Back to Work</IconButton><h3>{title(item)}</h3><p className="dfProduction__stages">{productionStages(item).map((stage) => <Status stage={stage} key={stage} />)}</p><p>{item.nextAction}</p>
       {sourceStatus(item) ? <p role="status">{sourceStatus(item)}</p> : null}

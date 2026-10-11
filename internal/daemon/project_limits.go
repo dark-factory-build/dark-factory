@@ -23,8 +23,7 @@ const (
 // finalizing, which its live owner answers by stopping the provider, as for
 // an operator stop. Every edge is CAS-protected: a result or stop that won
 // first is left untouched. A run that never started and an overseer past its
-// limit are retried once, by their finalization (kernel.NeverStartedRunDetail,
-// kernel.OverseerRunLimitDetail).
+// limit are retried once, by their finalization (kernel.FailureTransient).
 func (daemon *Daemon) enforceRunLiveness(ctx context.Context, spec SupervisorSpec) error {
 	at, err := daemon.timestamp()
 	if err != nil {
@@ -34,7 +33,7 @@ func (daemon *Daemon) enforceRunLiveness(ctx context.Context, spec SupervisorSpe
 	if err != nil {
 		return err
 	}
-	overseerLimit, err := kernel.NewFailureProposal(kernel.FailureProtocol, kernel.OverseerRunLimitDetail)
+	overseerLimit, err := kernel.NewFailureProposal(kernel.FailureTransient, kernel.OverseerRunLimitDetail)
 	if err != nil {
 		return err
 	}
@@ -68,15 +67,16 @@ func (daemon *Daemon) enforceRunLiveness(ctx context.Context, spec SupervisorSpe
 			continue
 		}
 		_, _, output := attempt.diagnosticSnapshot()
-		detail := kernel.NeverStartedRunDetail
+		code, detail := kernel.FailureTransient, kernel.NeverStartedRunDetail
 		if !attempt.neverStarted() {
+			code = kernel.FailureProtocol
 			dropped := len(output) > 512
 			if dropped {
 				output = output[len(output)-512:]
 			}
 			detail = stalledRunDetail + terminalTextProjection(output, dropped, 512)
 		}
-		proposal, err := kernel.NewFailureProposal(kernel.FailureProtocol, detail)
+		proposal, err := kernel.NewFailureProposal(code, detail)
 		if err != nil {
 			return err
 		}

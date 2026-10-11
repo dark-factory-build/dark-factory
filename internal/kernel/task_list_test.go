@@ -10,6 +10,7 @@ import (
 )
 
 func TestCompletedWorkDoesNotFillActiveSnapshotAndPagesIndependently(t *testing.T) {
+	t.Parallel()
 	store, _, project, agent := newAdmissionStore(t, RoleOrchestrator, 2)
 	defer store.Close()
 	ctx := context.Background()
@@ -64,6 +65,7 @@ func TestCompletedWorkDoesNotFillActiveSnapshotAndPagesIndependently(t *testing.
 }
 
 func TestPublicQueueOrderMatchesAdmissionForTiedPriorities(t *testing.T) {
+	t.Parallel()
 	store, _, project, agent := newAdmissionStore(t, RoleOrchestrator, 2)
 	defer store.Close()
 	ctx := context.Background()
@@ -84,6 +86,7 @@ func TestPublicQueueOrderMatchesAdmissionForTiedPriorities(t *testing.T) {
 }
 
 func TestPublicQueueKeepsReplacementAheadOnlyWithinItsAgent(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	store, running, _ := runningWorkerRun(t)
 	defer store.Close()
@@ -139,6 +142,7 @@ func TestPublicQueueKeepsReplacementAheadOnlyWithinItsAgent(t *testing.T) {
 }
 
 func TestProjectTaskListPagesEveryAgentInOneProject(t *testing.T) {
+	t.Parallel()
 	store, _, project, first := newAdmissionStore(t, RoleOrchestrator, 2)
 	defer store.Close()
 	ctx := context.Background()

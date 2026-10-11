@@ -8,6 +8,7 @@ import (
 )
 
 func TestTerminalDiagnosticsSurviveRestartAndRemainBounded(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	store, run, keys := runningOrchestratorRun(t)
 	path := storePath(t, store)
@@ -41,6 +42,7 @@ func TestTerminalDiagnosticsSurviveRestartAndRemainBounded(t *testing.T) {
 }
 
 func TestTerminalDiagnosticsKeepOnlyTheNewestRows(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	store, run, keys := runningOrchestratorRun(t)
 	defer store.Close()

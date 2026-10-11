@@ -1,4 +1,5 @@
 import type { SceneTask } from "../console-view.js";
+import { fromTray } from "./messages.js";
 import { hash } from "./appearance.js";
 import type { ScenePoint, SceneWorker } from "./scene.js";
 
@@ -95,8 +96,7 @@ const quoted = (title: string) => title.length <= 36 ? title : `${title.slice(0,
 /** Things worth saying about this floor, each of them true of it right now. */
 export function gossip(workers: readonly SceneWorker[], tasks: readonly SceneTask[]): readonly Remark[] {
   const named = new Map(workers.map((worker) => [worker.id, worker.name]));
-  const count = (status: SceneTask["status"]) => tasks.filter((task) => task.status === status).length;
-  const queued = count("queued"), blocked = count("blocked");
+  const queued = tasks.filter((task) => task.status === "queued" && fromTray(task)).length, blocked = tasks.filter((task) => task.status === "blocked").length;
   return [
     ...tasks.flatMap((task) => task.status === "running" && named.has(task.agentId) ? [{ line: `${named.get(task.agentId)} has “${quoted(task.title)}”.`, reply: "Rather them than me.", about: [task.agentId] }] : []),
     ...workers.flatMap((worker) => worker.activity === "needs-you" ? [{ line: `${worker.name} is still waiting on an answer.`, reply: "Aren't we all.", about: [worker.id] }]

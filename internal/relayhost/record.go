@@ -31,6 +31,10 @@ const (
 	// RecordIngest is relay to host only and always uses connection 0: one
 	// authenticated OTLP traces push, a flags byte then the body.
 	RecordIngest RecordType = 0x08
+	// RecordConsole is host to relay only and always uses connection 0. Its
+	// payload is this build's signed console bundle (SignConsole), sent once
+	// per connection.
+	RecordConsole RecordType = 0x09
 )
 
 const (
@@ -38,6 +42,8 @@ const (
 	MaxHostMessageBytes = 4 << 20
 	// MaxPublicWorldBytes bounds one PUBLISH payload, exactly as the relay does.
 	MaxPublicWorldBytes = 128 << 10
+	// MaxConsoleBytes bounds one CONSOLE payload, exactly as the relay does.
+	MaxConsoleBytes = 1 << 20
 	// maxRecordPayloadBytes bounds one record payload: the 1 MiB snapshot
 	// bound plus the envelope slack the relay contract allows.
 	maxRecordPayloadBytes = (1 << 20) + 64
@@ -62,7 +68,7 @@ type Record struct {
 }
 
 func (kind RecordType) known() bool {
-	return kind >= RecordOpen && kind <= RecordIngest
+	return kind >= RecordOpen && kind <= RecordConsole
 }
 
 // AppendRecord appends the wire encoding of one record to dst.

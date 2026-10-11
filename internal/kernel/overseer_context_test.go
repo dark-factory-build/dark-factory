@@ -7,6 +7,7 @@ import (
 )
 
 func TestOverseerPriorContextRemainsReadableAfterUnproductivePass(t *testing.T) {
+	t.Parallel()
 	for _, outcome := range []string{"blocked", "failed", "failed-review", "empty-failure", "cancelled", "sent-back", "empty-success"} {
 		t.Run(outcome, func(t *testing.T) {
 			ctx := context.Background()
@@ -71,7 +72,7 @@ func TestOverseerPriorContextRemainsReadableAfterUnproductivePass(t *testing.T) 
 				if err != nil || !found {
 					t.Fatalf("task: %v", err)
 				}
-				if _, err = store.SendBackTask(ctx, task.ID, task.Revision, "correction", mustTime(t, 320)); err != nil {
+				if _, err = store.SendBackTask(ctx, task.ID, task.Revision, changeHead(t, store, task.ID), "correction", mustTime(t, 320)); err != nil {
 					t.Fatal(err)
 				}
 			}

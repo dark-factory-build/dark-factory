@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/rand"
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"maps"
@@ -29,21 +30,30 @@ const (
 // overseer acts on it (a blocked or failed worker task, an unanswered worker
 // question, finished work not yet published or corrected behind its open pull
 // request, a pull request factoryd escalated while it stays open at the
-// escalated head); a succeeded worker task, and a Change factoryd could not
-// publish (it has no pull request), need one look. An accepted intake task
-// that succeeded with a diff needs none: factoryd publishes it, and the
-// Change item covers a publication that never happens. An intake task the
+// escalated head, the newest self-release while it failed or retries a
+// failure); a succeeded worker task needs one look. A failed release is
+// keyed by its cause and dated by when it first failed so, which factoryd
+// carries over every release that fails the same way, a same-commit retry
+// included (RecordDelivery): it wakes once, never re-wakes, and so becomes
+// one NEEDS YOU card. So does a pull request waiting on its code owner's
+// approval, which no overseer can give. An accepted intake task that succeeded with a diff (or
+// whose published Change was since reclaimed) needs none: factoryd publishes
+// it, and the Change item covers a publication that never happens. While
+// factoryd records
+// that Change revision's publication refused, the item is that refusal, at the
+// Change's version however often the hourly retry repeats it. An intake task the
 // overseer could retry (an automatic end) is an item too; an operator's cancel
 // and a withdrawn issue's task are not. An item is due when
 // no carrier named it since that version; after that, at most once per
 // OverseerRewakeAfter, while no carrier that named it started (one look), or
-// while it persists and fewer than four did: one wake and three re-wakes per
-// item version, once the newest due item is overseerWakeSettle old or the
-// oldest overseerWakeMaxDelay old. A persistent item past its re-wakes is
-// stalled (overseerStalledItems).
+// while it persists and at most its rewakes did: one wake and three re-wakes
+// per item version (none for a refused publication, which an overseer cannot
+// retry), once the newest due item is overseerWakeSettle old or the oldest
+// overseerWakeMaxDelay old. A persistent item past its re-wakes is stalled
+// (overseerStalledItems).
 const overseerWakeItems = overseerItems + `SELECT id IS NULL, CASE WHEN id IS NULL THEN detail ELSE (` + overseerWakeLine + `) END, item_key, (` + overseerWakeCounts + `)
 FROM (SELECT *, MIN(version) OVER () AS oldest, MAX(version) OVER () AS newest FROM counted
-	WHERE named = 0 OR named_at + ?6 <= ?3 AND (wakes = 0 OR persistent AND wakes < 4)) AS due
+	WHERE named = 0 OR named_at + ?6 <= ?3 AND (wakes = 0 OR wakes <= rewakes)) AS due
 WHERE ?3 - newest >= ?7 OR ?3 - oldest >= ?8
 ORDER BY version LIMIT 33`
 
@@ -51,65 +61,108 @@ ORDER BY version LIMIT 33`
 // carrier task that last named it and whether OverseerRewakeAfter has passed
 // since any wake named it. It takes the wake query's arguments; ?7 and ?8 are
 // named only so the counts agree.
-const overseerStalledItems = overseerItems + `SELECT last, CASE WHEN id IS NULL THEN 'Escalated: ' || detail || ' ' || item_key ELSE (` + overseerWakeLine + `) END,
-	named_at + ?6 <= ?3 FROM counted AS due WHERE persistent AND wakes >= 4 AND ?7 + ?8 >= 0 ORDER BY last, version`
+const overseerStalledItems = overseerItems + `SELECT last, CASE WHEN id IS NULL THEN detail || ' ' || item_key ELSE (` + overseerWakeLine + `) END,
+	named_at + ?6 <= ?3 FROM counted AS due WHERE wakes > rewakes AND ?7 + ?8 >= 0 ORDER BY last, version`
 
-const overseerItems = `WITH carrier AS (SELECT t.id AS task, t.created_at_ms AS at, t.body,
+const overseerItems = `WITH carrier AS MATERIALIZED (SELECT t.id AS task, t.created_at_ms AS at, substr(t.body, instr(t.body, 'Factory causal wake: ')) AS names,
+	instr(t.body, 'wake: mode=targeted;') > 0 AS targeted,
 	EXISTS (SELECT 1 FROM runs AS r WHERE r.task_id = t.id AND r.terminal_detail IS NOT ?9 AND r.terminal_detail IS NOT ?10) AS started
 	FROM tasks AS t WHERE t.assigned_agent_id = ?4 AND t.title = ?5),
 item AS (
-	SELECT t.id, t.updated_at_ms AS version, t.status IN ('blocked', 'failed') AS persistent, '' AS detail, lower(hex(t.id)) AS item_key
+	SELECT t.id, t.updated_at_ms AS version, CASE WHEN t.status IN ('blocked', 'failed') THEN 3 END AS rewakes, '' AS detail, lower(hex(t.id)) AS item_key
 	FROM tasks AS t JOIN agents AS a ON a.id = t.assigned_agent_id
-	WHERE t.project_id = ?1 AND a.role = 'worker' AND t.status IN ('succeeded', 'blocked', 'failed') AND NOT ` + taskIssueWithdrawn + `
+	WHERE t.project_id = ?1 AND a.role = 'worker' AND t.status IN ('succeeded', 'blocked', 'failed') AND NOT ` + taskIssueWithdrawn + ` AND NOT ` + specialistCarrierSQL + `
 	  AND NOT (t.status = 'succeeded' AND EXISTS (SELECT 1 FROM intake_task_bindings AS b WHERE b.task_id = t.id)
-	      AND EXISTS (SELECT 1 FROM changes AS c WHERE c.task_id = t.id AND c.head_commit <> c.base_commit))
-	UNION ALL SELECT r.task_id, h.created_at_ms, 1, '', lower(hex(r.task_id)) FROM human_requests AS h JOIN runs AS r ON r.id = h.run_id
+	      AND EXISTS (SELECT 1 FROM changes AS c WHERE c.task_id = t.id AND (c.head_commit <> c.base_commit OR c.phase = 'abandoned' AND EXISTS (SELECT 1 FROM publication_tasks p WHERE p.task_id = t.id))))
+	UNION ALL SELECT r.task_id, h.created_at_ms, 3, '', lower(hex(r.task_id)) FROM human_requests AS h JOIN runs AS r ON r.id = h.run_id
 	WHERE r.project_id = ?1 AND r.role = 'worker' AND h.status IN ('open', 'delivering', 'delivery_unknown')
-	UNION ALL SELECT c.task_id, c.updated_at_ms, 1, '', lower(hex(c.task_id)) FROM changes AS c JOIN tasks AS t ON t.id = c.task_id
+	UNION ALL SELECT CASE WHEN f.identity IS NULL THEN c.task_id END, c.updated_at_ms, CASE WHEN f.identity IS NULL THEN 3 ELSE 0 END,
+	  printf('Escalated: factoryd cannot publish change %s for task %s: %s', lower(hex(c.id)), lower(hex(c.task_id)), json_extract(f.document, '$.detail')),
+	  COALESCE('[reviewer:' || f.identity || ']', lower(hex(c.task_id))) FROM changes AS c JOIN tasks AS t ON t.id = c.task_id
+	LEFT JOIN production_records AS f ON f.project_id = c.project_id AND f.kind = 'reviewer' AND f.identity = 'publish-' || lower(hex(c.id)) || '-' || c.revision
 	WHERE c.project_id = ?1 AND t.status = 'succeeded' AND c.head_commit IS NOT NULL AND c.base_commit IS NOT NULL
+	  AND NOT EXISTS (SELECT 1 FROM agents AS a WHERE a.id = t.assigned_agent_id AND ` + specialistCarrierSQL + `)
 	  AND c.head_commit <> c.base_commit AND c.updated_at_ms + ?2 <= ?3
 	  AND (NOT EXISTS (SELECT 1 FROM publication_tasks AS p WHERE p.change_id = c.id)
 	       OR EXISTS (SELECT 1 FROM publication_tasks AS p JOIN production_records AS r
 	           ON r.project_id = p.project_id AND r.repository = p.repository AND r.kind = 'pull_request' AND r.identity = CAST(p.pull_number AS TEXT)
 	           WHERE p.change_id = c.id AND json_extract(r.document, '$.state') = 'open' AND c.updated_at_ms > p.created_at_ms))
-	UNION ALL SELECT t.id, t.updated_at_ms, 1, '', lower(hex(t.id)) FROM tasks AS t
+	UNION ALL SELECT t.id, t.updated_at_ms, 3, '', lower(hex(t.id)) FROM tasks AS t
 	JOIN intake_task_bindings AS b ON b.task_id = t.id
 	JOIN intake_acceptances AS i ON i.id = b.acceptance_id
 	JOIN agents AS o ON o.id = i.overseer_agent_id
 	WHERE t.project_id = ?1 AND o.id = ?4 AND ` + taskEndedAutomatically + ` AND NOT ` + taskIssueWithdrawn + `
-	UNION ALL SELECT NULL, e.observed_at_ms, 1, json_extract(e.document, '$.escalation'), '[reviewer:' || e.identity || ']' FROM production_records AS e
+	UNION ALL SELECT NULL, e.observed_at_ms, CASE WHEN json_extract(e.document, '$.owner_approval') THEN 0 ELSE 3 END,
+	  'Escalated: ' || json_extract(e.document, '$.escalation'), '[reviewer:' || e.identity || ']' FROM production_records AS e
 	JOIN production_records AS p ON p.project_id = e.project_id AND p.repository = e.repository AND p.kind = 'pull_request'
 	  AND p.identity = CAST(json_extract(e.document, '$.request.PullNumber') AS TEXT)
 	WHERE e.project_id = ?1 AND e.kind = 'reviewer' AND COALESCE(json_extract(e.document, '$.escalation'), '') <> ''
 	  AND COALESCE(json_extract(e.document, '$.route_pending'), 0) = 0 AND json_extract(p.document, '$.state') = 'open'
 	  AND lower(json_extract(p.document, '$.head')) = lower(json_extract(e.document, '$.request.Head'))
-	UNION ALL SELECT NULL, observed_at_ms, 0, json_extract(document, '$.escalation'), '[reviewer:' || identity || ']' FROM production_records
-	WHERE project_id = ?1 AND kind = 'reviewer' AND json_extract(document, '$.state') = 'publish_failed'
-	  AND COALESCE(json_extract(document, '$.escalation'), '') <> ''),
-counted AS (SELECT item.*, (SELECT count(*) FROM carrier WHERE ` + overseerWakeNames + `) AS named,
-	(SELECT MAX(at) FROM carrier WHERE ` + overseerWakeNames + `) AS named_at,
-	(SELECT count(*) FROM carrier WHERE started AND ` + overseerWakeNames + `) AS wakes,
-	(SELECT task FROM carrier WHERE started AND ` + overseerWakeNames + ` ORDER BY at DESC LIMIT 1) AS last FROM item)
+	UNION ALL SELECT NULL, COALESCE(json_extract(d.document, '$.failed_at'), d.observed_at_ms), 0, CASE json_extract(d.document, '$.state')
+	  WHEN 'failed' THEN printf('Escalated: factoryd %s failed in phase %s: %s', d.identity, json_extract(d.document, '$.phase'), replace(json_extract(d.document, '$.reason'), char(10), ' '))
+	  ELSE printf('Escalated: factoryd %s is %s after a release failed in phase %s', d.identity, json_extract(d.document, '$.state'), replace(json_extract(d.document, '$.cause'), char(10), ' ')) END,
+	  '[release:' || lower(hex(json_extract(d.document, '$.cause'))) || ']'
+	FROM (SELECT * FROM production_records WHERE project_id = ?1 AND kind = 'delivery' AND identity LIKE 'release:%' ORDER BY observed_at_ms DESC LIMIT 1) AS d
+	WHERE json_extract(d.document, '$.state') <> 'verified' AND COALESCE(json_extract(d.document, '$.cause'), '') <> ''
+	UNION ALL SELECT NULL, c.created_at_ms, 3, 'Proposal ' || lower(hex(c.id)) || ' from ' || COALESCE((SELECT name FROM agents WHERE id = ` + authorAgentSQL + `), 'the operator') || ': '
+		|| replace(substr(c.title, 1, 100), char(10), ' ') || ` + proposalNotesSQL + `, '[proposal:' || lower(hex(c.id)) || ']'
+	FROM project_content_revisions AS c WHERE c.project_id = ?1 AND ` + openProposalSQL + `
+	UNION ALL SELECT NULL, json_extract(value, '$.since'), 3, json_extract(value, '$.detail'), '[health:' || json_extract(value, '$.key') || ']' FROM json_each(?11)),
+numbered AS (SELECT *, row_number() OVER () AS n FROM item),
+counted AS (SELECT numbered.*, count(at) AS named, MAX(at) AS named_at, count(CASE WHEN started THEN 1 END) AS wakes,
+	unhex(substr(MAX(CASE WHEN started THEN printf('%020d', at) || hex(task) END), 21)) AS last
+	FROM numbered LEFT JOIN carrier ON ` + overseerWakeNames + ` GROUP BY n)
 `
+
+// proposalNotesSQL names, after proposal c's title, the contributions and
+// challenges other records attach to it by record_id, and who wrote them, so
+// the overseer weighs them when it decides and prioritises.
+const proposalNotesSQL = `COALESCE((SELECT ' (' || count(*) || ' notes from ' || group_concat(DISTINCT COALESCE(a.name, 'the operator')) || ')'
+		FROM project_content_revisions AS n LEFT JOIN agents AS a ON a.id = unhex(substr(n.author, instr(n.author, ' agent:') + 7, 32))
+		WHERE n.project_id = c.project_id AND n.kind = 'observation' AND n.deprecated = 0
+		  AND n.revision = (SELECT MAX(revision) FROM project_content_revisions WHERE id = n.id)
+		  AND json_extract(CASE WHEN json_valid(n.source_references) THEN n.source_references ELSE '{}' END, '$.record_type') = 'contribution'
+		  AND lower(json_extract(CASE WHEN json_valid(n.source_references) THEN n.source_references ELSE '{}' END, '$.record_id')) = lower(hex(c.id))
+		HAVING count(*) > 0), '')`
+
+// OverseerHealth is a factoryd health condition held only in memory (the
+// owner's GitHub quota, an intake source's sync, the Maintainer's answers),
+// for every project when Project is zero. While held it is an overseer item
+// keyed [health:Key] at the version it began, so it wakes, re-wakes and
+// stalls into the operator's card like an escalation.
+type OverseerHealth struct {
+	Project     ProjectID
+	Key, Detail string
+	Since       UnixMillis
+}
 
 // overseerWakeNames is a carrier since the item's version that named it, by
 // its key (a task identity, or an escalation's reviewer record), or that named
 // no item at all (a full reconciliation, or a bare instruction when the causal
-// record overflowed).
-const overseerWakeNames = `at > version AND (NOT instr(body, 'wake: mode=targeted;') OR instr(body, item_key))`
+// record overflowed). Keys are searched only in the causal record (names),
+// never the standing instruction: scanning every carrier's whole body for
+// every item made each wake tick hold the writer for tens of seconds.
+const overseerWakeNames = `at > version AND (NOT targeted OR instr(names, item_key))`
 
 // EnqueueOverseerWakeups applies one level-triggered rule to each standing
 // overseer: while it has no unfinished wake carrier and some item is due, it
 // gets one carrier naming the due items (see overseerWakeItems), and the items
 // it left stalled become the operator's NEEDS YOU card (raiseStalledItems).
-func (store *Store) EnqueueOverseerWakeups(ctx context.Context, at UnixMillis) ([]Task, error) {
+// Each specialist without an unfinished carrier or an exhausted budget gets
+// one when specialistSchedule says it is due.
+func (store *Store) EnqueueOverseerWakeups(ctx context.Context, at UnixMillis, health ...OverseerHealth) ([]Task, error) {
 	tx, err := store.beginUncheckedWrite(ctx)
 	if err != nil {
 		return nil, err
 	}
 	defer tx.Close()
+	factory, err := factoryState(ctx, tx.connection)
+	if err != nil {
+		return nil, tx.Rollback(err)
+	}
 	rows, err := tx.connection.QueryContext(ctx, `SELECT `+agentColumns+` FROM agents AS a
-		WHERE role = 'orchestrator' AND idle_policy = 'standing_instruction' AND paused = 0 AND archived = 0
+		WHERE idle_policy = 'standing_instruction' AND paused = 0 AND archived = 0
 		  AND NOT EXISTS (SELECT 1 FROM tasks WHERE assigned_agent_id = a.id AND title = ? AND status IN ('queued', 'running'))
 		ORDER BY id`, overseerWakeTitle)
 	if err != nil {
@@ -144,27 +197,69 @@ func (store *Store) EnqueueOverseerWakeups(ctx context.Context, at UnixMillis) (
 		return validateDurableControls(ctx, tx.connection)
 	}
 	var tasks []Task
+	changed := false
 	for _, agent := range agents {
-		if err := raiseStalledItems(ctx, tx, agent, at, validate); err != nil {
-			return nil, tx.Rollback(err)
-		}
-		body, due, err := overseerWake(ctx, tx.connection, agent, at.Int64())
+		cursor, found, err := overseerWakeCursor(ctx, tx.connection, agent.ID)
 		if err != nil {
 			return nil, tx.Rollback(err)
 		}
-		if !due {
+		// A cursor is deliberately not advanced while a carrier is queued or
+		// running. Events arriving during the provider run therefore remain
+		// visible to the next wake instead of being lost at the poll boundary.
+		if !found {
+			cursor = 0
+		}
+		var active int
+		if err := tx.connection.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM tasks WHERE assigned_agent_id = ? AND title = ? AND status IN ('queued', 'running'))`, agent.ID.Bytes(), overseerWakeTitle).Scan(&active); err != nil {
+			return nil, tx.Rollback(err)
+		}
+		if active != 0 {
 			continue
 		}
-		if err := validate(); err != nil {
-			return nil, tx.Rollback(err)
+		var body string
+		due, priority := false, int64(overseerWakePriority)
+		if agent.Specialist() {
+			state, prior, events, err := specialistSchedule(ctx, tx.connection, agent)
+			if err != nil {
+				return nil, tx.Rollback(err)
+			}
+			if due = state.Waiting == "" && state.NextReviewAt <= at.Int64(); due {
+				if body, err = specialistWake(ctx, tx.connection, agent, state, prior, events); err != nil {
+					return nil, tx.Rollback(err)
+				}
+			}
+			priority = specialistWakePriority
+		} else {
+			if err := raiseStalledItems(ctx, tx, agent, at, health, validate); err != nil {
+				return nil, tx.Rollback(err)
+			}
+			var err error
+			if body, due, err = overseerWake(ctx, tx.connection, agent, at.Int64(), health); err != nil {
+				return nil, tx.Rollback(err)
+			}
 		}
-		task, err := enqueueStandingTaskWithBody(ctx, tx.connection, agent, body, at)
-		if err != nil {
-			return nil, tx.Rollback(err)
+		if !due {
+			// The cursor still records that this quiet poll inspected the current
+			// journal head; no task is created and no provider run can start.
+		} else {
+			if err := validate(); err != nil {
+				return nil, tx.Rollback(err)
+			}
+			task, err := enqueueStandingTaskWithBody(ctx, tx.connection, agent, body, priority, at)
+			if err != nil {
+				return nil, tx.Rollback(err)
+			}
+			tasks = append(tasks, task)
+			changed = true
 		}
-		tasks = append(tasks, task)
+		if cursor != factory.Head.Int64() || !found {
+			if err := setOverseerWakeCursor(ctx, tx.connection, agent, factory.Head.Int64()); err != nil {
+				return nil, tx.Rollback(err)
+			}
+			changed = true
+		}
 	}
-	if !validated {
+	if !validated && !changed {
 		return nil, tx.Rollback(nil)
 	}
 	if err := tx.Commit(ctx); err != nil {
@@ -173,9 +268,41 @@ func (store *Store) EnqueueOverseerWakeups(ctx context.Context, at UnixMillis) (
 	return tasks, nil
 }
 
-func overseerItemArgs(agent Agent, at int64) []any {
+func overseerWakeCursor(ctx context.Context, connection *sql.Conn, agentID AgentID) (int64, bool, error) {
+	var sequence int64
+	err := connection.QueryRowContext(ctx, `SELECT invalidation_sequence FROM overseer_wake_cursors WHERE agent_id = ?`, agentID.Bytes()).Scan(&sequence)
+	if err == sql.ErrNoRows {
+		return 0, false, nil
+	}
+	if err != nil {
+		return 0, false, err
+	}
+	if sequence < 0 {
+		return 0, false, fmt.Errorf("%w: invalid overseer wake cursor", ErrCorruptState)
+	}
+	return sequence, true, nil
+}
+
+func setOverseerWakeCursor(ctx context.Context, connection *sql.Conn, agent Agent, sequence int64) error {
+	if sequence < 0 {
+		return fmt.Errorf("%w: invalid overseer wake cursor", ErrInvalidValue)
+	}
+	_, err := connection.ExecContext(ctx, `INSERT INTO overseer_wake_cursors(agent_id, project_id, invalidation_sequence) VALUES(?, ?, ?)
+		ON CONFLICT(agent_id) DO UPDATE SET project_id = excluded.project_id, invalidation_sequence = excluded.invalidation_sequence`, agent.ID.Bytes(), agent.ProjectID.Bytes(), sequence)
+	return err
+}
+
+func overseerItemArgs(agent Agent, at int64, health []OverseerHealth) []any {
+	held := []map[string]any{}
+	for _, condition := range health {
+		if condition.Project.zero() || condition.Project == agent.ProjectID {
+			since := time.UnixMilli(condition.Since.Int64()).UTC().Format(time.RFC3339)
+			held = append(held, map[string]any{"key": condition.Key, "since": condition.Since.Int64(), "detail": "Health since " + since + ": " + condition.Detail})
+		}
+	}
+	encoded, _ := json.Marshal(held)
 	return []any{agent.ProjectID.Bytes(), PublicationAttentionAfter.Milliseconds(), at, agent.ID.Bytes(), overseerWakeTitle,
-		OverseerRewakeAfter.Milliseconds(), overseerWakeSettle.Milliseconds(), overseerWakeMaxDelay.Milliseconds(), NeverStartedRunDetail, ProviderCapacityRunDetail}
+		OverseerRewakeAfter.Milliseconds(), overseerWakeSettle.Milliseconds(), overseerWakeMaxDelay.Milliseconds(), NeverStartedRunDetail, ProviderCapacityRunDetail, string(encoded)}
 }
 
 // stalledItemKey is the idempotency key of the one stalled-item card a
@@ -190,9 +317,9 @@ var stalledItemKey = [IDBytes]byte([]byte("stalled item key"))
 // most one such card; one still unfinished, or already carrying a request,
 // waits. A card closes only once none of its carrier's items is stalled, so
 // a later wake that moves an item's timing never strands it uncarded.
-func raiseStalledItems(ctx context.Context, tx *writeTx, agent Agent, at UnixMillis, validate func() error) error {
+func raiseStalledItems(ctx context.Context, tx *writeTx, agent Agent, at UnixMillis, health []OverseerHealth, validate func() error) error {
 	connection := tx.connection
-	rows, err := connection.QueryContext(ctx, overseerStalledItems, overseerItemArgs(agent, at.Int64())...)
+	rows, err := connection.QueryContext(ctx, overseerStalledItems, overseerItemArgs(agent, at.Int64(), health)...)
 	if err != nil {
 		return err
 	}
@@ -239,19 +366,16 @@ func raiseStalledItems(ctx context.Context, tx *writeTx, agent Agent, at UnixMil
 		if err := validate(); err != nil {
 			return err
 		}
-		question := "The overseer was woken four times and left these unresolved. Reply to wake it with your decision, or cancel to leave them to you.\n" + strings.Join(lines[carrier], "\n")
+		question := "The overseer was woken and left these unresolved. Reply to wake it with your decision, or cancel to leave them to you.\n" + strings.Join(lines[carrier], "\n")
 		var request [IDBytes]byte
 		if _, err := rand.Read(request[:]); err != nil {
 			return err
 		}
-		if _, err := connection.ExecContext(ctx, `INSERT INTO human_requests(id, run_id, idempotency_key, kind, reason_code, question_text, options_json, status, revision, created_at_ms, updated_at_ms) VALUES(?, ?, ?, 'question', 'provider_question', ?, '[]', 'open', 1, ?, ?)`,
+		if _, err := connection.ExecContext(ctx, `INSERT INTO human_requests(id, run_id, idempotency_key, kind, reason_code, question_text, options_json, status, revision, created_at_ms, updated_at_ms, continuation) VALUES(?, ?, ?, 'question', 'provider_question', ?, '[]', 'open', 1, ?, ?, 'waiting')`,
 			request[:], run, stalledItemKey[:], strings.ToValidUTF8(question[:min(len(question), MaxHumanRequestQuestionBytes)], ""), at.Int64(), at.Int64()); err != nil {
 			return err
 		}
 		if err := appendInvalidations(ctx, connection, at, []pendingInvalidation{{kind: EntityHumanRequest, id: request[:], revision: 1}}); err != nil {
-			return err
-		}
-		if _, err := insertWaitingContinuation(ctx, connection, task, ConditionHumanRequest, ContinuationConditionID(request), Revision{value: 1}, at); err != nil {
 			return err
 		}
 	}
@@ -282,27 +406,88 @@ func raiseStalledItems(ctx context.Context, tx *writeTx, agent Agent, at UnixMil
 		if err != nil || !found {
 			return errors.Join(err, ErrCorruptState)
 		}
-		run, found, err := runByID(ctx, connection, request.RunID)
-		if err != nil || !found {
-			return errors.Join(err, ErrCorruptState)
-		}
-		continuation, found, err := humanRequestContinuation(ctx, connection, request, run)
-		if err != nil || !found {
-			return errors.Join(err, ErrCorruptState)
-		}
 		if err := validate(); err != nil {
 			return err
 		}
-		if err := cancelHumanContinuationOnConnection(ctx, tx, request, continuation, at); err != nil {
+		if err := cancelHumanContinuationOnConnection(ctx, tx, request, at); err != nil {
 			return err
 		}
 	}
 	return nil
 }
 
+// OverseerItem is one of an overseer's items as the operator sees it: Due in
+// its next wake (Line as the wake names it), or stalled since Carrier last
+// named it.
+type OverseerItem struct {
+	Agent   AgentID
+	Due     bool
+	Line    string
+	Carrier []byte
+}
+
+// OverseerItems reads, for each standing overseer of project, the items its
+// next wake names and the items it left stalled, by the wake's own queries.
+func (store *Store) OverseerItems(ctx context.Context, project ProjectID, at UnixMillis, health ...OverseerHealth) ([]OverseerItem, error) {
+	read, err := store.beginRead(ctx)
+	if err != nil {
+		return nil, err
+	}
+	defer read.Close()
+	rows, err := read.connection.QueryContext(ctx, `SELECT `+agentColumns+` FROM agents WHERE project_id = ? AND role = 'orchestrator' AND idle_policy = 'standing_instruction' AND archived = 0 ORDER BY id`, project.Bytes())
+	if err != nil {
+		return nil, err
+	}
+	var agents []Agent
+	for rows.Next() {
+		agent, found, err := scanAgent(rows)
+		if err != nil || !found {
+			return nil, errors.Join(err, ErrCorruptState, rows.Close())
+		}
+		agents = append(agents, agent)
+	}
+	if err := errors.Join(rows.Err(), rows.Close()); err != nil {
+		return nil, err
+	}
+	var items []OverseerItem
+	for _, agent := range agents {
+		for _, due := range []bool{true, false} {
+			query := overseerStalledItems
+			if due {
+				query = overseerWakeItems
+			}
+			rows, err := read.connection.QueryContext(ctx, query, overseerItemArgs(agent, at.Int64(), health)...)
+			if err != nil {
+				return nil, err
+			}
+			for rows.Next() {
+				item := OverseerItem{Agent: agent.ID, Due: due}
+				var escalation, ripe bool
+				var key, counts string
+				if due {
+					err = rows.Scan(&escalation, &item.Line, &key, &counts)
+				} else {
+					err = rows.Scan(&item.Carrier, &item.Line, &ripe)
+				}
+				if err != nil {
+					return nil, errors.Join(err, rows.Close())
+				}
+				if escalation {
+					item.Line += " " + key
+				}
+				items = append(items, item)
+			}
+			if err := errors.Join(rows.Err(), rows.Close()); err != nil {
+				return nil, err
+			}
+		}
+	}
+	return items, nil
+}
+
 // overseerWake returns the carrier body for agent's due items, if any.
-func overseerWake(ctx context.Context, connection *sql.Conn, agent Agent, at int64) (string, bool, error) {
-	rows, err := connection.QueryContext(ctx, overseerWakeItems, overseerItemArgs(agent, at)...)
+func overseerWake(ctx context.Context, connection *sql.Conn, agent Agent, at int64, health []OverseerHealth) (string, bool, error) {
+	rows, err := connection.QueryContext(ctx, overseerWakeItems, overseerItemArgs(agent, at, health)...)
 	if err != nil {
 		return "", false, err
 	}
@@ -321,7 +506,7 @@ func overseerWake(ctx context.Context, connection *sql.Conn, agent Agent, at int
 			break
 		}
 		if escalation {
-			escalations = append(escalations, "Escalated: "+strings.ToValidUTF8(detail[:min(len(detail), 256)], "")+" "+key)
+			escalations = append(escalations, strings.ToValidUTF8(detail[:min(len(detail), 256)], "")+" "+key)
 		} else if !slices.Contains(lines, detail) {
 			lines = append(lines, detail)
 		}
@@ -342,7 +527,7 @@ func overseerWake(ctx context.Context, connection *sql.Conn, agent Agent, at int
 // overseerWakeLine summarises one due task in a line: identity, title, status,
 // work revision, its latest Change head, its pull request and why it waits.
 const overseerWakeLine = `SELECT printf('- %s "%s" %s rev=%d', lower(hex(t.id)), replace(substr(t.title, 1, 60), char(10), ' '), t.status, t.work_revision)
-	|| COALESCE((SELECT printf(' change=%s@%s', substr(lower(hex(c.id)), 1, 12), substr(lower(hex(c.head_commit)), 1, 8)) FROM changes AS c
+	|| COALESCE((SELECT printf(' change=%s@%s', substr(lower(hex(c.id)), 1, 12), lower(hex(c.head_commit))) FROM changes AS c
 		WHERE c.task_id = t.id AND c.head_commit IS NOT NULL ORDER BY c.updated_at_ms DESC LIMIT 1), '')
 	|| COALESCE((SELECT printf(' PR #%d %s/%s', p.pull_number, json_extract(r.document, '$.state'), json_extract(r.document, '$.review.state'))
 		FROM publication_tasks AS p JOIN production_records AS r ON r.project_id = p.project_id AND r.repository = p.repository AND r.kind = 'pull_request' AND r.identity = CAST(p.pull_number AS TEXT)
@@ -351,8 +536,23 @@ const overseerWakeLine = `SELECT printf('- %s "%s" %s rev=%d', lower(hex(t.id)),
 		WHERE u.task_id = t.id AND h.status IN ('open', 'delivering', 'delivery_unknown') LIMIT 1)), 1, 120), char(10), ' '), '')
 FROM tasks AS t WHERE t.id = due.id`
 
-const overseerWakeCounts = `SELECT printf('worker tasks queued=%d running=%d; open PRs=%d', COALESCE(SUM(t.status = 'queued'), 0), COALESCE(SUM(t.status = 'running'), 0),
-	(SELECT count(*) FROM production_records WHERE project_id = ?1 AND kind = 'pull_request' AND json_extract(document, '$.state') = 'open'))
+const overseerWakeCounts = `WITH open_pr AS (SELECT p.repository, CAST(json_extract(p.document, '$.number') AS INTEGER) AS number, json_extract(p.document, '$.head') AS head,
+	json_extract(p.document, '$.mergeable') AS mergeable, lower(COALESCE(json_extract(p.document, '$.merge_state'), '')) AS merge_state,
+	lower(COALESCE(json_extract(p.document, '$.merge_queue'), '')) AS merge_queue,
+	lower(COALESCE(json_extract(p.document, '$.review.state'), '')) AS review
+	FROM production_records AS p WHERE p.project_id = ?1 AND p.kind = 'pull_request' AND json_extract(p.document, '$.state') = 'open'
+	AND EXISTS (SELECT 1 FROM publication_tasks AS pt WHERE pt.project_id = p.project_id AND pt.repository = p.repository
+		AND pt.pull_number = CAST(json_extract(p.document, '$.number') AS INTEGER))),
+	classified AS (SELECT open_pr.*,
+	EXISTS (SELECT 1 FROM production_records AS c, json_each(c.document, '$.pull_requests') AS n
+		WHERE c.project_id = ?1 AND c.repository = open_pr.repository AND c.kind = 'check' AND json_extract(c.document, '$.scope') = 'head'
+		  AND lower(json_extract(c.document, '$.revision')) = lower(open_pr.head) AND CAST(n.value AS INTEGER) = open_pr.number
+		  AND json_extract(c.document, '$.conclusion') IN ('failure', 'timed_out', 'action_required', 'cancelled', 'startup_failure')) AS failing
+	FROM open_pr)
+SELECT printf('worker tasks queued=%d running=%d; open factory PRs conflicting=%d failing=%d approved-not-queued=%d', COALESCE(SUM(t.status = 'queued'), 0), COALESCE(SUM(t.status = 'running'), 0),
+	(SELECT COALESCE(SUM(merge_state = 'dirty' OR COALESCE(mergeable = 0, 0)), 0) FROM classified),
+	(SELECT COALESCE(SUM(failing), 0) FROM classified),
+	(SELECT COALESCE(SUM(review = 'allow' AND NOT failing AND merge_state <> 'dirty' AND COALESCE(mergeable, 1) <> 0 AND merge_queue = 'none'), 0) FROM classified))
 FROM tasks AS t LEFT JOIN agents AS a ON a.id = t.assigned_agent_id
 WHERE t.project_id = ?1 AND t.status IN ('queued', 'running') AND COALESCE(a.role, 'worker') = 'worker'`
 

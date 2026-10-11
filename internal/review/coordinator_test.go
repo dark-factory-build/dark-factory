@@ -3,6 +3,7 @@ package review
 import (
 	"context"
 	"errors"
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -18,6 +19,7 @@ func (s *memoryStore) Update(_ context.Context, op Operation) error {
 	s.values = append(s.values, op)
 	return nil
 }
+func (s *memoryStore) Blocked(context.Context, uint64, string) (bool, error) { return false, nil }
 func (s *memoryStore) CreateRetry(_ context.Context, failed, retry Operation) error {
 	for index := len(s.values) - 1; index >= 0; index-- {
 		if s.values[index].ID == failed.ID {
@@ -33,15 +35,16 @@ func (s *memoryStore) CreateRetry(_ context.Context, failed, retry Operation) er
 }
 
 type fakeBackend struct {
-	reviews    int
-	killed     bool
-	submitErr  error
-	event      string
-	submitted  bool
-	enqueues   int
-	enqueueErr error
-	observeErr error
-	pull       *Pull
+	reviews         int
+	killed          bool
+	submitErr       error
+	event           string
+	submitted       bool
+	enqueues        int
+	enqueueAttempts int
+	enqueueErr      error
+	observeErr      error
+	pull            *Pull
 }
 
 func (b *fakeBackend) CloneReadOnly(context.Context, Request) (string, func(), error) {
@@ -63,6 +66,7 @@ func (b *fakeBackend) Submit(context.Context, Operation, Verdict) error {
 	return b.submitErr
 }
 func (b *fakeBackend) Enqueue(context.Context, Operation) error {
+	b.enqueueAttempts++
 	if b.enqueueErr == nil {
 		b.enqueues++
 	}
@@ -82,7 +86,7 @@ func (b *fakeBackend) ObservePull(_ context.Context, op Operation) (Pull, error)
 		return Pull{}, b.observeErr
 	}
 	if b.pull == nil {
-		return Pull{Head: op.Request.Head, State: "open"}, nil
+		return Pull{Head: op.Request.Head, State: "open", Checks: []string{"required=success"}}, nil
 	}
 	return *b.pull, nil
 }
@@ -203,6 +207,55 @@ func TestRequestChangesResponseLossIsReconciledForRouting(t *testing.T) {
 	}
 }
 
+type pollingBackend struct {
+	fakeBackend
+	pulls []Pull
+}
+
+func (b *pollingBackend) ObservePull(_ context.Context, op Operation) (Pull, error) {
+	pull := b.pulls[0]
+	if len(b.pulls) > 1 {
+		b.pulls = b.pulls[1:]
+	}
+	if pull.Head == "" {
+		pull.Head, pull.State = op.Request.Head, "open"
+	}
+	return pull, nil
+}
+
+// #1582: review waits for the published head's required checks. A red head
+// goes back to its author naming the failing tests, and spends no review.
+func TestReviewWaitsForTheHeadsRequiredChecks(t *testing.T) {
+	checksPoll = time.Millisecond
+	defer func() { checksPoll = time.Minute }()
+	conflicting, failed := false, Pull{Failing: []string{"required"}, Tests: strings.Split("--- FAIL: TestA (0.01s),1,2,3,4,5,6,7,8,9,10", ",")}
+	for _, test := range []struct {
+		name    string
+		pulls   []Pull
+		age     time.Duration
+		state   string
+		reviews int
+		detail  string
+	}{
+		{name: "red after running", pulls: []Pull{{}, {Pending: true}, failed}, state: "ejected", detail: "Not reviewed: its checks failed. Exact head " + reviewRequest().Head + " cannot merge. Failing checks: required.\n- --- FAIL: TestA (0.01s)\n"},
+		{name: "green after running", pulls: []Pull{{Pending: true}, {Checks: []string{"required=success"}}}, state: "enqueued", reviews: 1},
+		{name: "no required check past the grace", pulls: []Pull{{}}, age: checksGrace, state: "enqueued", reviews: 1},
+		{name: "still running past the grace", pulls: []Pull{{Pending: true}, {Checks: []string{"required=success"}}}, age: checksGrace, state: "enqueued", reviews: 1},
+		{name: "conflict", pulls: []Pull{{Mergeable: &conflicting}}, state: "ejected", detail: "conflicts with main"},
+		{name: "head moved", pulls: []Pull{{Head: strings.Repeat("c", 40), State: "open"}}, state: "superseded"},
+	} {
+		backend := &pollingBackend{pulls: test.pulls}
+		c := Coordinator{Store: &memoryStore{}, Backend: backend, Now: time.Now}
+		op, err := c.Resume(context.Background(), Operation{ID: "op", Request: reviewRequest(), State: "running", CreatedAt: time.Now().Add(-test.age)})
+		if err != nil || op.State != test.state || backend.reviews != test.reviews || op.RoutePending != (test.state == "ejected") || !strings.Contains(op.Detail, test.detail) {
+			t.Fatalf("%s: operation=%+v err=%v reviews=%d", test.name, op, err, backend.reviews)
+		}
+		if strings.Contains(op.Detail, "\n- 10") {
+			t.Fatalf("%s: more than ten failing tests: %q", test.name, op.Detail)
+		}
+	}
+}
+
 // Each pass decides from one observation of the pull request.
 func TestAdvanceDecidesFromOnePullObservation(t *testing.T) {
 	head := reviewRequest().Head
@@ -279,6 +332,33 @@ func TestConflictingPullIsSentBackOnceInsteadOfLooping(t *testing.T) {
 	}
 }
 
+func TestRefusedDirtyPullIsSentBackWithoutEscalation(t *testing.T) {
+	store := &memoryStore{}
+	backend := &fakeBackend{pull: &Pull{Head: reviewRequest().Head, State: "open", MergeStateStatus: "DIRTY"}, enqueueErr: fmt.Errorf("%w (rejected before execution as UNPROCESSABLE)", ErrRefused)}
+	c := Coordinator{Store: store, Backend: backend, Now: func() time.Time { return time.Unix(20, 0) }}
+	op, err := c.Advance(context.Background(), Operation{ID: "op", Request: reviewRequest(), State: "enqueued", Verdict: "allow", Submitted: true})
+	if err != nil || op.State != "ejected" || !op.RoutePending || op.Escalation != "" || backend.enqueueAttempts != 0 || len(store.values) != 1 {
+		t.Fatalf("dirty refusal = %+v err=%v enqueues=%d writes=%d", op, err, backend.enqueues, len(store.values))
+	}
+}
+
+func TestRefusedCleanPullStopsAfterRetryLimit(t *testing.T) {
+	store := &memoryStore{}
+	backend := &fakeBackend{pull: &Pull{Head: reviewRequest().Head, State: "open", MergeStateStatus: "CLEAN"}, enqueueErr: fmt.Errorf("%w (rejected before execution as UNPROCESSABLE)", ErrRefused)}
+	c := Coordinator{Store: store, Backend: backend, Now: func() time.Time { return time.Unix(20, 0) }}
+	op := Operation{ID: "op", Request: reviewRequest(), State: "enqueued", Verdict: "allow", Submitted: true}
+	for range RefusedRetryLimit + 1 {
+		var err error
+		op, err = c.Advance(context.Background(), op)
+		if !errors.Is(err, ErrRefused) || op.State != "enqueued" {
+			t.Fatalf("refused pass = %+v err=%v", op, err)
+		}
+	}
+	if backend.enqueueAttempts != RefusedRetryLimit || op.RefusedAttempts != RefusedRetryLimit {
+		t.Fatalf("retry cap = %+v attempts=%d", op, backend.enqueueAttempts)
+	}
+}
+
 // An enqueue whose outcome is unknown leaves nothing sticky behind: the next
 // pass reads the pull request again and goes on from what it shows.
 func TestIndeterminateEnqueueIsSettledByTheNextObservation(t *testing.T) {
@@ -301,11 +381,46 @@ func TestIndeterminateEnqueueIsSettledByTheNextObservation(t *testing.T) {
 	}
 }
 
-// A refusal is escalated only once it has persisted for
-// FailuresBeforeEscalation consecutive passes, and only once.
-func TestPersistingRefusalEscalatesOnceAfterTheGracePasses(t *testing.T) {
+// A transient refusal retries even when checks and review state are unchanged:
+// mergeability can clear without either signal changing.
+func TestRefusedEnqueueRetriesWithoutHeadObservationChange(t *testing.T) {
 	store := &memoryStore{}
-	c := Coordinator{Store: store, Backend: &fakeBackend{enqueueErr: errors.New("rejected before execution as UNPROCESSABLE")}, Now: func() time.Time { return time.Unix(20, 0) }}
+	backend := &fakeBackend{pull: &Pull{Head: reviewRequest().Head, State: "open"}, enqueueErr: fmt.Errorf("%w (rejected before execution as UNPROCESSABLE: Pull request head no longer matches the expected head)", ErrRefused)}
+	c := Coordinator{Store: store, Backend: backend, Now: func() time.Time { return time.Unix(20, 0) }}
+	op, err := c.Advance(context.Background(), Operation{ID: "op", Request: reviewRequest(), State: "enqueued", Verdict: "allow", Submitted: true})
+	if !errors.Is(err, ErrRefused) || op.State != "enqueued" || !op.Refused || !strings.Contains(op.Escalation, "head no longer matches the expected head") || len(store.values) != 1 {
+		t.Fatalf("operation=%+v err=%v", op, err)
+	}
+	backend.enqueueErr = nil
+	if queued, err := c.Advance(context.Background(), op); err != nil || queued.State != "enqueued" || queued.Refused || queued.Escalation != "" || queued.Enqueues != 1 || backend.enqueues != 1 {
+		t.Fatalf("unchanged refusal did not retry: operation=%+v err=%v enqueues=%d", queued, err, backend.enqueues)
+	}
+}
+
+func TestOwnerApprovalRefusalEscalatesOnce(t *testing.T) {
+	store := &memoryStore{}
+	backend := &fakeBackend{pull: &Pull{Head: reviewRequest().Head, State: "open", MergeStateStatus: "BLOCKED"}, enqueueErr: fmt.Errorf("%w (required approval is missing for .github/workflows/ci.yml)", ErrOwnerApproval)}
+	c := Coordinator{Store: store, Backend: backend, Now: func() time.Time { return time.Unix(20, 0) }}
+	op, err := c.Advance(context.Background(), Operation{ID: "op", Request: reviewRequest(), State: "enqueued", Verdict: "allow", Submitted: true})
+	if !errors.Is(err, ErrOwnerApproval) || !op.Refused || !op.OwnerApproval || backend.enqueues != 0 || !strings.Contains(op.Escalation, "#7") || !strings.Contains(op.Escalation, ".github/workflows/ci.yml") {
+		t.Fatalf("owner approval refusal = %+v err=%v enqueues=%d", op, err, backend.enqueues)
+	}
+	backend.enqueueErr = nil
+	// #1698: the same observation waits for the owner, still escalated, without another enqueue.
+	if waiting, err := c.Advance(context.Background(), op); err != nil || backend.enqueues != 0 || !waiting.OwnerApproval || waiting.Escalation != op.Escalation {
+		t.Fatalf("owner approval retried before approval: %+v err=%v enqueues=%d", waiting, err, backend.enqueues)
+	}
+	backend.pull.Review, backend.pull.MergeStateStatus = "APPROVED", "CLEAN"
+	if next, err := c.Advance(context.Background(), op); err != nil || backend.enqueues != 1 || next.Refused || next.OwnerApproval || next.Enqueues != 1 {
+		t.Fatalf("owner approval did not recover: %+v err=%v enqueues=%d", next, err, backend.enqueues)
+	}
+}
+
+// Any other enqueue failure is escalated only once it has persisted for
+// FailuresBeforeEscalation consecutive passes, and only once.
+func TestPersistingEnqueueFailureEscalatesOnceAfterTheGracePasses(t *testing.T) {
+	store := &memoryStore{}
+	c := Coordinator{Store: store, Backend: &fakeBackend{enqueueErr: errors.New("rejected before execution as RATE_LIMITED")}, Now: func() time.Time { return time.Unix(20, 0) }}
 	op := Operation{ID: "op", Request: reviewRequest(), State: "enqueued", Verdict: "allow", Submitted: true}
 	for pass := 1; pass <= FailuresBeforeEscalation+2; pass++ {
 		next, err := c.Advance(context.Background(), op)
@@ -317,7 +432,7 @@ func TestPersistingRefusalEscalatesOnceAfterTheGracePasses(t *testing.T) {
 		}
 		op = next
 	}
-	if !strings.Contains(op.Escalation, "UNPROCESSABLE") {
+	if !strings.Contains(op.Escalation, "RATE_LIMITED") {
 		t.Fatalf("escalation = %q", op.Escalation)
 	}
 }
@@ -344,5 +459,23 @@ func TestPersistentObservationFailureEscalatesOnce(t *testing.T) {
 	backend.observeErr, backend.pull = nil, &Pull{Head: op.Request.Head, State: "open", Pending: true}
 	if waited, err := c.Advance(context.Background(), op); err != nil || waited.Failures != 0 || waited.Escalation != "" || len(store.values) != FailuresBeforeEscalation+2 {
 		t.Fatalf("waiting pass: operation=%+v err=%v writes=%d", waited, err, len(store.values))
+	}
+}
+
+// A failure the same request meets again (ErrPermanent) fails the head at
+// once, not retryable, so it is escalated once and never enqueued again.
+func TestPermanentEnqueueFailureIsTerminalForTheHead(t *testing.T) {
+	store := &memoryStore{}
+	backend := &fakeBackend{enqueueErr: fmt.Errorf("invalid_input: %w", ErrPermanent)}
+	c := Coordinator{Store: store, Backend: backend, Now: func() time.Time { return time.Unix(20, 0) }}
+	op, err := c.Advance(context.Background(), Operation{ID: "op", Request: reviewRequest(), State: "enqueued", Verdict: "allow", Submitted: true})
+	if !errors.Is(err, ErrPermanent) || op.State != "failed" || op.Retryable || !strings.Contains(op.Detail, "invalid_input") || store.values[len(store.values)-1].State != "failed" {
+		t.Fatalf("operation=%+v err=%v", op, err)
+	}
+	if _, err := c.Advance(context.Background(), op); err == nil {
+		t.Fatal("a failed head was advanced again")
+	}
+	if _, err := c.ReserveRetry(context.Background(), op); err == nil {
+		t.Fatal("a permanently refused head was retried")
 	}
 }
