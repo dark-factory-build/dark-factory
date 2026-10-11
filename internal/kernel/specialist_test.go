@@ -289,7 +289,23 @@ func TestSpecialistOverseerItems(t *testing.T) {
 	if _, err := store.CreateContent(ctx, proposal, mustTime(t, at)); err != nil {
 		t.Fatal(err)
 	}
-	line := "\nProposal " + proposal.ID.String() + " from worker: Split the gate [proposal:" + proposal.ID.String() + "]"
+	challenge := knowledgeSpec(t, worker.ProjectID, 83, ContentObservation, KnowledgeMetadata{Status: "tentative", RecordType: "contribution", RecordID: proposal.ID.String()})
+	if _, err := store.CreateContent(ctx, challenge, mustTime(t, at)); err != nil {
+		t.Fatal(err)
+	}
+	revised := challenge
+	if _, err := store.ReviseContent(ctx, Revision{value: 1}, revised, mustTime(t, at)); err != nil {
+		t.Fatal(err)
+	}
+	withdrawn := knowledgeSpec(t, worker.ProjectID, 84, ContentObservation, KnowledgeMetadata{Status: "tentative", RecordType: "contribution", RecordID: proposal.ID.String()})
+	if _, err := store.CreateContent(ctx, withdrawn, mustTime(t, at)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.DeprecateContent(ctx, withdrawn.ID, worker.ProjectID, Revision{value: 1}, "operator:local", mustTime(t, at)); err != nil {
+		t.Fatal(err)
+	}
+	// A revised note counts once and a withdrawn one not at all.
+	line := "\nProposal " + proposal.ID.String() + " from worker: Split the gate (1 notes from the operator) [proposal:" + proposal.ID.String() + "]"
 	at += overseerWakeSettle.Milliseconds()
 	if bodies := wakeBodies(t, store, at); len(bodies) != 1 || !strings.Contains(bodies[0], line) {
 		t.Fatalf("proposal wake = %q", bodies)
@@ -371,6 +387,117 @@ func TestSpecialistRecordLimits(t *testing.T) {
 	}
 	if _, err := store.CreateContentForAttempt(ctx, overseer, resolution(97, second.ID, ""), mustTime(t, 62)); err != nil {
 		t.Fatalf("decline: %v", err)
+	}
+}
+
+// A proposal is accepted only by a task pinning one of its proposal
+// revisions: an observation pinned as context and later revised into a
+// proposal stays open.
+func TestSpecialistAttachedObservationRevisedIntoProposalStaysOpen(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	store, run, _ := runningWorkerRun(t)
+	defer store.Close()
+	task, err := store.EnqueueTask(ctx, NewTask{ID: taskID(t, 100), ProjectID: run.ProjectID, IncarnationID: incarnationID(t, 101), Title: "context"}, mustTime(t, 40))
+	if err != nil {
+		t.Fatal(err)
+	}
+	spec := knowledgeSpec(t, run.ProjectID, 90, ContentObservation, KnowledgeMetadata{Status: "tentative"})
+	spec.Author = "run:00 agent:" + run.AgentID.String() + " role:worker"
+	observation, err := store.CreateContent(ctx, spec, mustTime(t, 41))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.AttachContentToTask(ctx, task.ID, run.ProjectID, observation.ID, observation.Revision, mustTime(t, 42)); err != nil {
+		t.Fatal(err)
+	}
+	spec.SourceReferences = `{"status":"tentative","record_type":"proposal"}`
+	proposal, err := store.ReviseContent(ctx, observation.Revision, spec, mustTime(t, 43))
+	if err != nil {
+		t.Fatal(err)
+	}
+	follow := func() (int, string) {
+		t.Helper()
+		conn, err := store.writer.Conn(ctx)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer conn.Close()
+		agent, _, err := agentByID(ctx, conn, run.AgentID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var open int
+		if err := conn.QueryRowContext(ctx, `SELECT count(*) FROM project_content_revisions AS c WHERE c.id = ? AND `+openProposalSQL, proposal.ID.Bytes()).Scan(&open); err != nil {
+			t.Fatal(err)
+		}
+		body, err := specialistWake(ctx, conn, agent, SpecialistState{}, specialistPrior{}, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return open, body
+	}
+	line := "- proposal " + proposal.ID.String() + ` "` + spec.Title + `": `
+	if open, body := follow(); open != 1 || !strings.Contains(body, line+"open") {
+		t.Fatalf("observation pin accepted the later proposal: open=%d body=%q", open, body)
+	}
+	if err := store.AttachContentToTask(ctx, task.ID, run.ProjectID, proposal.ID, proposal.Revision, mustTime(t, 44)); err != nil {
+		t.Fatal(err)
+	}
+	if open, body := follow(); open != 0 || !strings.Contains(body, line+"accepted task "+task.ID.String()+" queued") {
+		t.Fatalf("proposal pin = open=%d body=%q", open, body)
+	}
+}
+
+// Attaching a proposal accepts it, so both attachment and decision keep one
+// accepted implementation active at a time, even after the pinned proposal
+// is revised.
+func TestSpecialistProposalAttachmentKeepsOneActiveImplementation(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	store, run, _ := runningWorkerRun(t)
+	defer store.Close()
+	var tasks []Task
+	for _, seed := range []byte{100, 102} {
+		task, err := store.EnqueueTask(ctx, NewTask{ID: taskID(t, seed), ProjectID: run.ProjectID, IncarnationID: incarnationID(t, seed+1), Title: "implement"}, mustTime(t, 40))
+		if err != nil {
+			t.Fatal(err)
+		}
+		tasks = append(tasks, task)
+	}
+	var proposals []ContentRevision
+	for _, seed := range []byte{90, 91} {
+		proposal, err := store.CreateContent(ctx, knowledgeSpec(t, run.ProjectID, seed, ContentObservation, KnowledgeMetadata{Status: "tentative", RecordType: "proposal"}), mustTime(t, 41))
+		if err != nil {
+			t.Fatal(err)
+		}
+		proposals = append(proposals, proposal)
+	}
+	if err := store.AttachContentToTask(ctx, tasks[0].ID, run.ProjectID, proposals[0].ID, proposals[0].Revision, mustTime(t, 42)); err != nil {
+		t.Fatal(err)
+	}
+	revised := knowledgeSpec(t, run.ProjectID, 90, ContentObservation, KnowledgeMetadata{Status: "tentative", RecordType: "proposal"})
+	revised.Title = "revised"
+	if _, err := store.ReviseContent(ctx, proposals[0].Revision, revised, mustTime(t, 43)); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.AttachContentToTask(ctx, tasks[1].ID, run.ProjectID, proposals[1].ID, proposals[1].Revision, mustTime(t, 44)); !errors.Is(err, ErrConflict) {
+		t.Fatalf("second attached implementation: %v", err)
+	}
+	if err := store.AttachContentToTask(ctx, tasks[0].ID, run.ProjectID, proposals[1].ID, proposals[1].Revision, mustTime(t, 45)); err != nil {
+		t.Fatalf("second proposal on the active implementation: %v", err)
+	}
+	overseer := runningOverseerDigest(t, store, run.ProjectID, 50)
+	accept := func(seed byte, task TaskID) error {
+		decision := knowledgeSpec(t, run.ProjectID, seed, ContentDecision, KnowledgeMetadata{Status: "tentative", Evidence: []string{"proposal:" + proposals[1].ID.String()}, RecordType: "proposal", RecordID: proposals[1].ID.String(), TaskID: task.String()})
+		_, err := store.CreateContentForAttempt(ctx, overseer, decision, mustTime(t, 60))
+		return err
+	}
+	if err := accept(96, tasks[1].ID); !errors.Is(err, ErrConflict) {
+		t.Fatalf("decision beside an attached implementation: %v", err)
+	}
+	if err := accept(97, tasks[0].ID); err != nil {
+		t.Fatalf("decision naming the attached implementation: %v", err)
 	}
 }
 
@@ -543,5 +670,36 @@ func TestArchiveStopsSpecialist(t *testing.T) {
 	}
 	if task, _, _ := store.Task(ctx, shared.ID); task.Status != TaskQueued || task.Revision != shared.Revision {
 		t.Fatalf("shared task = %+v", task)
+	}
+}
+
+func TestSpecialistWakeListsOtherSpecialists(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	store, _, project, a := newAdmissionStore(t, RoleWorker, 4)
+	defer store.Close()
+	a = makeSpecialist(t, store, a, "failures", 10)
+	for i, name := range []string{"ops", "gone"} {
+		b, err := store.CreateAgent(ctx, NewAgent{ID: agentID(t, byte(60+i)), ProjectID: project.ID, Name: name, Role: RoleWorker, Provider: ProviderCodex, ToolBudgetLimit: 5}, mustTime(t, 4))
+		if err != nil {
+			t.Fatal(err)
+		}
+		b = makeSpecialist(t, store, b, "failures", 10)
+		instruction := name + " remit line\nsecond line"
+		if _, err := store.writer.Exec(`UPDATE agents SET idle_instruction = ?, archived = ? WHERE id = ?`, instruction, i, b.ID.Bytes()); err != nil {
+			t.Fatal(err)
+		}
+	}
+	var found bool
+	for _, body := range wakeBodies(t, store, 20) {
+		if strings.HasPrefix(body, "Review the factory.") {
+			found = true
+			if !strings.Contains(body, "\nOther specialists:\n- ops: ops remit line\n") || strings.Contains(body, "- a:") || strings.Contains(body, "gone") || strings.Contains(body, "second line") {
+				t.Fatalf("wake body = %q", body)
+			}
+		}
+	}
+	if !found {
+		t.Fatal("no wake for the first specialist")
 	}
 }

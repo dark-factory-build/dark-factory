@@ -202,6 +202,11 @@ func (c fixedReviewCheckout) CloneReadOnly(context.Context, review.Request) (str
 	return c.dir, func() {}, nil
 }
 
+// ObservePull reports the head's required checks green, so review proceeds.
+func (c fixedReviewCheckout) ObservePull(_ context.Context, op review.Operation) (review.Pull, error) {
+	return review.Pull{Head: op.Request.Head, State: "open", Checks: []string{"required=success"}}, nil
+}
+
 func TestReviewMovesPastALimitedAccountAndFailsRetryablyWhenAllAreLimited(t *testing.T) {
 	backend, homes := reviewerFixture(t, "a-limited", "b-available")
 	if err := os.WriteFile(filepath.Join(homes["a-limited"], "limited"), nil, 0o600); err != nil {

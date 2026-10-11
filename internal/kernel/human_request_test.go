@@ -108,6 +108,15 @@ func TestHumanQuestionCreationProjectionDetailAndIdempotency(t *testing.T) {
 
 func TestCancelHumanRequestRunAtomicallyResolvesRequestAndRevokesRun(t *testing.T) {
 	t.Parallel()
+	for _, operator := range []bool{false, true} {
+		t.Run(map[bool]string{false: "browser", true: "operator"}[operator], func(t *testing.T) {
+			t.Parallel()
+			testCancelHumanRequestRun(t, operator)
+		})
+	}
+}
+
+func testCancelHumanRequestRun(t *testing.T, operator bool) {
 	ctx := context.Background()
 	store, run, keys := runningOrchestratorRun(t)
 	defer store.Close()
@@ -125,6 +134,12 @@ func TestCancelHumanRequestRunAtomicallyResolvesRequestAndRevokesRun(t *testing.
 	if err != nil {
 		t.Fatal(err)
 	}
+	cancel := func(expectedRequest, expectedRun Revision, at UnixMillis) (Run, HumanRequest, error) {
+		if operator {
+			return store.CancelHumanRequestRunForOperator(ctx, request.ID, expectedRequest, expectedRun, at)
+		}
+		return store.CancelHumanRequestRun(ctx, client.ID, request.ID, expectedRequest, expectedRun, at)
+	}
 	before, err := store.Factory(ctx)
 	if err != nil {
 		t.Fatal(err)
@@ -134,7 +149,7 @@ func TestCancelHumanRequestRunAtomicallyResolvesRequestAndRevokesRun(t *testing.
 		"stale run":     {request.Revision, mustRevision(t, run.Revision.Int64()+1)},
 	} {
 		t.Run(name, func(t *testing.T) {
-			if _, _, err := store.CancelHumanRequestRun(ctx, client.ID, request.ID, revisions[0], revisions[1], mustTime(t, 401)); !errors.Is(err, ErrRevisionConflict) {
+			if _, _, err := cancel(revisions[0], revisions[1], mustTime(t, 401)); !errors.Is(err, ErrRevisionConflict) {
 				t.Fatalf("cancellation = %v", err)
 			}
 		})
@@ -151,7 +166,7 @@ func TestCancelHumanRequestRunAtomicallyResolvesRequestAndRevokesRun(t *testing.
 	if err != nil || unchangedRun.Revision != run.Revision || unchangedRun.Phase != RunRunning || unchangedRequest.Revision != request.Revision || unchangedRequest.Status != HumanRequestOpen || unchangedFactory.Head != before.Head {
 		t.Fatalf("stale cancellation changed state: run=%+v request=%+v factory=%+v err=%v", unchangedRun, unchangedRequest, unchangedFactory, err)
 	}
-	cancelled, resolved, err := store.CancelHumanRequestRun(ctx, client.ID, request.ID, request.Revision, run.Revision, mustTime(t, 401))
+	cancelled, resolved, err := cancel(request.Revision, run.Revision, mustTime(t, 401))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -160,7 +175,7 @@ func TestCancelHumanRequestRunAtomicallyResolvesRequestAndRevokesRun(t *testing.
 		t.Fatalf("cancel result = run=%+v request=%+v", cancelled, resolved)
 	}
 	assertHumanRequestInvalidation(t, store, before.Head, request.ID, resolved.Revision, true)
-	if _, _, err := store.CancelHumanRequestRun(ctx, client.ID, request.ID, request.Revision, run.Revision, mustTime(t, 402)); !errors.Is(err, ErrRevisionConflict) {
+	if _, _, err := cancel(request.Revision, run.Revision, mustTime(t, 402)); !errors.Is(err, ErrRevisionConflict) {
 		t.Fatalf("duplicate cancellation = %v", err)
 	}
 }

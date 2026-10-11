@@ -123,7 +123,7 @@ func runProvider(ctx context.Context) (resultErr error) {
 	}
 	// Grant the verified worktree's actual administration. New Changes have
 	// private Git state; retained canonical worktrees keep their existing layout.
-	runtimePaths, err = runtimePaths.WithGitCommonDirectory(gitDirectory, config.Role == kernel.RoleWorker)
+	runtimePaths, err = runtimePaths.WithGitCommonDirectory(gitDirectory, config.Role == kernel.RoleWorker, config.ProjectGitDirs...)
 	if err != nil {
 		_ = cwd.Close()
 		return err

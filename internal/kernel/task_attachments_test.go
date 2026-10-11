@@ -119,7 +119,7 @@ func TestAttachmentCleanupAndCompactionPreserveHistory(t *testing.T) {
 	if _, err := TaskAttachmentInstruction("retry", files); !errors.Is(err, ErrConflict) {
 		t.Fatalf("removed file delivered: %v", err)
 	}
-	if _, err := store.SendBackTask(ctx, id, settled.Revision, "again", mustTime(t, 140)); !errors.Is(err, ErrConflict) {
+	if _, err := store.SendBackTask(ctx, id, settled.Revision, "", "again", mustTime(t, 140)); !errors.Is(err, ErrConflict) {
 		t.Fatalf("cleaned task sent back: %v", err)
 	}
 	state, err := store.Factory(ctx)

@@ -37,7 +37,7 @@ const (
 	codexConfigDir   = ".codex"
 	// bootstrapPrompt is both native providers' fixed positional prompt: the
 	// exact task is read through the attempt API, never typed into the PTY.
-	bootstrapPrompt = `Use the factory_attempt.factory tool with argv ["attempt","task"] before doing anything else. The returned JSON task field is the exact task: complete only that task. Use this tool for every factoryctl attempt or overseer command, passing argv without the executable; shell commands cannot access the attempt API. Peer collaboration is asynchronous: use argv ["attempt","peer","status"] to read or answer task-linked questions, but it grants no task or terminal control. For a stale paged peer status, restart from the first page. Before exiting, report the durable outcome with attempt succeed, block, or fail through this tool. When assigned a writable task checkout, read and edit it directly, including corrections after send-back; never add Git remotes or fetch from the network inside it. Never substitute another task or private Change path. Scope file discovery to the task checkout and private runtime home. Locate tools with command -v and the checkout's documented setup. Never recursively search the user home, Library, Documents, Desktop, Music or Photos for tools or instructions. If a required path is not provided or present, report the missing prerequisite instead of widening the search. In UI review, screenshots are illustrative only and never blocking evidence; judge correctness from render tests and source behavior.`
+	bootstrapPrompt = `Use the factory_attempt.factory tool with argv ["attempt","task"] before doing anything else. The returned JSON task field is the exact task: complete only that task. When it reports an observed problem, rerun its cited commands or read its cited file:line before editing, and quote each with what you saw in your attempt succeed result; if the problem does not reproduce, end with attempt fail and a detail starting "premise not reproduced:" that quotes them instead. Use this tool for every factoryctl attempt or overseer command, passing argv without the executable; shell commands cannot access the attempt API. Peer collaboration is asynchronous: use argv ["attempt","peer","status"] to read or answer task-linked questions, but it grants no task or terminal control. For a stale paged peer status, restart from the first page. Before exiting, report the durable outcome with attempt succeed, block, or fail through this tool. When assigned a writable task checkout, read and edit it directly, including corrections after send-back; never add Git remotes or fetch from the network inside it. Never substitute another task or private Change path. Scope file discovery to the task checkout and private runtime home. Locate tools with command -v and the checkout's documented setup. Never recursively search the user home, Library, Documents, Desktop, Music or Photos for tools or instructions. If a required path is not provided or present, report the missing prerequisite instead of widening the search. In UI review, screenshots are illustrative only and never blocking evidence; judge correctness from render tests and source behavior.`
 )
 
 var (
@@ -213,6 +213,9 @@ type RuntimePaths struct {
 	// environment still has no Git credential helper, SSH or prompt.
 	gitCommonDir         string
 	gitCommonDirWritable bool
+	// projectGitDirs are the project's other repositories' Git directories,
+	// read by an orchestrator publishing a Change made in one of them.
+	projectGitDirs []string
 	// traceReceiverPort is factoryd's loopback OTLP listener; zero exports
 	// nothing. telemetryRunID names the run in the agent CLI's own telemetry
 	// resource; empty leaves that telemetry off.
@@ -232,12 +235,15 @@ func (runtime RuntimePaths) WithLocalCILeaseDirectory(path string) (RuntimePaths
 
 // WithGitCommonDirectory grants the project repository's Git directory to
 // local commands: writable for a worker committing on its Change branch,
-// read-only for an orchestrator reading a settled Change's commits.
-func (runtime RuntimePaths) WithGitCommonDirectory(path string, writable bool) (RuntimePaths, error) {
-	if !validAbsolute(path, maxPathBytes) || filepath.Base(path) != ".git" || path == runtime.home || path == runtime.temp {
-		return RuntimePaths{}, ErrInvalid
+// read-only for an orchestrator reading a settled Change's commits. The
+// project's other repositories' Git directories are granted read-only.
+func (runtime RuntimePaths) WithGitCommonDirectory(path string, writable bool, project ...string) (RuntimePaths, error) {
+	for _, dir := range append([]string{path}, project...) {
+		if !validAbsolute(dir, maxPathBytes) || filepath.Base(dir) != ".git" || dir == runtime.home || dir == runtime.temp {
+			return RuntimePaths{}, ErrInvalid
+		}
 	}
-	runtime.gitCommonDir, runtime.gitCommonDirWritable = path, writable
+	runtime.gitCommonDir, runtime.gitCommonDirWritable, runtime.projectGitDirs = path, writable, slices.Clone(project)
 	return runtime, nil
 }
 
@@ -721,8 +727,9 @@ func Build(request Request) (Launch, error) {
 		// runtime. The runner's committed cwd is request.workingDirectory, so
 		// select that authorized current directory through Codex's native
 		// resume configuration before any prompt can be shown.
-		notify := "notify=[" + tomlBasicString(request.runtime.factoryctl) + ", \"attempt\", \"turn-complete\"]"
-		argv = append(argv, "-c", notify, "--strict-config", "--no-alt-screen", "-c", "tui.resume_cwd=\"current\"", "-c", "check_for_update_on_startup=false", "-c", "tool_output_token_limit=32768", "-c", codexUntrustedProjectConfig(request.workingDirectory), "-c", "default_permissions="+tomlBasicString(codexPermissionName(request.runtime)), "-c", `approval_policy="never"`, "-c", permissions, "--disable", "computer_use", "--disable", "browser_use", "--disable", "plugins")
+		stop := "'" + strings.ReplaceAll(request.runtime.factoryctl, "'", `'\''`) + "' attempt turn-complete"
+		hooks := "hooks.Stop=[{hooks=[{type=\"command\",command=" + tomlBasicString(stop) + "}]}]"
+		argv = append(argv, "-c", hooks, "--strict-config", "--dangerously-bypass-hook-trust", "--no-alt-screen", "-c", "tui.resume_cwd=\"current\"", "-c", "check_for_update_on_startup=false", "-c", "tool_output_token_limit=32768", "-c", codexUntrustedProjectConfig(request.workingDirectory), "-c", "default_permissions="+tomlBasicString(codexPermissionName(request.runtime)), "-c", `approval_policy="never"`, "-c", permissions, "--disable", "computer_use", "--disable", "browser_use", "--disable", "plugins")
 		attemptServer := codexAttemptServerName(request.runtime)
 		argv = append(argv, "-c", "mcp_servers."+attemptServer+"={command="+tomlBasicString(request.runtime.factoryctl)+`,args=["attempt","mcp"],env_vars=["DARK_FACTORY_SOCKET","DARK_FACTORY_ATTEMPT_TOKEN_FILE"],enabled=true,required=true,tools={factory={approval_mode="approve"}}}`)
 		if browser != "" {
@@ -827,6 +834,9 @@ func sandboxGrants(request Request) []grant {
 			// the worktree) so its index, HEAD and logs stay writable for commits.
 			grants = append(grants, grant{filepath.Join(request.runtime.gitCommonDir, "worktrees", filepath.Base(request.workingDirectory)), true})
 		}
+	}
+	for _, path := range request.runtime.projectGitDirs {
+		grants = append(grants, grant{path, false})
 	}
 	return grants
 }
@@ -1240,7 +1250,7 @@ func AccountEnvironment(kind kernel.Provider, accountHome, accountConfig string)
 }
 
 // goModuleCachePath is the one shared-cache path native workers may see. It
-// matches local-ci-environment.sh's trusted cache layout and deliberately
+// matches local-ci.sh's trusted cache layout and deliberately
 // leaves the rest of the account home outside the provider grant.
 func goModuleCachePath(accountHome string) string {
 	return filepath.Join(accountHome, "Library", "Caches", "dark-factory", "local-ci", "trusted", "go-mod")

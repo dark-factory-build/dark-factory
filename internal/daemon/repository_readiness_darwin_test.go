@@ -87,13 +87,79 @@ func TestRepositoryReadinessFetchesExactNondefaultBranchWithoutChangingCheckout(
 	if got := supervisorGitOutput(t, git, "-C", root, "status", "--porcelain"); got != status {
 		t.Fatal("fetch altered operator work")
 	}
-	if _, verified, err := fixture.store.RepositorySourceIdentity(ctx, id); err != nil || !verified {
+	first, verified, err := fixture.store.RepositorySourceIdentity(ctx, id)
+	if err != nil || !verified {
 		t.Fatalf("explicit first claim: %v %v", verified, err)
 	}
-	supervisorGit(t, git, "-C", root, "remote", "set-url", "origin", filepath.Join(parent, "replacement.git"))
+	replacement := filepath.Join(parent, "replacement.git")
+	supervisorGit(t, git, "-C", root, "remote", "set-url", "origin", replacement)
 	view, err = fixture.daemon.RepositoryReadiness(ctx, id, true)
 	if err != nil || view.FetchState != "setup_required" {
-		t.Fatalf("changed origin accepted: %+v %v", view, err)
+		t.Fatalf("unfetchable origin accepted: %+v %v", view, err)
+	}
+	if got, _, err := fixture.store.RepositorySourceIdentity(ctx, id); err != nil || got != first {
+		t.Fatalf("failed check re-pinned: %+v %v", got, err)
+	}
+	pinned := func(value kernel.RepositorySourceIdentity) change.RepositorySourceIdentity {
+		root, _ := change.NewRepositoryIdentity(value.RootDevice, value.RootInode)
+		git, _ := change.NewRepositoryIdentity(value.GitDevice, value.GitInode)
+		return change.RepositorySourceIdentity{Root: root, Git: git, OriginDigest: value.OriginDigest, PublicationRepository: value.PublicationRepository}
+	}
+	supervisorGit(t, git, "clone", "--bare", bare, replacement)
+	if _, err := change.SelectRegisteredGit(ctx, git, root, "refs/remotes/origin/release", pinned(first)); err == nil || !strings.Contains(err.Error(), "registered checkout identity changed") {
+		t.Fatalf("selection re-pinned: %v", err)
+	}
+	view, err = fixture.daemon.RepositoryReadiness(ctx, id, true)
+	if err != nil || view.FetchState != "ready" {
+		t.Fatalf("operator re-pin: %+v %v", view, err)
+	}
+	repinned, _, err := fixture.store.RepositorySourceIdentity(ctx, id)
+	if err != nil || repinned.OriginDigest == first.OriginDigest || repinned.RootInode != first.RootInode || repinned.GitInode != first.GitInode {
+		t.Fatalf("re-pinned identity: %+v %v", repinned, err)
+	}
+	if _, err := change.SelectRegisteredGit(ctx, git, root, "refs/remotes/origin/release", pinned(repinned)); err != nil {
+		t.Fatalf("selection after re-pin: %v", err)
+	}
+}
+
+func TestRepositoryReadinessLocalBaseRepinsOnlyAFetchableOrigin(t *testing.T) {
+	ctx := context.Background()
+	git := change.TrustedGitExecutable
+	root := contentRepositoryFixture(t)
+	parent, err := os.MkdirTemp("/private/tmp", "dark-factory-readiness-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { os.RemoveAll(parent) })
+	origin := filepath.Join(parent, "origin.git")
+	supervisorGit(t, git, "clone", "--bare", root, origin)
+	supervisorGit(t, git, "-C", root, "remote", "add", "origin", origin)
+	supervisorGit(t, git, "-C", root, "config", "protocol.file.allow", "always")
+	// An explicit commit base selects without fetching anything.
+	fixture, id := readinessProject(t, root, strings.TrimSpace(supervisorGitOutput(t, git, "-C", root, "rev-parse", "HEAD")))
+	if view, err := fixture.daemon.RepositoryReadiness(ctx, id, true); err != nil || view.FetchState != "ready" {
+		t.Fatalf("first claim: %+v %v", view, err)
+	}
+	first, _, err := fixture.store.RepositorySourceIdentity(ctx, id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	replacement := filepath.Join(parent, "replacement.git")
+	supervisorGit(t, git, "-C", root, "remote", "set-url", "origin", replacement)
+	if view, err := fixture.daemon.RepositoryReadiness(ctx, id, true); err != nil || view.FetchState != "setup_required" {
+		t.Fatalf("unfetchable origin with a local base: %+v %v", view, err)
+	}
+	if got, _, err := fixture.store.RepositorySourceIdentity(ctx, id); err != nil || got != first {
+		t.Fatalf("unfetchable origin re-pinned: %+v %v", got, err)
+	}
+	// Fetchable although its HEAD names a branch that does not exist.
+	supervisorGit(t, git, "init", "--quiet", "--bare", "--initial-branch=unborn", replacement)
+	supervisorGit(t, git, "-C", root, "push", "--quiet", replacement, "HEAD:refs/heads/release")
+	if view, err := fixture.daemon.RepositoryReadiness(ctx, id, true); err != nil || view.FetchState != "ready" {
+		t.Fatalf("fetchable origin with an unborn HEAD: %+v %v", view, err)
+	}
+	if got, _, err := fixture.store.RepositorySourceIdentity(ctx, id); err != nil || got.OriginDigest == first.OriginDigest {
+		t.Fatalf("fetchable origin not re-pinned: %+v %v", got, err)
 	}
 }
 
@@ -120,7 +186,7 @@ func TestRepositoryReadinessPrivateRemoteDenialNeverInheritsCredentialsOrStderr(
 	t.Setenv("GIT_CONFIG_KEY_0", "http.extraHeader")
 	t.Setenv("GIT_CONFIG_VALUE_0", "Authorization: Bearer PRIVATE_TEST_CREDENTIAL")
 	view, err := fixture.daemon.RepositoryReadiness(context.Background(), id, true)
-	if err != nil || view.FetchState != "setup_required" || view.ReadinessMessage == "" {
+	if err != nil || view.FetchState != "setup_required" || !strings.Contains(view.ReadinessMessage, "remote required authentication") {
 		t.Fatalf("denial: %+v %v", view, err)
 	}
 	if requests.Load() == 0 || authenticated.Load() {
