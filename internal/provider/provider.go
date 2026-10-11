@@ -700,9 +700,9 @@ func Build(request Request) (Launch, error) {
 		// runtime root every run and could never itself be found again;
 		// previousWorkingDirectory instead names the same agent's most recent
 		// terminal run's cwd, so its standing tasks share one continuing
-		// session. Neither ever changes argv beyond an optional leading
-		// "resume <id>": Codex assigns its own session id, there is nothing
-		// to derive.
+		// session. A resumed Codex launch carries its marker through the attempt
+		// MCP server so the daemon can omit repeated standing context; Codex
+		// still assigns its own session id, so there is nothing to derive.
 		discoveryCwd := request.workingDirectory
 		if request.role == kernel.RoleOrchestrator {
 			discoveryCwd = request.previousWorkingDirectory
@@ -720,7 +720,7 @@ func Build(request Request) (Launch, error) {
 		hooks := "hooks.Stop=[{hooks=[{type=\"command\",command=" + tomlBasicString(stop) + "}]}]"
 		argv = append(argv, "-c", hooks, "--strict-config", "--dangerously-bypass-hook-trust", "--no-alt-screen", "-c", "tui.resume_cwd=\"current\"", "-c", "check_for_update_on_startup=false", "-c", "tool_output_token_limit=32768", "-c", codexUntrustedProjectConfig(request.workingDirectory), "-c", "default_permissions="+tomlBasicString(codexPermissionName(request.runtime)), "-c", `approval_policy="never"`, "-c", permissions, "--disable", "computer_use", "--disable", "browser_use", "--disable", "plugins")
 		attemptServer := codexAttemptServerName(request.runtime)
-		argv = append(argv, "-c", "mcp_servers."+attemptServer+"={command="+tomlBasicString(request.runtime.factoryctl)+`,args=["attempt","mcp"],env_vars=["DARK_FACTORY_SOCKET","DARK_FACTORY_ATTEMPT_TOKEN_FILE"],enabled=true,required=true,tools={factory={approval_mode="approve"}}}`)
+		argv = append(argv, "-c", "mcp_servers."+attemptServer+"={command="+tomlBasicString(request.runtime.factoryctl)+`,args=["attempt","mcp"],env_vars=["DARK_FACTORY_SOCKET","DARK_FACTORY_ATTEMPT_TOKEN_FILE","DARK_FACTORY_OVERSEER_SESSION_RESUMED"],enabled=true,required=true,tools={factory={approval_mode="approve"}}}`)
 		if browser != "" {
 			args := make([]string, len(browserArgs))
 			for i, arg := range browserArgs {
