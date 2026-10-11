@@ -402,6 +402,31 @@ func TestCorrectionKeepsWorkerCommitsAndMainChanges(t *testing.T) {
 	}
 }
 
+func TestEvidenceOnlyCorrectionKeepsMainChangeOnWorkerPath(t *testing.T) {
+	fixture, c, source, app, checkout := publishFixture(t, 1, false)
+	ctx := context.Background()
+	root, git := filepath.Dir(source), change.TrustedGitExecutable
+	registered := strings.TrimSpace(supervisorGitOutput(t, git, "-C", root, "remote", "get-url", "origin"))
+	supervisorGit(t, git, "-C", registered, "fetch", "-q", "--update-head-ok", root, "HEAD:worker")
+	if err := os.WriteFile(filepath.Join(registered, "f00.txt"), []byte("line 0\nmain\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	supervisorGit(t, git, "-C", registered, "-c", "user.name=fixture", "-c", "user.email=fixture@example.invalid", "add", "f00.txt")
+	supervisorGit(t, git, "-C", registered, "-c", "user.name=fixture", "-c", "user.email=fixture@example.invalid", "commit", "-q", "-m", "main")
+	app.main = strings.TrimSpace(supervisorGitOutput(t, git, "-C", registered, "rev-parse", "HEAD"))
+	supervisorGit(t, git, "-C", registered, "rm", "-q", "gone.txt")
+	supervisorGit(t, git, "-C", registered, "-c", "user.name=fixture", "-c", "user.email=fixture@example.invalid", "commit", "-q", "-m", "published")
+	app.tip = strings.TrimSpace(supervisorGitOutput(t, git, "-C", registered, "rev-parse", "HEAD"))
+	app.journal[uuid5("dark-factory:"+c.Change.String()+":publish-"+c.Head[:8]+"-1")] = json.RawMessage(`{"commit_sha":"published","parent_sha":"` + c.Base + `"}`)
+	c.Pull = 31
+	if err := fixture.daemon.publishChange(ctx, c, "team/repo", source, app.call, checkout); err != nil {
+		t.Fatal(err)
+	}
+	if len(app.writes) != 1 || app.writes[0]["name"] != "update_pull_request_body" {
+		t.Fatalf("evidence-only writes = %+v", app.writes)
+	}
+}
+
 // A worker answering a verdict with evidence and no file change (#1706)
 // moves no head: its answer replaces the body, instead of publication
 // refusing "nothing to publish". The reconciler reviews the head once more.

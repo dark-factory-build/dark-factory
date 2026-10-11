@@ -245,7 +245,32 @@ func (daemon *Daemon) publishPull(ctx context.Context, c kernel.PublishableChang
 	}
 	var workerPaths map[string]bool
 	if c.Pull != 0 && tip != "" && tip != c.Head {
-		listing, err := gitOutput(ctx, gitDir, "log", "--format=", "--name-only", "-z", "--no-merges", "--no-renames", from+".."+c.Head)
+		workerHead := from
+		candidates, err := gitOutput(ctx, gitDir, "rev-list", c.Head, "--not", c.Base)
+		if err != nil {
+			return err
+		}
+		for _, candidate := range strings.Fields(string(candidates)) {
+			response, observeErr := call(ctx, "observe_operation", map[string]any{"repository": repo, "operation_id": operation("publish-" + candidate[:8] + "-1")})
+			if observeErr != nil {
+				return observeErr
+			}
+			var observed struct {
+				State  string          `json:"state"`
+				Result json.RawMessage `json:"result"`
+			}
+			if json.Unmarshal(response, &observed) == nil && observed.State == "completed" {
+				var commit struct {
+					Parent string `json:"parent_sha"`
+				}
+				if json.Unmarshal(observed.Result, &commit) == nil && commit.Parent == tip {
+					continue
+				}
+				workerHead = candidate
+				break
+			}
+		}
+		listing, err := gitOutput(ctx, gitDir, "log", "--format=", "--name-only", "-z", "--no-merges", "--no-renames", workerHead+".."+c.Head)
 		if err != nil {
 			return err
 		}
