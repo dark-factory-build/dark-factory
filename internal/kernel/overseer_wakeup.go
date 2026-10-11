@@ -61,7 +61,7 @@ ORDER BY version LIMIT 33`
 // carrier task that last named it and whether OverseerRewakeAfter has passed
 // since any wake named it. It takes the wake query's arguments; ?7 and ?8 are
 // named only so the counts agree.
-const overseerStalledItems = overseerItems + `SELECT last, CASE WHEN id IS NULL THEN detail || ' ' || item_key ELSE (` + overseerWakeLine + `) END,
+const overseerStalledItems = overseerItems + `SELECT last, CASE WHEN id IS NULL THEN detail ELSE (` + overseerWakeLine + `) END,
 	named_at + ?6 <= ?3 FROM counted AS due WHERE wakes > rewakes AND ?7 + ?8 >= 0 ORDER BY last, version`
 
 const overseerItems = `WITH carrier AS MATERIALIZED (SELECT t.id AS task, t.created_at_ms AS at, substr(t.body, instr(t.body, 'Factory causal wake: ')) AS names,
@@ -480,7 +480,9 @@ func (store *Store) OverseerItems(ctx context.Context, project ProjectID, at Uni
 					return nil, errors.Join(err, rows.Close())
 				}
 				if escalation {
-					item.Line += " " + key
+					if !strings.Contains(item.Line, key) {
+						item.Line += " " + key
+					}
 				}
 				items = append(items, item)
 			}
