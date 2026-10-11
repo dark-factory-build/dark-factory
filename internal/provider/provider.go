@@ -697,9 +697,9 @@ func Build(request Request) (Launch, error) {
 		// runtime root every run and could never itself be found again;
 		// previousWorkingDirectory instead names the same agent's most recent
 		// terminal run's cwd, so its standing tasks share one continuing
-		// session. Neither ever changes argv beyond an optional leading
-		// "resume <id>": Codex assigns its own session id, there is nothing
-		// to derive.
+		// session. A resumed Codex launch carries its marker through the attempt
+		// MCP server so the daemon can omit repeated standing context; Codex
+		// still assigns its own session id, so there is nothing to derive.
 		discoveryCwd := request.workingDirectory
 		if request.role == kernel.RoleOrchestrator {
 			discoveryCwd = request.previousWorkingDirectory
