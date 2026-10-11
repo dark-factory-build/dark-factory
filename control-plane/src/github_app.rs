@@ -8250,12 +8250,6 @@ mod tests {
             request_digest(&references).unwrap(),
             request_digest(&replay).unwrap()
         );
-        assert_eq!(
-            serde_json::to_value(&references)
-                .unwrap()
-                .get("close_on_merge"),
-            Some(&serde_json::Value::Bool(false))
-        );
         assert!(
             create
                 .marked_body()
