@@ -88,11 +88,6 @@ func TestSupervisorRetainedCanonicalGitRetryPreservesWorktree(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(path, "untracked.txt"), []byte("untracked\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	indexBefore, err := os.ReadFile(canonicalIndex)
-	if err != nil {
-		t.Fatal(err)
-	}
-
 	if err := os.WriteFile(filepath.Join(project, "main-fix.txt"), []byte("main fix\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
@@ -137,9 +132,14 @@ func TestSupervisorRetainedCanonicalGitRetryPreservesWorktree(t *testing.T) {
 			t.Fatalf("retained %s = %q, %v", name, body, readErr)
 		}
 	}
-	indexAfter, err := os.ReadFile(canonicalIndex)
-	if err != nil || string(indexAfter) != string(indexBefore) {
-		t.Fatalf("retained worktree index changed: %v", err)
+	if got := strings.TrimSpace(supervisorGitOutput(t, git, "-C", path, "diff", "--cached", "--name-only", "--", "staged.txt")); got != "staged.txt" {
+		t.Fatalf("original staged change was not preserved: %q", got)
+	}
+	if got := strings.TrimSpace(supervisorGitOutput(t, git, "-C", path, "ls-files", "--error-unmatch", "--", "main-fix.txt")); got != "main-fix.txt" {
+		t.Fatalf("rebased base entry is not tracked: %q", got)
+	}
+	if got := strings.TrimSpace(supervisorGitOutput(t, git, "-C", path, "diff", "--name-only", "--", "main-fix.txt")); got != "" {
+		t.Fatalf("rebased base entry is dirty: %q", got)
 	}
 	if got := strings.TrimSpace(supervisorGitOutput(t, git, "-C", project, "rev-parse", "HEAD")); got != mainHead {
 		t.Fatalf("main ref changed from %s to %s", mainHead, got)

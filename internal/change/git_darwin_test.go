@@ -66,6 +66,67 @@ func TestSelectGitRealSHA1AndSHA256WithoutBlobReads(t *testing.T) {
 	}
 }
 
+func TestRebaseWorktreeRestoresUntrackedAndStagedChanges(t *testing.T) {
+	for _, test := range []struct {
+		name   string
+		staged bool
+		status string
+	}{
+		{name: "untracked", status: "?? untracked.txt\n"},
+		{name: "staged-and-untracked", staged: true, status: "A  staged.txt\n?? untracked.txt\n"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			ctx := context.Background()
+			fixture := newLocalGitFixture(t, "sha1")
+			selected, err := SelectGit(ctx, fixture.git, fixture.repository, "HEAD", fixture.identity)
+			if err != nil {
+				t.Fatal(err)
+			}
+			path := filepath.Join(secureTempDir(t), testChangeID)
+			if _, err := AddWorktree(ctx, selected, path, BranchName(testChangeID)); err != nil {
+				t.Fatal(err)
+			}
+			if test.staged {
+				if err := os.WriteFile(filepath.Join(path, "staged.txt"), []byte("staged\n"), 0o600); err != nil {
+					t.Fatal(err)
+				}
+				runFixtureGit(t, fixture.git, path, "add", "staged.txt")
+			}
+			if err := os.WriteFile(filepath.Join(path, "untracked.txt"), []byte("untracked\n"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(filepath.Join(fixture.repository, "main-fix.txt"), []byte("main fix\n"), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			runFixtureGit(t, fixture.git, fixture.repository, "add", "main-fix.txt")
+			runFixtureGit(t, fixture.git, fixture.repository, "commit", "-m", "advance main")
+			current, err := SelectGit(ctx, fixture.git, fixture.repository, "HEAD", fixture.identity)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := FetchBase(ctx, current, path); err != nil {
+				t.Fatal(err)
+			}
+			facts, err := RebaseWorktree(ctx, current, path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !facts.Dirty() || !facts.Head().equal(current.Base()) {
+				t.Fatalf("rebased facts = %+v", facts)
+			}
+			if got := runFixtureGitOutput(t, fixture.git, path, "status", "--porcelain", "--untracked-files=all"); got != test.status {
+				t.Fatalf("restored status = %q, want %q", got, test.status)
+			}
+			if got := strings.TrimSpace(runFixtureGitOutput(t, fixture.git, path, "ls-files", "--error-unmatch", "--", "main-fix.txt")); got != "main-fix.txt" {
+				t.Fatalf("rebased base entry = %q", got)
+			}
+			if got := runFixtureGitOutput(t, fixture.git, path, "diff", "--name-only", "--", "main-fix.txt"); got != "" {
+				t.Fatalf("rebased base entry is dirty: %q", got)
+			}
+		})
+	}
+}
+
 func TestSelectGitRepositoryShapesAndReplacement(t *testing.T) {
 	fixture := newLocalGitFixture(t, "sha1")
 	alias := fixture.repository + "/../" + filepath.Base(fixture.repository)
