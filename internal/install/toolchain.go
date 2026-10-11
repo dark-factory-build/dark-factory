@@ -16,7 +16,7 @@ const trustedSystemToolchainRoot = "/Library/Developer/CommandLineTools"
 func TrustedSystemToolchainRoot() string { return trustedSystemToolchainRoot }
 
 const supportedNodeVersion = "v22.20.0"
-const supportedGoVersion = "1.27.0"
+const supportedGoVersion = "1.27.2"
 
 // SupportedToolchain derives the small, optional capability contract used by
 // the default Darwin launch. It names only the pinned Node installation and

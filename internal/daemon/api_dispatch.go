@@ -356,6 +356,8 @@ func (daemon *Daemon) dispatch(ctx context.Context, call api.Call) api.Reply {
 		return daemon.enqueueTask(ctx, call)
 	case api.CallTaskRead:
 		return daemon.taskRead(ctx, call, scope)
+	case api.CallProjectContent:
+		return daemon.projectContent(ctx, call)
 	case api.CallOperatorWorkerOperation:
 		return daemon.workerOperation(ctx, call)
 	case api.CallSetDispatch:
@@ -661,7 +663,22 @@ func (daemon *Daemon) taskRead(ctx context.Context, call api.Call, scope *kernel
 	if err != nil {
 		return newErrorReply(remoteErrorCode(err))
 	}
-	result := api.TaskText{Attachments: attachments, TaskID: task.ID.String(), Revision: uint64(task.Revision.Int64()), Instruction: instruction, Feedback: feedback}
+	peerExpectedHead := kernel.EventSequence{}
+	if input.PeerHead != 0 {
+		peerExpectedHead, err = kernel.NewEventSequence(int64(input.PeerHead))
+		if err != nil {
+			return newErrorReply(api.RemoteInvalidRequest)
+		}
+	}
+	questions, nextPeerOffset, peerHead, err := daemon.store.PeerQuestionsForTask(ctx, task.ID, input.PeerOffset, peerExpectedHead)
+	if err != nil {
+		return newErrorReply(remoteErrorCode(err))
+	}
+	peerQuestions := make([]api.PeerQuestion, 0, len(questions))
+	for _, question := range questions {
+		peerQuestions = append(peerQuestions, api.PeerQuestion{ID: question.ID.String(), SourceTaskID: question.SourceTaskID.String(), TargetTaskID: question.TargetTaskID.String(), Question: question.Question, Answer: question.Answer, RecipientDeliveryState: question.RecipientDeliveryState.String(), AnswerDeliveryState: question.AnswerDeliveryState.String(), Revision: uint64(question.Revision.Int64())})
+	}
+	result := api.TaskText{Attachments: attachments, TaskID: task.ID.String(), Revision: uint64(task.Revision.Int64()), Instruction: instruction, Feedback: feedback, PeerQuestions: peerQuestions}
 	if outcomeText != "" {
 		result.Outcome = &outcome
 	}
@@ -669,6 +686,8 @@ func (daemon *Daemon) taskRead(ctx context.Context, call api.Call, scope *kernel
 		next := input.Offset + 2048
 		result.NextOffset = &next
 	}
+	result.NextPeerOffset = nextPeerOffset
+	result.PeerHead = uint64(peerHead.Int64())
 	reply, err := api.NewTaskTextReply(result)
 	if err != nil {
 		return newErrorReply(api.RemoteInternal)
