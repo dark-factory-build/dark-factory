@@ -888,6 +888,12 @@ type OverseerAgentUpdateInput struct {
 	Archived         *bool  `json:"archived,omitempty"`
 	// Appearance is operator-only, in the stored slot form; empty is automatic.
 	Appearance *string `json:"appearance,omitempty"`
+	// The rest are operator-only too (factoryctl agent set): each changes one
+	// column and keeps the standing instruction as it is.
+	IdleAfterSeconds *uint32 `json:"idle_after_seconds,omitempty"`
+	IdleWakeOn       *string `json:"idle_wake_on,omitempty"`
+	Model            *string `json:"model,omitempty"`
+	ReasoningEffort  *string `json:"reasoning_effort,omitempty"`
 }
 
 // AgentIdlePolicyInput is the operator-only standing supervision edit. It
@@ -1178,4 +1184,25 @@ type AgentModelSelectInput struct {
 
 func validAgentModelSelectInput(value AgentModelSelectInput) bool {
 	return validID(value.AgentID) && value.ExpectedRevision != 0 && validText(value.Model, 1, 128) && validText(value.ReasoningEffort, 0, 128)
+}
+
+// ReportInput selects factoryctl report (Pull and TaskID empty) or why (one
+// of them). ProjectID empty is every project for the operator; an attempt
+// reads its own project whatever it names.
+type ReportInput struct {
+	ProjectID     string `json:"project_id,omitempty"`
+	SinceSeconds  uint64 `json:"since_seconds,omitempty"`
+	BucketSeconds uint64 `json:"bucket_seconds,omitempty"`
+	Pull          uint64 `json:"pull,omitempty"`
+	TaskID        string `json:"task_id,omitempty"`
+}
+
+type Report struct {
+	Lines []string `json:"lines"`
+}
+
+func validReportInput(input ReportInput) bool {
+	why := input.Pull != 0 || input.TaskID != ""
+	return (input.ProjectID == "" || validID(input.ProjectID)) && (input.TaskID == "" || validID(input.TaskID)) && input.Pull <= 1<<53-1 &&
+		(why && input.SinceSeconds == 0 && input.BucketSeconds == 0 || !why && input.SinceSeconds > 0 && input.SinceSeconds <= 366*86400 && input.BucketSeconds >= 3600 && input.BucketSeconds <= input.SinceSeconds)
 }

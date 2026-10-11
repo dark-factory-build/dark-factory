@@ -84,6 +84,10 @@ Every record carries `status` (`tentative` unless verified), `evidence`
 - The operator's read views, through your attempt: `attempt status`,
   `attempt human list`, `attempt intake list|config [--project ID]` and
   `attempt task read --task ID --revision N`. Their write forms are refused.
+- `attempt report [--since 24h] [--by half-day]` (runs, failure %, tokens by
+  worker, overseer and specialist, merges and tokens per merge, top tasks and
+  pull requests) and `attempt why --pull N | --task ID`, for your project. To
+  measure a merged fix, cite `attempt report` for buckets before and after it.
 - Your checkout. Run tests or builds only if your question needs them.
 - Measures, offline (Architecture and Operations, at least weekly):
   `scripts/hotspots.sh --since=PRIOR_DATE -- internal cmd ':!*_test.go'`

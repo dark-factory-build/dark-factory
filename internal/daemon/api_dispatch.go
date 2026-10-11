@@ -322,7 +322,7 @@ func (daemon *Daemon) dispatch(ctx context.Context, call api.Call) api.Reply {
 	// project otherwise.
 	var scope *kernel.ProjectID
 	switch call.Kind() {
-	case api.CallSnapshot, api.CallHumanRequests, api.CallTaskRead, api.CallIntake:
+	case api.CallSnapshot, api.CallHumanRequests, api.CallTaskRead, api.CallIntake, api.CallReport:
 		if raw, attempt := call.AttemptDigest(); attempt {
 			project, ok := daemon.attemptOperatorCall(ctx, raw, call)
 			if !ok {
@@ -486,6 +486,8 @@ func (daemon *Daemon) dispatch(ctx context.Context, call api.Call) api.Reply {
 		return reply
 	case api.CallMaintainer:
 		return daemon.attemptMaintainer(ctx, call)
+	case api.CallReport:
+		return daemon.report(ctx, call, scope)
 	case api.CallIntake:
 		input, ok := call.IntakeInput()
 		if !ok {
@@ -542,8 +544,8 @@ func (daemon *Daemon) dispatch(ctx context.Context, call api.Call) api.Reply {
 
 // attemptOperatorCall admits a specialist's review run (its carrier) to the
 // operator's read views of its own project, and of intake only its list; an
-// overseer to the intake list and to one fresh exact-head review in its own
-// project. Every other attempt, and every other write, is refused.
+// overseer to report and why, the intake list and one fresh exact-head review
+// in its own project. Every other attempt, and every other write, is refused.
 func (daemon *Daemon) attemptOperatorCall(ctx context.Context, raw api.AttemptDigest, call api.Call) (kernel.ProjectID, bool) {
 	digest, err := attemptDigest(raw)
 	if err != nil {
@@ -555,16 +557,47 @@ func (daemon *Daemon) attemptOperatorCall(ctx context.Context, raw api.AttemptDi
 	switch {
 	case err != nil:
 		return authority.ProjectID, false
+	case call.Kind() == api.CallReport, intake.Action == "list":
+		return authority.ProjectID, authority.Specialist || overseer
 	case call.Kind() != api.CallIntake:
 		return authority.ProjectID, authority.Specialist
-	case intake.Action == "list":
-		return authority.ProjectID, authority.Specialist || overseer
 	}
 	return authority.ProjectID, overseer && intake.Action == "review_pr" && intake.ProjectID == authority.ProjectID.String()
 }
 
 func inScope(scope *kernel.ProjectID, project kernel.ProjectID) bool {
 	return scope == nil || *scope == project
+}
+
+// report answers factoryctl report and why; an attempt reads its own project
+// (scope), the operator the one it names or every project.
+func (daemon *Daemon) report(ctx context.Context, call api.Call, scope *kernel.ProjectID) api.Reply {
+	input, _ := call.ReportInput()
+	if scope == nil && input.ProjectID != "" {
+		project, err := decodeID(input.ProjectID, kernel.ProjectIDFromBytes)
+		if err != nil {
+			return newErrorReply(api.RemoteInvalidRequest)
+		}
+		scope = &project
+	}
+	var lines []string
+	var err error
+	if input.Pull == 0 && input.TaskID == "" {
+		since := daemon.now().Add(-time.Duration(input.SinceSeconds) * time.Second).UnixMilli()
+		lines, err = daemon.store.Report(ctx, scope, since, int64(input.BucketSeconds)*1000)
+	} else {
+		var task kernel.TaskID
+		if input.TaskID != "" {
+			if task, err = decodeID(input.TaskID, kernel.TaskIDFromBytes); err != nil {
+				return newErrorReply(api.RemoteInvalidRequest)
+			}
+		}
+		lines, err = daemon.store.Why(ctx, scope, input.Pull, task)
+	}
+	if err != nil {
+		return newErrorReply(remoteErrorCode(err))
+	}
+	return api.NewContentReply(api.Report{Lines: append([]string{}, lines...)})
 }
 
 func (daemon *Daemon) agentPaths(ctx context.Context, call api.Call) api.Reply {
@@ -2165,7 +2198,7 @@ func (daemon *Daemon) operatorUpdateAgent(ctx context.Context, call api.Call) ap
 	if !ok || input.ExpectedRevision > uint64(^uint64(0)>>1) {
 		return newErrorReply(api.RemoteInvalidRequest)
 	}
-	patch := kernel.AgentPatch{Paused: input.Paused, Archived: input.Archived}
+	patch := kernel.AgentPatch{Paused: input.Paused, Archived: input.Archived, IdleAfterSeconds: input.IdleAfterSeconds, IdleWakeOn: input.IdleWakeOn, Model: input.Model, ReasoningEffort: input.ReasoningEffort}
 	if input.Appearance != nil {
 		appearance, err := kernel.DecodeAgentAppearance(*input.Appearance)
 		if err != nil {

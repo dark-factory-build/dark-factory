@@ -74,6 +74,7 @@ const (
   factoryctl attempt peer answer --question ID --revision REVISION --idempotency-key HEX32 --answer TEXT
   factoryctl attempt terminal observe --project ID --task ID --run ID [--cursor N] [--max-bytes N]
   factoryctl attempt status | human list | intake list|config [--project ID] | task read --task ID --revision REVISION [--offset N] (a specialist's review run only; an overseer may list intake)
+  factoryctl attempt report [--since 24h|7d] [--by hour|half-day|day] | why --pull N | --task ID (an overseer or a specialist, in its own project)
   factoryctl attempt review --project ID --repository OWNER/REPO --pull N --head SHA --base SHA --base-ref REF (an overseer only: one fresh review of a head with no verdict of record; a same-head BLOCK stands)
   factoryctl terminal observe --project ID --task ID --run ID [--cursor N] [--max-bytes N] [--text]
   factoryctl attempt send-back --task ID [--head SHA] --note TEXT
@@ -102,6 +103,8 @@ const (
   factoryctl agent idle-policy --agent ID --revision REVISION --policy wait
   factoryctl agent idle-policy --agent ID --revision REVISION --policy standing_instruction --after-seconds N --instruction TEXT [--run-budget N] [--wake-on failures|merges|failures,merges]
   factoryctl agent pause|resume|archive|restore --agent ID --revision REVISION
+  factoryctl agent set --agent ID [--cadence DURATION] [--wake-on failures|merges|failures,merges|none] [--model TEXT] [--reasoning-effort EFFORT] [--pause|--resume]
+    Changes only the named fields at the current revision; the standing instruction is kept.
   factoryctl worker stop --operation-id ID --task ID --task-revision REVISION --run ID --run-revision REVISION
   factoryctl worker replace --operation-id ID --task ID --task-revision REVISION --run ID --run-revision REVISION --successor-task ID --successor-incarnation ID --instruction TEXT
   factoryctl worker message --operation-id ID --task ID --task-revision REVISION --run ID --run-revision REVISION --message TEXT
@@ -118,6 +121,10 @@ const (
   factoryctl task add --project ID [--repository ID] --agent ID|any --title TEXT [--body TEXT] [--priority N] [--content ID:REVISION[,ID:REVISION...]] [--task-id ID --incarnation-id ID]
     --agent any queues the task for any eligible worker in the project; the first worker admitted keeps it.
     --content pins up to eight project content revisions before any worker can admit the task.
+  factoryctl report [--project ID] [--since 24h|7d] [--by hour|half-day|day]
+    Per bucket: runs, failure %, tokens (worker, overseer, specialist), merges and tokens per merge; then the top five tasks and pull requests by tokens.
+  factoryctl why --pull N | --task ID [--project ID]
+    One line each: exact head, checks, review at head, queue, task, the reconciler's last action and why, and whom it waits on.
   factoryctl status [--project ID]
     --project prints what factoryd waits on there instead: held health conditions,
     the overseers' due and stalled items, Changes reclaim keeps by reason, and
@@ -243,6 +250,8 @@ const (
 	commandOutcomeWrite
 	commandOutcomeRead
 	commandOutcomeList
+	commandReport
+	commandAgentSet
 )
 
 type attemptCommand struct {
@@ -311,6 +320,8 @@ type attemptCommand struct {
 	knowledgeThread     string
 	contentKind         string
 	intake              api.IntakeInput
+	report              api.ReportInput
+	agentSet            api.OverseerAgentUpdateInput
 	contentID           string
 	contentRevision     uint64
 	description         string
@@ -416,7 +427,7 @@ func runWithDependencies(ctx context.Context, args []string, getenv func(string)
 	if command.kind == commandRemoteStatus {
 		return runRemote(ctx, getenv, stdout, stderr)
 	}
-	if command.kind == commandAgentPaths || command.kind == commandOperatorTerminalObserve || command.kind == commandWorkerOperation || command.kind == commandProjectCreate || command.kind == commandProjectRepository || command.kind == commandIntake || command.kind == commandProjectLimits || command.kind == commandAgentCreate || command.kind == commandAgentIdlePolicy || command.kind == commandAccountsDiscover || command.kind == commandAccountsList || command.kind == commandAccountLink || command.kind == commandAgentSelectAccount || command.kind == commandAgentSelectModel || command.kind == commandTaskAdd || command.kind == commandTaskSendBack || command.kind == commandTaskRead || command.kind == commandDispatch || command.kind == commandCapacity || command.kind == commandStatus || command.kind == commandCompactStorage || command.kind == commandBackupCreate || command.kind == commandBackupVerify || command.kind == commandHumanList || command.kind == commandHumanReply || command.kind == commandHumanCancel {
+	if command.kind == commandAgentPaths || command.kind == commandOperatorTerminalObserve || command.kind == commandWorkerOperation || command.kind == commandProjectCreate || command.kind == commandProjectRepository || command.kind == commandIntake || command.kind == commandProjectLimits || command.kind == commandAgentCreate || command.kind == commandAgentIdlePolicy || command.kind == commandAccountsDiscover || command.kind == commandAccountsList || command.kind == commandAccountLink || command.kind == commandAgentSelectAccount || command.kind == commandAgentSelectModel || command.kind == commandTaskAdd || command.kind == commandTaskSendBack || command.kind == commandTaskRead || command.kind == commandDispatch || command.kind == commandCapacity || command.kind == commandStatus || command.kind == commandCompactStorage || command.kind == commandBackupCreate || command.kind == commandBackupVerify || command.kind == commandHumanList || command.kind == commandHumanReply || command.kind == commandHumanCancel || command.kind == commandReport || command.kind == commandAgentSet {
 		return runOperator(ctx, command, getenv, stdout, stderr)
 	}
 	if command.kind >= commandContentCreate && command.kind <= commandContentAttachments && len(args) > 0 && args[0] == "content" {
@@ -683,6 +694,12 @@ func parse(args []string) (attemptCommand, bool, bool) {
 		command.operatorControl = ok
 		return command, help, ok
 	}
+	if len(args) >= 1 && (args[0] == "report" || args[0] == "why") {
+		return parseReport(args)
+	}
+	if len(args) >= 2 && args[0] == "agent" && args[1] == "set" {
+		return parseAgentSet(args[2:])
+	}
 	if len(args) >= 1 && (args[0] == "status" || args[0] == "storage" || args[0] == "backup" || args[0] == "content" || args[0] == "outcome" || args[0] == "project" || args[0] == "agent" || args[0] == "account" || args[0] == "task" || args[0] == "worker" || args[0] == "dispatch" || args[0] == "capacity" || args[0] == "intake") {
 		return parseOperator(args)
 	}
@@ -763,6 +780,11 @@ func parse(args []string) (attemptCommand, bool, bool) {
 	}
 	if args[1] == "outcome" {
 		return parseOutcome(args)
+	}
+	if args[1] == "report" || args[1] == "why" {
+		command, help, ok := parseReport(args[1:])
+		command.attemptRead = true
+		return command, help, ok
 	}
 	if args[1] == "status" || args[1] == "human" || args[1] == "intake" || args[1] == "task" && len(args) > 2 {
 		command, help, ok := parse(args[1:])
@@ -2232,6 +2254,12 @@ func runOperator(ctx context.Context, command attemptCommand, getenv func(string
 	}
 	if command.kind >= commandOutcomeWrite && command.kind <= commandOutcomeList {
 		return runOutcome(callContext, client, command, stdout, stderr)
+	}
+	if command.kind == commandReport {
+		return runReport(callContext, client, command, stdout, stderr)
+	}
+	if command.kind == commandAgentSet {
+		return runAgentSet(callContext, client, command, stdout, stderr)
 	}
 	switch command.kind {
 	case commandIntake:

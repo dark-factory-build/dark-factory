@@ -40,3 +40,14 @@ func (client *AttemptClient) OutcomeRead(ctx context.Context, input OutcomeReadI
 func (client *AttemptClient) OutcomeList(ctx context.Context, input OutcomeListInput) (OutcomeList, error) {
 	return listOutcome(client.client, ctx, "attempt_outcome_list", input)
 }
+
+// Report reads factoryctl report or why; an attempt reader reads its own
+// project's.
+func (client *OperatorClient) Report(ctx context.Context, input ReportInput) (Report, error) {
+	if !validReportInput(input) {
+		return Report{}, ErrInvalidInput
+	}
+	var v Report
+	err := client.client.call(ctx, "report", input, &v)
+	return v, err
+}

@@ -317,6 +317,12 @@ func (daemon *Daemon) reconcilePull(ctx context.Context, open kernel.OpenPull, u
 	case action != review.Wait && action != review.Escalate:
 		op.Failures, op.Escalation, op.OwnerApproval = 0, "", false
 	}
+	if err != nil {
+		op.LastAction = fmt.Sprintf("could not %s (attempt %d): %v", actionVerbs[action], op.Failures, err)
+	} else if action != review.Wait {
+		first, _, _ := strings.Cut(note, "\n")
+		op.LastAction = strings.TrimSuffix(actionVerbs[action]+": "+first, ": ")
+	}
 	if op != before {
 		op.UpdatedAt = daemon.now()
 		err = errors.Join(err, store.Update(ctx, op))
