@@ -248,9 +248,14 @@ func (daemon *Daemon) tryAutoRebase(ctx context.Context, project kernel.ProjectI
 		return false, err
 	}
 	state, found, err := daemon.store.Change(ctx, changeID)
-	// Only the head the conflict was observed at is rebased; a newer one is
-	// left to routing, which drops the stale note.
-	if err != nil || !found || state.Phase != kernel.ChangeRetained || state.Selection == nil || state.HeadCommit == nil || !strings.EqualFold(hex.EncodeToString(state.HeadCommit.Bytes()), op.Request.Head) {
+	if err != nil || !found || state.Phase != kernel.ChangeRetained || state.Selection == nil || state.HeadCommit == nil {
+		return false, err
+	}
+	// The App publishes its own commit, so a conflict names the pull request
+	// head, never the Change's. One observed at a head the pull request has
+	// since left is stale: routing drops it.
+	pull, open, err := daemon.store.TaskOpenPullRequest(ctx, state.TaskID)
+	if err != nil || !open || pull.Number != op.Request.PullNumber || !strings.EqualFold(pull.Head, op.Request.Head) {
 		return false, err
 	}
 	parent, git := daemon.changeParent.Load(), daemon.gitExecutable.Load()
