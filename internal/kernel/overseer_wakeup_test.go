@@ -370,9 +370,8 @@ func TestOverseerWakeInstructionFallsBackToFull(t *testing.T) {
 	}
 }
 
-// A succeeded intake task with a diff is factoryd's to publish, and stays so
-// once its merged Change is reclaimed; any other success, an empty intake one
-// whose Change was reclaimed included, still gets the overseer's one look.
+// Every succeeded Change with a diff is factoryd's to publish, regardless of
+// intake provenance; an empty reclaimed Change still gets the overseer's look.
 func TestOverseerWakeSkipsPublishedIntakeSuccess(t *testing.T) {
 	t.Parallel()
 	for _, mode := range []string{"plain", "intake", "reclaimed", "empty"} {
@@ -422,7 +421,7 @@ func TestOverseerWakeSkipsPublishedIntakeSuccess(t *testing.T) {
 				t.Fatal(err)
 			}
 		}
-		if bodies := wakeBodies(t, store, 1_000_000); len(bodies) != map[bool]int{false: 1, true: 0}[intake && mode != "empty"] {
+		if bodies := wakeBodies(t, store, 1_000_000); len(bodies) != map[bool]int{false: 0, true: 1}[mode == "empty"] {
 			t.Fatalf("%s wake = %q", mode, bodies)
 		}
 	}

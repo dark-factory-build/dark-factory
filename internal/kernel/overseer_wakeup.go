@@ -28,19 +28,16 @@ const (
 // overseerWakeItems is every work item of a project that needs its
 // overseer, at the version it last changed. An item persists until the
 // overseer acts on it (a blocked or failed worker task, an unanswered worker
-// question, finished work not yet published or corrected behind its open pull
-// request, a pull request factoryd escalated while it stays open at the
+// question, a publication factoryd escalated while it stays open at the
 // escalated head, the newest self-release while it failed or retries a
 // failure); a succeeded worker task needs one look. A failed release is
 // keyed by its cause and dated by when it first failed so, which factoryd
 // carries over every release that fails the same way, a same-commit retry
 // included (RecordDelivery): it wakes once, never re-wakes, and so becomes
 // one NEEDS YOU card. So does a pull request waiting on its code owner's
-// approval, which no overseer can give. An accepted intake task that succeeded with a diff (or
-// whose published Change was since reclaimed) needs none: factoryd publishes
-// it, and the Change item covers a publication that never happens. While
-// factoryd records
-// that Change revision's publication refused, the item is that refusal, at the
+// approval, which no overseer can give. A succeeded Change needs none: factoryd
+// publishes it. While factoryd records that Change revision's publication
+// refused, the item is that refusal, at the
 // Change's version however often the hourly retry repeats it. An intake task the
 // overseer could retry (an automatic end) is an item too; an operator's cancel
 // and a withdrawn issue's task are not. An item is due when
@@ -72,8 +69,7 @@ item AS (
 	SELECT t.id, t.updated_at_ms AS version, CASE WHEN t.status IN ('blocked', 'failed') THEN 3 END AS rewakes, '' AS detail, lower(hex(t.id)) AS item_key
 	FROM tasks AS t JOIN agents AS a ON a.id = t.assigned_agent_id
 	WHERE t.project_id = ?1 AND a.role = 'worker' AND t.status IN ('succeeded', 'blocked', 'failed') AND NOT ` + taskIssueWithdrawn + ` AND NOT ` + specialistCarrierSQL + `
-	  AND NOT (t.status = 'succeeded' AND EXISTS (SELECT 1 FROM intake_task_bindings AS b WHERE b.task_id = t.id)
-	      AND EXISTS (SELECT 1 FROM changes AS c WHERE c.task_id = t.id AND (c.head_commit <> c.base_commit OR c.phase = 'abandoned' AND EXISTS (SELECT 1 FROM publication_tasks p WHERE p.task_id = t.id))))
+	  AND NOT (t.status = 'succeeded' AND EXISTS (SELECT 1 FROM changes AS c WHERE c.task_id = t.id AND (c.head_commit <> c.base_commit OR c.phase = 'abandoned' AND EXISTS (SELECT 1 FROM publication_tasks p WHERE p.task_id = t.id))))
 	UNION ALL SELECT r.task_id, h.created_at_ms, 3, '', lower(hex(r.task_id)) FROM human_requests AS h JOIN runs AS r ON r.id = h.run_id
 	WHERE r.project_id = ?1 AND r.role = 'worker' AND h.status IN ('open', 'delivering', 'delivery_unknown')
 	UNION ALL SELECT CASE WHEN f.identity IS NULL THEN c.task_id END, c.updated_at_ms, CASE WHEN f.identity IS NULL THEN 3 ELSE 0 END,
@@ -83,6 +79,7 @@ item AS (
 	WHERE c.project_id = ?1 AND t.status = 'succeeded' AND c.head_commit IS NOT NULL AND c.base_commit IS NOT NULL
 	  AND NOT EXISTS (SELECT 1 FROM agents AS a WHERE a.id = t.assigned_agent_id AND ` + specialistCarrierSQL + `)
 	  AND c.head_commit <> c.base_commit AND c.updated_at_ms + ?2 <= ?3
+	  AND f.identity IS NOT NULL
 	  AND (NOT EXISTS (SELECT 1 FROM publication_tasks AS p WHERE p.change_id = c.id)
 	       OR EXISTS (SELECT 1 FROM publication_tasks AS p JOIN production_records AS r
 	           ON r.project_id = p.project_id AND r.repository = p.repository AND r.kind = 'pull_request' AND r.identity = CAST(p.pull_number AS TEXT)

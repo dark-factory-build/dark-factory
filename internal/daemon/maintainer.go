@@ -62,7 +62,7 @@ func (daemon *Daemon) attemptMaintainer(ctx context.Context, call api.Call) api.
 		}
 		// factoryd is the one verdict authority: it reviews and
 		// enqueues every published head itself.
-		if params.Name == "submit_pull_request_review" || params.Name == "enqueue_pull_request" {
+		if params.Name == "submit_pull_request_review" || params.Name == "enqueue_pull_request" || params.Name == "publish_commit" || params.Name == "create_pull_request" {
 			return failure("denied")
 		}
 		request.Params = encoded

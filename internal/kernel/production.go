@@ -491,9 +491,9 @@ func (store *Store) RecordPublication(ctx context.Context, project ProjectID, ta
 	return tx.Commit(ctx)
 }
 
-// PublishableChange is a succeeded intake worker task's settled Change that
-// factoryd publishes itself: as a new pull request, or, when Pull is set, as
-// the correction of the open pull request it published for that task.
+// PublishableChange is a succeeded task's settled Change that factoryd
+// publishes: as a new pull request, or, when Pull is set, as the correction
+// of the open pull request it published for that task.
 type PublishableChange struct {
 	Task       Task
 	Change     ChangeID
@@ -505,17 +505,6 @@ type PublishableChange struct {
 	Branch     string
 	Pull       uint64
 }
-
-// factorydPublishesAcceptance is the invariant for intake work factoryd
-// publishes itself (a is its intake_acceptances row): one issue, one worker
-// task, and a GitHub source issue in the destination repository itself. A
-// Linear or cross-repository source (whose private title must never reach a
-// public commit) and work split over several tasks are the overseer's.
-// An imported task its overseer owned (before intake went straight to
-// workers) is not a worker task.
-const factorydPublishesAcceptance = `(SELECT count(*) FROM intake_task_bindings s JOIN tasks st ON st.id = s.task_id LEFT JOIN agents sa ON sa.id = st.assigned_agent_id
-	WHERE s.acceptance_id = a.id AND sa.role IS NOT 'orchestrator') = 1
-	AND EXISTS (SELECT 1 FROM repository_source_identities i WHERE i.repository_id = a.repository_id AND i.github_repository_id = a.github_repository_id)`
 
 // PublishRetryAfter is how long a recorded publish failure holds back its
 // Change revision; then the next pass retries it, so a refusal fixed outside
@@ -529,7 +518,7 @@ func PublishFailureID(change ChangeID, revision Revision) string {
 }
 
 // PublishableChanges lists, oldest first, the current settled Changes of
-// succeeded tasks bound to a live intake acceptance factoryd publishes, whose
+// succeeded tasks bound to a repository, whose
 // head differs from their base, with no publish failure at that Change
 // revision recorded within PublishRetryAfter of at: with no publication of
 // that Change or task, at any work revision, or above work revision 1
@@ -541,14 +530,14 @@ func (store *Store) PublishableChanges(ctx context.Context, at UnixMillis) ([]Pu
 		return nil, err
 	}
 	defer tx.Close()
-	rows, err := tx.connection.QueryContext(ctx, `SELECT c.id, c.task_id, c.revision, lower(hex(c.base_commit)), lower(hex(c.head_commit)), COALESCE(p.pull_number, 0), COALESCE((SELECT lower(hex(repository_id)) FROM task_repository_bindings WHERE task_id = c.task_id), ''), COALESCE((SELECT json_extract(r.document, '$.branch') FROM production_records r WHERE r.project_id = p.project_id AND r.repository = p.repository AND r.kind = 'pull_request' AND r.identity = CAST(p.pull_number AS TEXT)), '') FROM changes c
+	rows, err := tx.connection.QueryContext(ctx, `SELECT c.id, c.task_id, c.revision, lower(hex(c.base_commit)), lower(hex(c.head_commit)), COALESCE(p.pull_number, 0), COALESCE((SELECT lower(hex(repository_id)) FROM task_repository_bindings WHERE task_id = c.task_id), ''), COALESCE((SELECT json_extract(r.document, '$.branch') FROM production_records r WHERE r.project_id = p.project_id AND r.repository = p.repository AND r.kind = 'pull_request' AND r.identity = CAST(p.pull_number AS TEXT)), ''), t.title LIKE 'Repair %' FROM changes c
 		JOIN tasks t ON t.id = c.task_id AND t.incarnation_id = c.task_incarnation_id
 		LEFT JOIN intake_task_bindings b ON b.task_id = c.task_id LEFT JOIN intake_acceptances a ON a.id = b.acceptance_id
 		LEFT JOIN publication_tasks p ON p.task_id = c.task_id AND c.updated_at_ms > p.created_at_ms
 		  AND EXISTS (SELECT 1 FROM production_records r WHERE r.project_id = p.project_id AND r.repository = p.repository AND r.kind = 'pull_request'
 		      AND r.identity = CAST(p.pull_number AS TEXT) AND json_extract(r.document, '$.state') = 'open')
 		WHERE c.phase = 'retained' AND t.status = 'succeeded' AND a.withdrawn_at_ms IS NULL AND c.head_commit <> c.base_commit
-		  AND ((a.id IS NOT NULL AND `+factorydPublishesAcceptance+`) OR (a.id IS NULL AND EXISTS (SELECT 1 FROM publication_tasks repair WHERE repair.project_id = c.project_id AND repair.task_id = c.task_id)))
+		  AND EXISTS (SELECT 1 FROM task_repository_bindings rb WHERE rb.task_id = c.task_id)
 		  AND (p.pull_number IS NOT NULL OR NOT EXISTS (SELECT 1 FROM publication_tasks q WHERE q.change_id = c.id OR q.task_id = c.task_id))
 		  AND NOT EXISTS (SELECT 1 FROM production_records r WHERE r.project_id = c.project_id AND r.kind = 'reviewer'
 		      AND r.identity = 'publish-' || lower(hex(c.id)) || '-' || c.revision
@@ -567,8 +556,9 @@ func (store *Store) PublishableChanges(ctx context.Context, at UnixMillis) ([]Pu
 		var revision int64
 		var repository string
 		var branch string
+		var repair bool
 		var value PublishableChange
-		if err := rows.Scan(&change, &task, &revision, &value.Base, &value.Head, &value.Pull, &repository, &branch); err != nil {
+		if err := rows.Scan(&change, &task, &revision, &value.Base, &value.Head, &value.Pull, &repository, &branch, &repair); err != nil {
 			rows.Close()
 			return nil, err
 		}
@@ -586,6 +576,7 @@ func (store *Store) PublishableChanges(ctx context.Context, at UnixMillis) ([]Pu
 				value.Revision, err = NewRevision(revision)
 			}
 		}
+		value.Repair = repair
 		if err != nil {
 			rows.Close()
 			return nil, err
@@ -604,7 +595,6 @@ func (store *Store) PublishableChanges(ctx context.Context, at UnixMillis) ([]Pu
 			err = ErrCorruptState
 		}
 		if err == nil {
-			found[i].Repair = !bound
 			if !bound && found[i].Repository.zero() {
 				err = ErrCorruptState
 			}
