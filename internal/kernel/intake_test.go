@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"strings"
 	"testing"
+	"time"
 )
 
 func intakeSourceForTest(t *testing.T, policy IntakePolicy) IntakeSource {
@@ -400,6 +401,18 @@ func TestIntakeSkipsWholeStoreValidation(t *testing.T) {
 
 	if replay, err := store.ImportIntakeAcceptanceWithPriority(ctx, imported.ID, mustTime(t, 7), source, 0); err != nil || replay.ID != task.ID {
 		t.Fatalf("replay of an imported issue = %+v, %v", replay, err)
+	}
+	// Every poll replays each listed imported issue; a replay writes nothing,
+	// so it must not queue behind other writers once per issue.
+	if err := store.acquireWriter(ctx); err != nil {
+		t.Fatal(err)
+	}
+	busy, cancel := context.WithTimeout(ctx, time.Second)
+	replay, err := store.ImportIntakeAcceptanceWithPriority(busy, imported.ID, mustTime(t, 7), source, 0)
+	cancel()
+	store.releaseWriter()
+	if err != nil || replay.ID != task.ID {
+		t.Fatalf("replay while another write holds the writer = %+v, %v", replay, err)
 	}
 	if _, err := store.ImportIntakeAcceptanceWithPriority(ctx, pending.ID, mustTime(t, 7), source, 0); err != nil {
 		t.Fatalf("new import = %v", err)
