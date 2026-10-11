@@ -17,15 +17,12 @@ import (
 // testStragglerPass replaces one sweep scan in package tests; production is nil.
 var testStragglerPass func(pass int) (bool, error)
 
-// PrivateTemp is the short TMPDIR the Change worker gives a run, named from its
+// privateTemp is the short TMPDIR the Change worker gives a run, named from its
 // runtime directory. Worker sandboxes deny the shared /private/tmp (a grant
 // beneath it still applies), and the runtime's own tmp is too deep for a test
 // fixture's Unix socket to fit the sun_path budget. A runtime not named by a
-// run id (a test's) has none, so unrelated runtimes never share one.
-// ponytail: two live runs whose ids share 8 hex characters (about one in four
-// billion) share this name, and the later run's sweep would reach the earlier
-// run's processes; widen the name if run counts ever make that plausible.
-func PrivateTemp(runtime string) string {
+// run id (a test's) has none.
+func privateTemp(runtime string) string {
 	name := filepath.Base(runtime)
 	if len(name) != 32 || strings.Trim(name, "0123456789abcdef") != "" {
 		return ""
@@ -33,15 +30,43 @@ func PrivateTemp(runtime string) string {
 	return "/private/tmp/df-" + name[:8]
 }
 
+const privateTempOwnerName = ".df-run"
+
+// ClaimPrivateTemp makes runtime's short TMPDIR and records the runtime's full
+// name in it, or returns "" when the name is taken (a run whose id shares its
+// first 8 characters, or one that left it behind).
+func ClaimPrivateTemp(runtime string) string {
+	short := privateTemp(runtime)
+	if short == "" || os.Mkdir(short, 0o700) != nil {
+		return ""
+	}
+	if os.WriteFile(filepath.Join(short, privateTempOwnerName), []byte(filepath.Base(runtime)), 0o600) != nil {
+		_ = os.RemoveAll(short)
+		return ""
+	}
+	return short
+}
+
+// ownedPrivateTemp is runtime's short TMPDIR only when ClaimPrivateTemp made
+// it for this runtime, so a run never sweeps or removes another run's.
+func ownedPrivateTemp(runtime string) string {
+	short := privateTemp(runtime)
+	if owner, err := os.ReadFile(filepath.Join(short, privateTempOwnerName)); short == "" || err != nil || string(owner) != filepath.Base(runtime) {
+		return ""
+	}
+	return short
+}
+
 // killRunStragglers kills every process of this user whose TMPDIR is inside
-// the run's private runtime root or PrivateTemp, then removes the latter:
-// descendants that left the provider's group and session (setsid, double
-// fork) and now live on under launchd (#1403). Only the run's own processes
-// are given those paths. ARCHITECTURE.md records why this numeric-PID sweep stays Darwin-only. Every
-// error is unresolved: cleanup was not proved, so no result may be published.
+// the run's private runtime root or its owned short TMPDIR, then removes the
+// latter: descendants that left the provider's group and session (setsid,
+// double fork) and now live on under launchd (#1403). Only the run's own
+// processes are given those paths. ARCHITECTURE.md records why this
+// numeric-PID sweep stays Darwin-only. Every error is unresolved: cleanup was
+// not proved, so no result may be published.
 func killRunStragglers(runtime *os.File) error {
 	root, err := fdPath(runtime)
-	short := PrivateTemp(root)
+	short := ownedPrivateTemp(root)
 	roots := []string{root}
 	if short != "" {
 		roots = append(roots, short)
