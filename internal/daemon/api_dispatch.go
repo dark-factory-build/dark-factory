@@ -84,6 +84,7 @@ type Daemon struct {
 	// time, read only by the scheduler loop, and whether a pass is running.
 	pipelineAt   atomic.Int64 // unix nanoseconds of the next merge-stage pass
 	pipelineBusy atomic.Bool
+	reconcileMu  sync.Mutex // one reconciler pass at a time: startup's and the tick's
 	// The scheduler's Change reclaim pass (tickChangeReclaim), alike, and the
 	// Changes it kept, each logged once with its project and reason; healthMu
 	// guards it for the operator's health read.
@@ -1782,7 +1783,7 @@ func (daemon *Daemon) sendBack(ctx context.Context, call api.Call) api.Reply {
 	}
 	// An attempt is authenticated before anything is read on its behalf, so a
 	// credential the kernel would refuse learns nothing about any task.
-	var digest kernel.AttemptDigest
+	var digest *kernel.AttemptDigest
 	var authority kernel.AttemptAuthority
 	raw, attempt := call.AttemptDigest()
 	if attempt {
@@ -1797,7 +1798,7 @@ func (daemon *Daemon) sendBack(ctx context.Context, call api.Call) api.Reply {
 		if authority.Role != kernel.RoleOrchestrator {
 			return newErrorReply(api.RemoteUnauthorized)
 		}
-		digest = kDigest
+		digest = &kDigest
 	}
 	// The body a send-back leaves is the provider's whole task, so it must fit
 	// the provider of the agent that will run it, or the retry would be queued
@@ -1828,12 +1829,7 @@ func (daemon *Daemon) sendBack(ctx context.Context, call api.Call) api.Reply {
 	if _, _, err := provider.PrepareTask(agent.Provider, []byte(kernel.SentBackBody(current, input.Note))); err != nil {
 		return newErrorReply(api.RemoteTooLarge)
 	}
-	var task kernel.Task
-	if attempt {
-		task, err = daemon.store.SendBackTaskForAttempt(ctx, digest, taskID, input.Head, input.Note, at)
-	} else {
-		task, err = daemon.store.SendBackTask(ctx, taskID, current.Revision, input.Head, input.Note, at)
-	}
+	task, err := daemon.store.SendBackTask(ctx, digest, taskID, current.Revision, input.Head, input.Note, at)
 	if err != nil {
 		// A stale head names the Change head to observe instead.
 		if errors.Is(err, kernel.ErrSuperseded) {
@@ -2043,7 +2039,7 @@ func (daemon *Daemon) overseerUpdateTask(ctx context.Context, call api.Call) api
 		if err != nil {
 			return newErrorReply(api.RemoteInternal)
 		}
-		task, err := daemon.store.RetryTaskForOverseer(ctx, digest, id, expected, assigned, at)
+		task, err := daemon.store.RetryTask(ctx, &digest, id, expected, assigned, at, 0)
 		if err != nil {
 			return newErrorReply(remoteErrorCode(err))
 		}
@@ -2141,7 +2137,7 @@ func (daemon *Daemon) operatorUpdateTask(ctx context.Context, call api.Call) api
 		if err != nil {
 			return newErrorReply(api.RemoteInternal)
 		}
-		task, err := daemon.store.RetryTaskForOperator(ctx, id, expected, value, at)
+		task, err := daemon.store.RetryTask(ctx, nil, id, expected, value, at, 0)
 		if err != nil {
 			return newErrorReply(remoteErrorCode(err))
 		}

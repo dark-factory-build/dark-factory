@@ -37,6 +37,7 @@ func TestPublishedFixtureEnqueuesWithBaseRef(t *testing.T) {
 	}
 	backend := &publicReviewBackend{}
 	fixture.daemon.reviewBackend = func(string, uint64) review.Backend { return backend }
+	customerMode(t, fixture)
 	head, base := strings.Repeat("a", 40), strings.Repeat("b", 40)
 	request := maintainerRequest{JSONRPC: "2.0", ID: json.RawMessage(`1`), Method: "tools/call", Params: json.RawMessage(`{"name":"create_pull_request","arguments":{"repository":"team/repo","title":"Ship it","head":"feature/ship","base":"main","body":"fixture body"}}`)}
 	response := json.RawMessage(`{"jsonrpc":"2.0","id":1,"result":{"isError":false,"structuredContent":{"number":7,"url":"https://github.com/team/repo/pull/7","head_sha":"` + head + `","base_sha":"` + base + `"}}}`)
@@ -44,6 +45,12 @@ func TestPublishedFixtureEnqueuesWithBaseRef(t *testing.T) {
 		t.Fatal(err)
 	}
 	op := waitForDurableReview(t, fixture.store, projectID, func(op review.Operation) bool { return op.State == "enqueued" })
+	// The verdict wakes the pull request's reconciler, which enqueues the head
+	// though the task that published it has work queued.
+	for deadline := time.Now().Add(2 * time.Second); backend.enqueueSignal.Load() == 0 && time.Now().Before(deadline); {
+		time.Sleep(time.Millisecond)
+	}
+	waitForMergePipeline(t, fixture.daemon)
 	if backend.reviews != 1 || backend.submits != 1 || backend.enqueues != 1 || backend.enqueuedBase != "main" || backend.enqueuedSHA != base || op.Request != (review.Request{Repository: "team/repo", PullNumber: 7, Head: head, Base: base, BaseRef: "main", Body: "fixture body", Provider: "codex"}) {
 		t.Fatalf("publication review enqueue=%+v operation=%+v", backend, op)
 	}
@@ -127,9 +134,10 @@ func TestRestartResumesPublicationReviewWithoutDuplicateSubmit(t *testing.T) {
 	if count, err := restarted.RecoverReviewOperations(context.Background()); err != nil || count != 1 {
 		t.Fatalf("startup reconciliation count=%d err=%v", count, err)
 	}
-	// An interrupted claim is still running, so startup resumes it once.
+	// An interrupted claim is still running, so startup resumes it once, up
+	// to its verdict; the pull request's reconciler enqueues it.
 	recovered := waitForDurableReview(t, fixture.store, projectID, func(op review.Operation) bool { return op.State == "enqueued" })
-	if recovered.ID != prepared.ID || recovered.State != "enqueued" || backend.reviews != 1 || backend.submits != 1 || backend.enqueues != 1 || len(backend.journal) != 1 {
+	if recovered.ID != prepared.ID || recovered.State != "enqueued" || backend.reviews != 1 || backend.submits != 1 || backend.enqueues != 0 || len(backend.journal) != 1 {
 		t.Fatalf("recovered operation=%+v backend=%+v", recovered, backend)
 	}
 	if count, err := restarted.RecoverReviewOperations(context.Background()); err != nil || count != 0 {
@@ -152,6 +160,10 @@ func TestRestartReconcilesUncertainExternalReviewWritesWithoutDuplicateWrites(t 
 			store := durableReviewStore{store: fixture.store, project: projectID, repository: "team/repo", now: now}
 			coordinator := review.Coordinator{Store: &failReviewUpdateStore{Store: store, failAt: test.failAt}, Backend: backend, Now: now}
 			head, base := strings.Repeat("c", 40), strings.Repeat("d", 40)
+			// Every open pull request is recorded by the refresh that lists it.
+			if err := fixture.store.RecordProductionObservation(context.Background(), projectID, kernel.ProductionObservation{Repository: "team/repo", ObservedAt: 5, PullRequests: []kernel.ProductionPullRequest{{Number: 11, Title: "Ship it", Head: head, State: "open"}}}, mustKernelTime(t, 5)); err != nil {
+				t.Fatal(err)
+			}
 			_, err := coordinator.Start(context.Background(), review.Request{Repository: "team/repo", PullNumber: 11, Head: head, Base: base, BaseRef: "main", Body: "fixture body", Provider: "codex"})
 			if err == nil {
 				t.Fatal("simulated restart boundary unexpectedly completed")
@@ -177,7 +189,7 @@ func TestRestartReconcilesUncertainExternalReviewWritesWithoutDuplicateWrites(t 
 				t.Fatalf("reconciliation count=%d err=%v", count, err)
 			}
 			recovered := lastDurableReview(t, fixture.store, projectID)
-			if recovered.State != "enqueued" || recovered.Retryable || recovered.Request.Head != head || recovered.ID != before.ID || backend.submits != 1 || backend.enqueues != 1 {
+			if recovered.State != "enqueued" || recovered.Retryable || recovered.Request.Head != head || recovered.ID != before.ID || backend.submits != 1 || backend.enqueues != 0 {
 				t.Fatalf("uncertain operation=%+v", recovered)
 			}
 			if count, err := restarted.RecoverReviewOperations(context.Background()); err != nil || count != 0 {
