@@ -756,8 +756,8 @@ func TestSchedulerPausedDispatchDefersAutomaticWorkUntilResume(t *testing.T) {
 			// An escalation on an open pull request is an item due to the overseer.
 			head := "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
 			pr := kernel.ProductionPullRequest{Number: 7, Title: "Ship", URL: "https://github.com/team/repo/pull/7", Head: head, Branch: "factory/x", Base: "main", State: "open", Review: kernel.ProductionReview{Head: head, State: "unknown"}}
-			escalated := kernel.ProductionReviewOperation{ID: "op", Document: map[string]any{"request": map[string]any{"PullNumber": 7, "Head": head}, "escalation": "stuck"}}
-			if err := store.RecordProductionObservationWithReviewOperations(ctx, project.ID, kernel.ProductionObservation{Repository: "team/repo", ObservedAt: 5, PullRequests: []kernel.ProductionPullRequest{pr}}, []kernel.ProductionReviewOperation{escalated}, schedulerTime(t, 5)); err != nil {
+			escalated := map[string]any{"request": map[string]any{"PullNumber": 7, "Head": head}, "escalation": "stuck"}
+			if err := errors.Join(store.RecordProductionObservation(ctx, project.ID, kernel.ProductionObservation{Repository: "team/repo", ObservedAt: 5, PullRequests: []kernel.ProductionPullRequest{pr}}, schedulerTime(t, 5)), store.RecordReviewOperation(ctx, project.ID, "team/repo", "op", escalated, schedulerTime(t, 5))); err != nil {
 				t.Fatal(err)
 			}
 			continue
