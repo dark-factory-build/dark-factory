@@ -11,6 +11,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"sort"
 	"strings"
 	"syscall"
@@ -115,9 +116,8 @@ func (daemon *Daemon) tickMergePipeline(ctx context.Context) {
 }
 
 // advanceMergePipeline publishes settled intake work, refreshes each
-// publishing project's pull requests, so a corrected head is reviewed, then
-// advances every unfinished review operation. It does nothing on an
-// unconnected home.
+// publishing project's pull requests, then reconciles every open pull request
+// factoryd advances. It does nothing on an unconnected home.
 func (daemon *Daemon) advanceMergePipeline(ctx context.Context) {
 	if !daemon.customerMaintainer() {
 		return
@@ -134,128 +134,225 @@ func (daemon *Daemon) advanceMergePipeline(ctx context.Context) {
 	}
 }
 
-// advanceReviewOperations moves each unfinished review operation one step. It
-// resumes verdict writes whose receipts may be lost, advances allowed heads
-// from their pull request, and retries task routing until it lands. Startup and the
-// poll tick share it; only startup relaunches an interrupted review, and the
-// tick leaves a write younger than reviewStuckAfter to the goroutine making it.
+// reviewOrphanedAfter outlasts a review's wait for checks and its provider
+// deadline: a running review this old has no goroutine making it.
+const reviewOrphanedAfter = time.Hour
+
+// actionVerbs name each review.Action in an escalation; Wait's only failure
+// is the observation.
+var actionVerbs = [...]string{"observe the pull request", "rebase its Change onto main", "send it back", "review it", "retry its review", "enqueue it", "escalate it"}
+
+// advanceReviewOperations is every open pull request's reconciler, one pass
+// each; startup relaunches the reviews it interrupted. It returns how many it
+// acted on.
 func (daemon *Daemon) advanceReviewOperations(ctx context.Context, startup bool) (int, error) {
-	operations, err := daemon.store.InFlightReviewOperations(ctx)
+	daemon.reconcileMu.Lock()
+	defer daemon.reconcileMu.Unlock()
+	pulls, err := daemon.store.OpenPulls(ctx)
 	if err != nil {
 		return 0, err
 	}
+	// Settled work factoryd has yet to publish moves its pull request's head.
+	unpublished := map[kernel.TaskID]bool{}
+	if at, err := daemon.timestamp(); err == nil {
+		changes, _ := daemon.store.PublishableChanges(ctx, at)
+		for _, c := range changes {
+			unpublished[c.Task.ID] = true
+		}
+	}
 	advanced := 0
-	for _, operation := range operations {
-		var op review.Operation
-		if err := json.Unmarshal(operation.Document, &op); err != nil || op.ID == "" || op.ID != operation.ID {
-			return advanced, fmt.Errorf("%w: review operation", kernel.ErrCorruptState)
-		}
-		err = nil
-		stuck := startup || daemon.now().Sub(op.UpdatedAt) > reviewStuckAfter
-		switch {
-		case op.RoutePending && op.State == "ejected" && strings.Contains(op.Detail, "conflicts with"):
-			var rebased bool
-			rebased, err = daemon.tryAutoRebase(ctx, operation.Project, operation.Repository, op)
-			if err == nil && rebased {
-				daemon.publishSettledChanges(ctx)
-				_ = daemon.refreshProduction(ctx, operation.Project)
-				op.State, op.RoutePending, op.UpdatedAt = "superseded", false, daemon.now()
-				err = durableReviewStore{store: daemon.store, project: operation.Project, repository: operation.Repository, now: daemon.now}.Update(ctx, op)
-				if err == nil {
-					continue
-				}
-			} else if err == nil {
-				err = daemon.finishReviewRouting(ctx, operation.Project, operation.Repository, op)
-			}
-		case op.RoutePending:
-			err = daemon.finishReviewRouting(ctx, operation.Project, operation.Repository, op)
-		case op.State == "running" && startup:
-			// A review takes minutes; startup does not wait for it.
-			daemon.launchReview(operation.Project, op)
-		case op.State == "enqueued" && daemon.customerMaintainer() && !daemon.githubQuotaLow():
-			var coordinator review.Coordinator
-			if coordinator, err = daemon.reviewCoordinator(ctx, operation.Project, operation.Repository); err == nil {
-				if op, err = coordinator.Advance(ctx, op); err == nil && op.State == "enqueued" {
-					continue
-				}
-			}
-			if err == nil && op.State == "ejected" && op.RoutePending && strings.Contains(op.Detail, "conflicts with") {
-				var rebased bool
-				rebased, err = daemon.tryAutoRebase(ctx, operation.Project, operation.Repository, op)
-				if err == nil && rebased {
-					// Reuse the ordinary correction publication and refresh paths;
-					// this makes the new exact head visible without waiting for the
-					// next scheduler tick. A later pass retries a transient publish.
-					daemon.publishSettledChanges(ctx)
-					_ = daemon.refreshProduction(ctx, operation.Project)
-					op.State, op.RoutePending, op.UpdatedAt = "superseded", false, daemon.now()
-					err = durableReviewStore{store: daemon.store, project: operation.Project, repository: operation.Repository, now: daemon.now}.Update(ctx, op)
-					if err == nil {
-						continue
-					}
-				}
-			}
-			if err == nil {
-				err = daemon.finishReviewRouting(ctx, operation.Project, operation.Repository, op)
-			}
-		case op.State == "submitting" && stuck:
-			// It keeps resuming, since it may still complete; one whose resume
-			// keeps failing is escalated once, with the last error, not left silent.
-			var resumed review.Operation
-			if resumed, err = daemon.resumeReview(ctx, operation.Project, op); err != nil && resumed.State == op.State && op.Escalation == "" && daemon.now().Sub(op.UpdatedAt) > reviewEscalateAfter &&
-				daemon.escalatePull(&resumed, "its "+op.State+" write has not advanced for 30 minutes: "+err.Error()) == nil {
-				err = durableReviewStore{store: daemon.store, project: operation.Project, repository: operation.Repository, now: daemon.now}.Update(ctx, resumed)
-			}
-		case op.State == "failed" && stuck && daemon.customerMaintainer():
-			// A failed review is retried once, claimed here and run in the
-			// background; one that cannot be is escalated to the overseer, once.
-			// Neither leaves the pull request silently stalled.
-			why := "its review failed: " + op.Detail
-			if op.Retryable && op.RetryOf == "" {
-				var coordinator review.Coordinator
-				var retry review.Operation
-				if coordinator, err = daemon.reviewCoordinator(ctx, operation.Project, operation.Repository); err == nil {
-					if retry, err = coordinator.ReserveRetry(ctx, op); err == nil {
-						daemon.launchReview(operation.Project, retry)
-						break
-					}
-				}
-				why += "\n\nits retry could not start: " + err.Error()
-			}
-			if err = daemon.escalatePull(&op, why); err == nil {
-				op.Handled = true
-				err = durableReviewStore{store: daemon.store, project: operation.Project, repository: operation.Repository, now: daemon.now}.Update(ctx, op)
-			}
-		default:
-			continue
-		}
-		if err == nil {
-			advanced++
-		} else {
+	for _, open := range pulls {
+		acted, err := daemon.reconcilePull(ctx, open, unpublished[open.Task], startup)
+		if err != nil {
 			daemon.noteMaintainerFault(err)
-			LogFactoryd(daemon.log, "factoryd: review %s %s: %v\n", operation.ID, op.State, err)
+			LogFactoryd(daemon.log, "factoryd: reconcile %s#%d: %v\n", open.Repository, open.Pull.Number, err)
+		} else if acted {
+			advanced++
 		}
 	}
 	return advanced, nil
 }
 
-// tryAutoRebase repairs the common merge-queue conflict without consuming a
-// worker turn. It returns false only for a real Git conflict; other failures
-// remain pending so the normal durable retry/escalation path can handle them.
-func (daemon *Daemon) tryAutoRebase(ctx context.Context, project kernel.ProjectID, repository string, op review.Operation) (bool, error) {
-	changeID, found, err := daemon.store.PublishedChangeID(ctx, project, repository, op.Request.PullNumber)
+// reconcilePull is one pass of an open pull request's reconciler: it reads
+// the exact pull request, its task and the operations at its head, decides
+// once (review.Decide) and takes that one action. An action that fails counts
+// toward one escalation.
+func (daemon *Daemon) reconcilePull(ctx context.Context, open kernel.OpenPull, unpublished, startup bool) (bool, error) {
+	ops := make([]review.Operation, len(open.Operations))
+	for i, document := range open.Operations {
+		if json.Unmarshal(document, &ops[i]) != nil || ops[i].ID == "" {
+			return false, fmt.Errorf("%w: review operation", kernel.ErrCorruptState)
+		}
+	}
+	slices.SortFunc(ops, func(a, b review.Operation) int { return a.CreatedAt.Compare(b.CreatedAt) })
+	var op review.Operation
+	if len(ops) > 0 {
+		op = ops[len(ops)-1]
+	}
+	var task kernel.Task
+	if open.Task != (kernel.TaskID{}) {
+		var err error
+		if task, _, err = daemon.store.Task(ctx, open.Task); err != nil {
+			return false, err
+		}
+	}
+	store := durableReviewStore{store: daemon.store, project: open.Project, repository: open.Repository, now: daemon.now}
+	since := daemon.now().Sub(op.UpdatedAt)
+	switch {
+	case op.State == "running":
+		if startup || since > reviewOrphanedAfter {
+			daemon.launchReview(open.Project, op)
+			return true, nil
+		}
+		return false, nil
+	case op.State == "submitting":
+		// A write whose receipt may be lost keeps resuming, since it may still
+		// complete; one that keeps failing is escalated once, not left silent.
+		if !startup && since <= reviewStuckAfter {
+			return false, nil
+		}
+		resumed, err := daemon.resumeReview(ctx, open.Project, op)
+		if err != nil && resumed.State == op.State && op.Escalation == "" && since > reviewEscalateAfter {
+			resumed.Escalate("its " + op.State + " write has not advanced for 30 minutes: " + err.Error())
+			err = store.Update(ctx, resumed)
+		}
+		return true, err
+	case !daemon.customerMaintainer() || daemon.githubQuotaLow(), unpublished:
+		// The merge stage runs on the factoryd Maintainer path, and settled
+		// work factoryd has yet to publish moves the head.
+		return false, nil
+	case task.Status == kernel.TaskCancelled:
+		return false, nil // an operator's cancel is final: its author reads GitHub
+	}
+	working := task.Status == kernel.TaskQueued || task.Status == kernel.TaskRunning
+	coordinator, err := daemon.reviewCoordinator(ctx, open.Project, open.Repository)
+	if len(ops) == 0 {
+		if err == nil {
+			err = daemon.reviewHead(ctx, coordinator, open, "")
+		}
+		return true, err
+	}
+	before, action, note := op, review.Wait, ""
+	var pull review.Pull
+	if err == nil {
+		pull, err = coordinator.Backend.ObservePull(ctx, op)
+	}
+	switch {
+	case err != nil:
+		op.Observation = ""
+	case !strings.EqualFold(pull.Head, op.Request.Head):
+		return false, nil // the refresh records the new head
+	case pull.State != "open":
+		op.State = pull.State
+	default:
+		if observation := pull.Observation(); observation != op.Observation {
+			op.Observation, op.Failures = observation, 0
+		}
+		ops[len(ops)-1] = op
+		answered := !working && strings.Contains(kernel.TaskFeedback(task), "review-operation: "+op.ID+"\n")
+		if action, note = review.Decide(pull, ops, answered); working && (action == review.Rebase || action == review.SendBack) {
+			action = review.Wait // its task's next head decides
+		}
+		switch action {
+		case review.Escalate:
+			op.Escalate(note)
+			op.Handled = true
+		case review.Review:
+			answer := ""
+			if answered {
+				answer = task.Result
+			}
+			err = daemon.reviewHead(ctx, coordinator, open, answer)
+		case review.Retry:
+			var retry review.Operation
+			if retry, err = coordinator.ReserveRetry(ctx, op); err == nil {
+				daemon.launchReview(open.Project, retry)
+				return true, nil // the reservation wrote op
+			}
+		case review.Rebase:
+			op.Rebased = true
+			var moved bool
+			if moved, err = daemon.rebaseChange(ctx, open); err == nil && moved {
+				daemon.publishSettledChanges(ctx)
+			} else if err == nil {
+				err = daemon.sendBackPull(ctx, open, task, op, note)
+			}
+		case review.SendBack:
+			err = daemon.sendBackPull(ctx, open, task, op, note)
+		case review.Enqueue:
+			if err = coordinator.Backend.Enqueue(ctx, op); err == nil {
+				op.Enqueues++
+			}
+		}
+	}
+	switch {
+	case err != nil:
+		// One refusal policy: bounded retry, then escalate once. A refusal no
+		// retry passes is escalated at once and waits for the pull to change.
+		op.Failures++
+		why := fmt.Sprintf("it could not %s (attempt %d): %v", actionVerbs[action], op.Failures, err)
+		if op.OwnerApproval = errors.Is(err, review.ErrOwnerApproval); op.OwnerApproval || errors.Is(err, review.ErrPermanent) {
+			op.Failures = max(op.Failures, review.FailuresBeforeEscalation)
+		}
+		if op.Failures >= review.FailuresBeforeEscalation && op.Escalation == "" {
+			op.Escalate(why)
+		}
+	case action != review.Wait && action != review.Escalate:
+		op.Failures, op.Escalation, op.OwnerApproval = 0, "", false
+	}
+	if op != before {
+		op.UpdatedAt = daemon.now()
+		err = errors.Join(err, store.Update(ctx, op))
+	}
+	return action != review.Wait || op.State != before.State, err
+}
+
+// reviewHead claims and launches a review of the pull request's head as
+// GitHub stores it; answer is its task's answer to the block it disputes.
+func (daemon *Daemon) reviewHead(ctx context.Context, coordinator review.Coordinator, open kernel.OpenPull, answer string) error {
+	request, err := coordinator.Backend.StoredPull(ctx, open.Pull.Number, open.Pull.Head)
+	if err != nil {
+		return err
+	}
+	request.Answer = strings.ToValidUTF8(answer[:min(len(answer), 4000)], "")
+	op, err := review.Prepare(request, daemon.now)
+	if err == nil {
+		err = coordinator.Store.Create(ctx, op)
+	}
+	if err == nil {
+		daemon.launchReview(open.Project, op)
+	}
+	return err
+}
+
+// sendBackPull returns the head's work, with the operation's marker, to the
+// task that published the pull request, or to a new repair task when no task
+// did. A fork's stays on GitHub for its author.
+func (daemon *Daemon) sendBackPull(ctx context.Context, open kernel.OpenPull, task kernel.Task, op review.Operation, note string) error {
+	at, err := daemon.timestamp()
+	if err != nil {
+		return err
+	}
+	note = "review-operation: " + op.ID + "\nreview-head: " + op.Request.Head + "\n\n" + note
+	note = strings.ToValidUTF8(note[:min(len(note), kernel.MaxSendBackNoteBytes)], "")
+	if open.Task != (kernel.TaskID{}) {
+		_, err = daemon.store.SendBackTask(ctx, nil, task.ID, task.Revision, op.Request.Head, note, at)
+	} else if _, err = daemon.store.CreateRepairTask(ctx, open.Project, open.Repository, open.Pull.Number, op.Request.Head, note, at); errors.Is(err, kernel.ErrNotFound) {
+		err = nil
+	}
+	return err
+}
+
+// rebaseChange brings the retained Change published on the pull request up to
+// current main without a worker turn. It reports whether the Change's head
+// moved: not on a real Git conflict, a Change already on main, or none.
+func (daemon *Daemon) rebaseChange(ctx context.Context, open kernel.OpenPull) (bool, error) {
+	changeID, found, err := daemon.store.PublishedChangeID(ctx, open.Project, open.Repository, open.Pull.Number)
 	if err != nil || !found {
 		return false, err
 	}
 	state, found, err := daemon.store.Change(ctx, changeID)
 	if err != nil || !found || state.Phase != kernel.ChangeRetained || state.Selection == nil || state.HeadCommit == nil {
-		return false, err
-	}
-	// The App publishes its own commit, so a conflict names the pull request
-	// head, never the Change's. One observed at a head the pull request has
-	// since left is stale: routing drops it.
-	pull, open, err := daemon.store.TaskOpenPullRequest(ctx, state.TaskID)
-	if err != nil || !open || pull.Number != op.Request.PullNumber || !strings.EqualFold(pull.Head, op.Request.Head) {
 		return false, err
 	}
 	parent, git := daemon.changeParent.Load(), daemon.gitExecutable.Load()
@@ -297,7 +394,7 @@ func (daemon *Daemon) tryAutoRebase(ctx context.Context, project kernel.ProjectI
 		return false, errors.New("rebased Change worktree failed verification")
 	}
 	newHead, err := kernelCommit(facts.Head())
-	if err != nil {
+	if err != nil || kernelCommitEqual(*state.HeadCommit, newHead) {
 		return false, err
 	}
 	at, err := daemon.timestamp()
@@ -306,19 +403,6 @@ func (daemon *Daemon) tryAutoRebase(ctx context.Context, project kernel.ProjectI
 	}
 	_, err = daemon.store.RecordChangeRebased(ctx, state.ID, state.Revision, *state.HeadCommit, newHead, at)
 	return err == nil, err
-}
-
-func (daemon *Daemon) repairPublishedConflict(ctx context.Context, project kernel.ProjectID, repository string, op review.Operation) error {
-	rebased, err := daemon.tryAutoRebase(ctx, project, repository, op)
-	if err != nil {
-		return err
-	}
-	if rebased {
-		daemon.publishSettledChanges(ctx)
-		op.State, op.RoutePending, op.UpdatedAt = "superseded", false, daemon.now()
-		return (durableReviewStore{store: daemon.store, project: project, repository: repository, now: daemon.now}).Update(ctx, op)
-	}
-	return daemon.finishReviewRouting(ctx, project, repository, op)
 }
 
 func (daemon *Daemon) reviewCoordinator(ctx context.Context, project kernel.ProjectID, repository string) (review.Coordinator, error) {
@@ -350,79 +434,25 @@ func (daemon *Daemon) resumeReview(ctx context.Context, project kernel.ProjectID
 	if err != nil {
 		return op, err
 	}
-	// Resume is the fresh-verdict boundary; routing retries below stay paced.
-	defer func() {
-		if op.Submitted && (op.State == "enqueued" || op.State == "completed" || op.State == "ejected") {
-			daemon.pipelineAt.Store(0)
-			daemon.tickMergePipeline(ctx)
-		}
-	}()
 	op, err = coordinator.Resume(ctx, op)
-	return op, errors.Join(err, daemon.finishReviewRouting(ctx, project, repository, op))
-}
-
-// finishReviewRouting completes the second half of a REQUEST_CHANGES verdict
-// or a merge-queue ejection: the note goes to the task that
-// owns the published Change. It stays pending, retried each tick, until that
-// task's feedback carries the operation marker at a new work revision; the
-// marker makes a replay idempotent. A head that cannot be routed, more than
-// two repair rounds are escalated.
-func (daemon *Daemon) finishReviewRouting(ctx context.Context, project kernel.ProjectID, repository string, op review.Operation) error {
-	at, err := daemon.timestamp()
-	if err != nil {
-		return err
-	}
 	if op.Submitted && (op.State == "enqueued" || op.State == "completed") {
 		// factoryd's submitted verdict is the production review of record,
-		// shown best-effort: routing never waits on the projection.
+		// shown best-effort.
 		verdict := kernel.ProductionReview{Head: op.Request.Head, State: "allow", Findings: strings.ToValidUTF8(op.Detail[:min(len(op.Detail), 16000)], ""), OperationID: op.ID}
 		if op.Verdict == "request_changes" {
 			verdict.State = "block"
 		}
-		_ = daemon.store.RecordProductionReview(ctx, project, repository, op.Request.PullNumber, verdict, at)
+		if at, timeErr := daemon.timestamp(); timeErr == nil {
+			_ = daemon.store.RecordProductionReview(ctx, project, repository, op.Request.PullNumber, verdict, at)
+		}
 	}
-	if !op.RoutePending {
-		return nil
+	if op.Submitted || op.State == "ejected" {
+		// The pull request's reconciler acts on a verdict, or a head too red
+		// or conflicting to review, now, not at the next refresh (#1504).
+		daemon.pipelineAt.Store(0)
+		daemon.tickMergePipeline(ctx)
 	}
-	if err := daemon.routeSendBack(ctx, project, repository, &op, at); err != nil {
-		return err
-	}
-	op.RoutePending, op.UpdatedAt = false, daemon.now()
-	return durableReviewStore{store: daemon.store, project: project, repository: repository, now: daemon.now}.Update(ctx, op)
-}
-
-func (daemon *Daemon) routeSendBack(ctx context.Context, project kernel.ProjectID, repository string, op *review.Operation, at kernel.UnixMillis) error {
-	note := op.Detail
-	if op.Submitted && op.Verdict == "request_changes" {
-		note = "This is the review of record for exact head " + op.Request.Head + ". No other verdict on this head supersedes its findings: correct each one.\n\n" + note
-	}
-	note = strings.ToValidUTF8(note[:min(len(note), kernel.MaxSendBackNoteBytes-160)], "")
-	task, err := daemon.store.SendBackPublishedReview(ctx, project, repository, op.Request.PullNumber, op.ID, op.Request.Head, note, at)
-	switch {
-	case errors.Is(err, kernel.ErrSuperseded), errors.Is(err, kernel.ErrNotFound):
-		// A moved head, a fork, or no bound repository: its author reads the verdict on GitHub.
-		err = nil
-	case errors.Is(err, kernel.ErrInvalidValue):
-		err = daemon.escalatePull(op, "its send-back reached no task:\n\n"+note)
-	case err != nil:
-		return err // a running task refuses it until it settles
-	case !strings.Contains(kernel.TaskFeedback(task), "review-operation: "+op.ID+"\n") || task.WorkRevision.Int64() < 1:
-		return errors.New("review: send-back did not move the task")
-	case task.WorkRevision.Int64() > 3:
-		err = daemon.escalatePull(op, "it is past two repair rounds; the latest went back to its task:\n\n"+note)
-	}
-	return err
-}
-
-// escalatePull records why the pipeline cannot advance a pull request on its
-// operation, which makes it an item due to the project's overseer; an
-// unconnected home never escalates, so its route stays pending.
-func (daemon *Daemon) escalatePull(op *review.Operation, why string) error {
-	if !daemon.customerMaintainer() {
-		return errors.New("escalation waits for the factoryd Maintainer connection")
-	}
-	op.Escalate(why)
-	return nil
+	return op, err
 }
 
 // launchReview keeps publication acknowledgement independent from provider
@@ -434,14 +464,6 @@ func (daemon *Daemon) launchReview(project kernel.ProjectID, op review.Operation
 		ctx = context.Background()
 	}
 	go func() { _, _ = daemon.resumeReview(ctx, project, op) }()
-}
-
-func (daemon *Daemon) preparePublishedReview(ctx context.Context, project kernel.ProjectID, repository string, pull uint64, publishedHead string) (review.Operation, error) {
-	request, err := daemon.publishedReviewRequest(ctx, project, repository, pull, publishedHead)
-	if err != nil {
-		return review.Operation{}, err
-	}
-	return review.Prepare(request, daemon.now)
 }
 
 func (daemon *Daemon) publishedReviewRequest(ctx context.Context, project kernel.ProjectID, repository string, pull uint64, publishedHead string) (review.Request, error) {
@@ -604,7 +626,11 @@ func (b *daemonReviewBackend) Review(ctx context.Context, checkout string, reque
 	if err != nil {
 		return review.Verdict{}, fmt.Errorf("review: %s not on the tool path: %w", request.Provider, err)
 	}
-	prompt := reviewPrompt(checkout, request.Base, request.Body, diff)
+	body := request.Body
+	if request.Answer != "" {
+		body += "\n\nThe author disputes the blocking review of this exact head without changing it, answering:\n\n" + request.Answer
+	}
+	prompt := reviewPrompt(checkout, request.Base, body, diff)
 	for _, home := range homes {
 		var command *exec.Cmd
 		// A later entry wins in exec, so the account's HOME replaces the
@@ -858,13 +884,12 @@ func (r maintainerRejection) Error() string {
 
 // Is classifies the rejection once for every caller. Only invalid input or a
 // tree GitHub cannot return whole is permanent; a refusal (not RATE_LIMITED)
-// for a CODEOWNERS approval (GitHub's "Waiting on code owner review") or as
-// UNPROCESSABLE can come to hold (#1531).
+// for a CODEOWNERS approval (GitHub's "Waiting on code owner review") waits
+// for the owner. Any other refusal can come to hold (#1531) and is retried.
 func (r maintainerRejection) Is(target error) bool {
 	why, refused := string(r), strings.HasPrefix(string(r), "refused:") && !strings.Contains(string(r), "RATE_LIMITED")
 	return target == review.ErrPermanent && (strings.HasPrefix(why, "invalid_input:") || strings.Contains(why, "too large for GitHub to return whole")) ||
-		target == review.ErrOwnerApproval && refused && (strings.Contains(strings.ToLower(why), "required codeowners approval") || strings.Contains(strings.ToLower(why), "waiting on code owner review") || strings.Contains(why, "CODEOWNERS_APPROVAL")) ||
-		target == review.ErrRefused && refused && strings.Contains(why, "UNPROCESSABLE")
+		target == review.ErrOwnerApproval && refused && (strings.Contains(strings.ToLower(why), "required codeowners approval") || strings.Contains(strings.ToLower(why), "waiting on code owner review") || strings.Contains(why, "CODEOWNERS_APPROVAL"))
 }
 
 func reviewedBodyDigest(operation review.Operation) string {

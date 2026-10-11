@@ -557,13 +557,16 @@ the full gate. The reviewer is a separate session that can read only the reviewe
 checkout (see providers.md), never the author or overseer. Never create a
 review task for a worker, record a verdict, enqueue, or wait on that pipeline.
 
+Each head goes back to its task at most once per review. A task that answers
+a REQUEST_CHANGES without a new head gets one more review of that head, which
+reads its answer; a conflicting head factoryd first rebases itself.
+
 factoryd wakes you with `Escalated: factoryd cannot advance OWNER/REPO#N at
 exact head HEAD: ...` only when it cannot advance a pull request: a review that
-failed twice, an enqueue the App refused, a send-back that reached no task, or
-a change past two repair rounds. An enqueue refusal is escalated at once and
-the operation stays live: one awaiting CODEOWNERS approval waits for it, and an
-UNPROCESSABLE one is retried up to three times, then again whenever the head's
-checks or review state change. Only invalid input is final for that head.
+failed twice, a task that answered a send-back without a new head (a disputed
+block upheld by its second review included), or an action (enqueue, send-back,
+review) that kept failing for 30 minutes and now waits for the pull request to
+change. A CODEOWNERS refusal is escalated at once and waits for the owner.
 Resolve the cause or raise it with
 `attempt request-human` naming the pull request; never start another review.
 

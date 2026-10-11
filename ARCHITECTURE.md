@@ -96,10 +96,13 @@ unsupported before a provider runs.
 8. A long-running operation stops only on a failure the same request meets
    again, and that is escalated once; anything else is retried, and escalated
    once if it outlasts its bound (#1558). Publication retries hourly and
-   escalates on its first failure. A merge-stage pass (observe, enqueue)
-   retries every 5 minutes and escalates after 30; an enqueue refusal is
-   escalated at once and retried three times, then on each changed
-   observation of the pull request. Run settlement retries a
+   escalates on its first failure. Each open pull request has one
+   level-triggered reconciler: every 5-minute merge-stage pass reads the exact
+   pull request, its task and the review at its head, and takes the one action
+   they call for (bring the Change up to main, send back bound to the head,
+   review, retry, enqueue or escalate). An action that keeps failing is retried
+   for 30 minutes, then escalated once and left until the pull request changes;
+   a CODEOWNERS refusal is escalated at once. Run settlement retries a
    repository, Git or I/O fault and refuses a worktree that fails its own
    validation; a release drain waits 10 minutes, then fails naming the run. An
    attempt call waits out a 30-second daemon restart before its run sees the
