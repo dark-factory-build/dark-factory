@@ -239,8 +239,9 @@ func validateKnowledge(ctx context.Context, c *sql.Conn, spec NewContent, expect
 	if (spec.Kind == ContentDecision || spec.Kind == ContentLesson || (spec.Kind == ContentProjectBrief && m.Status == "current")) && len(m.Evidence) == 0 {
 		return ErrInvalidValue
 	}
-	// Lessons are evidence-backed operational memory: every new or revised
-	// lesson must carry a command or query that can re-verify its claim.
+	// New and revised lessons are evidence-backed operational memory: they must
+	// carry a command or query that can re-verify the claim. Retirement preserves
+	// legacy metadata so existing lessons remain manageable.
 	if spec.Kind == ContentLesson && !retiring && strings.TrimSpace(m.Verification) == "" {
 		return ErrInvalidValue
 	}

@@ -52,7 +52,7 @@ func TestLessonsRequireRunnableVerification(t *testing.T) {
 	if err != nil {
 		t.Fatalf("verified lesson = %v", err)
 	}
-	// A pre-change lesson may lack verification; retirement must remain possible.
+	// Legacy metadata without verification remains retireable.
 	if _, err := store.writer.ExecContext(ctx, `UPDATE project_content_revisions SET source_references=? WHERE id=? AND revision=?`, `{"status":"tentative","evidence":["legacy source"]}`, created.ID.Bytes(), created.Revision.Int64()); err != nil {
 		t.Fatal(err)
 	}
