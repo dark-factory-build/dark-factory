@@ -212,7 +212,7 @@ func (daemon *Daemon) publishPull(ctx context.Context, c kernel.PublishableChang
 	if err != nil {
 		return err
 	}
-	if tip != "" && c.Pull != 0 {
+	if tip != "" {
 		checked, ref = tip, "refs/heads/"+branch
 	}
 	if done {
@@ -272,7 +272,7 @@ func (daemon *Daemon) publishPull(ctx context.Context, c kernel.PublishableChang
 				break
 			}
 		}
-		listing, err := gitOutput(ctx, gitDir, "log", "--full-history", "--format=", "--name-only", "-z", "--no-merges", "--no-renames", workerHead+".."+c.Head, "--not", main)
+		listing, err := gitOutput(ctx, gitDir, "log", "--full-history", "--format=", "--name-only", "-z", "--no-merges", "--no-renames", c.Base+".."+c.Head, "--not", main)
 		if err != nil {
 			return err
 		}

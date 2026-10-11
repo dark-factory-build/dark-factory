@@ -568,7 +568,7 @@ func TestCorrectionPublishesMergeResolution(t *testing.T) {
 		t.Fatal(err)
 	}
 	supervisorGit(t, git, "-C", root, "-c", "user.name=fixture", "-c", "user.email=fixture@example.invalid", "add", "f00.txt")
-	supervisorGit(t, git, "-C", root, "-c", "user.name=fixture", "-c", "user.email=fixture@example.invalid", "commit", "-q", "-m", "resolve")
+	supervisorGit(t, git, "-C", root, "-c", "user.name=fixture", "-c", "user.email=fixture@example.invalid", "commit", "-q", "--amend", "--no-edit")
 	c.Head = strings.TrimSpace(supervisorGitOutput(t, git, "-C", root, "rev-parse", "HEAD"))
 	app.journal[uuid5("dark-factory:"+c.Change.String()+":publish-"+workerHead[:8]+"-1")] = json.RawMessage(`{"commit_sha":"published","parent_sha":"` + c.Base + `"}`)
 	c.Pull = 31
