@@ -297,7 +297,7 @@ func (daemon *Daemon) publishPull(ctx context.Context, c kernel.PublishableChang
 	if c.Pull != 0 {
 		// The corrected body keeps its closing line; factoryd's refresh
 		// reviews a new head. One settlement's body is written once.
-		if !c.Repair {
+		if !c.Repair && c.Accepted.Snapshot.IssueNumber != 0 {
 			step := fmt.Sprintf("body-%s-%d", head[:8], c.Revision.Int64())
 			done, err := completed(step, new(json.RawMessage))
 			if err == nil && !done {
@@ -324,6 +324,28 @@ func (daemon *Daemon) publishPull(ctx context.Context, c kernel.PublishableChang
 		}
 		return daemon.store.RecordCorrectionPublished(ctx, c, at)
 	}
+	issue := c.Accepted.Snapshot.IssueNumber
+	if c.Accepted.ID == (kernel.IntakeAcceptanceID{}) && issue == 0 {
+		step := "issue"
+		var created struct {
+			Number uint64 `json:"number"`
+		}
+		done, err := completed(step, &created)
+		if err == nil && !done {
+			response, callErr := call(ctx, "create_issue", map[string]any{"repository": repo, "operation_id": operation(step), "title": message, "body": c.Task.Body})
+			err = callErr
+			if err == nil {
+				err = json.Unmarshal(response, &created)
+			}
+		}
+		if err != nil {
+			return err
+		}
+		if created.Number == 0 {
+			return errors.New("create_issue returned no issue")
+		}
+		issue = created.Number
+	}
 	var pull struct {
 		Number uint64 `json:"number"`
 		URL    string `json:"url"`
@@ -343,7 +365,7 @@ func (daemon *Daemon) publishPull(ctx context.Context, c kernel.PublishableChang
 	}
 	if err == nil && !done {
 		arguments := map[string]any{"repository": repo, "operation_id": operation(step), "head": branch, "head_sha": head, "base": "main", "base_sha": base, "title": message, "body": body, "draft": false,
-			"issue_number": c.Accepted.Snapshot.IssueNumber, "close_on_merge": true} // the source issue is in repo itself
+			"issue_number": issue, "close_on_merge": issue != 0}
 		var response json.RawMessage
 		if response, err = call(ctx, "create_pull_request", arguments); err == nil {
 			err = json.Unmarshal(response, &pull)

@@ -62,25 +62,11 @@ func (daemon *Daemon) attemptMaintainer(ctx context.Context, call api.Call) api.
 		}
 		// factoryd is the one verdict authority: it reviews and
 		// enqueues every published head itself.
-		if params.Name == "submit_pull_request_review" || params.Name == "enqueue_pull_request" {
+		if params.Name == "create_issue" || params.Name == "publish_commit" || params.Name == "create_pull_request" || params.Name == "update_pull_request_body" || params.Name == "enqueue_pull_request" || params.Name == "submit_pull_request_review" {
 			return failure("denied")
 		}
 		request.Params = encoded
-		// A published Change carries its own worker task's intake source; the
-		// overseer publishes it from a wake task that has none.
 		sourceTask := authority.TaskID
-		if params.Name == "publish_commit" || params.Name == "create_pull_request" {
-			var branch string
-			_ = json.Unmarshal(params.Arguments["branch"], &branch)
-			_ = json.Unmarshal(params.Arguments["head"], &branch)
-			if task, closed, err := daemon.store.ChangeBranchClosedToOverseer(ctx, authority.ProjectID, branch); err != nil {
-				return failure("unavailable")
-			} else if closed {
-				return failure("denied") // a sent-back Change, or intake work factoryd publishes
-			} else if task != (kernel.TaskID{}) {
-				sourceTask = task
-			}
-		}
 		var repository, source string
 		if json.Unmarshal(params.Arguments["repository"], &repository) != nil || repository == "" {
 			return failure("invalid")
