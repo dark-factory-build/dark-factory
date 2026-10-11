@@ -179,13 +179,14 @@ test("board shares immutable threads, resolves by revision, and retains linked c
   assert.equal(renderer.root.findAllByProps({ name: "kind" }).length, 0, "specialized conclusion keeps its intent without a category selector");
   assert.deepEqual(renderer.root.findByProps({ name: "evidence" }).props.defaultValue.split("\n"), ["test:regression", `content:${metadata.id}@3`], "conclusion retains existing and thread evidence");
   const originalFormData = globalThis.FormData;
-  const values = { kind: "lesson", repository_id: metadata.repository_id, title: "Retained conclusion", body: "Use exact authority", status: "tentative", evidence: `content:${metadata.id}@3`, entities: source, thread_id: metadata.id, branch: "topic", environment: "staging" };
+  const values = { kind: "lesson", repository_id: metadata.repository_id, title: "Retained conclusion", body: "Use exact authority", status: "tentative", evidence: `content:${metadata.id}@3`, verification: "go test ./internal/kernel -run TestReport", entities: source, thread_id: metadata.id, branch: "topic", environment: "staging" };
   globalThis.FormData = class { get(name) { return values[name] ?? null; } };
   try { await act(async () => renderer.root.findByProps({ "aria-label": "Knowledge editor" }).props.onSubmit({ preventDefault() {}, currentTarget: {} })); } finally { globalThis.FormData = originalFormData; }
   assert.ok(!renderer.root.findAllByType("p").some((node) => node.children.join("").includes("· Run run")), "new conclusion clears another document's receipts");
   assert.equal(calls.at(-1).operation, "search", "saved content refreshes the list automatically");
   assert.equal(calls.findLast(call => call.operation === "create").input.repository_id, metadata.repository_id);
   assert.match(JSON.parse(calls.findLast(call => call.operation === "create").input.source_references).evidence.join(" "), /content:abab.*@3/);
+  assert.equal(JSON.parse(calls.findLast(call => call.operation === "create").input.source_references).verification, values.verification);
   assert.ok(!calls.some((value) => /task|reply|deliver/.test(value.operation)), "discussion actions never invoke task delivery");
   await act(async () => renderer.unmount());
 });

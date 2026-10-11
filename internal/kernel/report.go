@@ -97,6 +97,7 @@ func (store *Store) Report(ctx context.Context, project *ProjectID, since, bucke
 			return nil, err
 		}
 	}
+	// Reuse counters describe only each lesson's latest immutable revision.
 	var lessons, reads, citations, stale int64
 	if err := read.connection.QueryRowContext(ctx, `SELECT COUNT(*),
 		COALESCE((SELECT COUNT(DISTINCT a.run_id) FROM content_accesses a JOIN project_content_revisions x ON x.id=a.content_id AND x.revision=a.content_revision WHERE a.kind IN ('read','supplied') AND (?1 IS NULL OR x.project_id=?1) AND x.kind='lesson'), 0),
