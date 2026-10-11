@@ -546,6 +546,12 @@ func TestCorrectionPublishesMergeResolution(t *testing.T) {
 	app.main = m1
 	supervisorGit(t, git, "-C", registered, "merge", "-q", "--no-ff", "-s", "ours", "worker", "-m", "published")
 	app.tip = strings.TrimSpace(supervisorGitOutput(t, git, "-C", registered, "rev-parse", "HEAD"))
+	if err := os.WriteFile(filepath.Join(registered, "f00.txt"), []byte("line 0\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	supervisorGit(t, git, "-C", registered, "-c", "user.name=fixture", "-c", "user.email=fixture@example.invalid", "add", "f00.txt")
+	supervisorGit(t, git, "-C", registered, "-c", "user.name=fixture", "-c", "user.email=fixture@example.invalid", "commit", "-q", "-m", "worker version")
+	app.tip = strings.TrimSpace(supervisorGitOutput(t, git, "-C", registered, "rev-parse", "HEAD"))
 	supervisorGit(t, git, "-C", root, "branch", "fix-side")
 	supervisorGit(t, git, "-C", root, "checkout", "-q", "fix-side")
 	if err := os.WriteFile(filepath.Join(root, "fix.txt"), []byte("fix\n"), 0o644); err != nil {
@@ -557,7 +563,7 @@ func TestCorrectionPublishesMergeResolution(t *testing.T) {
 	supervisorGit(t, git, "-C", root, "merge", "-q", "--no-ff", "fix-side", "-m", "merge side fix")
 	supervisorGit(t, git, "-C", root, "fetch", "-q", "origin", "main")
 	supervisorGit(t, git, "-C", root, "merge", "-q", "--no-ff", "-s", "ours", m1, "-m", "integrate main")
-	if err := os.WriteFile(filepath.Join(root, "f00.txt"), []byte("resolved\n"), 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(root, "f00.txt"), []byte("main\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	supervisorGit(t, git, "-C", root, "-c", "user.name=fixture", "-c", "user.email=fixture@example.invalid", "add", "f00.txt")

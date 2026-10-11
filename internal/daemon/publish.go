@@ -272,7 +272,7 @@ func (daemon *Daemon) publishPull(ctx context.Context, c kernel.PublishableChang
 				break
 			}
 		}
-		listing, err := gitOutput(ctx, gitDir, "log", "--format=", "--name-only", "-z", "--diff-merges=combined", "--no-renames", workerHead+".."+c.Head, "--not", main)
+		listing, err := gitOutput(ctx, gitDir, "log", "--full-history", "--format=", "--name-only", "-z", "--no-merges", "--no-renames", workerHead+".."+c.Head)
 		if err != nil {
 			return err
 		}
@@ -293,7 +293,14 @@ func (daemon *Daemon) publishPull(ctx context.Context, c kernel.PublishableChang
 			}
 		}
 	}
-	changes, err := publicationEntries(ctx, gitDir, diffFrom, c.Head, workerPaths)
+	entriesFrom := diffFrom
+	if tip != "" {
+		// A correction must carry the worker's settled tree, even when its
+		// resolution deliberately matches main; the branch still has the
+		// rejected worker version at tip.
+		entriesFrom = tip
+	}
+	changes, err := publicationEntries(ctx, gitDir, entriesFrom, c.Head, workerPaths)
 	if err != nil {
 		return err
 	}
