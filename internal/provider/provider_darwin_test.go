@@ -131,7 +131,7 @@ func TestPrepareWebDependenciesProvisionsPinnedCorepackPnpm(t *testing.T) {
 		t.Fatal(err)
 	}
 	node := filepath.Join(toolDir, "node")
-	if err := os.WriteFile(node, []byte("#!/bin/sh\ncase \"$*\" in *--config.ignorePnpmfile=true*) exit 0 ;; *) printf ran > .pnpmfile-ran; exit 1 ;; esac\n"), 0o755); err != nil {
+	if err := os.WriteFile(node, []byte("#!/bin/sh\ncase \"$*\" in *--config.ignorePnpmfile=true*--config.storeDir=*--config.modulesDir=*--config.virtualStoreDir=*--config.stateDir=*) exit 0 ;; *) printf ran > .pnpmfile-ran; exit 1 ;; esac\n"), 0o755); err != nil {
 		t.Fatal(err)
 	}
 	account := filepath.Join(root, "account")
