@@ -256,12 +256,17 @@ func (store *Store) SendBackTask(ctx context.Context, digest *AttemptDigest, id 
 // before a worker claimed it. A positive intakeLimit is an open intake issue
 // retrying its own task: only after an automatic end (a failure, a run-limit
 // cancel, a blocked expiry), never an operator's cancel, and at most
-// intakeLimit times.
+// intakeLimit times. Every intake poll offers each ended issue task a retry,
+// so an intake retry checks only the rows it touches, never the whole store.
 func (store *Store) RetryTask(ctx context.Context, digest *AttemptDigest, id TaskID, expected Revision, assigned AgentID, at UnixMillis, intakeLimit int64) (Task, error) {
 	if id.zero() || expected.Int64() < 1 {
 		return Task{}, fmt.Errorf("%w: invalid task retry", ErrInvalidValue)
 	}
-	tx, err := store.beginValidatedWrite(ctx)
+	begin := store.beginValidatedWrite
+	if intakeLimit > 0 {
+		begin = store.beginUncheckedWrite
+	}
+	tx, err := begin(ctx)
 	if err != nil {
 		return Task{}, err
 	}
