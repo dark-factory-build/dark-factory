@@ -161,6 +161,23 @@ func TestRecordChangeRebasedUpdatesRetainedHeadWithoutOpeningWork(t *testing.T) 
 	}
 }
 
+func TestRecordChangeRebasedUpdatesAvailableHeadBeforeWorkerStarts(t *testing.T) {
+	t.Parallel()
+	blocked, _ := NewBlockedProposal("rebased available")
+	store, finalizing := finalizingReleasedRun(t, RoleWorker, blocked)
+	defer store.Close()
+	ctx := context.Background()
+	available, found, err := store.Change(ctx, *finalizing.ChangeID)
+	if err != nil || !found || available.Phase != ChangeAvailable || available.HeadCommit == nil {
+		t.Fatalf("available Change = %+v, found=%v, err=%v", available, found, err)
+	}
+	newHead, _ := NewCommitID(available.HeadCommit.format, bytes.Repeat([]byte{0x7b}, available.HeadCommit.format.oidLength()))
+	updated, err := store.RecordChangeRebased(ctx, available.ID, available.Revision, *available.HeadCommit, newHead, mustTime(t, 81))
+	if err != nil || updated.Phase != ChangeAvailable || updated.Revision != available.Revision || updated.HeadCommit == nil || !updated.HeadCommit.equal(newHead) {
+		t.Fatalf("rebased available Change = %+v, err=%v", updated, err)
+	}
+}
+
 func TestChangeSchemaIsPathFreeCanonicalAndCircularlyBound(t *testing.T) {
 	t.Parallel()
 	store, _ := newTestStore(t)
