@@ -272,14 +272,8 @@ func TestReviewDeadlineKillsTheReviewerProcessGroup(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	// Wait reaps the killed leader; its killed orphan is reaped by launchd a
-	// moment later, so the group is gone shortly after, not at once.
-	gone := time.Now().Add(2 * time.Second)
-	for err := syscall.Kill(-pid, 0); !errors.Is(err, syscall.ESRCH); err = syscall.Kill(-pid, 0) {
-		if time.Now().After(gone) {
-			t.Fatalf("reviewer process group %d survived: %v", pid, err)
-		}
-		time.Sleep(10 * time.Millisecond)
+	if err := syscall.Kill(-pid, 0); !errors.Is(err, syscall.ESRCH) {
+		t.Fatalf("reviewer process group %d survived: %v", pid, err)
 	}
 }
 

@@ -186,10 +186,6 @@ const (
 	CostUSD    = "cost_usd"
 	ToolCall   = "tool_call"
 	APIRequest = "api_request"
-	// A Claude Code sub-agent starts when its Agent (formerly Task) tool call
-	// is accepted and ends with that call's result.
-	SubagentStart = "subagent_start"
-	SubagentEnd   = "subagent_end"
 )
 
 // AgentPoint is one counted fact an agent CLI exported about a run. Series is
@@ -205,8 +201,7 @@ type AgentPoint struct {
 // DecodeAgentLogs counts tool calls and API requests in an OTLP logs export
 // (LogsData is wire-identical to the export request). Events are named by
 // their event.name attribute (Claude Code "tool_result", Codex
-// "codex.tool_result"); bodies are dropped unread, and of the other attributes
-// only a sub-agent call's tool name and decision are read.
+// "codex.tool_result"); bodies and every other attribute are dropped unread.
 func DecodeAgentLogs(body []byte, protobuf bool) ([]AgentPoint, error) {
 	var data logsv1.LogsData
 	if err := unmarshalOTLP(body, protobuf, &data); err != nil {
@@ -224,16 +219,9 @@ func DecodeAgentLogs(body []byte, protobuf bool) ([]AgentPoint, error) {
 				if name == "" {
 					name = record.GetEventName()
 				}
-				tool := stringAttribute(record.GetAttributes(), "tool_name")
-				subagent := tool == "Agent" || tool == "Task"
 				switch {
 				case strings.HasSuffix(name, "tool_result"):
 					points = append(points, AgentPoint{Run: run, Kind: ToolCall, Value: 1})
-					if subagent {
-						points = append(points, AgentPoint{Run: run, Kind: SubagentEnd, Value: 1})
-					}
-				case name == "tool_decision" && subagent && stringAttribute(record.GetAttributes(), "decision") == "accept":
-					points = append(points, AgentPoint{Run: run, Kind: SubagentStart, Value: 1})
 				case strings.HasSuffix(name, "api_request"):
 					points = append(points, AgentPoint{Run: run, Kind: APIRequest, Value: 1})
 				}

@@ -357,15 +357,13 @@ type RunPaths struct {
 
 // RunTelemetry is one run's recorded agent effort and spend: counts and cost,
 // never content. QuietSeconds is the time since its last recorded tool call or
-// API request, absent before the first. Subagents is how many of its
-// sub-agents are running now; their tokens are already in the counts.
+// API request, absent before the first.
 type RunTelemetry struct {
 	TokensIn     uint64  `json:"tokens_in"`
 	TokensOut    uint64  `json:"tokens_out"`
 	CostMicroUSD uint64  `json:"cost_micro_usd"`
 	ToolCalls    uint64  `json:"tool_calls"`
 	APIRequests  uint64  `json:"api_requests"`
-	Subagents    uint64  `json:"subagents,omitempty"`
 	QuietSeconds *uint64 `json:"quiet_seconds,omitempty"`
 }
 
@@ -1041,7 +1039,7 @@ func validIntakeCandidates(candidates []IntakeCandidate) bool {
 }
 
 func validRunTelemetry(value RunTelemetry) bool {
-	for _, count := range []uint64{value.TokensIn, value.TokensOut, value.CostMicroUSD, value.ToolCalls, value.APIRequests, value.Subagents} {
+	for _, count := range []uint64{value.TokensIn, value.TokensOut, value.CostMicroUSD, value.ToolCalls, value.APIRequests} {
 		if count > uint64(MaxJSONInteger) {
 			return false
 		}

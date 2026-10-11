@@ -26,12 +26,8 @@ func RunTokens(kind kernel.Provider, accountHome, accountConfig, cwd string, sin
 	var total uint64
 	switch kind {
 	case kernel.ProviderClaudeCode:
-		// A sub-agent's transcript sits beside its session's, under
-		// <session>/subagents/, and its spend is the run's.
-		project := filepath.Join(claudeConfigHome(runtime), "projects", escapeClaudeProjectPath(cwd))
-		transcripts, _ := filepath.Glob(filepath.Join(project, "*.jsonl"))
-		subagents, _ := filepath.Glob(filepath.Join(project, "*", "subagents", "*.jsonl"))
-		for _, transcript := range append(transcripts, subagents...) {
+		transcripts, _ := filepath.Glob(filepath.Join(claudeConfigHome(runtime), "projects", escapeClaudeProjectPath(cwd), "*.jsonl"))
+		for _, transcript := range transcripts {
 			total = addTokens(total, claudeTranscriptTokens(transcript, since))
 		}
 	case kernel.ProviderCodex:

@@ -69,21 +69,13 @@ export function restingItem(worker: SceneWorker, at?: number): Readonly<{ item: 
 }
 
 /**
- * A resting specialist is off duty: paused, it is off shift; otherwise it sleeps
- * in its seat until its next review wakes it, however long a backoff makes that.
- */
-export function offDuty(worker: SceneWorker): "asleep" | "off shift" | undefined {
-  return worker.specialist === undefined || worker.activity === "busy" || worker.activity === "needs-you" ? undefined : worker.paused ? "off shift" : "asleep";
-}
-
-/**
  * Nobody sits for ever: a reader is drawn to the bookshelf, a drinker or snacker
- * to the coffee station. Whoever already has their reading with them, is
- * asking for you, or is off duty stays where they are.
+ * to the coffee station. Whoever already has their reading with them, or is
+ * asking for you, stays where they are.
  */
 export function breakRoomHabit(worker: SceneWorker): BreakRoomErrand | undefined {
   const { item } = restingItem(worker);
-  return worker.activity === "needs-you" || offDuty(worker) !== undefined || item === "clipboard" || item === "tablet" ? undefined : item === "book" ? "shelf" : "coffee";
+  return worker.activity === "needs-you" || item === "clipboard" || item === "tablet" ? undefined : item === "book" ? "shelf" : "coffee";
 }
 
 /**
@@ -102,8 +94,6 @@ export function workerFrames(worker: SceneWorker, motion?: WorkerMotion, seat?: 
   const walking = motion?.action === "walking";
   const seated = seat !== undefined && !walking;
   const rest = restingItem(worker, at);
-  // Off duty, a specialist sits empty-handed; asleep, its eyes stay shut.
-  const duty = seat === "resting" ? offDuty(worker) : undefined;
   // Planners write in bursts; resting workers pick up what is in front of them now and then.
   const scribble = at !== undefined && at % 2600 < 1300 ? Math.floor(at / 325) % 2 : 0;
   // At the bench a wrench, tablet or clipboard is worked with: the carrying arm
@@ -127,7 +117,6 @@ export function workerFrames(worker: SceneWorker, motion?: WorkerMotion, seat?: 
     : errand !== undefined ? "hold"
     : worker.activity === "needs-you" ? `wave.${at === undefined ? 0 : Math.floor(at / 400) % 2}`
     : seat === "planning" ? `type.${scribble}`
-    : duty !== undefined ? "idle"
     : seat === "resting" && stroking !== undefined ? `pet.${Math.floor(stroking / 400) % 2}`
     : seat === "resting" ? rest.where === "mouth" ? "sip" : rest.where === "chest" ? "hold" : "idle"
     : worker.activity === "busy" ? "type.0"
@@ -161,7 +150,7 @@ export function workerFrames(worker: SceneWorker, motion?: WorkerMotion, seat?: 
     `person.system.${role}.${provider}`,
     ...alert,
   ];
-  const blinking = duty === "asleep" && !walking || at !== undefined && at % (3000 + hash(worker.id) % 4000) < 200;
+  const blinking = at !== undefined && at % (3000 + hash(worker.id) % 4000) < 200;
   const glasses = spriteOptions.face[appearance.face]?.name === "glasses";
   const held = pose.startsWith("inspect") ? [`person.held.${tool === "tablet" ? "tablet" : "clipboard"}.${pose === "inspect.0" ? "chest" : "low"}`]
     : errand !== undefined && pose === "hold" ? [`person.held.${errand === "shelf" ? "book" : errand === "coffee" ? "cup" : "clipboard"}.chest`]
