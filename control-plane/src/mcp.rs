@@ -450,14 +450,15 @@ fn tools() -> Value {
     }, {
         "name": "update_pull_request_body",
         "title": "Replace an open pull request body",
-        "description": "Replace one open pull request body and return the head observed with the replacement. GitHub has no atomic expected-head condition for this metadata write. The App renders its operation marker; the supplied body cannot contain an App operation or review verdict marker. Replays require the same operation UUID and request.",
+        "description": "Replace one open pull request body and return the head observed with the replacement. With close true the same write closes the pull request unmerged, as for a superseded one. GitHub has no atomic expected-head condition for this metadata write. The App renders its operation marker; the supplied body cannot contain an App operation or review verdict marker. Replays require the same operation UUID and request.",
         "inputSchema": {
             "type": "object",
             "properties": {
                 "repository": {"type": "string", "pattern": "^[A-Za-z0-9-]{1,39}/[A-Za-z0-9._-]{1,100}$"},
                 "operation_id": {"type": "string", "pattern": "^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$"},
                 "pull_number": {"type": "integer", "minimum": 1},
-                "body": {"type": "string", "maxLength": 30000}
+                "body": {"type": "string", "maxLength": 30000},
+                "close": {"type": "boolean", "default": false}
             },
             "required": ["repository", "operation_id", "pull_number", "body"],
             "additionalProperties": false

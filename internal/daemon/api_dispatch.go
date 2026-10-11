@@ -323,7 +323,7 @@ func (daemon *Daemon) dispatch(ctx context.Context, call api.Call) api.Reply {
 	switch call.Kind() {
 	case api.CallSnapshot, api.CallHumanRequests, api.CallTaskRead, api.CallIntake:
 		if raw, attempt := call.AttemptDigest(); attempt {
-			project, ok := daemon.specialistRead(ctx, raw, call)
+			project, ok := daemon.attemptOperatorCall(ctx, raw, call)
 			if !ok {
 				return newErrorReply(api.RemoteForbidden)
 			}
@@ -539,17 +539,27 @@ func (daemon *Daemon) dispatch(ctx context.Context, call api.Call) api.Reply {
 	}
 }
 
-// specialistRead admits a specialist's review run (its carrier) to the
-// operator's read views of its own project, and of intake only its list;
-// every other attempt, and every write, is refused.
-func (daemon *Daemon) specialistRead(ctx context.Context, raw api.AttemptDigest, call api.Call) (kernel.ProjectID, bool) {
+// attemptOperatorCall admits a specialist's review run (its carrier) to the
+// operator's read views of its own project, and of intake only its list; an
+// overseer to the intake list and to one fresh exact-head review in its own
+// project. Every other attempt, and every other write, is refused.
+func (daemon *Daemon) attemptOperatorCall(ctx context.Context, raw api.AttemptDigest, call api.Call) (kernel.ProjectID, bool) {
 	digest, err := attemptDigest(raw)
 	if err != nil {
 		return kernel.ProjectID{}, false
 	}
 	authority, err := daemon.store.AuthenticateAttempt(ctx, digest)
 	intake, _ := call.IntakeInput()
-	return authority.ProjectID, err == nil && authority.Specialist && (call.Kind() != api.CallIntake || intake.Action == "list")
+	overseer := authority.Role == kernel.RoleOrchestrator
+	switch {
+	case err != nil:
+		return authority.ProjectID, false
+	case call.Kind() != api.CallIntake:
+		return authority.ProjectID, authority.Specialist
+	case intake.Action == "list":
+		return authority.ProjectID, authority.Specialist || overseer
+	}
+	return authority.ProjectID, overseer && intake.Action == "review_pr" && intake.ProjectID == authority.ProjectID.String()
 }
 
 func inScope(scope *kernel.ProjectID, project kernel.ProjectID) bool {
