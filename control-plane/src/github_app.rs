@@ -1626,6 +1626,7 @@ impl AppAuthority {
         mut request: ObservePullRequestChecks,
     ) -> Result<ChecksResult, OperationError> {
         request.validate()?;
+        let mut name = request.repository.clone();
         let repository = RepositoryName::requested(&mut request.repository)?;
         let token = self
             .0
@@ -1643,7 +1644,19 @@ impl AppAuthority {
             .0
             .verify_pull_request_head(&token, request.pull_number, &request.head_sha)
             .await?;
-        self.0.checks(&token, request, &pull.base.name).await
+        // Failed jobs' logs, on their own Actions-read token as for a merge
+        // group: without that grant the checks are still observed.
+        let actions = self
+            .0
+            .installation_token(
+                RepositoryName::requested(&mut name)?,
+                BTreeMap::from([("actions", "read"), ("metadata", "read")]),
+            )
+            .await
+            .ok();
+        self.0
+            .checks(&token, request, &pull.base.name, actions.as_ref())
+            .await
     }
 
     #[cfg(target_arch = "wasm32")]
@@ -3713,7 +3726,7 @@ impl Authority {
             head_sha: request.head_sha.clone(),
         };
         if self
-            .checks(token, checks, &request.base)
+            .checks(token, checks, &request.base, None)
             .await?
             .checks
             .iter()
@@ -3844,7 +3857,7 @@ impl Authority {
     }
 
     /// Why an open head left the queue: the newest completed merge-group run
-    /// that built it, with its failed jobs' failure annotations. Best effort,
+    /// that built it, with its failed jobs' failure lines. Best effort,
     /// on its own Actions-read token, so an installation without that grant
     /// or an unreadable run still observes NOT_QUEUED, only unexplained.
     #[cfg(target_arch = "wasm32")]
@@ -3897,13 +3910,8 @@ impl Authority {
             .filter(WorkflowJob::failed)
             .take(MERGE_GROUP_JOBS)
         {
-            let annotations: Vec<Annotation> = github_json(
-                &format!("{api}/check-runs/{}/annotations?per_page=100", job.id),
-                token.as_str(),
-            )
-            .await
-            .unwrap_or_default();
-            failed_jobs.push(job.into_result(annotations));
+            let lines = job_failure_lines(&api, job.id, &token, Some(&token)).await;
+            failed_jobs.push(job.into_result(lines));
         }
         valid_github_url(&run.html_url).ok()?;
         Some(MergeGroupRun {
@@ -4127,6 +4135,7 @@ impl Authority {
         token: &RepositoryToken,
         request: ObservePullRequestChecks,
         base: &str,
+        actions: Option<&RepositoryToken>,
     ) -> Result<ChecksResult, OperationError> {
         let api = format!(
             "https://api.github.com/repos/{}/{}",
@@ -4156,16 +4165,9 @@ impl Authority {
             let id = run.id;
             let mut check = CheckResult::try_from(run)?;
             check.required = required.contains(&check.name);
-            // Best effort, as for a merge group: an unreadable list names no tests.
             if failed(check.conclusion.as_deref()) && annotated < MERGE_GROUP_JOBS {
                 annotated += 1;
-                let annotations: Vec<Annotation> = github_json(
-                    &format!("{api}/check-runs/{id}/annotations?per_page=100"),
-                    token.as_str(),
-                )
-                .await
-                .unwrap_or_default();
-                check.annotations = failure_lines(annotations);
+                check.annotations = job_failure_lines(&api, id, token, actions).await;
             }
             checks.push(check);
         }
@@ -5088,7 +5090,7 @@ fn required_check_names<E>(
 #[cfg(any(target_arch = "wasm32", test))]
 const MERGE_GROUP_JOBS: usize = 3;
 #[cfg(any(target_arch = "wasm32", test))]
-const MERGE_GROUP_ANNOTATIONS: usize = 10;
+const FAILURE_LINES: usize = 40;
 
 #[cfg(any(target_arch = "wasm32", test))]
 #[derive(Deserialize)]
@@ -5170,25 +5172,110 @@ impl WorkflowJob {
         failed(self.conclusion.as_deref())
     }
 
-    fn into_result(self, annotations: Vec<Annotation>) -> MergeGroupJob {
+    fn into_result(self, annotations: Vec<String>) -> MergeGroupJob {
         MergeGroupJob {
             name: bounded_line(&self.name),
             conclusion: self.conclusion.unwrap_or_default(),
-            annotations: failure_lines(annotations),
+            annotations,
         }
     }
 }
 
-/// Bounded failure annotations: the failing test lines CI writes, and
-/// GitHub's own notes on a cancelled job or lost runner.
+/// One failed check's failure lines, best effort: an unreadable annotation
+/// list or log (no Actions grant, a check no workflow ran) names nothing.
+/// A check run started by Actions has its job's ID.
+#[cfg(target_arch = "wasm32")]
+async fn job_failure_lines(
+    api: &str,
+    id: i64,
+    token: &RepositoryToken,
+    actions: Option<&RepositoryToken>,
+) -> Vec<String> {
+    let annotations: Vec<Annotation> = github_json(
+        &format!("{api}/check-runs/{id}/annotations?per_page=100"),
+        token.as_str(),
+    )
+    .await
+    .unwrap_or_default();
+    let log = match actions {
+        Some(actions) => job_log(api, id, actions.as_str()).await,
+        None => None,
+    };
+    failure_lines(log.as_deref().unwrap_or_default(), annotations)
+}
+
+/// GitHub answers a job's log with a redirect to a short-lived signed
+/// download that takes no credential; its URL is never logged.
+/// ponytail: a log over MAX_GITHUB_RESPONSE_BYTES is not read; scan it as a
+/// stream if a job ever logs that much.
+#[cfg(target_arch = "wasm32")]
+async fn job_log(api: &str, id: i64, credential: &str) -> Option<String> {
+    let url = format!("{api}/actions/jobs/{id}/logs");
+    let redirect = github_request(worker::Method::Get, &url, credential, None)
+        .await
+        .ok()?;
+    let location = redirect.headers().get("location").ok()??;
+    if redirect.status_code() != 302 || !location.starts_with("https://") {
+        return None;
+    }
+    let response = worker::Fetch::Url(location.parse().ok()?)
+        .send()
+        .await
+        .ok()?;
+    let bytes = read_github_response(response, &url, MAX_GITHUB_RESPONSE_BYTES)
+        .await
+        .ok()?;
+    Some(String::from_utf8_lossy(&bytes).into_owned())
+}
+
+/// The bounded lines that say why a job failed: the first failing step, the
+/// log's failing tests with their file:line (Go's `--- FAIL:` and
+/// `_test.go:N:`, Node's `✖`, TAP's `not ok`, Rust's `error[` and
+/// `panicked at`), then CI's failure annotations, which include GitHub's own
+/// notes on a cancelled job or lost runner.
 #[cfg(any(target_arch = "wasm32", test))]
-fn failure_lines(annotations: Vec<Annotation>) -> Vec<String> {
-    annotations
-        .into_iter()
-        .filter(|annotation| annotation.annotation_level == "failure")
-        .map(|annotation| bounded_line(&annotation.message))
+fn failure_lines(log: &str, annotations: Vec<Annotation>) -> Vec<String> {
+    let (mut step, mut failing_step, mut lines) = (None, None, Vec::new());
+    for line in log.lines() {
+        // Each log line starts with its timestamp.
+        let line = line
+            .split_once(' ')
+            .filter(|(time, _)| time.ends_with('Z'))
+            .map_or(line, |(_, line)| line);
+        let text = line.trim_start();
+        if let Some(run) = text
+            .strip_prefix("##[group]")
+            .filter(|group| group.starts_with("Run "))
+        {
+            step = Some(run);
+        } else if text.starts_with("##[error]") {
+            failing_step = failing_step.or(step);
+        } else if text.starts_with("--- FAIL:")
+            || text.starts_with('✖')
+            || text.starts_with("not ok")
+            || text.starts_with("error[")
+            || text.contains("panicked at")
+            || text
+                .split_once("_test.go:")
+                .is_some_and(|(_, rest)| rest.starts_with(|c: char| c.is_ascii_digit()))
+        {
+            lines.push(text);
+        }
+    }
+    let failing_step = failing_step.map(|step| format!("Failing step: {step}"));
+    failing_step
+        .iter()
+        .map(String::as_str)
+        .chain(lines)
+        .map(bounded_line)
+        .chain(
+            annotations
+                .into_iter()
+                .filter(|annotation| annotation.annotation_level == "failure")
+                .map(|annotation| bounded_line(&annotation.message)),
+        )
         .filter(|line| !line.is_empty())
-        .take(MERGE_GROUP_ANNOTATIONS)
+        .take(FAILURE_LINES)
         .collect()
 }
 
@@ -8511,7 +8598,7 @@ mod tests {
     }
 
     #[test]
-    fn merge_group_run_is_the_newest_failed_build_of_the_pull_with_bounded_annotations() {
+    fn merge_group_run_is_the_newest_failed_build_of_the_pull_with_bounded_failure_lines() {
         let runs: WorkflowRuns = serde_json::from_value(serde_json::json!({"workflow_runs": [
             {"id": 9, "head_branch": "gh-readonly-queue/main/pr-8-aaaa", "head_sha": "e".repeat(40), "conclusion": "failure", "html_url": "https://github.com/o/r/actions/runs/9"},
             {"id": 7, "head_branch": "gh-readonly-queue/main/pr-7-bbbb", "head_sha": "c".repeat(40), "conclusion": "success", "html_url": "https://github.com/o/r/actions/runs/7"},
@@ -8543,21 +8630,47 @@ mod tests {
                 message: "--- FAIL: TestDaemonServesTaskOnlyToLiveAttempt (0.41s)\nstack".into(),
             },
         ];
-        annotations.extend((0..20).map(|_| Annotation {
+        annotations.extend((0..50).map(|_| Annotation {
             annotation_level: "failure".into(),
             message: "x".repeat(500),
         }));
-        let job = failed.into_iter().next().unwrap().into_result(annotations);
+        let log = "2026-10-11T10:54:00.0000000Z ##[group]Run actions/checkout@v4\n\
+            2026-10-11T10:54:01.0000000Z ##[group]Run go test ./...\n\
+            2026-10-11T10:54:02.0000000Z --- FAIL: TestA (0.01s)\n\
+            2026-10-11T10:54:02.0000000Z     a_test.go:12: got 1, want 2\n\
+            2026-10-11T10:54:02.0000000Z ok  \tpackage/b\t0.1s\n\
+            2026-10-11T10:54:02.0000000Z ✖ renders the board (3ms)\n\
+            2026-10-11T10:54:02.0000000Z not ok 3 - console loads\n\
+            2026-10-11T10:54:02.0000000Z error[E0425]: cannot find value `x`\n\
+            2026-10-11T10:54:02.0000000Z thread 'tests::t' panicked at src/lib.rs:7:5:\n\
+            2026-10-11T10:54:03.0000000Z ##[error]Process completed with exit code 101.\n\
+            2026-10-11T10:54:04.0000000Z ##[group]Run echo cleanup\n\
+            2026-10-11T10:54:04.0000000Z ##[error]Process completed with exit code 1.\n";
+        let job = failed
+            .into_iter()
+            .next()
+            .unwrap()
+            .into_result(failure_lines(log, annotations));
         assert_eq!(
             (job.name.as_str(), job.conclusion.as_str()),
             ("checks", "failure")
         );
-        assert_eq!(job.annotations.len(), MERGE_GROUP_ANNOTATIONS);
+        assert_eq!(job.annotations.len(), FAILURE_LINES);
         assert_eq!(
-            job.annotations[0],
-            "--- FAIL: TestDaemonServesTaskOnlyToLiveAttempt (0.41s)"
+            job.annotations[..8],
+            [
+                "Failing step: Run go test ./...",
+                "--- FAIL: TestA (0.01s)",
+                "a_test.go:12: got 1, want 2",
+                "✖ renders the board (3ms)",
+                "not ok 3 - console loads",
+                "error[E0425]: cannot find value `x`",
+                "thread 'tests::t' panicked at src/lib.rs:7:5:",
+                "--- FAIL: TestDaemonServesTaskOnlyToLiveAttempt (0.41s)",
+            ]
         );
-        assert_eq!(job.annotations[1].len(), 240);
+        assert_eq!(job.annotations[8].len(), 240);
+        assert!(failure_lines("", Vec::new()).is_empty());
     }
 
     #[test]

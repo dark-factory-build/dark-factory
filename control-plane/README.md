@@ -148,7 +148,8 @@ copied into an operation token.
 Each operation's requested checks, contents, issues,
 merge-queues, metadata, and pull-requests permission is checked when its
 repository token is minted, not at readiness. No operation mints
-Administration or Actions. Readiness names no
+Administration. Actions read is minted only, best effort, to read a failed
+job's log and merge-group runs. Readiness names no
 repository, so it has no installation to audit; an installation that is
 suspended, is not selected-repository, or lacks the operation's requested grant
 is refused with the field that failed. A repository that cannot merge or deploy

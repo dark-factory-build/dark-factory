@@ -1001,6 +1001,11 @@ func (b *daemonReviewBackend) ObservePull(ctx context.Context, operation review.
 		return pull, nil
 	}
 	pull.Group = merge.Group
+	if pull.Group != nil {
+		for _, job := range pull.Group.Jobs {
+			redactLines(job.Annotations)
+		}
+	}
 	response, err = b.callResponse(ctx, "observe_pull_request_checks", map[string]any{"repository": b.repository, "pull_number": request.PullNumber, "head_sha": request.Head})
 	if err != nil {
 		return review.Pull{}, err
@@ -1040,7 +1045,7 @@ func requiredChecks(response json.RawMessage, pull *review.Pull) error {
 		return errors.New("review: Maintainer returned invalid checks")
 	}
 	for _, check := range checks.Checks {
-		pull.Tests = append(pull.Tests, check.Annotations...)
+		pull.Tests = append(pull.Tests, redactLines(check.Annotations)...)
 		if !check.Required {
 			continue
 		}
@@ -1058,6 +1063,15 @@ func requiredChecks(response json.RawMessage, pull *review.Pull) error {
 	}
 	sort.Strings(pull.Checks)
 	return nil
+}
+
+// redactLines redacts CI's failure lines in place, as other evidence quoted
+// to a worker is.
+func redactLines(lines []string) []string {
+	for i, line := range lines {
+		lines[i] = string(redactTerminalText([]byte(line)))
+	}
+	return lines
 }
 
 func (b *daemonReviewBackend) call(ctx context.Context, name string, arguments map[string]any) error {
