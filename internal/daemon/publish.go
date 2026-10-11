@@ -249,7 +249,7 @@ func (daemon *Daemon) publishPull(ctx context.Context, c kernel.PublishableChang
 		return err
 	}
 	if c.Pull != 0 && tip != "" && tip != c.Head {
-		listing, err := gitOutput(ctx, gitDir, "log", "--format=", "--name-only", "-z", "--no-merges", from+".."+c.Head)
+		listing, err := gitOutput(ctx, gitDir, "log", "--format=", "--name-only", "-z", "--no-merges", "--no-renames", from+".."+c.Head)
 		if err != nil {
 			return err
 		}

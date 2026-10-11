@@ -384,7 +384,9 @@ func TestCorrectionKeepsWorkerCommitsAndMainChanges(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(root, "f01.txt"), []byte("correction B\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	supervisorGit(t, git, "-C", root, "-c", "user.name=fixture", "-c", "user.email=fixture@example.invalid", "commit", "-q", "-am", "correction B")
+	supervisorGit(t, git, "-C", root, "mv", "keep.txt", "kept.txt")
+	supervisorGit(t, git, "-C", root, "-c", "user.name=fixture", "-c", "user.email=fixture@example.invalid", "add", "f01.txt", "kept.txt")
+	supervisorGit(t, git, "-C", root, "-c", "user.name=fixture", "-c", "user.email=fixture@example.invalid", "commit", "-q", "-m", "correction B")
 	c.Head = strings.TrimSpace(supervisorGitOutput(t, git, "-C", root, "rev-parse", "HEAD"))
 	c.Pull = 31
 	if err := fixture.daemon.publishChange(ctx, c, "team/repo", source, app.call, checkout); err != nil {
@@ -395,7 +397,7 @@ func TestCorrectionKeepsWorkerCommitsAndMainChanges(t *testing.T) {
 	for _, entry := range changes {
 		paths[entry["path"].(string)] = true
 	}
-	if len(paths) != 3 || !paths["f00.txt"] || !paths["f01.txt"] || !paths["gone.txt"] || paths["main-only.txt"] {
+	if len(paths) != 5 || !paths["f00.txt"] || !paths["f01.txt"] || !paths["gone.txt"] || !paths["keep.txt"] || !paths["kept.txt"] || paths["main-only.txt"] {
 		t.Fatalf("correction paths = %v", paths)
 	}
 }
