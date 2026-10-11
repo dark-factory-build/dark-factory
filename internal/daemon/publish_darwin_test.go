@@ -486,6 +486,44 @@ func TestCorrectionExcludesRevertedWorkerEdits(t *testing.T) {
 	}
 }
 
+func TestCorrectionPublishesMergeResolution(t *testing.T) {
+	fixture, c, source, app, checkout := publishFixture(t, 1, false)
+	ctx := context.Background()
+	root, git := filepath.Dir(source), change.TrustedGitExecutable
+	workerHead := c.Head
+	registered := strings.TrimSpace(supervisorGitOutput(t, git, "-C", root, "remote", "get-url", "origin"))
+	supervisorGit(t, git, "-C", registered, "fetch", "-q", "--update-head-ok", root, "HEAD:worker")
+	if err := os.WriteFile(filepath.Join(registered, "f00.txt"), []byte("main\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	supervisorGit(t, git, "-C", registered, "-c", "user.name=fixture", "-c", "user.email=fixture@example.invalid", "add", "f00.txt")
+	supervisorGit(t, git, "-C", registered, "-c", "user.name=fixture", "-c", "user.email=fixture@example.invalid", "commit", "-q", "-m", "main")
+	m1 := strings.TrimSpace(supervisorGitOutput(t, git, "-C", registered, "rev-parse", "HEAD"))
+	app.main = m1
+	supervisorGit(t, git, "-C", registered, "merge", "-q", "--no-ff", "-s", "ours", "worker", "-m", "published")
+	app.tip = strings.TrimSpace(supervisorGitOutput(t, git, "-C", registered, "rev-parse", "HEAD"))
+	supervisorGit(t, git, "-C", root, "fetch", "-q", "origin", "main")
+	supervisorGit(t, git, "-C", root, "merge", "-q", "--no-ff", "-s", "ours", m1, "-m", "integrate main")
+	if err := os.WriteFile(filepath.Join(root, "f00.txt"), []byte("resolved\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	supervisorGit(t, git, "-C", root, "-c", "user.name=fixture", "-c", "user.email=fixture@example.invalid", "add", "f00.txt")
+	supervisorGit(t, git, "-C", root, "-c", "user.name=fixture", "-c", "user.email=fixture@example.invalid", "commit", "-q", "-m", "resolve")
+	c.Head = strings.TrimSpace(supervisorGitOutput(t, git, "-C", root, "rev-parse", "HEAD"))
+	app.journal[uuid5("dark-factory:"+c.Change.String()+":publish-"+workerHead[:8]+"-1")] = json.RawMessage(`{"commit_sha":"published","parent_sha":"` + c.Base + `"}`)
+	c.Pull = 31
+	if err := fixture.daemon.publishChange(ctx, c, "team/repo", source, app.call, checkout); err != nil {
+		t.Fatal(err)
+	}
+	if len(app.writes) < 1 || app.writes[0]["name"] != "publish_commit" {
+		t.Fatalf("merge resolution writes = %+v", app.writes)
+	}
+	changes := app.writes[0]["arguments"].(map[string]any)["changes"].([]map[string]any)
+	if len(changes) != 1 || changes[0]["path"] != "f00.txt" {
+		t.Fatalf("merge resolution changes = %+v", changes)
+	}
+}
+
 func TestEvidenceOnlyCorrectionKeepsMainChangeOnWorkerPath(t *testing.T) {
 	fixture, c, source, app, checkout := publishFixture(t, 1, false)
 	ctx := context.Background()
