@@ -171,28 +171,6 @@ func inspectOperationalSnapshot(ctx context.Context, path string, files *databas
 		return errors.Join(fmt.Errorf("pin operational SQLite snapshot: %w", err), tx.Close())
 	}
 	if err := validateOpenableSnapshot(inspectionCtx, tx.connection); err != nil {
-		if errors.Is(err, ErrCorruptState) {
-			// A read under WAL pressure can observe a transiently inconsistent
-			// projection. Close this snapshot and take one fresh snapshot once.
-			_ = tx.Close()
-			connection, err = pool.Conn(inspectionCtx)
-			if err != nil {
-				return fmt.Errorf("refresh operational SQLite inspection: %w", err)
-			}
-			tx, err = beginPinnedRead(inspectionCtx, connection)
-			if err != nil {
-				return err
-			}
-			if err = validateOpenableSnapshot(inspectionCtx, tx.connection); err == nil {
-				if err := tx.Close(); err != nil {
-					return err
-				}
-				if err := files.recheckPaths(); err != nil {
-					return err
-				}
-				return nil
-			}
-		}
 		return errors.Join(fmt.Errorf("validate operational SQLite snapshot: %w", err), tx.Close())
 	}
 	if err := tx.Close(); err != nil {

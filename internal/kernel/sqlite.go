@@ -387,18 +387,19 @@ func (store *Store) Close() error {
 			return
 		}
 		defer store.releaseWriter()
-		store.waitForCheckedOutConnections()
-		store.closeErr = errors.Join(store.closeErr, store.checkpointWAL(context.Background(), "TRUNCATE"))
 		store.bindingMu.Lock()
 		defer store.bindingMu.Unlock()
+		store.waitForCheckedOutConnections()
+		store.closeErr = errors.Join(store.closeErr, store.checkpointWAL(context.Background(), "TRUNCATE"))
 		poolErr := errors.Join(closeSQLitePool("reader", store.readers), closeSQLitePool("writer", store.writer))
 		if poolErr != nil {
 			store.closeErr = fmt.Errorf("%w: close retained sqlite pools: %w", ErrCorruptState, poolErr)
 			return
 		}
 		if store.pathBinding != nil {
-			store.closeErr = store.pathBinding.Close()
-			if store.closeErr == nil {
+			closeErr := store.pathBinding.Close()
+			store.closeErr = errors.Join(store.closeErr, closeErr)
+			if closeErr == nil {
 				store.pathBinding = nil
 			}
 		}
