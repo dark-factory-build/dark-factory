@@ -36,6 +36,7 @@ func TestReportAndWhyReadTheReconcilersState(t *testing.T) {
 	want := []string{
 		"1970-01-01T00:00Z runs=1 failed=0% tokens=300 worker=0 overseer=300 specialist=0 merges=1 tokens/merge=300",
 		"top task tokens=300 " + task.ID.String() + ` running "oversee"`,
+		"lessons=0 reads=0 citations=0 stale=0",
 	}
 	if err != nil || !slices.Equal(lines, want) {
 		t.Fatalf("report = %q, %v", lines, err)

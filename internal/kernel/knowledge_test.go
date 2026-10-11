@@ -38,6 +38,21 @@ func TestKnowledgeMetadataRequiresCanonicalKeys(t *testing.T) {
 	}
 }
 
+func TestLessonsRequireRunnableVerification(t *testing.T) {
+	t.Parallel()
+	store, run, _ := runningWorkerRun(t)
+	defer store.Close()
+	ctx := context.Background()
+	lesson := knowledgeSpec(t, run.ProjectID, 80, ContentLesson, KnowledgeMetadata{Status: "current", Evidence: []string{"internal/kernel/knowledge.go:242"}})
+	if _, err := store.CreateContent(ctx, lesson, mustTime(t, 40)); !errors.Is(err, ErrInvalidValue) {
+		t.Fatalf("lesson without verification = %v", err)
+	}
+	lesson.SourceReferences = `{"status":"current","evidence":["internal/kernel/knowledge.go:242"],"verification":"go test ./internal/kernel -run TestLessonsRequireRunnableVerification"}`
+	if _, err := store.CreateContent(ctx, lesson, mustTime(t, 41)); err != nil {
+		t.Fatalf("verified lesson = %v", err)
+	}
+}
+
 func TestKnowledgeAuthorityScopeAndImmutableThreads(t *testing.T) {
 	t.Parallel()
 	store, run, _ := runningWorkerRun(t)
