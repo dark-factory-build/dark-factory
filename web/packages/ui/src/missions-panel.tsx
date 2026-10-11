@@ -47,7 +47,7 @@ export function MissionsPanel({ production = [], onProduction, requestedMission,
   };
   const list = async (offset = 0) => {
     const current = generation.current;
-    const value = await call!("outcome_list", { project_id: projectId, kind: "mission", offset, limit: 8 });
+    const value = await call!("outcome_list", { project_id: projectId, offset, limit: 1 });
     if (current !== generation.current) return;
     setItems((previous) => offset === 0 ? rows(value.items) : [...previous, ...rows(value.items).filter((item) => !previous.some((old) => old.id === item.id))]);
     setNext(Number(value.next_offset ?? 0)); setLoaded(true);
@@ -63,7 +63,17 @@ export function MissionsPanel({ production = [], onProduction, requestedMission,
   const read = async (id: string) => {
     const current = generation.current;
     const value = await call!("outcome_read", { project_id: projectId, id });
-    if (current === generation.current) { lastObservedHead.current = state?.head; setSelected(value); await loadTasks(id); }
+    if (current === generation.current) { lastObservedHead.current = state?.head; setSelected(value); if (value.kind === undefined || text(value.kind) === "mission") await loadTasks(id); else setTasks([]); }
+  };
+  const changeState = async (nextState: "accepted" | "reopened") => {
+    if (selected === undefined) return;
+    const current = generation.current;
+    const action = nextState === "accepted" ? "accept" : "reopen";
+    const value = await call!("outcome_write", { project_id: projectId, id: selected.id, expected_revision: Number(selected.revision), document: { ...document, state: nextState, reason: `${action[0]!.toUpperCase()}${action.slice(1)}d from Work → By mission.`, judgment: `authorized judgment: ${action} this outcome.`, ...(nextState === "accepted" && !text(document.conclusion) ? { conclusion: `Accepted from Work → By mission.` } : {}) } });
+    if (current !== generation.current) return;
+    lastObservedHead.current = state?.head;
+    setSelected(value); setNotice(`Outcome ${nextState}.`);
+    if (value.kind === undefined || text(value.kind) === "mission") await loadTasks(text(value.id));
   };
   useEffect(() => { if (active && projectId !== undefined && call !== undefined && !loaded && !pending && error === "") void run(() => list()); }, [active, projectId, call, loaded, pending, error]);
   const lastObservedHead = useRef<bigint | undefined>(undefined);
@@ -103,15 +113,16 @@ export function MissionsPanel({ production = [], onProduction, requestedMission,
         <button disabled={Boolean(pending) || call === undefined}>Create mission</button>
         <button type="button" disabled={Boolean(pending)} onClick={() => setDrafts((previous) => { const next = { ...previous }; delete next[project.id]; return next; })}>Discard draft</button>
       </form>}
-      {loaded && items.length === 0 ? <p>Objectives owned by an overseer, with explicit acceptance criteria. No missions yet. Standalone tasks stay in the Work list.</p> : null}
+      {loaded && items.length === 0 ? <p>No outcomes yet.</p> : null}
       {selected === undefined ? <ul className="dfMissions__list">{items.map((item) => <li key={text(item.id)}><button type="button" disabled={Boolean(pending) || call === undefined} onClick={() => void run(() => read(text(item.id)))}>{text(item.objective)} <span>{text(item.state)}{item.stale ? " · stale" : ""}</span></button></li>)}</ul> : null}
       {next === 0 || selected !== undefined ? null : <button type="button" disabled={Boolean(pending) || call === undefined} onClick={() => void run(() => list(next))}>{pending ? "Loading…" : "Show more"}</button>}
       {selected === undefined ? null : <article className="dfConsoleSidebar__section">
         <IconButton icon="chevron-left" className="dfConsoleBack" onClick={() => { generation.current++; setPending(""); setSelected(undefined); setTasks([]); setTaskNext(0); }}>Back to Missions</IconButton>
         <h3>{text(document.objective)}</h3>
-        <p><Status stage={text(document.state)} /> · {owner?.name ?? (text(selected.owner_name) || "Owner unavailable")}</p>
+        <p><Status stage={text(document.state)} /> · {text(selected.kind) === "mission" ? owner?.name ?? (text(selected.owner_name) || "Owner unavailable") : text(selected.kind)}</p>
         {selected.stale ? <p role="status">The objective changed. Earlier acceptance is stale.</p> : null}
         <h4>Next action</h4><p className="dfMissions__text">{text(document.remaining_work) || anchor?.blocked_reason || (document.state === "accepted" ? "Acceptance recorded." : "Awaiting the overseer’s next recorded action.")}</p>
+        <div className="dfProjectLibrary__actions"><button type="button" disabled={Boolean(pending) || call === undefined || selected.stale === true} onClick={() => void run(() => changeState(document.state === "accepted" ? "reopened" : "accepted"), false, true)}>{document.state === "accepted" ? "Reopen outcome" : "Accept outcome"}</button></div>
         {owner === undefined ? null : <button type="button" disabled={call === undefined || onSelectAgent === undefined} onClick={() => onSelectAgent?.(owner)}>Talk to {owner.name}</button>}
         <details><summary>Acceptance criteria</summary><p className="dfMissions__text">{text(document.criteria)}</p></details>
         {text(document.reason) || text(document.conclusion) || rows(document.links).length || (Array.isArray(selected.missing_references) && selected.missing_references.length) ? <details><summary>Evidence</summary>
