@@ -14,7 +14,15 @@ export const RELAY_ORIGIN = "wss://relay.example";
 export const PWA_ORIGIN = "https://app.darkfactory.build";
 
 export const tick = () => new Promise((resolve) => setTimeout(resolve, 0));
-export async function settle(rounds = 8) { for (let index = 0; index < rounds; index++) await tick(); }
+// Real WebCrypto completes off the event loop, so no fixed number of turns or
+// sleep waits for it on a loaded runner: count its calls and settle only once
+// none is pending for a whole run of turns.
+let pendingCrypto = 0;
+for (const name of ["exportKey", "generateKey", "importKey", "sign", "verify"]) {
+  const real = crypto.subtle[name].bind(crypto.subtle);
+  crypto.subtle[name] = (...args) => { pendingCrypto++; return real(...args).finally(() => { pendingCrypto--; }); };
+}
+export async function settle(rounds = 8) { for (let quiet = 0; quiet < rounds; quiet = pendingCrypto === 0 ? quiet + 1 : 0) await tick(); }
 
 export function nodeId(character = "a") { return character.repeat(32); }
 

@@ -62,8 +62,6 @@ jobs:
           if [ "$GITHUB_EVENT_NAME" = pull_request ]; then
             macos_mode=affected
             printf 'base=%s\n' "$merge_base" >>"$GITHUB_OUTPUT"
-          elif [ "$GITHUB_EVENT_NAME" = push ]; then
-            macos_mode=warm
           else
             macos_mode=full
           fi
@@ -77,7 +75,8 @@ jobs:
       fail-fast: false
       matrix:
         # The linux leg gates only packages proved in scripts/linux-coverage.
-        shard: ${{ fromJSON(needs.scope.outputs.macos_mode == 'full' && '["daemon","packages","source","linux"]' || '["source","linux"]') }}
+        # The merge group adds only the shards a pull request does not run.
+        shard: ${{ fromJSON(github.event_name == 'merge_group' && '["daemon","packages"]' || needs.scope.outputs.macos_mode == 'full' && '["daemon","packages","source","linux"]' || '["source","linux"]') }}
     steps:
       - name: Check out $GITHUB_SHA
         env:
@@ -134,7 +133,7 @@ jobs:
           printf 'DF_CI_CACHE_ROOT=%s/dark-factory-ci-cache\n' "$RUNNER_TEMP" >> "$GITHUB_ENV"
           printf 'go=%s\n' "$(go env GOVERSION)" >> "$GITHUB_OUTPUT"
       - name: Restore reusable compiler and package caches
-        uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        uses: actions/cache/restore@caa296126883cff596d87d8935842f9db880ef25 # v5.1.0
         with:
           path: |
             ${{ runner.temp }}/dark-factory-ci-cache/go-build
@@ -163,7 +162,7 @@ jobs:
         run: python3 ./scripts/check-advisories.py
       - name: Save the warm main-branch cache
         if: github.event_name == 'push'
-        uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        uses: actions/cache/save@caa296126883cff596d87d8935842f9db880ef25 # v5.1.0
         with:
           path: |
             ${{ runner.temp }}/dark-factory-ci-cache/go-build
@@ -171,11 +170,9 @@ jobs:
             ${{ runner.temp }}/dark-factory-ci-cache/corepack
             ${{ runner.temp }}/dark-factory-ci-cache/pnpm-store
           key: ci-v2-${{ runner.os }}-${{ runner.arch }}-${{ steps.cache-toolchain.outputs.go }}-node22.20.0-${{ hashFiles('go.sum', 'web/pnpm-lock.yaml', 'web/package.json') }}-${{ github.sha }}
-      - name: Annotate failing tests
+      - name: Annotate the failure
         if: failure()
-        run: |
-          grep -E '^[[:space:]]*(--- FAIL: |not ok |✖ )' "$RUNNER_TEMP/macos-gate.log" | head -n 10 |
-            sed -e 's/^[[:space:]]*//' -e 's/%/%25/g' -e 's/^/::error title=Failing test::/' || true
+        run: ./scripts/ci-annotate.sh "$RUNNER_TEMP/macos-gate.log"
   required:
     if: always()
     needs: [scope, checks, control-plane, relay, review]
@@ -185,7 +182,9 @@ jobs:
       - name: Require every hosted source gate
         if: github.event_name != 'push' && (needs.scope.result != 'success' || (needs.scope.outputs.macos == 'true' && needs.checks.result != 'success') || (needs.scope.outputs.control_plane == 'true' && needs.control-plane.result != 'success') || (needs.scope.outputs.relay == 'true' && needs.relay.result != 'success'))
         run: |
-          echo "required source gates failed: scope=${{ needs.scope.result }}, macOS=${{ needs.checks.result }}, control-plane=${{ needs.control-plane.result }}, relay=${{ needs.relay.result }}" >&2
+          for gate in scope=${{ needs.scope.result }} checks=${{ needs.checks.result }} control-plane=${{ needs.control-plane.result }} relay=${{ needs.relay.result }}; do
+            case "$gate" in *=success|*=skipped) ;; *) echo "::error title=Required gate failed::${gate%%=*} ${gate#*=}; its own annotations name the failing step and test" ;; esac
+          done
           exit 1
       - name: Confirm the pull request is eligible for the queue
         if: github.event_name == 'pull_request'
@@ -194,9 +193,9 @@ jobs:
         if: github.event_name == 'merge_group' || github.event_name == 'workflow_dispatch'
         run: echo "every selected combined-tree gate passed"
       - name: Require a recorded adversarial review verdict
-        if: needs.review.result != 'success' && (github.event_name == 'merge_group' || needs.review.result != 'skipped')
+        if: github.event_name == 'merge_group' && needs.review.result != 'success'
         run: |
-          echo "no adversarial review verdict at the head being merged (review=${{ needs.review.result }})" >&2
+          echo "::error title=Required gate failed::review ${{ needs.review.result }}: no adversarial review verdict at the head being merged"
           echo "  A reviewer that did not write the change records:" >&2
           echo "  Publish a GitHub review at this exact commit with Dark-Factory-Review: allow <head_sha>" >&2
           exit 1
@@ -252,7 +251,7 @@ jobs:
       - name: Install the pinned toolchain
         run: rustup toolchain install 1.88.0 --profile minimal --component clippy,rustfmt --no-self-update
       - name: Restore control-plane Rust and tool caches
-        uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        uses: actions/cache/restore@caa296126883cff596d87d8935842f9db880ef25 # v5.1.0
         with:
           path: |
             ~/.cargo/registry
@@ -265,10 +264,15 @@ jobs:
       - name: Verify the supported Node runtime
         run: node -e "if (Number(process.versions.node.split('.')[0]) < 22) process.exit(1)"
       - name: Run the control-plane authoritative gate
-        run: ./control-plane/scripts/local-ci.sh
+        run: |
+          set -o pipefail
+          ./control-plane/scripts/local-ci.sh 2>&1 | tee "$RUNNER_TEMP/control-plane-gate.log"
+      - name: Annotate the failure
+        if: failure()
+        run: ./scripts/ci-annotate.sh "$RUNNER_TEMP/control-plane-gate.log"
       - name: Save the warm main-branch control-plane cache
         if: github.event_name == 'push'
-        uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        uses: actions/cache/save@caa296126883cff596d87d8935842f9db880ef25 # v5.1.0
         with:
           path: |
             ~/.cargo/registry
