@@ -432,11 +432,19 @@ func (daemon *Daemon) runNext(ctx context.Context, spec SupervisorSpec) (resultR
 	}
 	retainedRebaseConflict := false
 	if worker && retained != nil {
-		_, rebaseErr := daemon.rebaseRetainedChange(ctx, changeState)
+		moved, rebaseErr := daemon.rebaseRetainedChange(ctx, changeState)
 		if errors.Is(rebaseErr, change.ErrRebaseConflict) {
 			retainedRebaseConflict = true
 		} else if rebaseErr != nil {
 			return daemon.failRunBeforeRuntime(daemon.cleanupCtx, run, keys.resources.RuntimeRoot, kernel.FailureSource, rebaseErr)
+		} else if moved {
+			changeState, found, err = daemon.store.Change(ctx, changeID)
+			if err != nil || !found {
+				if err == nil {
+					err = kernel.ErrCorruptState
+				}
+				return daemon.failRunBeforeRuntime(daemon.cleanupCtx, run, keys.resources.RuntimeRoot, kernel.FailureInternal, err)
+			}
 		}
 	}
 	if retainedRebaseConflict {
