@@ -52,6 +52,7 @@ type ProductionCheck struct {
 	State        string          `json:"state"`
 	Conclusion   string          `json:"conclusion"`
 	URL          string          `json:"url"`
+	Required     bool            `json:"required,omitempty"` // the merge gate counts it (review.Pull); why reads only these
 	PullRequests []uint64        `json:"pull_requests"`
 	Jobs         []ProductionJob `json:"jobs"`
 	Overflow     int             `json:"overflow,omitempty"`

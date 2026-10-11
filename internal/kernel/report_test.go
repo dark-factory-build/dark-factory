@@ -66,6 +66,21 @@ func TestReportAndWhyReadTheReconcilersState(t *testing.T) {
 	if !strings.Contains(line, "pull: example/factory#7") || !strings.Contains(line, "head: "+head) {
 		t.Fatalf("escalation why = %q", line)
 	}
+	// Only required checks count, as in the reconciler: an optional failure or
+	// pending check predicts nothing.
+	for id, check := range map[string]string{"c1": `"name":"go","state":"completed","conclusion":"success","required":true`, "c2": `"name":"lint","state":"completed","conclusion":"failure"`, "c3": `"name":"docs","state":"in_progress","conclusion":""`} {
+		if _, err := store.writer.ExecContext(ctx, `INSERT INTO production_records (project_id, repository, kind, identity, visual_id, document, observed_at_ms) VALUES (?, 'example/factory', 'check', ?, '', ?, 99)`, project.ID.Bytes(), id, `{`+check+`,"revision":"`+head+`","scope":"head","pull_requests":[7]}`); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if read, err = store.beginRead(ctx); err != nil {
+		t.Fatal(err)
+	}
+	line = escalationWhy(ctx, read.connection, project.ID, "[reviewer:op7]")
+	read.Close()
+	if !strings.Contains(line, "; required checks: 1 passed, 0 pending, 0 failed;") {
+		t.Fatalf("why checks = %q", line)
+	}
 	// A failing check outranks a pending one and a missing verdict, as in review.Decide.
 	if waits := whyPullWaits(ProductionPullRequest{State: "open"}, false, Task{}, nil, 1, 1); waits != "factoryd: failing checks send it back on its next pass" {
 		t.Fatalf("failing and pending checks wait on %q", waits)

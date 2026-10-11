@@ -185,13 +185,14 @@ func why(ctx context.Context, c *sql.Conn, project *ProjectID, repository string
 	}
 	head := strings.ToLower(pr.Head)
 	lines = append(lines, fmt.Sprintf("pull: %s#%d %s %q", repository, pr.Number, pr.State, oneLine(pr.Title, 80)), "head: "+head)
-	// Checks at the exact head that name this pull request.
+	// The required checks at the exact head that name this pull request: the
+	// reconciler (requiredChecks) ignores optional ones.
 	var passed, pending, failed int
 	var failing []string
 	rows, err := c.QueryContext(ctx, `SELECT json_extract(c.document, '$.name'), json_extract(c.document, '$.state'), COALESCE(json_extract(c.document, '$.conclusion'), '')
 		FROM production_records AS c, json_each(c.document, '$.pull_requests') AS n
 		WHERE c.project_id = ? AND c.repository = ? AND c.kind = 'check' AND json_extract(c.document, '$.scope') = 'head'
-		  AND lower(json_extract(c.document, '$.revision')) = ? AND CAST(n.value AS INTEGER) = ?`, projectBytes, repository, head, int64(pr.Number))
+		  AND lower(json_extract(c.document, '$.revision')) = ? AND CAST(n.value AS INTEGER) = ? AND json_extract(c.document, '$.required')`, projectBytes, repository, head, int64(pr.Number))
 	if err != nil {
 		return nil, err
 	}
@@ -213,7 +214,7 @@ func why(ctx context.Context, c *sql.Conn, project *ProjectID, repository string
 	if err := errors.Join(rows.Err(), rows.Close()); err != nil {
 		return nil, err
 	}
-	checks := fmt.Sprintf("checks: %d passed, %d pending, %d failed", passed, pending, failed)
+	checks := fmt.Sprintf("required checks: %d passed, %d pending, %d failed", passed, pending, failed)
 	if len(failing) > 0 {
 		checks += " (" + strings.Join(failing, ", ") + ")"
 	}
