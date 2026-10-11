@@ -44,6 +44,7 @@ type Operation struct {
 	Observation   string    `json:"observation,omitempty"` // the pull request the last pass observed
 	Rebased       bool      `json:"rebased,omitempty"`     // its Change was brought up to main once at this head
 	OwnerApproval bool      `json:"owner_approval,omitempty"`
+	LastAction    string    `json:"last_action,omitempty"` // the reconciler's last action at this head and why, for factoryctl why
 	CreatedAt     time.Time `json:"created_at"`
 	UpdatedAt     time.Time `json:"updated_at"`
 }

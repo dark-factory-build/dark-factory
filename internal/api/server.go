@@ -87,6 +87,7 @@ const (
 	CallOutcomeWrite
 	CallOutcomeRead
 	CallOutcomeList
+	CallReport
 	CallGitHubConnection
 	CallIntake
 	CallMaintainer
@@ -155,6 +156,7 @@ type Call struct {
 	outcomeWrite       OutcomeWriteInput
 	outcomeRead        OutcomeReadInput
 	outcomeList        OutcomeListInput
+	report             ReportInput
 	release            ReleaseInput
 	webClient          WebClientRevocationInput
 	webAfter           string
@@ -171,6 +173,8 @@ type Call struct {
 }
 
 func (call Call) IntakeInput() (IntakeInput, bool) { return call.intake, call.kind == CallIntake }
+
+func (call Call) ReportInput() (ReportInput, bool) { return call.report, call.kind == CallReport }
 
 func (call Call) GitHubConnectionInput() (GitHubConnectionInput, bool) {
 	return call.githubConnection, call.kind == CallGitHubConnection
@@ -197,7 +201,7 @@ func (call Call) AttemptDigest() (AttemptDigest, bool) {
 		return AttemptDigest{}, false
 	}
 	switch call.kind {
-	case CallSnapshot, CallHumanRequests, CallTaskRead, CallIntake, CallMaintainer, CallAttemptTask, CallAttemptSource, CallSucceed, CallBlock, CallFail, CallRequestHuman, CallPeerStatus, CallPeerAsk, CallPeerAnswer, CallTerminalObserve, CallSendBack, CallOverseerSnapshot, CallOverseerEnqueueTask, CallOverseerUpdateTask, CallOverseerUpdateAgent, CallOverseerStopRun, CallOverseerReplaceRun, CallOverseerMessageWorker, CallOverseerInterruptWorker, CallOverseerReplyHuman, CallContentCreate, CallContentRevise, CallContentDeprecate, CallContentList, CallContentRead, CallContentBody, CallContentAttach, CallContentAttachments, CallOutcomeWrite, CallOutcomeRead, CallOutcomeList:
+	case CallSnapshot, CallHumanRequests, CallTaskRead, CallIntake, CallReport, CallMaintainer, CallAttemptTask, CallAttemptSource, CallSucceed, CallBlock, CallFail, CallRequestHuman, CallPeerStatus, CallPeerAsk, CallPeerAnswer, CallTerminalObserve, CallSendBack, CallOverseerSnapshot, CallOverseerEnqueueTask, CallOverseerUpdateTask, CallOverseerUpdateAgent, CallOverseerStopRun, CallOverseerReplaceRun, CallOverseerMessageWorker, CallOverseerInterruptWorker, CallOverseerReplyHuman, CallContentCreate, CallContentRevise, CallContentDeprecate, CallContentList, CallContentRead, CallContentBody, CallContentAttach, CallContentAttachments, CallOutcomeWrite, CallOutcomeRead, CallOutcomeList:
 		return call.digest, true
 	default:
 		return AttemptDigest{}, false
@@ -1018,7 +1022,7 @@ func decodeCall(domain byte, bearer credential, encoded []byte) (Call, RemoteErr
 			return Call{}, RemoteInvalidRequest
 		}
 	case CallOverseerUpdateAgent, CallOperatorUpdateAgent:
-		if err := decodeExact(request.Params, &call.overseerAgent); err != nil || !validID(call.overseerAgent.AgentID) || call.overseerAgent.ExpectedRevision == 0 || kind == CallOverseerUpdateAgent && call.overseerAgent.Appearance != nil {
+		if err := decodeExact(request.Params, &call.overseerAgent); err != nil || !validID(call.overseerAgent.AgentID) || call.overseerAgent.ExpectedRevision == 0 || kind == CallOverseerUpdateAgent && (call.overseerAgent.Appearance != nil || call.overseerAgent.IdleAfterSeconds != nil || call.overseerAgent.IdleWakeOn != nil || call.overseerAgent.Model != nil || call.overseerAgent.ReasoningEffort != nil) {
 			return Call{}, RemoteInvalidRequest
 		}
 	case CallOverseerStopRun, CallOperatorStopRun:
@@ -1086,6 +1090,10 @@ func decodeCall(domain byte, bearer credential, encoded []byte) (Call, RemoteErr
 		}
 	case CallOutcomeList:
 		if err := decodeExact(request.Params, &call.outcomeList); err != nil || !validText(call.outcomeList.ProjectID, 1, 64) || call.outcomeList.Limit > MaxContentPageItems {
+			return Call{}, RemoteInvalidRequest
+		}
+	case CallReport:
+		if err := decodeExact(request.Params, &call.report); err != nil || !validReportInput(call.report) {
 			return Call{}, RemoteInvalidRequest
 		}
 	case CallRelease:
@@ -1287,6 +1295,10 @@ func methodKind(method string) (CallKind, byte) {
 		return CallTaskRead, attemptDomain
 	case "attempt_intake":
 		return CallIntake, attemptDomain
+	case "report":
+		return CallReport, operatorDomain
+	case "attempt_report":
+		return CallReport, attemptDomain
 	case "human_reply":
 		return CallHumanReply, operatorDomain
 	case "human_cancel":
@@ -1401,7 +1413,7 @@ func replyMatches(kind CallKind, reply replyKind) bool {
 		return reply == replyWebClients
 	case CallWebRevokeClient:
 		return reply == replyWebRevoke
-	case CallMaintainer, CallGitHubConnection, CallIntake, CallRelease, CallWebPair:
+	case CallMaintainer, CallGitHubConnection, CallIntake, CallReport, CallRelease, CallWebPair:
 		return reply == replyContent
 	case CallRemoteStatus:
 		return reply == replyRemoteStatus
