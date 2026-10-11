@@ -643,7 +643,13 @@ func (daemon *Daemon) agentPaths(ctx context.Context, call api.Call) api.Reply {
 			paths = observedPaths
 		}
 	}
-	reply, err := api.NewAgentPathsReply(api.AgentPaths{AgentID: input.AgentID, RunID: run, SourcePath: sourcePath, RuntimePath: runtimePath, Paths: paths})
+	var telemetry *api.RunTelemetry
+	if runID != (kernel.RunID{}) {
+		if value := daemon.runTelemetryView(runID); value != nil {
+			telemetry = &api.RunTelemetry{TokensIn: value.TokensIn, TokensOut: value.TokensOut, CostMicroUSD: value.CostMicroUSD, ToolCalls: value.ToolCalls, APIRequests: value.APIRequests, QuietSeconds: value.QuietSeconds}
+		}
+	}
+	reply, err := api.NewAgentPathsReply(api.AgentPaths{AgentID: input.AgentID, RunID: run, SourcePath: sourcePath, RuntimePath: runtimePath, Paths: paths, Telemetry: telemetry})
 	if err != nil {
 		return newErrorReply(api.RemoteInternal)
 	}

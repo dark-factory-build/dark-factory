@@ -19,9 +19,12 @@ func projectSnapshot(snapshot kernel.DashboardSnapshot) api.DashboardSnapshot {
 			ActiveRuns:      snapshot.Factory.ActiveRuns,
 			Revision:        uint64(snapshot.Factory.Revision.Int64()),
 		},
-		Projects: make([]api.ProjectSummary, 0, len(snapshot.Projects)),
-		Agents:   make([]api.AgentSummary, 0, len(snapshot.Agents)),
-		Tasks:    make([]api.TaskSummary, 0, len(snapshot.Tasks)),
+		Projects:      make([]api.ProjectSummary, 0, len(snapshot.Projects)),
+		Agents:        make([]api.AgentSummary, 0, len(snapshot.Agents)),
+		Tasks:         make([]api.TaskSummary, 0, len(snapshot.Tasks)),
+		HumanRequests: make([]api.HumanRequestItem, 0, len(snapshot.HumanRequests)),
+		Accounts:      make([]api.AccountSummary, 0, len(snapshot.Accounts)),
+		PeerQuestions: make([]api.PeerQuestion, 0, len(snapshot.PeerQuestions)),
 	}
 	for _, project := range snapshot.Projects {
 		result.Projects = append(result.Projects, api.ProjectSummary{
@@ -32,10 +35,24 @@ func projectSnapshot(snapshot kernel.DashboardSnapshot) api.DashboardSnapshot {
 		result.Agents = append(result.Agents, projectAgentSummary(agent))
 	}
 	for _, task := range snapshot.Tasks {
-		result.Tasks = append(result.Tasks, api.TaskSummary{
+		projected := api.TaskSummary{
 			ID: task.ID.String(), ProjectID: task.ProjectID.String(), AssignedAgentID: optionalAgentText(task.AssignedAgentID),
-			IncarnationID: task.IncarnationID.String(), WorkRevision: uint64(task.WorkRevision.Int64()), Title: task.Title, Status: task.Status, Priority: task.Priority, Revision: uint64(task.Revision.Int64()),
-		})
+			IncarnationID: task.IncarnationID.String(), WorkRevision: uint64(task.WorkRevision.Int64()), Title: task.Title, Status: task.Status, Priority: task.Priority, Revision: uint64(task.Revision.Int64()), BlockedReason: task.BlockedReason, UpdatedAtMS: uint64(task.UpdatedAt.Int64()), IssueNumber: task.IssueNumber, MissionID: task.MissionID,
+		}
+		if task.AssignedAgentID == (kernel.AgentID{}) {
+			result.SharedTasks = append(result.SharedTasks, projected)
+		} else {
+			result.Tasks = append(result.Tasks, projected)
+		}
+	}
+	for _, item := range snapshot.Accounts {
+		result.Accounts = append(result.Accounts, api.AccountSummary{ID: item.ID.String(), Provider: item.Provider, Home: item.Home, Label: item.Label, Revision: uint64(item.Revision.Int64())})
+	}
+	for _, item := range snapshot.PeerQuestions {
+		result.PeerQuestions = append(result.PeerQuestions, api.PeerQuestion{ID: item.ID.String(), SourceTaskID: item.SourceTaskID.String(), TargetTaskID: item.TargetTaskID.String(), Answered: item.Answered, Revision: uint64(item.Revision.Int64())})
+	}
+	for _, item := range snapshot.HumanRequests {
+		result.HumanRequests = append(result.HumanRequests, api.HumanRequestItem{ID: item.ID.String(), ProjectID: item.ProjectID.String(), AgentID: item.AgentID.String(), TaskID: item.TaskID.String(), CreatedAt: uint64(item.CreatedAt.Int64()), UpdatedAt: uint64(item.UpdatedAt.Int64()), Revision: uint64(item.Revision.Int64()), Kind: item.Kind.String(), Status: item.Status.String(), ReplyMaxBytes: uint16(item.ReplyMaxBytes), CanReply: item.CanReply})
 	}
 	return result
 }
@@ -84,15 +101,23 @@ func projectOverseerSnapshot(snapshot kernel.OverseerSnapshot) (api.OverseerSnap
 }
 
 func projectAgentSummary(agent kernel.AgentSummary) api.AgentSummary {
-	return api.AgentSummary{
+	result := api.AgentSummary{
 		ID: agent.ID.String(), ProjectID: agent.ProjectID.String(), Name: agent.Name,
 		Role: agent.Role, Provider: agent.Provider, Paused: agent.Paused, Archived: agent.Archived,
-		Model: agent.Model, ReasoningEffort: agent.ReasoningEffort,
+		Appearance: api.AppearanceSummary{Automatic: agent.Appearance.Automatic, Skin: agent.Appearance.Skin, Hair: agent.Appearance.Hair, HairColour: agent.Appearance.HairColour, Face: agent.Appearance.Face, Outfit: agent.Appearance.Outfit, ClothesColour: agent.Appearance.ClothesColour, Shoes: agent.Appearance.Shoes, Tool: agent.Appearance.Tool, Headwear: agent.Appearance.Headwear},
+		Model:      agent.Model, ReasoningEffort: agent.ReasoningEffort, EffectiveModel: agent.Model, EffectiveReasoningEffort: agent.ReasoningEffort,
 		ToolBudgetLimit: agent.ToolBudgetLimit, ToolCallsUsed: agent.ToolCallsUsed,
 		IdlePolicy: string(agent.Idle.Policy), IdleAfterSeconds: agent.Idle.AfterSeconds,
 		IdleInstruction: agent.Idle.Instruction, IdleRunBudget: agent.Idle.RunBudget, IdleRunsUsed: agent.Idle.RunsUsed, IdleWakeOn: agent.Idle.WakeOn,
 		AccountID: optionalAccountText(agent.AccountID), Revision: uint64(agent.Revision.Int64()),
 	}
+	if agent.Model != "" {
+		result.ModelSource = "agent"
+	}
+	if agent.Specialist != nil {
+		result.Specialist = &api.SpecialistSummary{NextReviewAtMS: uint64(max(agent.Specialist.NextReviewAt, 0)), NextReason: agent.Specialist.NextReason, Waiting: agent.Specialist.Waiting, QuietReviews: uint8(agent.Specialist.QuietReviews), OpenProposals: uint16(agent.Specialist.OpenProposals), OpenProposalLimit: uint16(agent.Specialist.OpenProposalLimit), LastReviewTaskID: agent.Specialist.LastReviewTaskID}
+	}
+	return result
 }
 
 func optionalAccountText(account kernel.AccountID) string {
