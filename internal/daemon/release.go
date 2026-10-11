@@ -263,18 +263,7 @@ func (daemon *Daemon) FinishRelease(ctx context.Context, sha, state, reason stri
 	if state == "verified" {
 		delivery.Phase = ""
 	}
-	if err = daemon.writeRelease(ctx, project, &delivery); err != nil {
-		return err
-	}
-	if state == "verified" {
-		at, err := daemon.timestamp()
-		if err != nil {
-			return err
-		}
-		_, err = daemon.store.ExpireBlockedTasks(ctx, at, at)
-		return err
-	}
-	return nil
+	return daemon.writeRelease(ctx, project, &delivery)
 }
 
 func (daemon *Daemon) selfRepositorySource(ctx context.Context) (project kernel.ProjectID, root string, source change.RepositorySourceIdentity, err error) {
