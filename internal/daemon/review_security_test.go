@@ -348,7 +348,11 @@ func TestCodexReviewerReadsOnlyItsCheckoutAndToolchain(t *testing.T) {
 	}
 	profile := "\n" + `permissions.dark-factory-review={filesystem={":root"="deny",":minimal"="read","/private/tmp"="deny","/private/var/tmp"="deny",` + strconv.Quote(checkout) + `="read",`
 	reads := []string{filepath.Join(registered, ".git", "objects"), toolchain, filepath.Join(operator, "Library", "Caches", "dark-factory", "local-ci", "trusted", "go-mod"), filepath.Join(operator, "Library", "Caches", "dark-factory", "local-ci", "trusted", "pnpm-store")}
-	writes := strings.Count(joined, `="write"`) - strings.Count(joined, strconv.Quote(scratch)+`="write"`) - strings.Count(joined, strconv.Quote(resolved)+`="write"`)
+	// A canonical TMPDIR makes both spellings one grant.
+	writes := strings.Count(joined, `="write"`)
+	for _, path := range slices.Compact([]string{scratch, resolved}) {
+		writes -= strings.Count(joined, strconv.Quote(path)+`="write"`)
+	}
 	if strings.Contains(joined, "--sandbox") || strings.Contains(joined, "sandbox_mode") || writes != 0 || !strings.Contains(joined, strconv.Quote(scratch)+`="write"`) || !strings.Contains(joined, "\ndefault_permissions=\"dark-factory-review\"\n") || !strings.Contains(joined, profile) || !strings.Contains(joined, "},network={enabled=false}}\n") {
 		t.Fatalf("reviewer argv = %q, want the deny-root profile writing only %s and no --sandbox", argv, scratch)
 	}
