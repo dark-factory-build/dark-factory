@@ -67,6 +67,16 @@ function replySnapshot(socket, frame, head, overrides = {}) {
 
 function tick() { return new Promise((resolve) => setTimeout(resolve, 0)); }
 
+// Waits on the condition itself, not a fixed sleep: the async handshake can
+// take longer than any fixed delay on a loaded runner.
+async function until(condition, message) {
+  const deadline = Date.now() + 5000;
+  while (!condition()) {
+    if (Date.now() > deadline) assert.fail(message);
+    await tick();
+  }
+}
+
 function lastFrame(socket, type) {
   return decodeClientControl(socket.sent.findLast((wire) => decodeClientControl(wire).type === type));
 }
@@ -1032,7 +1042,7 @@ test("old-socket snapshot and change frames cannot overwrite a reconnected sessi
   const states = [];
   const seed = new BrowserSession({ url: "ws://127.0.0.1/browser", host: "127.0.0.1", origin: "https://preview.example", challenge, keyStore: store, socketFactory: () => new Socket(serverFor) });
   await seed.connect();
-  await new Promise((resolve) => setTimeout(resolve, 10));
+  await until(() => seed.status === "ready", "the seed session never became ready");
   seed.close();
 
   const timer = new VirtualTimer();
@@ -1042,7 +1052,7 @@ test("old-socket snapshot and change frames cannot overwrite a reconnected sessi
     onState: (state) => states.push(state),
   });
   await client.connect();
-  await new Promise((resolve) => setTimeout(resolve, 10));
+  await until(() => client.session?.status === "ready", "the first session never became ready");
   const staleSession = client.session;
   const staleSocket = sockets[0];
   const staleWatch = lastFrame(staleSocket, "STATE_WATCH");
@@ -1050,7 +1060,7 @@ test("old-socket snapshot and change frames cannot overwrite a reconnected sessi
 
   staleSocket.close();
   timer.advance(10);
-  await new Promise((resolve) => setTimeout(resolve, 10));
+  await until(() => client.session !== staleSession && client.session?.status === "ready", "the reconnected session never became ready");
   assert.equal(sockets.length, 2);
   assert.notEqual(client.session, staleSession);
   assert.equal(client.session.status, "ready");

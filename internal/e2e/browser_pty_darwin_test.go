@@ -162,7 +162,7 @@ type fixture struct {
 
 func newFixture(t *testing.T, seed byte, test scenario, factoryctl, runnerExecutable string) *fixture {
 	t.Helper()
-	root, err := os.MkdirTemp("/private/tmp", "dark-factory-browser-pty-e2e-")
+	root, err := os.MkdirTemp(runner.ShortTempDir(), "dark-factory-browser-pty-e2e-")
 	if err != nil {
 		t.Fatal(err)
 	}

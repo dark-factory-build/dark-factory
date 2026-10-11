@@ -347,6 +347,64 @@ func TestAcceptedIntakeImportsOnceAcrossOverlappingSourcesAndWithdrawal(t *testi
 	}
 }
 
+// An intake poll replays every already-imported issue on each tick, so a
+// replay must not walk the whole store; a new import still validates first.
+func TestIntakeImportReplaySkipsWholeStoreValidation(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	store, _ := newTestStore(t)
+	defer store.Close()
+	project, err := store.CreateProject(ctx, NewProject{ID: projectID(t, 240), Name: "intake", Root: "/intake"}, mustTime(t, 1))
+	if err != nil {
+		t.Fatal(err)
+	}
+	id, err := IntakeSourceIDFromBytes(bytes.Repeat([]byte{241}, IDBytes))
+	if err != nil {
+		t.Fatal(err)
+	}
+	source, err := store.CreateIntakeSource(ctx, NewIntakeSource{ID: id, GitHubRepositoryID: 42, GitHubRepositoryName: "owner/repository", ProjectID: project.ID, TargetRepositoryID: RepositoryID(project.ID), Policy: IntakePolicyManual, PollSeconds: 60, AdmissionLimit: 25}, mustTime(t, 2))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if source, err = store.SetIntakeSourceEnabled(ctx, source.ID, source.Revision, true, mustTime(t, 3)); err != nil {
+		t.Fatal(err)
+	}
+	imported, err := store.AcceptIntakeSnapshot(ctx, source.ID, intakeSnapshotForTest(), mustTime(t, 4))
+	if err != nil {
+		t.Fatal(err)
+	}
+	task, err := store.ImportIntakeAcceptanceWithPriority(ctx, imported.ID, mustTime(t, 5), source, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	other := intakeSnapshotForTest()
+	other.IssueNumber, other.NodeID = 8, "I_kwDOOther"
+	pending, err := store.AcceptIntakeSnapshot(ctx, source.ID, other, mustTime(t, 6))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Corrupt retained history so any whole-store walk refuses.
+	tx, err := store.beginUncheckedWrite(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := tx.connection.ExecContext(ctx, `UPDATE tasks SET work_revision = work_revision + 1`); err != nil {
+		t.Fatal(err)
+	}
+	if err := tx.Commit(ctx); err != nil {
+		t.Fatal(err)
+	}
+	tx.Close()
+
+	if replay, err := store.ImportIntakeAcceptanceWithPriority(ctx, imported.ID, mustTime(t, 7), source, 0); err != nil || replay.ID != task.ID {
+		t.Fatalf("replay of an imported issue = %+v, %v", replay, err)
+	}
+	if _, err := store.ImportIntakeAcceptanceWithPriority(ctx, pending.ID, mustTime(t, 7), source, 0); !errors.Is(err, ErrCorruptState) {
+		t.Fatalf("new import over corrupt history = %v, want ErrCorruptState", err)
+	}
+}
+
 func TestPendingIntakeAcceptancesSkipsSupersededWithdrawnAndImportedReceipts(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()

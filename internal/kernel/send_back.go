@@ -114,7 +114,13 @@ func (store *Store) SendBackPublishedReview(ctx context.Context, project Project
 	if strings.Contains(TaskFeedback(task), marker) {
 		return task, tx.Rollback(nil)
 	}
-	updated, err := sendBackTask(ctx, tx.connection, task, marker+note, at)
+	// An operator cancellation is final. The review operation may still have
+	// route_pending set, but retrying its send-back only produces a durable
+	// conflict on every scheduler pass.
+	if task.Status == TaskCancelled {
+		return Task{}, tx.Rollback(ErrNotFound)
+	}
+	updated, err := sendBackTask(ctx, tx.connection, task, head, marker+note, at)
 	if err != nil {
 		return Task{}, tx.Rollback(err)
 	}
@@ -223,8 +229,9 @@ func TaskBodyWithInstruction(task Task, instruction string) (string, *int64) {
 // may be sent back, a success included: the reviewer, not the worker, decides
 // when work is done; a cancelled task comes back the same way. A task that
 // never ran has nothing to go back to, and a shell agent's task is a
-// program, which no note can be added to.
-func (store *Store) SendBackTask(ctx context.Context, id TaskID, expected Revision, note string, at UnixMillis) (Task, error) {
+// program, which no note can be added to. head is the Change head the note
+// was observed at; sendBackTask refuses it once the Change has moved on.
+func (store *Store) SendBackTask(ctx context.Context, id TaskID, expected Revision, head, note string, at UnixMillis) (Task, error) {
 	if id.zero() || expected.Int64() < 1 {
 		return Task{}, fmt.Errorf("%w: invalid task send-back", ErrInvalidValue)
 	}
@@ -246,7 +253,7 @@ func (store *Store) SendBackTask(ctx context.Context, id TaskID, expected Revisi
 	if task.Revision != expected {
 		return Task{}, tx.Rollback(ErrRevisionConflict)
 	}
-	updated, err := sendBackTask(ctx, tx.connection, task, note, at)
+	updated, err := sendBackTask(ctx, tx.connection, task, head, note, at)
 	if err != nil {
 		return Task{}, tx.Rollback(err)
 	}
@@ -260,7 +267,7 @@ func (store *Store) SendBackTask(ctx context.Context, id TaskID, expected Revisi
 // attempt must be a running orchestrator, the task must belong to its
 // project (another project's is not its authority), be a worker's, and not
 // be the attempt's own.
-func (store *Store) SendBackTaskForAttempt(ctx context.Context, digest AttemptDigest, id TaskID, note string, at UnixMillis) (Task, error) {
+func (store *Store) SendBackTaskForAttempt(ctx context.Context, digest AttemptDigest, id TaskID, head, note string, at UnixMillis) (Task, error) {
 	if id.zero() {
 		return Task{}, fmt.Errorf("%w: invalid task send-back", ErrInvalidValue)
 	}
@@ -299,7 +306,7 @@ func (store *Store) SendBackTaskForAttempt(ctx context.Context, digest AttemptDi
 	if !found || agent.Role != RoleWorker {
 		return Task{}, tx.Rollback(ErrUnauthorized)
 	}
-	updated, err := sendBackTask(ctx, tx.connection, task, note, at)
+	updated, err := sendBackTask(ctx, tx.connection, task, head, note, at)
 	if err != nil {
 		return Task{}, tx.Rollback(err)
 	}
@@ -468,7 +475,11 @@ func (store *Store) retryTaskTx(ctx context.Context, tx *writeTx, digest *Attemp
 	return updated, nil
 }
 
-func sendBackTask(ctx context.Context, connection *sql.Conn, task Task, note string, at UnixMillis) (Task, error) {
+// sendBackTask is where every send-back is made. head binds the note to the
+// Change head it was observed at: once the task has a Change head, a note
+// about any other head is a premise the worker cannot reproduce, so it is
+// refused as superseded instead of costing a run (#1673).
+func sendBackTask(ctx context.Context, connection *sql.Conn, task Task, head, note string, at UnixMillis) (Task, error) {
 	var removed bool
 	if err := connection.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM task_attachments WHERE task_id = ? AND data IS NULL)`, task.ID.Bytes()).Scan(&removed); err != nil {
 		return Task{}, err
@@ -511,6 +522,26 @@ func sendBackTask(ctx context.Context, connection *sql.Conn, task Task, note str
 	}
 	if runs != 1 {
 		return Task{}, ErrConflict
+	}
+	var current string
+	if err := connection.QueryRowContext(ctx, `SELECT COALESCE((SELECT lower(hex(head_commit)) FROM changes WHERE task_id = ? AND task_incarnation_id = ?), '')`, task.ID.Bytes(), task.IncarnationID.Bytes()).Scan(&current); err != nil {
+		return Task{}, err
+	}
+	// The App publishes its own commit of the Change's tree, so a reviewer's
+	// note names the pull request head, never the local Change head.
+	var published bool
+	if current != "" && !strings.EqualFold(head, current) {
+		// The pull request is the task's by its publication row, or by its
+		// branch, which names the Change.
+		if err := connection.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM production_records r WHERE r.project_id = ?1 AND r.kind = 'pull_request' AND ?3 <> '' AND lower(json_extract(r.document, '$.head')) = lower(?3)
+			AND (EXISTS(SELECT 1 FROM publication_tasks p WHERE p.task_id = ?2 AND p.project_id = r.project_id AND p.repository = r.repository AND CAST(p.pull_number AS TEXT) = r.identity)
+			  OR json_extract(r.document, '$.branch') IN (SELECT 'factory/' || substr(lower(hex(c.id)), 1, 12) FROM changes c WHERE c.task_id = ?2 AND c.task_incarnation_id = ?4)))`,
+			task.ProjectID.Bytes(), task.ID.Bytes(), head, task.IncarnationID.Bytes()).Scan(&published); err != nil {
+			return Task{}, err
+		}
+	}
+	if current != "" && !strings.EqualFold(head, current) && !published {
+		return Task{}, fmt.Errorf("%w: %w: the note was observed at head %q but the task's Change head is %q; observe it there before sending it back", ErrConflict, ErrSuperseded, head, current)
 	}
 	next := task.WorkRevision.Int64() + 1
 	body := SentBackBody(task, note)
@@ -558,7 +589,7 @@ const taskIssueWithdrawn = `EXISTS (SELECT 1 FROM intake_task_bindings AS b JOIN
 // continuation, and validation runs before a write, not at its commit.
 func refuseAwaitedTask(ctx context.Context, connection *sql.Conn, id TaskID) error {
 	var awaited bool
-	if err := connection.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM continuations WHERE task_id = ? AND state IN ('waiting', 'queued'))`, id.Bytes()).Scan(&awaited); err != nil {
+	if err := connection.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM human_requests h JOIN runs r ON r.id = h.run_id WHERE r.task_id = ? AND h.continuation IN ('waiting', 'queued'))`, id.Bytes()).Scan(&awaited); err != nil {
 		return err
 	}
 	if awaited {

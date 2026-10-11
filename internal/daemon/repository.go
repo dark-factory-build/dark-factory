@@ -76,7 +76,15 @@ func updateRepositoryBase(ctx context.Context, store *kernel.Store, id kernel.Re
 	if err != nil {
 		return kernel.ProjectRepository{}, err
 	}
-	if err := store.BindRepositorySource(ctx, id, source); err != nil {
+	known, verified, err := store.RepositorySourceIdentity(ctx, id)
+	if err != nil {
+		return kernel.ProjectRepository{}, err
+	}
+	if verified {
+		if known != source {
+			return kernel.ProjectRepository{}, kernel.ErrConflict
+		}
+	} else if err := store.BindRepositorySource(ctx, id, source); err != nil {
 		return kernel.ProjectRepository{}, err
 	}
 	return store.UpdateProjectRepositoryBase(ctx, id, expected, base, at)

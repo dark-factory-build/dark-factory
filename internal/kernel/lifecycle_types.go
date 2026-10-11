@@ -980,7 +980,8 @@ type AttemptAuthority struct {
 	BaseCommit               []byte
 	ContinuationContexts     []ContinuationContext
 	// Specialist is a specialist's review run (its carrier): it may also read
-	// its project's overseer status and observe its workers.
+	// its project's overseer status, observe its workers and read the
+	// operator's views (status, human requests, task read, intake list).
 	Specialist bool
 	task       string
 }

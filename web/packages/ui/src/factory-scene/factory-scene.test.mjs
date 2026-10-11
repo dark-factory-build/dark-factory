@@ -246,11 +246,13 @@ test("the standalone agent sprite crops one existing stable frame", () => {
 });
 
 test("the selected scene worker has a ring without changing its sprite", () => {
-  const markup = render({ selectedWorkerId: "worker-b" });
-  const selected = markup.slice(markup.indexOf('data-worker-id="worker-b"'));
-  assert.match(selected.slice(0, selected.indexOf("</g>")), /dfFactoryScene__worker--selected/);
-  assert.match(selected.slice(0, selected.indexOf("</g>")), /class="dfFactoryScene__selection"/);
-  for (const frame of workerFrames(workers[0])) assert.match(selected.slice(0, selected.indexOf("</g>")), new RegExp(`href="#df-frame-${frame}"`));
+  const sprite = (markup) => { const from = markup.slice(markup.indexOf('data-worker-id="worker-b"')); return from.slice(0, from.indexOf("</g></g>")); };
+  const selected = sprite(render({ selectedWorkerId: "worker-b" }));
+  assert.match(selected, /dfFactoryScene__worker--selected/);
+  assert.match(selected, /class="dfFactoryScene__selection"/);
+  const frames = (markup) => markup.match(/href="#df-frame-[^"]+"/g);
+  assert.ok(frames(selected).length >= 6, selected);
+  assert.deepEqual(frames(selected), frames(sprite(render())));
 });
 
 test("every generated person layer is reachable, including fallbacks", () => {
@@ -261,7 +263,8 @@ test("every generated person layer is reachable, including fallbacks", () => {
     for (const provider of ["claude_code", "codex", "shell"]) {
       for (const activity of ["busy", "waiting", "needs-you", "idle"]) {
         const base = { automatic: false, skin: 0, hair: 0, hair_colour: 0, face: 0, outfit: 0, clothes_colour: 0, shoes: 0, tool: 0, headwear: 0 };
-        const add = (appearance) => { for (const motion of moments) for (const [seat, stroking] of [[], ["resting"], ["resting", 0], ["resting", 400], ["planning"]]) for (const frame of workerFrames({ id: "agent", name: "Agent", role, provider, activity, appearance }, motion, seat, undefined, stroking)) reached.add(frame); };
+        // Specialists inspect, and which machine is worked decides between reaching for its controls and typing.
+        const add = (appearance) => { for (const motion of [...moments, { action: "interacting", frame: 0, at: 3000 }]) for (const [seat, stroking] of [[], ["resting"], ["resting", 0], ["resting", 400], ["planning"]]) for (const extra of [{}, { specialist: { title: "", text: "", next: "" } }, { observedBayId: "a" }, { observedBayId: "b" }]) for (const frame of workerFrames({ id: "agent", name: "Agent", role, provider, activity, appearance, ...extra }, motion, seat, undefined, stroking)) reached.add(frame); };
         for (const field of ["skin", "face", "shoes", "tool", "headwear"]) for (let index = 0; index < spriteOptions[field].length; index++) add({ ...base, [field]: index });
         for (let hair = 0; hair < spriteOptions.hair.length; hair++) for (let hair_colour = 0; hair_colour < spriteOptions.hair_colour.length; hair_colour++) add({ ...base, hair, hair_colour });
         for (let outfit = 0; outfit < spriteOptions.outfit.length; outfit++) for (let clothes_colour = 0; clothes_colour < spriteOptions.clothes_colour.length; clothes_colour++) add({ ...base, outfit, clothes_colour });
@@ -330,7 +333,7 @@ test("every generated person layer is reachable, including fallbacks", () => {
     assert.deepEqual([0, 1].map((frame) => bench(tool, frame).filter((layer) => /skin|legs|tool|held/.test(layer)).map((layer) => layer.replace("person.", ""))),
       [["skin.0.idle", "legs.plain.stand", `tool.${tool}.low`], ["skin.0.walk.1", "legs.plain.stand", `tool.${tool}.high`]], name);
   }
-  for (const name of ["none", "mug"]) assert.ok(bench(toolNames.indexOf(name), 0).includes("person.held.keyboard"), name);
+  for (const name of ["none", "mug"]) assert.ok(bench(toolNames.indexOf(name), 0).some((layer) => layer === "person.held.keyboard" || layer.endsWith(".back.operate.0")), name);
   // Glasses blink with their lenses; bare eyes with the face's own shadow.
   const eyes = (face) => workerFrames({ ...fallback, appearance: { automatic: false, skin: 2, hair: 0, hair_colour: 0, face, outfit: 0, clothes_colour: 0, shoes: 0, tool: 0, headwear: 0 } }, { action: "still", frame: 0, at: 0 }).filter((layer) => layer.includes("blink"));
   assert.deepEqual([eyes(0), eyes(spriteOptions.face.findIndex(({ name }) => name === "glasses"))], [["person.blink.2"], ["person.blink.glasses"]]);
@@ -340,6 +343,35 @@ test("every generated person layer is reachable, including fallbacks", () => {
   }
   // A stilled clock rests every pose on its first frame, with open eyes.
   assert.deepEqual(workerFrames({ ...fallback, activity: "needs-you" }).filter((name) => /wave|blink/.test(name)).map((name) => name.split(".").slice(-2).join(".")), ["wave.0", "wave.0"]);
+});
+
+test("at a machine empty hands work it facing it or type, a reviewing specialist inspects, and a stilled clock rests on frame 0", () => {
+  const appearance = (tool = "none") => ({ automatic: false, skin: 0, hair: 0, hair_colour: 0, face: 0, outfit: 0, clothes_colour: 0, shoes: 0, tool: spriteOptions.tool.findIndex(({ name }) => name === tool), headwear: 0 });
+  const person = (id, extra = {}) => ({ id, name: id, role: "worker", provider: "codex", activity: "busy", location: "working", nodeId: "src", appearance: appearance(), ...extra });
+  const working = (worker, at, seat) => workerFrames(worker, { action: "interacting", frame: 0, at }, seat);
+  const kind = (frames) => frames.some((name) => name.includes(".back.operate.")) ? "operate" : frames.includes("person.held.keyboard") ? "type" : frames.join();
+  const people = Array.from({ length: 30 }, (_, index) => person(`w${index}`));
+  // Both ways of working a machine occur on one floor, and each is fixed per worker and machine.
+  assert.deepEqual([...new Set(people.map((worker) => kind(working(worker, 0))))].sort(), ["operate", "type"]);
+  for (const worker of people) for (const at of [400, 900, 1700, 5000]) assert.equal(kind(working(worker, at)), kind(working(worker, 0)), `${worker.id} never flickers between ways of working`);
+  assert.ok(people.some((worker) => kind(working(worker, 0)) !== kind(working({ ...worker, observedBayId: "elsewhere" }, 0))), "another machine may be worked another way");
+  // Operating faces the machine: a back with no face, badge, blink or tool, whose hands change over.
+  const operator = people.find((worker) => kind(working(worker, 0)) === "operate");
+  assert.deepEqual(working(operator, 0).filter((name) => /skin|outfit/.test(name)), ["person.skin.0.back.operate.0", "person.outfit.0.0.back.operate.0"]);
+  assert.ok(working(operator, 800).includes("person.skin.0.back.operate.1"));
+  assert.ok(working(operator, 0).every((name) => !/face|system|blink|tool|held/.test(name)), `${working(operator, 0)}`);
+  assert.ok(workerFrames(operator, { action: "interacting", frame: 1 }).includes("person.skin.0.back.operate.0"), "reduced motion rests on the first frame");
+  // A specialist's running review is inspection instead: it reads its board, then lowers it to look.
+  const specialist = { ...operator, specialist: { title: "Operations specialist", text: "reviewing: make delivery reliable", next: "" } };
+  const reading = (worker, at, seat, action = "interacting") => workerFrames(worker, { action, frame: 0, at }, seat).filter((name) => /skin|legs|held|tool/.test(name));
+  assert.deepEqual([0, 2500].map((at) => reading(specialist, at)), [
+    ["person.skin.0.inspect.0", "person.legs.plain.stand", "person.held.clipboard.chest"],
+    ["person.skin.0.inspect.1", "person.legs.plain.stand", "person.held.clipboard.low"]]);
+  assert.deepEqual(reading({ ...specialist, appearance: appearance("tablet") }, 2500), ["person.skin.0.inspect.1", "person.legs.plain.stand", "person.held.tablet.low"], "a tablet is read in place of a clipboard");
+  assert.deepEqual(reading(specialist, 0, "planning", "still"), ["person.skin.0.inspect.0", "person.legs.plain.sit", "person.held.clipboard.chest"], "and seated at the planning table");
+  assert.deepEqual(reading(specialist, undefined), ["person.skin.0.inspect.0", "person.legs.plain.stand", "person.held.clipboard.chest"], "reduced motion rests on the first frame");
+  // Between reviews it is an ordinary worker.
+  for (const activity of ["idle", "waiting"]) assert.deepEqual(workerFrames({ ...specialist, activity }, { action: "still", frame: 0, at: 0 }, "resting"), workerFrames({ ...operator, activity }, { action: "still", frame: 0, at: 0 }, "resting"), activity);
 });
 
 test("a walk crosses the shared floor directly, around machines, never through one or by an imaginary door", () => {
@@ -633,7 +665,8 @@ test("a walking worker is drawn facing where they go, and only a westward walk i
       const { action, facing, transform, frames } = drawn();
       assert.equal(transform.includes("scale(-1 1)"), action === "walking" && facing === "west", `${action}/${facing}: ${transform}`);
       assert.equal(facing !== undefined, action === "walking");
-      assert.equal(frames.some((name) => name.includes(".back")), facing === "north", `${facing}: ${frames}`);
+      // Working the machine faces it, which from the floor's side is a back too.
+      assert.equal(frames.some((name) => name.includes(".back")), facing === "north" || action === "interacting" && frames.some((name) => name.includes(".operate.")), `${facing}: ${frames}`);
       assert.equal(frames.some((name) => name.includes(".side")), facing === "east" || facing === "west", `${facing}: ${frames}`);
       seen.add(facing);
     };

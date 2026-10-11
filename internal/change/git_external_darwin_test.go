@@ -14,6 +14,7 @@ import (
 
 	"github.com/dark-factory-build/dark-factory/internal/change"
 	"github.com/dark-factory-build/dark-factory/internal/gitauthor"
+	"github.com/dark-factory-build/dark-factory/internal/runner"
 )
 
 func TestPublicSelectGitFortyCallsHaveExactZeroFDDeltaWithoutGC(t *testing.T) {
@@ -138,7 +139,7 @@ func TestPinContentSourceKeepsAnExactFileReachableAfterBranchCleanup(t *testing.
 
 func externalSecureTempDir(t testing.TB) string {
 	t.Helper()
-	path, err := os.MkdirTemp("/private/tmp", "dark-factory-change-external-")
+	path, err := os.MkdirTemp(runner.ShortTempDir(), "dark-factory-change-external-")
 	if err != nil {
 		t.Fatal(err)
 	}

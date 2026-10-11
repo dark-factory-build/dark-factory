@@ -20,10 +20,11 @@ import (
 
 	"github.com/dark-factory-build/dark-factory/internal/gitauthor"
 	"github.com/dark-factory-build/dark-factory/internal/install"
+	"github.com/dark-factory-build/dark-factory/internal/runner"
 )
 
 func TestHostDisconnectPersistsBeforeRemoteRevocation(t *testing.T) {
-	parent, err := os.MkdirTemp("/private/tmp", "df-connection-test-")
+	parent, err := os.MkdirTemp(runner.ShortTempDir(), "df-connection-test-")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -119,7 +120,7 @@ func TestHostDisconnectPersistsBeforeRemoteRevocation(t *testing.T) {
 }
 
 func TestHostGitAuthorPersistsVerifiedUserAndDisconnect(t *testing.T) {
-	parent, err := os.MkdirTemp("/private/tmp", "df-author-test-")
+	parent, err := os.MkdirTemp(runner.ShortTempDir(), "df-author-test-")
 	if err != nil {
 		t.Fatal(err)
 	}

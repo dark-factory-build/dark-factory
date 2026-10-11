@@ -47,8 +47,16 @@ const body = fixture
 const css = readFileSync(new URL(import.meta.resolve("@dark-factory/ui/styles.css")), "utf8");
 const html = `<!doctype html><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>${fixture ? "Console fixture" : "Floor preview"}</title><style>${css}</style><body style="margin:0;background:#08131d">${body}`;
 if (out === undefined) {
-  createServer((_, response) => response.writeHead(200, { "content-type": "text/html; charset=utf-8" }).end(html)).listen(5196, "127.0.0.1");
-  console.log("http://127.0.0.1:5196/?fixture");
+  const server = createServer((_, response) => response.writeHead(200, { "content-type": "text/html; charset=utf-8" }).end(html));
+  const stop = () => server.close();
+  server.once("error", (error) => { console.error(error); process.exitCode = 1; });
+  process.once("SIGINT", stop);
+  process.once("SIGTERM", stop);
+  server.listen(5196, "127.0.0.1", () => {
+    console.log("http://127.0.0.1:5196/?fixture");
+    const lifetime = setTimeout(stop, 30 * 60 * 1000);
+    lifetime.unref();
+  });
 } else {
   writeFileSync(out, html);
   console.log(out);

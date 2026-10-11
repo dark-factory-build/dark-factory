@@ -21,6 +21,7 @@ import (
 	"time"
 
 	"github.com/dark-factory-build/dark-factory/internal/kernel"
+	"github.com/dark-factory-build/dark-factory/internal/runner"
 	"golang.org/x/sys/unix"
 )
 
@@ -1851,7 +1852,7 @@ func descriptorCount() (int, bool) {
 
 func installTempDir(t *testing.T) string {
 	t.Helper()
-	parent, err := os.MkdirTemp("/private/tmp", "dark-factory-install-")
+	parent, err := os.MkdirTemp(runner.ShortTempDir(), "dark-factory-install-")
 	if err != nil {
 		t.Fatal(err)
 	}

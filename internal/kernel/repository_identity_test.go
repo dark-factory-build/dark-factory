@@ -67,6 +67,43 @@ func TestRepositorySourceIdentityPinsOnceAcrossRestart(t *testing.T) {
 	}
 }
 
+func TestRepinRepositoryOriginKeepsGitHubPublication(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	store, _ := newTestStore(t)
+	defer store.Close()
+	project, err := store.CreateProject(ctx, NewProject{ID: projectID(t, 207), Name: "source", Root: "/source"}, mustTime(t, 2))
+	if err != nil {
+		t.Fatal(err)
+	}
+	id := RepositoryID(project.ID)
+	pinned := RepositorySourceIdentity{RootDevice: 1, RootInode: 2, GitDevice: 1, GitInode: 3, OriginDigest: [32]byte{1}, PublicationRepository: "team/repo"}
+	if err := store.BindRepositorySource(ctx, id, pinned); err != nil {
+		t.Fatal(err)
+	}
+	next := pinned
+	next.OriginDigest = [32]byte{2}
+	stale := pinned
+	stale.OriginDigest = [32]byte{3}
+	if err := store.RepinRepositoryOrigin(ctx, id, stale, next); err == nil {
+		t.Fatal("stale origin re-pinned")
+	}
+	if err := store.BindRepositoryGitHubID(ctx, id, 9); err != nil {
+		t.Fatal(err)
+	}
+	renamed := next
+	renamed.PublicationRepository = "team/other"
+	if err := store.RepinRepositoryOrigin(ctx, id, pinned, renamed); err == nil {
+		t.Fatal("GitHub-pinned publication renamed")
+	}
+	if err := store.RepinRepositoryOrigin(ctx, id, pinned, next); err != nil {
+		t.Fatal(err)
+	}
+	if got, _, err := store.RepositorySourceIdentity(ctx, id); err != nil || got != next {
+		t.Fatalf("re-pinned = %+v %v", got, err)
+	}
+}
+
 func TestNewProjectSourceStaysUnverifiedUntilHostProof(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()

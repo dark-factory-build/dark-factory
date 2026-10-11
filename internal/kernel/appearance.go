@@ -28,7 +28,7 @@ func encodeAgentAppearance(value AgentAppearance) string {
 	return fmt.Sprintf("%d/%d/%d/%d/%d/%d/%d/%d/%d", value.Skin, value.Hair, value.HairColour, value.Face, value.Outfit, value.ClothesColour, value.Shoes, value.Tool, value.Headwear)
 }
 
-func decodeAgentAppearance(value string) (AgentAppearance, error) {
+func DecodeAgentAppearance(value string) (AgentAppearance, error) {
 	if value == "" {
 		return AgentAppearance{Automatic: true}, nil
 	}

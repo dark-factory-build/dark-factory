@@ -359,7 +359,7 @@ func scanAgentSummary(scanner rowScanner) (AgentSummary, error) {
 	role, roleErr := parseAgentRole(rawRole)
 	provider, providerErr := ParseProvider(rawProvider)
 	revision, revisionErr := NewRevision(rawRevision)
-	appearance, appearanceErr := decodeAgentAppearance(rawAppearance)
+	appearance, appearanceErr := DecodeAgentAppearance(rawAppearance)
 	if idErr != nil || projectErr != nil || roleErr != nil || providerErr != nil || revisionErr != nil || accountErr != nil || idleErr != nil ||
 		appearanceErr != nil || toolBudget < 1 || toolUsed < 0 || toolUsed > toolBudget ||
 		byteLen(name) < 1 || byteLen(name) > 128 || paused != 0 && paused != 1 || archived != 0 && archived != 1 ||

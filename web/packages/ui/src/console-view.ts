@@ -10,6 +10,33 @@ export type AgentStatus = "working" | "ready" | "needs-you" | "paused";
 export const isSpecialist = (agent: AgentItem | undefined) => agent?.role === "worker" && agent.idle_policy === "standing_instruction";
 export const STANDING_TITLE = "Standing instruction";
 
+const WAITING: Record<string, string> = { budget: "review budget used", queued: "queued behind other work", capacity: "waiting for a free background slot" };
+const clock = (ms: number) => new Date(ms).toLocaleString([], { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" });
+
+/**
+ * What a specialist is and is doing, from what the factory serves: its specialty
+ * is the remit's first line up to a colon ("Operations: make delivery reliable"),
+ * and a running review is its remit at work. Nothing here is inferred beyond that.
+ */
+export function specialistStatus(agent: AgentItem, state: StateView) {
+  const remit = agent.idle_instruction.split("\n", 1)[0]!.trim();
+  const colon = remit.indexOf(":");
+  const specialty = colon > 0 && colon <= 32 ? remit.slice(0, colon).trim() : "";
+  const aim = (specialty === "" ? remit : remit.slice(colon + 1)).trim();
+  const info = agent.specialist, status = agentStatus(agent, state);
+  const failed = info !== undefined && state.tasks.get(info.last_review_task_id)?.status === "failed";
+  const [stage, text] = agent.archived ? ["stopped", "stopped"]
+    : status === "working" ? ["working", aim === "" ? "reviewing" : `reviewing: ${aim.length <= 48 ? aim : `${aim.slice(0, 47).trimEnd()}…`}`]
+    : status === "needs-you" ? ["needs-you", "needs you"]
+    : agent.paused ? ["paused", "paused: no new reviews"]
+    : failed ? ["failed", "failed: its latest review failed; open it under Recent work"]
+    : info?.waiting && WAITING[info.waiting] ? ["waiting", `waiting: ${WAITING[info.waiting]}`]
+    : ["ready", "ready: between reviews"];
+  const wake = (agent.idle_wake_on ?? "") === "" ? "" : ` or sooner on ${(agent.idle_wake_on ?? "").replace(",", " and ")}`;
+  const next = agent.archived || agent.paused || info === undefined || info.next_review_at_ms === 0 ? "" : `Next review ${clock(info.next_review_at_ms)}${info.next_reason === "" ? "" : ` (${info.next_reason})`}${wake}`;
+  return { title: specialty === "" ? "Specialist" : `${specialty} specialist`, remit: remit.slice(0, 120), stage, text, next };
+}
+
 /** Tasks an agent is on right now (durable assignment, live statuses). */
 export function agentCurrentTask(agent: AgentItem, state: StateView): TaskItem | undefined {
 	if (agent.archived) return undefined;
@@ -276,7 +303,7 @@ export function projectFloor(state: StateView | undefined, prepared: ReturnType<
     const location: SceneWorker["location"] = task === undefined ? last === undefined ? "resting" : "last-observed" : live !== undefined ? "working" : "unobserved";
     const at = location === "working" ? live : location === "last-observed" ? last : undefined;
     return {
-      id: agent.id, name: agent.name, role: agent.role, provider: agent.provider, ...(isSpecialist(agent) ? { specialist: true } : {}),
+      id: agent.id, name: agent.name, role: agent.role, provider: agent.provider, ...(isSpecialist(agent) ? { specialist: specialistStatus(agent, state) } : {}),
       ...(agent.appearance === undefined ? {} : { appearance: agent.appearance }),
       activity: activity === "busy" && (telemetry?.quiet_seconds ?? 0) >= QUIET_SECONDS ? "waiting" : activity, paused: agent.paused, location,
       ...(telemetry === undefined ? {} : { telemetry }),

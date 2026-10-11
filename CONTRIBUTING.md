@@ -8,7 +8,7 @@ deterministic providers.
 ## Local development
 
 ```sh
-./scripts/new-worktree.sh <slug>
+git fetch origin main && git worktree add -b <slug> .worktrees/<slug> origin/main
 cd .worktrees/<slug>
 go build ./...
 ```
@@ -35,7 +35,9 @@ fixtures, process and lifecycle checks, and release/package fixtures. Fixed
 component boundaries; the release mode also runs the routine source check.
 CI selects a mode from the complete merge-queue diff;
 uncertain or mixed changes use the full gate. Dark Factory is macOS-only,
-so the gate is macOS-only. A focused `-race`
+so the macOS gate is the product gate; a Linux leg runs the same scripts but
+tests only packages `scripts/linux-coverage` marks proved, and that file must
+classify every Darwin-only test. A focused `-race`
 check covers concurrency or ownership changes without imposing broad stress
 on unrelated changes.
 

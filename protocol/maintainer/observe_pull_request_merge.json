@@ -1,0 +1,34 @@
+{
+  "name": "observe_pull_request_merge",
+  "request": {
+    "required": ["repository", "pull_number", "head_sha", "base"],
+    "properties": {
+      "repository": "string",
+      "pull_number": "integer",
+      "head_sha": "string",
+      "base": "string"
+    }
+  },
+  "response": {
+    "required": [
+      "pull_number",
+      "head_sha",
+      "base",
+      "pull_state",
+      "state",
+      "queue_state",
+      "merge_commit_sha",
+      "merge_group"
+    ],
+    "properties": {
+      "pull_number": "integer",
+      "head_sha": "string",
+      "base": "string",
+      "pull_state": "string",
+      "state": "string",
+      "queue_state": "string|null",
+      "merge_commit_sha": "string|null",
+      "merge_group": "object|null"
+    }
+  }
+}

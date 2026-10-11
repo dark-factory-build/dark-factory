@@ -307,3 +307,26 @@ func TestAttemptMCPOutcomeListUsesAttemptAuthority(t *testing.T) {
 		}
 	}
 }
+
+// A specialist's review run reaches the operator's read views through its
+// attempt; their write forms stay unparsed there.
+func TestAttemptOperatorReadsParseOnlyReadViews(t *testing.T) {
+	id := "0123456789abcdef0123456789abcdef"
+	for _, argv := range [][]string{
+		{"attempt", "status"}, {"attempt", "human", "list"}, {"attempt", "intake", "list"},
+		{"attempt", "intake", "config", "--project", id}, {"attempt", "task", "read", "--task", id, "--revision", "1"},
+	} {
+		if command, help, ok := parse(argv); !ok || help || !command.attemptRead {
+			t.Fatalf("read view refused: %v", argv)
+		}
+	}
+	for _, argv := range [][]string{
+		{"attempt", "status", "--project", id}, {"attempt", "human", "reply", "--operation-id", id, "--request", id, "--revision", "1", "--reply", "x"},
+		{"attempt", "intake", "pause", "--source", id, "--revision", "1"}, {"attempt", "task", "add", "--project", id, "--agent", "any", "--title", "x"},
+		{"attempt", "task", "send-back", "--task", id, "--note", "x"}, {"attempt", "dispatch", "off"},
+	} {
+		if _, _, ok := parse(argv); ok {
+			t.Fatalf("write or unbounded form accepted: %v", argv)
+		}
+	}
+}

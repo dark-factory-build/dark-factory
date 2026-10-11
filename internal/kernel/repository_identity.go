@@ -97,6 +97,25 @@ func bindRepositorySource(ctx context.Context, connection *sql.Conn, id Reposito
 	return err
 }
 
+// RepinRepositoryOrigin replaces only the pinned origin of a verified checkout,
+// after the operator's explicit fetch check succeeded through it. A pinned
+// GitHub repository keeps its publication name.
+func (store *Store) RepinRepositoryOrigin(ctx context.Context, id RepositoryID, previous, next RepositorySourceIdentity) error {
+	if id.zero() || !next.valid() {
+		return ErrInvalidValue
+	}
+	tx, err := store.beginValidatedWrite(ctx)
+	if err != nil {
+		return err
+	}
+	defer tx.Close()
+	result, err := tx.connection.ExecContext(ctx, `UPDATE repository_source_identities SET origin_digest = ?, publication_repository = ? WHERE repository_id = ? AND root_dev = ? AND root_inode = ? AND git_dev = ? AND git_inode = ? AND origin_digest = ? AND publication_repository = ? AND (github_repository_id IS NULL OR publication_repository = ?)`, next.OriginDigest[:], next.PublicationRepository, id.Bytes(), previous.RootDevice, previous.RootInode, previous.GitDevice, previous.GitInode, previous.OriginDigest[:], previous.PublicationRepository, next.PublicationRepository)
+	if err := requireOneRow(result, err); err != nil {
+		return tx.Rollback(err)
+	}
+	return tx.Commit(ctx)
+}
+
 func validateRepositoryBindings(ctx context.Context, connection *sql.Conn) error {
 	var broken bool
 	err := connection.QueryRowContext(ctx, `SELECT

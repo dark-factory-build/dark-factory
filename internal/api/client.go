@@ -39,6 +39,7 @@ const (
 	RestartRetryWindow   = 30 * time.Second
 	restartRetryInterval = 100 * time.Millisecond
 	attemptTokenFileEnv  = "DARK_FACTORY_ATTEMPT_TOKEN_FILE"
+	attemptResumedEnv    = "DARK_FACTORY_OVERSEER_SESSION_RESUMED"
 )
 
 type credential [credentialBytes]byte
@@ -51,6 +52,7 @@ type client struct {
 	tokenPath  string
 	token      tokenRecord
 	domain     byte
+	prefix     string
 }
 
 type OperatorClient struct{ client client }
@@ -82,6 +84,18 @@ func NewAttemptClientFromEnvironment(socketPath string) (*AttemptClient, error) 
 		return nil, err
 	}
 	return &AttemptClient{client: base}, nil
+}
+
+// NewAttemptReaderFromEnvironment sends the operator client's read views
+// (snapshot, human requests, task read, intake list) with the attempt
+// credential. factoryd answers them for a specialist's review run only.
+func NewAttemptReaderFromEnvironment(socketPath string) (*OperatorClient, error) {
+	attempt, err := NewAttemptClientFromEnvironment(socketPath)
+	if err != nil {
+		return nil, err
+	}
+	attempt.client.prefix = "attempt_"
+	return &OperatorClient{client: attempt.client}, nil
 }
 
 func newClient(socketPath, tokenPath string, domain byte) (client, error) {
@@ -184,6 +198,15 @@ func (client *OperatorClient) RemoteStatus(ctx context.Context) (RemoteStatus, e
 	return result, nil
 }
 
+// Health is factoryd's readiness, with project's oversight when project is set.
+func (client *OperatorClient) Health(ctx context.Context, project string) (HealthStatus, error) {
+	var result HealthStatus
+	err := client.client.call(ctx, "health", struct {
+		ProjectID string `json:"project_id,omitempty"`
+	}{project}, &result)
+	return result, err
+}
+
 func (client *OperatorClient) Snapshot(ctx context.Context) (DashboardSnapshot, error) {
 	var result DashboardSnapshot
 	if err := client.client.call(ctx, "snapshot", struct{}{}, &result); err != nil {
@@ -225,6 +248,13 @@ func (client *OperatorClient) HumanReply(ctx context.Context, input OverseerHuma
 		return MutationResult{}, ErrInvalidInput
 	}
 	return client.client.mutate(ctx, "human_reply", input)
+}
+
+func (client *OperatorClient) HumanCancel(ctx context.Context, input HumanCancelInput) (MutationResult, error) {
+	if !validHumanCancelInput(input) {
+		return MutationResult{}, ErrInvalidInput
+	}
+	return client.client.mutate(ctx, "human_cancel", input)
 }
 
 func (client *OperatorClient) StopRun(ctx context.Context, input OverseerRunStopInput) (MutationResult, error) {
@@ -346,7 +376,7 @@ func (client *OperatorClient) SetAgentIdlePolicy(ctx context.Context, input Agen
 
 // SendBackTask returns a finished task to its queue with a note.
 func (client *OperatorClient) SendBackTask(ctx context.Context, input SendBackInput) (MutationResult, error) {
-	if !validID(input.TaskID) || !validText(input.Note, 1, 8192) {
+	if !validID(input.TaskID) || input.Head != "" && !validCommitHex(input.Head) || !validText(input.Note, 1, 8192) {
 		return MutationResult{}, ErrInvalidInput
 	}
 	return client.client.mutate(ctx, "send_back_task", input)
@@ -381,10 +411,20 @@ func (client *OperatorClient) ReadTask(ctx context.Context, input TaskReadInput)
 }
 
 func (client *OperatorClient) EnqueueTask(ctx context.Context, input EnqueueTaskInput) (MutationResult, error) {
-	if !validID(input.ID) || !validID(input.ProjectID) || !validOptionalID(input.RepositoryID) || !validOptionalID(input.AssignedAgentID) || !validID(input.IncarnationID) || !validText(input.Title, 1, 1024) || !validText(input.Body, 0, 131072) || input.Priority < -1_000_000 || input.Priority > 1_000_000 {
+	if !validEnqueueTaskInput(input) {
 		return MutationResult{}, ErrInvalidInput
 	}
 	return client.client.mutate(ctx, "enqueue_task", input)
+}
+
+// validEnqueueTaskInput bounds content pins like the console (eight per task).
+func validEnqueueTaskInput(input EnqueueTaskInput) bool {
+	for _, pin := range input.Content {
+		if !validID(pin.ContentID) || pin.ContentRevision == 0 || pin.ContentRevision > uint64(^uint64(0)>>1) {
+			return false
+		}
+	}
+	return validID(input.ID) && validID(input.ProjectID) && validOptionalID(input.RepositoryID) && validOptionalID(input.AssignedAgentID) && validID(input.IncarnationID) && validText(input.Title, 1, 1024) && validText(input.Body, 0, 131072) && input.Priority >= -1_000_000 && input.Priority <= 1_000_000 && len(input.Content) <= 8
 }
 
 func (client *OperatorClient) UpdateTask(ctx context.Context, input OverseerTaskUpdateInput) (MutationResult, error) {
@@ -421,7 +461,7 @@ func (client *OperatorClient) BackupVerify(ctx context.Context, path string) (ke
 }
 
 func (client *OperatorClient) UpdateAgent(ctx context.Context, input OverseerAgentUpdateInput) (MutationResult, error) {
-	if !validID(input.AgentID) || input.ExpectedRevision == 0 {
+	if !validID(input.AgentID) || input.ExpectedRevision == 0 || input.Appearance != nil && !validText(*input.Appearance, 0, 64) {
 		return MutationResult{}, ErrInvalidInput
 	}
 	return client.client.mutate(ctx, "operator_update_agent", input)
@@ -460,7 +500,10 @@ func (client *AttemptClient) Succeed(ctx context.Context, result string) (Mutati
 
 func (client *AttemptClient) Task(ctx context.Context) (AttemptTask, error) {
 	var result AttemptTask
-	if err := client.client.call(ctx, "task", struct{}{}, &result); err != nil {
+	params := struct {
+		Resumed bool `json:"resumed,omitempty"`
+	}{Resumed: os.Getenv(attemptResumedEnv) == "1"}
+	if err := client.client.call(ctx, "task", params, &result); err != nil {
 		return AttemptTask{}, err
 	}
 	if !validAttemptTask(result) {
@@ -565,7 +608,7 @@ func (client *AttemptClient) TerminalObserve(ctx context.Context, input Terminal
 // SendBack returns a finished task of the attempt's project to its queue
 // with a note; only an orchestrator's attempt is allowed to.
 func (client *AttemptClient) SendBack(ctx context.Context, input SendBackInput) (MutationResult, error) {
-	if !validID(input.TaskID) || !validText(input.Note, 1, 8192) {
+	if !validID(input.TaskID) || input.Head != "" && !validCommitHex(input.Head) || !validText(input.Note, 1, 8192) {
 		return MutationResult{}, ErrInvalidInput
 	}
 	return client.client.mutate(ctx, "send_back", input)
@@ -679,6 +722,7 @@ func (client client) call(ctx context.Context, method string, params, output any
 	if err != nil || !current.same(client.token) {
 		return ErrInvalidClient
 	}
+	method = client.prefix + method
 	encoded, err := json.Marshal(requestEnvelope{Method: method, Params: params})
 	if err != nil || len(encoded)+requestPrelude > maxFrameBytes {
 		return ErrInvalidInput
@@ -851,7 +895,7 @@ func unavailable(err error) bool {
 
 func readMethod(method string) bool {
 	switch method {
-	case "task", "source", "peer_status", "overseer_snapshot", "terminal_observe", "attempt_content_list", "attempt_content_read", "attempt_content_body", "attempt_content_attachments", "attempt_outcome_read", "attempt_outcome_list":
+	case "task", "source", "peer_status", "overseer_snapshot", "terminal_observe", "attempt_snapshot", "attempt_human_requests", "attempt_task_read", "attempt_intake", "attempt_content_list", "attempt_content_read", "attempt_content_body", "attempt_content_attachments", "attempt_outcome_read", "attempt_outcome_list":
 		return true
 	}
 	return false
@@ -1194,6 +1238,14 @@ func validOverseerTaskUpdateInput(input OverseerTaskUpdateInput) bool {
 func validOverseerSnapshot(snapshot OverseerSnapshot) bool {
 	if !validID(snapshot.ProjectID) || snapshot.Head == 0 || snapshot.Agents == nil || snapshot.Tasks == nil || snapshot.Runs == nil || snapshot.Questions == nil || snapshot.PeerQuestions == nil || snapshot.History == nil || snapshot.Handoffs == nil || len(snapshot.Agents) > kernel.OverseerSnapshotPageSize || len(snapshot.Tasks) > kernel.OverseerSnapshotPageSize || len(snapshot.Runs) > kernel.OverseerSnapshotPageSize || len(snapshot.Questions) > kernel.OverseerSnapshotPageSize || len(snapshot.PeerQuestions) > 1 || len(snapshot.History) > kernel.OverseerSnapshotPageSize || len(snapshot.Handoffs) > kernel.OverseerSnapshotPageSize {
 		return false
+	}
+	if snapshot.Factoryd.Calls != nil && len(snapshot.Factoryd.Calls) > 32 {
+		return false
+	}
+	for _, call := range snapshot.Factoryd.Calls {
+		if !validText(call.Name, 1, 256) || call.Count == 0 || call.LatencyP95MS < 0 {
+			return false
+		}
 	}
 	for _, handoff := range snapshot.Handoffs {
 		if !validRetainedChangeHandoff(handoff) {

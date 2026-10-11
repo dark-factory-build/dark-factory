@@ -7,7 +7,12 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"time"
 )
+
+// Terminal tasks are retained for 30 days, and peer questions must remain
+// addressable for the same period so a retry can receive the conversation.
+const peerQuestionTerminalWindowMillis = int64(30 * 24 * time.Hour / time.Millisecond)
 
 const peerQuestionColumns = `id, project_id, source_task_id, target_task_id, idempotency_key, question_text,
     answer_idempotency_key, answer_text, recipient_delivery_id, recipient_delivery_state,
@@ -140,7 +145,7 @@ func (store *Store) CreatePeerQuestionForAttempt(ctx context.Context, digest Att
 	// Collaboration is a project-local, task-linked durable record. Provider
 	// selection only decides whether a best-effort terminal notice is possible;
 	// it must not decide who can read the durable inbox.
-	if target.ProjectID != run.ProjectID || target.ID == run.TaskID || (target.Status != TaskQueued && target.Status != TaskRunning) {
+	if target.ProjectID != run.ProjectID || target.ID == run.TaskID || !peerQuestionTargetStatus(target, at.Int64()) {
 		return PeerQuestion{}, tx.Rollback(ErrUnauthorized)
 	}
 	var raw [IDBytes]byte
@@ -171,6 +176,13 @@ func (store *Store) CreatePeerQuestionForAttempt(ctx context.Context, digest Att
 		return PeerQuestion{}, err
 	}
 	return result, nil
+}
+
+func peerQuestionTargetStatus(task Task, at int64) bool {
+	if task.Status == TaskQueued || task.Status == TaskRunning || task.Status == TaskBlocked {
+		return true
+	}
+	return (task.Status == TaskSucceeded || task.Status == TaskFailed || task.Status == TaskCancelled) && task.CompletedAt != nil && task.CompletedAt.Int64() >= at-peerQuestionTerminalWindowMillis
 }
 
 // AnswerPeerQuestionForAttempt lets only the live worker which owns the
@@ -320,10 +332,12 @@ func (store *Store) PeerTargetsForAttempt(ctx context.Context, digest AttemptDig
 	if expectedHead.Int64() != 0 && expectedHead != state.Head {
 		return nil, nil, ErrRevisionConflict
 	}
+	now := time.Now().UnixMilli()
 	rows, err := read.connection.QueryContext(ctx, `SELECT t.id, t.assigned_agent_id, a.name, t.title, t.status, t.revision
 		FROM tasks AS t JOIN agents AS a ON a.id=t.assigned_agent_id AND a.project_id=t.project_id
-		WHERE t.project_id=? AND t.id<>? AND a.role IN ('worker','orchestrator') AND t.status IN ('queued','running')
-		ORDER BY t.priority DESC,t.created_at_ms,t.id LIMIT 5 OFFSET ?`, run.ProjectID.Bytes(), run.TaskID.Bytes(), int64(offset))
+		WHERE t.project_id=? AND t.id<>? AND a.role IN ('worker','orchestrator')
+		  AND (t.status IN ('queued','running','blocked') OR (t.status IN ('succeeded','failed','cancelled') AND t.completed_at_ms >= ?))
+		ORDER BY t.priority DESC,t.created_at_ms,t.id LIMIT 5 OFFSET ?`, run.ProjectID.Bytes(), run.TaskID.Bytes(), now-peerQuestionTerminalWindowMillis, int64(offset))
 	if err != nil {
 		return nil, nil, err
 	}

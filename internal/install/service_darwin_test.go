@@ -19,6 +19,8 @@ import (
 	"time"
 
 	"golang.org/x/sys/unix"
+
+	"github.com/dark-factory-build/dark-factory/internal/runner"
 )
 
 type recordedLaunchctl struct {
@@ -770,7 +772,7 @@ func snapshotServiceTrees(t *testing.T, roots ...string) map[string]serviceTreeE
 
 func serviceTestRoot(t *testing.T) string {
 	t.Helper()
-	root, err := os.MkdirTemp("/private/tmp", "dark-factory-service-")
+	root, err := os.MkdirTemp(runner.ShortTempDir(), "dark-factory-service-")
 	if err != nil {
 		t.Fatal(err)
 	}

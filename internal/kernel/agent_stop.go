@@ -171,7 +171,7 @@ func (store *Store) stopRunTx(ctx context.Context, tx *writeTx, request TaskInte
 	}
 	// enterFinalizing commits this shared transaction, including the receipt and
 	// optional successor above, so a stop is durable before it returns.
-	if _, err := store.enterFinalizingWithCommit(ctx, tx, run, request.ExpectedRunRevision, proposal, at, nil, nil, commit); err != nil {
+	if _, err := store.enterFinalizingWithCommit(ctx, tx, run, request.ExpectedRunRevision, proposal, at, nil, commit); err != nil {
 		return TaskIntervention{}, err
 	}
 	return receipt, nil

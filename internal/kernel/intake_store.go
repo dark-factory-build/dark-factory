@@ -557,8 +557,10 @@ func (store *Store) ImportIntakeAcceptanceWithPriority(ctx context.Context, id I
 	return store.importIntakeAcceptance(ctx, id, at, priority, source)
 }
 
+// importIntakeAcceptance validates only before it writes: every intake poll
+// replays each imported issue, and a whole-store walk each overran the poll.
 func (store *Store) importIntakeAcceptance(ctx context.Context, id IntakeAcceptanceID, at UnixMillis, priority int64, expectedSource ...IntakeSource) (Task, error) {
-	tx, err := store.beginValidatedWrite(ctx)
+	tx, err := store.beginUncheckedWrite(ctx)
 	if err != nil {
 		return Task{}, err
 	}
@@ -585,6 +587,9 @@ func (store *Store) importIntakeAcceptance(ctx context.Context, id IntakeAccepta
 		}
 		if !found || task.Status != TaskFailed && task.Status != TaskCancelled || !latestFound || latest.ID != accepted.ID {
 			return Task{}, tx.Rollback(ErrConflict)
+		}
+		if err := validateDurableControls(ctx, tx.connection); err != nil {
+			return Task{}, tx.Rollback(err)
 		}
 		if _, err := tx.connection.ExecContext(ctx, `UPDATE intake_acceptances SET withdrawn_at_ms = NULL WHERE id = ?`, id.Bytes()); err != nil {
 			return Task{}, tx.Rollback(err)
@@ -628,16 +633,16 @@ func (store *Store) importIntakeAcceptance(ctx context.Context, id IntakeAccepta
 			}
 			return Task{}, tx.Rollback(err)
 		}
-		if err := tx.Rollback(nil); err != nil {
-			return Task{}, err
-		}
-		return existing, nil
+		return existing, tx.Rollback(nil)
 	}
 	latest, found, err := latestIntakeAcceptance(ctx, tx.connection, accepted.Snapshot, accepted.ProjectID, accepted.RepositoryID)
-	if err != nil || !found || latest.ID != accepted.ID {
-		if err == nil {
-			err = ErrConflict
-		}
+	if err == nil && (!found || latest.ID != accepted.ID) {
+		err = ErrConflict
+	}
+	if err == nil {
+		err = validateDurableControls(ctx, tx.connection)
+	}
+	if err != nil {
 		return Task{}, tx.Rollback(err)
 	}
 	value, err := insertTaskOnConnection(ctx, tx.connection, spec, at)

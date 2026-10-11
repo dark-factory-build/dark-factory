@@ -2,6 +2,10 @@ package daemon
 
 import (
 	"context"
+	"fmt"
+	"maps"
+	"slices"
+	"strings"
 	"time"
 
 	"github.com/dark-factory-build/dark-factory/internal/api"
@@ -36,6 +40,12 @@ func (daemon *Daemon) pollIntake(ctx context.Context) {
 	if err != nil {
 		return
 	}
+	daemon.healthMu.Lock()
+	maps.DeleteFunc(daemon.heldHealth, func(key string, _ kernel.OverseerHealth) bool { // a removed source's failure
+		id, ok := strings.CutPrefix(key, "intake:")
+		return ok && !slices.ContainsFunc(sources, func(source kernel.IntakeSource) bool { return source.ID.String() == id })
+	})
+	daemon.healthMu.Unlock()
 	for _, source := range sources {
 		if ctx.Err() != nil {
 			return
@@ -85,6 +95,7 @@ func (daemon *Daemon) pollIntakeSource(ctx context.Context, source kernel.Intake
 		}
 		poll.due = now.Add(min(interval, time.Minute))
 		poll.sync.State, poll.sync.Error = "error", result.State
+		daemon.holdHealth("intake:"+source.ID.String(), source.ProjectID, fmt.Sprintf("intake source %s sync failing: factoryctl intake list sync.state=error sync.error=%s sync.last_success_at=%d", source.ID, result.State, poll.sync.LastSuccessAt))
 		return
 	}
 	for _, candidate := range result.Candidates {
@@ -108,6 +119,7 @@ func (daemon *Daemon) pollIntakeSource(ctx context.Context, source kernel.Intake
 		poll.due = now.Add(5 * time.Second)
 	}
 	poll.sync.LastSuccessAt, poll.sync.State, poll.sync.Error = now.Unix(), result.State, ""
+	daemon.holdHealth("intake:"+source.ID.String(), source.ProjectID, "")
 }
 
 // intakeSync reports the poller's status by source; callers hold intakeMu.

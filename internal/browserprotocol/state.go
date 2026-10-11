@@ -210,13 +210,13 @@ type AgentItem struct {
 
 // SpecialistItem is when a specialist reviews next and why it waits.
 type SpecialistItem struct {
-	NextReviewAtMillis Decimal `json:"next_review_at_ms"` // 0: none scheduled
-	NextReason         string  `json:"next_reason"`       // initial, scheduled, events or ""
-	Waiting            string  `json:"waiting"`           // "", budget, paused, stopped, queued or capacity
-	QuietReviews       uint8   `json:"quiet_reviews"`
-	OpenProposals      uint16  `json:"open_proposals"`
-	OpenProposalLimit  uint16  `json:"open_proposal_limit"`
-	LastReviewTaskID   string  `json:"last_review_task_id"`
+	NextReviewAtMillis uint64 `json:"next_review_at_ms"` // 0: none scheduled
+	NextReason         string `json:"next_reason"`       // initial, scheduled, events or ""
+	Waiting            string `json:"waiting"`           // "", budget, paused, stopped, queued or capacity
+	QuietReviews       uint8  `json:"quiet_reviews"`
+	OpenProposals      uint16 `json:"open_proposals"`
+	OpenProposalLimit  uint16 `json:"open_proposal_limit"`
+	LastReviewTaskID   string `json:"last_review_task_id"`
 }
 
 // AccountItem is one linked provider login. Only which login it is and where

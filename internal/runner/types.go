@@ -3,8 +3,21 @@ package runner
 import (
 	"errors"
 	"os"
+	"path/filepath"
+	"strings"
 	"time"
 )
+
+// ShortTempDir is where a test fixture whose Unix sockets must fit the
+// sun_path budget makes its directory: the shared /private/tmp, unless TMPDIR
+// is already beneath it, as a worker sandbox's (which denies the rest) is.
+// It is resolved, since fixtures walk their paths without following links.
+func ShortTempDir() string {
+	if temp, err := filepath.EvalSymlinks(os.TempDir()); err == nil && strings.HasPrefix(temp, "/private/tmp/") {
+		return temp
+	}
+	return "/private/tmp"
+}
 
 const (
 	maxConfigBytes = 256 << 10

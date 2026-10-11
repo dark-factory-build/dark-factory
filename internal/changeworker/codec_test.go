@@ -71,6 +71,7 @@ func TestOrchestratorConfigCarriesNoChange(t *testing.T) {
 	config := configFixture(t)
 	config.Role, config.FinalName = kernel.RoleOrchestrator, ""
 	config.PreviousWorkingDirectory = "/private/previous-runtime-home/home"
+	config.ProjectGitDirs = []string{"/private/site/.git"}
 	encoded, err := EncodeConfig(config)
 	if err != nil {
 		t.Fatal(err)
@@ -271,6 +272,10 @@ func TestConfigRejectsRawAuthorityAndInputCorruption(t *testing.T) {
 		func(v *Config) { v.GitCommonDir = "/private/other/.git" },
 		func(v *Config) { v.GitCommonDir = v.RepositoryRoot },
 		func(v *Config) { v.GitCommonDir = "" },
+		func(v *Config) { v.ProjectGitDirs = []string{"/private/site/.git"} }, // a worker reads no other repository
+		func(v *Config) {
+			v.Role, v.FinalName, v.ProjectGitDirs = kernel.RoleOrchestrator, "", []string{"/private/site"}
+		},
 		func(v *Config) { v.AttemptSocket = "/" + strings.Repeat("s", install.MaxSocketPathBytes) },
 		func(v *Config) { v.ProviderTask = []byte{0xff} },
 		func(v *Config) { v.ProviderTask = []byte{'x', 0} },

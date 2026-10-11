@@ -29,6 +29,8 @@ type ProductionPullRequest struct {
 	State          string           `json:"state"`
 	Merge          string           `json:"merge,omitempty"`
 	MergeQueue     string           `json:"merge_queue,omitempty"`
+	Mergeable      *bool            `json:"mergeable,omitempty"`
+	MergeState     string           `json:"merge_state,omitempty"`
 	MergedAt       string           `json:"merged_at,omitempty"`
 	Review         ProductionReview `json:"review"`
 	NextAction     string           `json:"next_action,omitempty"`
@@ -87,4 +89,9 @@ type ProductionDelivery struct {
 	Phase        string   `json:"phase,omitempty"`
 	Reason       string   `json:"reason,omitempty"`
 	Overflow     int      `json:"overflow,omitempty"`
+	// RecordDelivery sets a release's Cause (phase and reason up to its
+	// first colon) and FailedAt (when it first failed so), carried over
+	// consecutive releases that fail the same way.
+	Cause    string `json:"cause,omitempty"`
+	FailedAt int64  `json:"failed_at,omitempty"`
 }

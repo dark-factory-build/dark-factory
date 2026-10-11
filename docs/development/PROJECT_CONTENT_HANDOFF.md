@@ -28,6 +28,9 @@ an exact retry; omitting it generates one. Revision/deprecation retries resolve
 to the immutable revision originally inserted, even after later edits. A changed
 payload at the same expected revision conflicts. Deprecation preserves history.
 Task references pin both the content revision and the task work revision.
+`factoryctl task add ... --content CONTENT_ID:1[,CONTENT_ID:REVISION...]` pins
+up to eight in the enqueue transaction, as the console does, so no worker can
+admit the task before them; one refused pin refuses the whole task.
 
 Use `attempt content ...` for live worker or overseer credentials. Workers can
 contribute definitions and observations; only operators and live overseers can

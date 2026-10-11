@@ -14,11 +14,12 @@ import (
 	"github.com/dark-factory-build/dark-factory/internal/api"
 	"github.com/dark-factory-build/dark-factory/internal/change"
 	"github.com/dark-factory-build/dark-factory/internal/kernel"
+	"github.com/dark-factory-build/dark-factory/internal/runner"
 )
 
 func contentRepositoryFixture(t *testing.T) string {
 	t.Helper()
-	root, err := os.MkdirTemp("/private/tmp", "dark-factory-content-")
+	root, err := os.MkdirTemp(runner.ShortTempDir(), "dark-factory-content-")
 	if err != nil {
 		t.Fatal(err)
 	}

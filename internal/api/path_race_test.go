@@ -305,7 +305,7 @@ func TestPrivateParentSymlinkSwapAcrossCallsFailsBeforeConnect(t *testing.T) {
 	if err := os.Symlink(filepath.Base(moved), outer); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := client.Health(context.Background()); !errors.Is(err, ErrInvalidClient) {
+	if _, err := client.Health(context.Background(), ""); !errors.Is(err, ErrInvalidClient) {
 		t.Fatalf("parent symlink swap error = %v", err)
 	}
 	if err := listener.SetDeadline(time.Now().Add(50 * time.Millisecond)); err != nil {

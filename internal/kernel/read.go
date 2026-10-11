@@ -120,7 +120,7 @@ func scanAgent(scanner rowScanner) (Agent, bool, error) {
 		return Agent{}, false, fmt.Errorf("%w: invalid agent idle rule", ErrCorruptState)
 	}
 	accountID, accountErr := optionalAccountID(rawAccountID)
-	appearance, appearanceErr := decodeAgentAppearance(rawAppearance)
+	appearance, appearanceErr := DecodeAgentAppearance(rawAppearance)
 	if accountErr != nil || appearanceErr != nil || provider == ProviderShell && !accountID.zero() {
 		return Agent{}, false, fmt.Errorf("%w: invalid agent account", ErrCorruptState)
 	}

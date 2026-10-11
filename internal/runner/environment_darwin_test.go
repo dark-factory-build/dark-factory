@@ -3,8 +3,10 @@
 package runner
 
 import (
+	"crypto/rand"
 	"debug/macho"
 	"encoding/binary"
+	"encoding/hex"
 	"io"
 	"os"
 	"path/filepath"
@@ -18,9 +20,10 @@ var providerEnvironmentNames = []string{
 	"DARK_FACTORY_SOCKET",
 	"DARK_FACTORY_ATTEMPT_TOKEN_FILE",
 	"DARK_FACTORY_TASK_ATTACHMENTS", "DARK_FACTORY_FACTORYCTL",
+	"DARK_FACTORY_OVERSEER_SESSION_RESUMED",
 	"DF_CI_CACHE_ROOT", "DF_CI_GO_MODULE_CACHE",
 	"CODEX_HOME",
-	"GOENV", "GOTOOLCHAIN", "GOCACHE", "GOPATH", "GOMODCACHE", "GOPROXY", "GOSUMDB", "CARGO_HOME", "RUSTUP_HOME", "COREPACK_HOME", "npm_config_cache", "XDG_CACHE_HOME",
+	"GOENV", "GOTOOLCHAIN", "GOCACHE", "GOPATH", "GOMODCACHE", "GOPROXY", "GOSUMDB", "CARGO_HOME", "RUSTUP_HOME", "COREPACK_HOME", "COREPACK_ENABLE_NETWORK", "pnpm_config_store_dir", "npm_config_cache", "XDG_CACHE_HOME",
 	"CLAUDE_CONFIG_DIR",
 	"HOME",
 	"TMPDIR",
@@ -294,5 +297,62 @@ func rewriteMachOArchitecture(t testing.TB, path string) {
 	order.PutUint32(header[4:8], want)
 	if _, err := file.WriteAt(header[4:8], 4); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestShortTemporaryDirectories(t *testing.T) {
+	if got := privateTemp("/factory/runtimes/cd518a4e3b32892d683def53f31d8340"); got != "/private/tmp/df-cd518a4e" {
+		t.Fatalf("privateTemp = %q", got)
+	}
+	for _, runtime := range []string{"/tests/001", "/factory/runtimes/CD518A4E3B32892D683DEF53F31D8340"} {
+		if got := privateTemp(runtime); got != "" {
+			t.Fatalf("privateTemp(%q) = %q, want none", runtime, got)
+		}
+	}
+	short, err := os.MkdirTemp(ShortTempDir(), "short-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(short) })
+	// A TMPDIR beneath the shared directory, as a sandboxed run's is, is used
+	// resolved; any other (macOS's deep per-user one) keeps the shared one.
+	for temp, want := range map[string]string{"/tmp": "/private/tmp", "/private/var/folders": "/private/tmp", short: short, "/tmp" + short[len("/private/tmp"):]: short} {
+		t.Setenv("TMPDIR", temp)
+		if got := ShortTempDir(); got != want {
+			t.Fatalf("TMPDIR=%q: ShortTempDir = %q, want %q", temp, got, want)
+		}
+	}
+}
+
+// Two run ids sharing their first 8 characters name one short TMPDIR: only
+// the run that claimed it may sweep or remove it.
+func TestPrivateTempBelongsToItsClaimant(t *testing.T) {
+	if probe, err := os.MkdirTemp("/private/tmp", "df-probe-"); err != nil {
+		t.Skipf("shared temporary directory unavailable here: %v", err)
+	} else {
+		_ = os.Remove(probe)
+	}
+	raw := make([]byte, 16)
+	if _, err := rand.Read(raw); err != nil {
+		t.Fatal(err)
+	}
+	first := "/runtimes/" + hex.EncodeToString(raw)
+	second := first[:len(first)-24] + strings.Repeat("0", 24)
+	if first == second {
+		second = first[:len(first)-24] + strings.Repeat("1", 24)
+	}
+	short := ClaimPrivateTemp(first)
+	if short == "" {
+		t.Fatal("first run could not claim its short TMPDIR")
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(short) })
+	if got := ClaimPrivateTemp(second); got != "" {
+		t.Fatalf("second run claimed %q", got)
+	}
+	if got := ownedPrivateTemp(second); got != "" {
+		t.Fatalf("second run owns %q", got)
+	}
+	if got := ownedPrivateTemp(first); got != short {
+		t.Fatalf("first run owns %q, want %q", got, short)
 	}
 }

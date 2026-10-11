@@ -54,6 +54,7 @@ type OutcomeDocument struct {
 	RemainingWork      string        `json:"remaining_work,omitempty"`
 	Judgment           string        `json:"judgment,omitempty"`
 	MilestoneOf        string        `json:"milestone_of,omitempty"`
+	DriverAgentID      string        `json:"driver_agent_id,omitempty"`
 }
 
 type OutcomeRevision struct {
@@ -111,6 +112,9 @@ func validateOutcomeDocument(document OutcomeDocument) error {
 	}
 	if document.Kind != "mission" && document.MilestoneOf != "" {
 		return fmt.Errorf("%w: milestone must be a mission", ErrInvalidValue)
+	}
+	if document.DriverAgentID != "" && (document.Kind != "mission" || !validID(document.DriverAgentID)) {
+		return fmt.Errorf("%w: invalid mission driver", ErrInvalidValue)
 	}
 	encoded, err := json.Marshal(document)
 	if err != nil || len(encoded) > OutcomeDocumentLimit {

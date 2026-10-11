@@ -307,8 +307,20 @@ func TestReleaseComparesWithTheLiveWorkerNotTheRunningBuild(t *testing.T) {
 		t.Fatal(err)
 	}
 	awaitRelease(t, fixture.daemon, failed, func(value kernel.ProductionDelivery) bool { return value.Phase == "trial" })
+	// The failed trial restored the backup taken in the stage phase.
+	project, staged, _, err := fixture.store.Delivery(ctx, "release:"+failed)
+	staged.Phase = "stage"
+	if err == nil {
+		err = fixture.daemon.writeRelease(ctx, project, &staged)
+	}
+	if err != nil {
+		t.Fatal(err)
+	}
 	if err := fixture.daemon.FinishRelease(ctx, failed, "failed", "trial"); err != nil {
 		t.Fatal(err)
+	}
+	if delivery, err := fixture.daemon.Release(ctx, failed, false); err != nil || delivery.State != "failed" || delivery.Phase != "trial" {
+		t.Fatalf("failed trial = %+v, %v", delivery, err)
 	}
 	for range 3 {
 		<-events

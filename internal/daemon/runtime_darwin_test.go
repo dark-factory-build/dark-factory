@@ -31,7 +31,7 @@ const (
 
 func runtimeTempDir(t testing.TB) string {
 	t.Helper()
-	path, err := os.MkdirTemp("/private/tmp", "dark-factory-runtime-")
+	path, err := os.MkdirTemp(runner.ShortTempDir(), "dark-factory-runtime-")
 	if err != nil {
 		t.Fatal(err)
 	}

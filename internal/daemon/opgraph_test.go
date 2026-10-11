@@ -273,6 +273,22 @@ func TestOutboundRequestsLightTheirExternalGate(t *testing.T) {
 	t.Fatalf("no inferred gate for api.github.com in %+v", live.Graph.Nodes)
 }
 
+func TestFactorydHealthExcludesBrowserFrames(t *testing.T) {
+	daemon := &Daemon{now: time.Now}
+	now := time.Now().UnixMilli()
+	daemon.runtimeStore().Record(opgraph.Observation{Source: "factoryd", Environment: "local", Kind: "internal", Start: now, End: now + 1, Count: 1, LatencyP95: 220,
+		Attributes: map[string]string{"service.name": "factoryd", "code.function.name": schedulerFunction}})
+	daemon.runtimeStore().Record(opgraph.Observation{Source: "factoryd", Environment: "local", Kind: "server", Start: now, End: now + 1, Count: 1, LatencyP95: 180,
+		Attributes: map[string]string{"service.name": "factoryd", "rpc.method": "snapshot", "network.transport": "unix"}})
+	daemon.runtimeStore().Record(opgraph.Observation{Source: "factoryd", Environment: "local", Kind: "server", Start: now, End: now + 1, Count: 1, LatencyP95: 999,
+		Attributes: map[string]string{"service.name": "factoryd", "rpc.method": "browser-frame"}})
+
+	health := daemon.factorydHealth()
+	if len(health.Calls) != 2 || health.Calls[0].Name != schedulerFunction || health.Calls[1].Name != "snapshot" {
+		t.Fatalf("factoryd calls = %+v, want scheduler and unix API only", health.Calls)
+	}
+}
+
 // This repository's own tree, served as two repositories with live runtime
 // evidence a sender controls, always encodes: the daemon never builds a frame
 // its own encoder refuses.

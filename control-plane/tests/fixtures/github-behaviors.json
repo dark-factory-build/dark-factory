@@ -1,0 +1,46 @@
+[
+  {
+    "name": "commit-created-with-explicit-author",
+    "source": "production log 2026-10-09 (#1288/#1455 publication incident)",
+    "response": {
+      "sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "verification": {
+        "verified": false,
+        "reason": "unsigned",
+        "signature": null,
+        "payload": null
+      }
+    }
+  },
+  {
+    "name": "enqueue-refused-before-codeowners-approval",
+    "source": "production log 2026-10-09T23:42Z (#1531; approval arrived 2026-10-10T07:22Z)",
+    "response": {
+      "data": { "enqueuePullRequest": null },
+      "errors": [{
+        "type": "UNPROCESSABLE",
+        "path": ["enqueuePullRequest"],
+        "message": "Pull request is not mergeable because required approval is missing"
+      }]
+    }
+  },
+  {
+    "name": "enqueue-refused-for-head-conflict",
+    "source": "production log 2026-10-09 (enqueue conflict response)",
+    "response": {
+      "data": { "enqueuePullRequest": null },
+      "errors": [{
+        "type": "UNPROCESSABLE",
+        "path": ["enqueuePullRequest"],
+        "message": "Pull request head no longer matches the expected head"
+      }]
+    }
+  },
+  {
+    "name": "worker-503-on-github-quota-exhaustion",
+    "source": "production log 2026-10-09 (GitHub quota exhaustion)",
+    "github_status": 503,
+    "worker_status": 503,
+    "worker_response": { "error": "github_unavailable" }
+  }
+]

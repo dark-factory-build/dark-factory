@@ -183,12 +183,20 @@ func (backend *browserBackend) CancelHumanRequestRun(ctx context.Context, princi
 }
 
 func (daemon *Daemon) cancelHumanRequestRun(ctx context.Context, clientID kernel.BrowserClientID, requestID kernel.HumanRequestID, expectedRequest, expectedRun kernel.Revision, at kernel.UnixMillis) (kernel.Run, kernel.HumanRequest, error) {
+	return daemon.fenceHumanRequestCancel(func() (kernel.Run, kernel.HumanRequest, error) {
+		return daemon.store.CancelHumanRequestRun(ctx, clientID, requestID, expectedRequest, expectedRun, at)
+	})
+}
+
+// fenceHumanRequestCancel runs one authorized kernel cancellation, browser or
+// operator, then fences the live owner exactly once.
+func (daemon *Daemon) fenceHumanRequestCancel(cancel func() (kernel.Run, kernel.HumanRequest, error)) (kernel.Run, kernel.HumanRequest, error) {
 	if daemon == nil || daemon.store == nil {
 		return kernel.Run{}, kernel.HumanRequest{}, kernel.ErrUnauthorized
 	}
 	daemon.operationMu.Lock()
 	defer daemon.operationMu.Unlock()
-	run, request, err := daemon.store.CancelHumanRequestRun(ctx, clientID, requestID, expectedRequest, expectedRun, at)
+	run, request, err := cancel()
 	if err != nil {
 		return kernel.Run{}, kernel.HumanRequest{}, err
 	}
