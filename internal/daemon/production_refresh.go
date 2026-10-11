@@ -167,9 +167,13 @@ func changedProductionHeads(known []kernel.ProductionPullRequest, observed []ker
 }
 
 func newProductionConflicts(known, observed []kernel.ProductionPullRequest) []kernel.ProductionPullRequest {
+	prior := make(map[uint64]kernel.ProductionPullRequest, len(known))
+	for _, pull := range known {
+		prior[pull.Number] = pull
+	}
 	conflicts := make([]kernel.ProductionPullRequest, 0)
 	for _, pull := range observed {
-		if pull.State == "open" && productionPullConflict(pull) {
+		if pull.State == "open" && productionPullConflict(pull) && !productionPullConflict(prior[pull.Number]) {
 			conflicts = append(conflicts, pull)
 		}
 	}

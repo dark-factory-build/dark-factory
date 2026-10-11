@@ -77,8 +77,8 @@ func TestRefreshRepairsAnUnqueuedPullThatBecomesConflicting(t *testing.T) {
 	if len(got) != 1 || got[0].Number != 7 || !strings.Contains(productionConflictDetail(got[0]), "Rebase this Change") {
 		t.Fatalf("conflict transition = %+v", got)
 	}
-	if got = newProductionConflicts(observed, observed); len(got) != 1 {
-		t.Fatalf("existing conflict was not retained: %+v", got)
+	if got = newProductionConflicts(observed, observed); len(got) != 0 {
+		t.Fatalf("repeated conflict retriggered: %+v", got)
 	}
 }
 
