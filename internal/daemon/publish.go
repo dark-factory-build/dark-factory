@@ -10,7 +10,6 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"slices"
 	"strconv"
 	"strings"
 
@@ -244,22 +243,22 @@ func (daemon *Daemon) publishPull(ctx context.Context, c kernel.PublishableChang
 			mergeParent = diffFrom
 		}
 	}
-	changes, err := publicationEntries(ctx, gitDir, diffFrom, c.Head)
-	if err != nil {
-		return err
-	}
+	var workerPaths map[string]bool
 	if c.Pull != 0 && tip != "" && tip != c.Head {
 		listing, err := gitOutput(ctx, gitDir, "log", "--format=", "--name-only", "-z", "--no-merges", "--no-renames", from+".."+c.Head)
 		if err != nil {
 			return err
 		}
-		workerPaths := make(map[string]bool)
+		workerPaths = make(map[string]bool)
 		for _, path := range strings.Split(string(listing), "\x00") {
 			if path = strings.Trim(path, "\n"); path != "" {
 				workerPaths[path] = true
 			}
 		}
-		changes = slices.DeleteFunc(changes, func(change map[string]any) bool { return !workerPaths[change["path"].(string)] })
+	}
+	changes, err := publicationEntries(ctx, gitDir, diffFrom, c.Head, workerPaths)
+	if err != nil {
+		return err
 	}
 	// A branch an earlier attempt already brought to this tree only lacks
 	// its pull request; a correction changing nothing is an answer in its body.
@@ -396,7 +395,7 @@ func publicationFrom(ctx context.Context, gitDir, base, head, main string) (stri
 // publicationEntries is publish_commit's changes list from one commit to
 // another: a deleted path carries only its path, any other its blob and mode.
 // A symlink, a submodule or a file over the App's bound cannot be published.
-func publicationEntries(ctx context.Context, gitDir, from, head string) ([]map[string]any, error) {
+func publicationEntries(ctx context.Context, gitDir, from, head string, allowed map[string]bool) ([]map[string]any, error) {
 	listing, err := gitOutput(ctx, gitDir, "diff", "--no-renames", "--name-status", "-z", from, head)
 	if err != nil {
 		return nil, err
@@ -415,6 +414,9 @@ func publicationEntries(ctx context.Context, gitDir, from, head string) ([]map[s
 	var entries []map[string]any
 	for i := 0; i+1 < len(fields); i += 2 {
 		status, path := fields[i], fields[i+1]
+		if allowed != nil && !allowed[path] {
+			continue
+		}
 		if status == "D" {
 			entries = append(entries, map[string]any{"path": path})
 			continue
