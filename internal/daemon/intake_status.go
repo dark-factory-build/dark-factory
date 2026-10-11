@@ -85,6 +85,7 @@ func (daemon *Daemon) pollIntakeSource(ctx context.Context, source kernel.Intake
 		return
 	}
 	interval := time.Duration(source.PollSeconds) * time.Second
+	started := time.Now()
 	result := daemon.previewIntake(ctx, source, poll.page, true, poll.cursor)
 	poll.sync.LastAttemptAt = now.Unix()
 	poll.sync.ImportedTasks = uint16(len(result.ImportedTasks))
@@ -95,7 +96,7 @@ func (daemon *Daemon) pollIntakeSource(ctx context.Context, source kernel.Intake
 		}
 		poll.due = now.Add(min(interval, time.Minute))
 		poll.sync.State, poll.sync.Error = "error", result.State
-		daemon.holdHealth("intake:"+source.ID.String(), source.ProjectID, fmt.Sprintf("intake source %s sync failing: factoryctl intake list sync.state=error sync.error=%s sync.last_success_at=%d", source.ID, result.State, poll.sync.LastSuccessAt))
+		daemon.holdHealth("intake:"+source.ID.String(), source.ProjectID, fmt.Sprintf("intake source %s sync failing: factoryctl intake list sync.state=error sync.error=%s sync.last_success_at=%d timing: %s", source.ID, result.State, poll.sync.LastSuccessAt, result.Timing))
 		return
 	}
 	for _, candidate := range result.Candidates {
@@ -119,7 +120,11 @@ func (daemon *Daemon) pollIntakeSource(ctx context.Context, source kernel.Intake
 		poll.due = now.Add(5 * time.Second)
 	}
 	poll.sync.LastSuccessAt, poll.sync.State, poll.sync.Error = now.Unix(), result.State, ""
-	daemon.holdHealth("intake:"+source.ID.String(), source.ProjectID, "")
+	slow := ""
+	if time.Since(started) > intakePassDeadline/2 { // warn before the deadline fails the pass
+		slow = fmt.Sprintf("intake source %s pass took over half its %s deadline; timing: %s", source.ID, intakePassDeadline, result.Timing)
+	}
+	daemon.holdHealth("intake:"+source.ID.String(), source.ProjectID, slow)
 }
 
 // intakeSync reports the poller's status by source; callers hold intakeMu.

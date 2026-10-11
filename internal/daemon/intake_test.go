@@ -72,7 +72,7 @@ func TestIntakeAcceptedContentSurvivesLargeBacklogAndMetadataChanges(t *testing.
 				t.Fatalf("unaccepted backlog: %+v", got)
 			}
 			discover = true
-			if got := fixture.daemon.Intake(ctx, api.IntakeInput{Action: "preview", SourceID: id.String(), Page: 1}); got.State != "ok" || got.SourceID != id.String() || len(got.Candidates) != 1 {
+			if got := fixture.daemon.Intake(ctx, api.IntakeInput{Action: "preview", SourceID: id.String(), Page: 1}); got.State != "ok" || got.SourceID != id.String() || len(got.Candidates) != 1 || !strings.HasPrefix(got.Timing, "withdrawals=") || !strings.Contains(got.Timing, " issues=") {
 				t.Fatalf("preview: %+v", got)
 			}
 			discover = false
