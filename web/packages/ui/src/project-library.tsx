@@ -28,7 +28,7 @@ type LibraryProps = {
   board?: boolean; entity?: string; repository?: string; initialID?: string; initialRevision?: number; onSource?: (entity: string) => void; onRecord?: (kind: string, id: string, project: string) => void | Promise<void>;
 };
 
-/** An intentional entry loads metadata; an unused Settings panel stays lazy. */
+/** The Library contains curated documents; outcome reading and acceptance live in Work → By mission. */
 export function ProjectLibrary({ state, call, onUseInTask, board = false, entity = "", repository = "", initialID = "", initialRevision, onSource, onRecord, open = false, initialProjectId = "" }: LibraryProps & { open?: boolean; initialProjectId?: string }) {
   const [expanded, setExpanded] = useState(false);
   const [view, setView] = useState("documents");
