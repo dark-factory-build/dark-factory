@@ -13,7 +13,7 @@ import (
 func TestContinuationTaskFitsCodexProviderLimit(t *testing.T) {
 	t.Parallel()
 	context := ContinuationContext{ResolutionDetail: strings.Repeat("答", 4096)}
-	if ContinuationTaskFits(ProviderCodex, strings.Repeat("x", 128<<10), []ContinuationContext{context}) {
+	if ContinuationTaskFits(ProviderCodex, strings.Repeat("x", 8192), []ContinuationContext{context}) {
 		t.Fatal("exact-limit Codex task was admitted without room for causal context")
 	}
 	if !ContinuationTaskCanUseFetchFallback(ProviderCodex, []ContinuationContext{context}) {

@@ -63,6 +63,9 @@ func ContinuationTaskFits(provider Provider, task string, contexts []Continuatio
 		return true
 	}
 	limit := 131072
+	if provider == ProviderCodex {
+		limit = 8192
+	}
 	if len(task) >= limit {
 		return false
 	}
