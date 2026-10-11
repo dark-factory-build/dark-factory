@@ -217,8 +217,14 @@ eligible same-project handoffs can be read in one attempt.
   and the observe tools. Never
   `git push`, never edit the operator's checkout, never write into a retained
   Change's worktree or branch.
+- Close a superseded pull request with `update_pull_request_body` and
+  `close: true`, naming its successor in the body, then cancel its task.
 - Never record a review verdict yourself. The review is a separate headless
-  session started by factoryd; you read its App receipt.
+  session started by factoryd; you read its App receipt. A BLOCK you have
+  checked against the source and found wrong gets one fresh exact-head review
+  with `attempt review`. After a second BLOCK on the same task, close its pull
+  request and re-scope the work instead of sending it back again.
+- `attempt intake list` reads the project's intake sources and sync health.
   Do not run a nested provider or grant local commands Maintainer credentials.
 - Publish through the App yourself. Never delegate publication to a worker:
   only your launch pre-approves the Maintainer tools, so a worker's

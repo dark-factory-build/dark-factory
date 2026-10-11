@@ -2056,3 +2056,43 @@ func TestDaemonOperatorReadsAdmitOnlySpecialistCarrier(t *testing.T) {
 		return err
 	})
 }
+
+// An overseer lists intake and requests one fresh exact-head review in its
+// own project (#1725), and reaches no other operator view or intake write.
+func TestDaemonOverseerListsIntakeAndRequestsAReview(t *testing.T) {
+	fixture := newDispatchFixture(t)
+	ctx := context.Background()
+	active := prepareActiveAttempt(t, fixture, 221)
+	reader, err := api.NewAttemptReaderFromEnvironment(fixture.socket)
+	if err != nil {
+		t.Fatal(err)
+	}
+	review := func(project string) func() error {
+		return func() error {
+			_, err := reader.Intake(ctx, api.IntakeInput{Action: "review_pr", ProjectID: project, ReviewRequest: &api.ReviewRequest{Repository: "team/repo", PullNumber: 7, Head: strings.Repeat("a", 40), Base: strings.Repeat("b", 40), BaseRef: "main", Provider: "codex"}})
+			return err
+		}
+	}
+	for name, invoke := range map[string]func() error{
+		"intake list": func() error { _, err := reader.Intake(ctx, api.IntakeInput{Action: "list"}); return err },
+		"review":      review(active.run.ProjectID.String()),
+	} {
+		done := fixture.serve(t)
+		if err := invoke(); err != nil {
+			t.Fatalf("overseer %s = %v", name, err)
+		}
+		waitDispatch(t, done)
+	}
+	for name, invoke := range map[string]func() error{
+		"status":                 func() error { _, err := reader.Snapshot(ctx); return err },
+		"review another project": review(testID(222)),
+		"intake write":           func() error { _, err := reader.Intake(ctx, api.IntakeInput{Action: "linear_disconnect"}); return err },
+	} {
+		done := fixture.serve(t)
+		var remote *api.RemoteError
+		if err := invoke(); !errors.As(err, &remote) || remote.Code() != api.RemoteForbidden {
+			t.Fatalf("overseer %s = %v, want forbidden", name, err)
+		}
+		waitDispatch(t, done)
+	}
+}

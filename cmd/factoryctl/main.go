@@ -73,7 +73,8 @@ const (
   factoryctl attempt peer ask --task ID --idempotency-key HEX32 --question TEXT
   factoryctl attempt peer answer --question ID --revision REVISION --idempotency-key HEX32 --answer TEXT
   factoryctl attempt terminal observe --project ID --task ID --run ID [--cursor N] [--max-bytes N]
-  factoryctl attempt status | human list | intake list|config [--project ID] | task read --task ID --revision REVISION [--offset N] (a specialist's review run only)
+  factoryctl attempt status | human list | intake list|config [--project ID] | task read --task ID --revision REVISION [--offset N] (a specialist's review run only; an overseer may list intake)
+  factoryctl attempt review --project ID --repository OWNER/REPO --pull N --head SHA --base SHA --base-ref REF (an overseer only: one fresh exact-head review)
   factoryctl terminal observe --project ID --task ID --run ID [--cursor N] [--max-bytes N] [--text]
   factoryctl attempt send-back --task ID [--head SHA] --note TEXT
   factoryctl overseer status [--task ID] [--offset N --head HEAD] [--text-offset RUNES --head HEAD]
@@ -769,6 +770,11 @@ func parse(args []string) (attemptCommand, bool, bool) {
 		return command, help, ok && (command.kind == commandStatus && command.project == "" || command.kind == commandHumanList || command.kind == commandTaskRead || command.kind == commandIntake && command.intake.Action == "list")
 	}
 	switch args[1] {
+	case "review":
+		// The attempt credential reaches the operator's intake call; the
+		// daemon admits only an overseer, in its own project.
+		input, ok := parseReview(args[2:], io.Discard)
+		return attemptCommand{kind: commandIntake, intake: input, attemptRead: true}, false, ok && api.ValidIntakeInput(input)
 	case "task":
 		if len(args) == 2 {
 			return attemptCommand{kind: commandAttemptTask}, false, true
