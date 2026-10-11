@@ -135,7 +135,7 @@ func TestContentAttachmentsEnforceAttemptRoleAndPinWork(t *testing.T) {
 	if err := orchestratorStore.AttachContentForOrchestrator(ctx, overseer.CredentialDigest, target.ID, localContent.ID, localContent.Revision, mustTime(t, 46)); err != nil {
 		t.Fatal(err)
 	}
-	references, err := orchestratorStore.TaskContentReferences(ctx, overseer.ProjectID, target.ID, target.WorkRevision)
+	references, err := orchestratorStore.TaskContentReferences(ctx, overseer.ProjectID, target.ID, target.WorkRevision, false)
 	if err != nil || len(references) != 1 || references[0].TaskWorkRevision != target.WorkRevision || references[0].ContentRevision != localContent.Revision {
 		t.Fatalf("attachment references = %+v, %v", references, err)
 	}

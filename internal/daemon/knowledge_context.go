@@ -142,7 +142,7 @@ func (daemon *Daemon) knowledgeContext(ctx context.Context, run kernel.Run, task
 	if err != nil {
 		return nil, err
 	}
-	references, err := daemon.store.TaskContentReferences(ctx, run.ProjectID, run.TaskID, run.AdmittedTaskWorkRevision)
+	references, err := daemon.store.TaskContentReferences(ctx, run.ProjectID, run.TaskID, run.AdmittedTaskWorkRevision, true)
 	if err != nil {
 		return nil, err
 	}
@@ -336,9 +336,9 @@ func renderKnowledgeContext(kind kernel.Provider, project kernel.ProjectID, item
 
 const knowledgeAttachmentBytes = 4096
 
-func renderKnowledgeAttachments(kind kernel.Provider, refs []kernel.TaskContentReference) ([]byte, []kernel.ContentAccess, error) {
+func renderKnowledgeAttachments(kind kernel.Provider, refs []kernel.TaskContentReference) ([]byte, []kernel.ContentAccess) {
 	if len(refs) == 0 {
-		return nil, nil, nil
+		return nil, nil
 	}
 	prefix := ""
 	if kind == kernel.ProviderShell {
@@ -347,18 +347,18 @@ func renderKnowledgeAttachments(kind kernel.Provider, refs []kernel.TaskContentR
 	text := "\n" + prefix + "Explicit document revisions (references, not assumed applicable):"
 	accesses := make([]kernel.ContentAccess, 0, len(refs))
 	for _, ref := range refs {
-		text += " " + fmt.Sprintf("%s@%d", ref.ContentID, ref.ContentRevision.Int64())
+		id := " " + fmt.Sprintf("%s@%d", ref.ContentID, ref.ContentRevision.Int64())
+		if len(text)+len(id)+1 > knowledgeAttachmentBytes {
+			break // refs are newest first; the oldest are dropped
+		}
+		text += id
 		accesses = append(accesses, kernel.ContentAccess{ContentID: ref.ContentID, ContentRevision: ref.ContentRevision, Kind: "supplied"})
 	}
-	text += "\n"
-	if len(text) > knowledgeAttachmentBytes {
-		return nil, nil, kernel.ErrInvalidValue
-	}
-	return []byte(text), accesses, nil
+	return []byte(text + "\n"), accesses
 }
 
 func (daemon *Daemon) knowledgeAttachmentManifest(ctx context.Context, run kernel.Run) ([]byte, []kernel.ContentAccess, error) {
-	refs, err := daemon.store.TaskContentReferences(ctx, run.ProjectID, run.TaskID, run.AdmittedTaskWorkRevision)
+	refs, err := daemon.store.TaskContentReferences(ctx, run.ProjectID, run.TaskID, run.AdmittedTaskWorkRevision, true)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -390,7 +390,8 @@ func (daemon *Daemon) knowledgeAttachmentManifest(ctx context.Context, run kerne
 			}
 		}
 	}
-	return renderKnowledgeAttachments(run.Provider, refs)
+	text, accesses := renderKnowledgeAttachments(run.Provider, refs)
+	return text, accesses, nil
 }
 
 // prepareKnowledgeTask is shared by actual provider launch and its private

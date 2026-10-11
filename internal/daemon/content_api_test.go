@@ -256,7 +256,7 @@ func TestAttemptContentRejectsCrossProjectAndWrongTaskWithoutMutation(t *testing
 	if err != nil {
 		t.Fatal(err)
 	}
-	refsBefore, err := fixture.store.TaskContentReferences(ctx, ownerID, active.run.TaskID, active.run.AdmittedTaskWorkRevision)
+	refsBefore, err := fixture.store.TaskContentReferences(ctx, ownerID, active.run.TaskID, active.run.AdmittedTaskWorkRevision, false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -276,7 +276,7 @@ func TestAttemptContentRejectsCrossProjectAndWrongTaskWithoutMutation(t *testing
 	if err != nil {
 		t.Fatal(err)
 	}
-	activeTaskForeignRefsBefore, err := fixture.store.TaskContentReferences(ctx, foreignID, active.run.TaskID, active.run.AdmittedTaskWorkRevision)
+	activeTaskForeignRefsBefore, err := fixture.store.TaskContentReferences(ctx, foreignID, active.run.TaskID, active.run.AdmittedTaskWorkRevision, false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -284,7 +284,7 @@ func TestAttemptContentRejectsCrossProjectAndWrongTaskWithoutMutation(t *testing
 	if err != nil {
 		t.Fatal(err)
 	}
-	wrongTaskRefsBefore, err := fixture.store.TaskContentReferences(ctx, ownerID, wrongTaskID, active.run.AdmittedTaskWorkRevision)
+	wrongTaskRefsBefore, err := fixture.store.TaskContentReferences(ctx, ownerID, wrongTaskID, active.run.AdmittedTaskWorkRevision, false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -318,7 +318,7 @@ func TestAttemptContentRejectsCrossProjectAndWrongTaskWithoutMutation(t *testing
 			waitDispatch(t, done)
 		})
 	}
-	refsAfter, err := fixture.store.TaskContentReferences(ctx, ownerID, active.run.TaskID, active.run.AdmittedTaskWorkRevision)
+	refsAfter, err := fixture.store.TaskContentReferences(ctx, ownerID, active.run.TaskID, active.run.AdmittedTaskWorkRevision, false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -333,11 +333,11 @@ func TestAttemptContentRejectsCrossProjectAndWrongTaskWithoutMutation(t *testing
 	if err != nil {
 		t.Fatal(err)
 	}
-	activeTaskForeignRefsAfter, err := fixture.store.TaskContentReferences(ctx, foreignID, active.run.TaskID, active.run.AdmittedTaskWorkRevision)
+	activeTaskForeignRefsAfter, err := fixture.store.TaskContentReferences(ctx, foreignID, active.run.TaskID, active.run.AdmittedTaskWorkRevision, false)
 	if err != nil {
 		t.Fatal(err)
 	}
-	wrongTaskRefsAfter, err := fixture.store.TaskContentReferences(ctx, ownerID, wrongTaskID, active.run.AdmittedTaskWorkRevision)
+	wrongTaskRefsAfter, err := fixture.store.TaskContentReferences(ctx, ownerID, wrongTaskID, active.run.AdmittedTaskWorkRevision, false)
 	if err != nil {
 		t.Fatal(err)
 	}

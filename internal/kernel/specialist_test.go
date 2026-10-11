@@ -703,3 +703,106 @@ func TestSpecialistWakeListsOtherSpecialists(t *testing.T) {
 		t.Fatal("no wake for the first specialist")
 	}
 }
+
+// A contribution, amendment or review naming a live task in the project is
+// attached to it; a proposal never is, and a full reference list or a
+// cancelled task keeps the record without the attachment.
+func TestSpecialistRecordNamingTaskAttachesToIt(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	store, run, _ := runningWorkerRun(t)
+	defer store.Close()
+	enqueue := func(seed byte) Task {
+		task, err := store.EnqueueTask(ctx, NewTask{ID: taskID(t, seed), ProjectID: run.ProjectID, IncarnationID: incarnationID(t, seed+1), Title: "target"}, mustTime(t, 40))
+		if err != nil {
+			t.Fatal(err)
+		}
+		return task
+	}
+	target, cancelled := enqueue(100), enqueue(102)
+	if _, err := store.UpdateTask(ctx, cancelled.ID, cancelled.Revision, TaskPatch{Cancel: true}, mustTime(t, 41)); err != nil {
+		t.Fatal(err)
+	}
+	refs := func(task TaskID, revision Revision) []TaskContentReference {
+		t.Helper()
+		refs, err := store.TaskContentReferences(ctx, run.ProjectID, task, revision, false)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return refs
+	}
+	create := func(seed byte, metadata KnowledgeMetadata) ContentRevision {
+		t.Helper()
+		created, err := store.CreateContentForAttempt(ctx, run.CredentialDigest, knowledgeSpec(t, run.ProjectID, seed, ContentObservation, metadata), mustTime(t, 50+int64(seed)))
+		if err != nil {
+			t.Fatalf("%+v: %v", metadata, err)
+		}
+		return created
+	}
+	create(90, KnowledgeMetadata{Status: "tentative", RecordType: "contribution", TaskID: target.ID.String()})
+	create(91, KnowledgeMetadata{Status: "tentative", RecordType: "amendment", TaskID: target.ID.String()})
+	create(92, KnowledgeMetadata{Status: "tentative", RecordType: "review", SourceRevision: strings.Repeat("ab", 20), TaskID: target.ID.String()})
+	create(93, KnowledgeMetadata{Status: "tentative", RecordType: "proposal", TaskID: target.ID.String()})
+	create(94, KnowledgeMetadata{Status: "tentative", RecordType: "contribution", TaskID: cancelled.ID.String()})
+	create(95, KnowledgeMetadata{Status: "tentative", RecordType: "contribution", TaskID: run.TaskID.String()})
+	if got := refs(target.ID, target.WorkRevision); len(got) != 3 || got[0].ContentID != contentID(t, 90) || got[1].ContentID != contentID(t, 91) || got[2].ContentID != contentID(t, 92) {
+		t.Fatalf("queued target references = %+v", got)
+	}
+	if got := refs(cancelled.ID, cancelled.WorkRevision); len(got) != 0 {
+		t.Fatalf("cancelled target references = %+v", got)
+	}
+	if got := refs(run.TaskID, run.AdmittedTaskWorkRevision); len(got) != 1 || got[0].ContentID != contentID(t, 95) {
+		t.Fatalf("running target references = %+v", got)
+	}
+	for seed := byte(160); seed < 160+contentPageSize-3; seed++ {
+		item, err := store.CreateContent(ctx, knowledgeSpec(t, run.ProjectID, seed, ContentObservation, KnowledgeMetadata{Status: "tentative"}), mustTime(t, 200))
+		if err == nil {
+			err = store.AttachContentToTask(ctx, target.ID, run.ProjectID, item.ID, item.Revision, mustTime(t, 201))
+		}
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	full := create(96, KnowledgeMetadata{Status: "tentative", RecordType: "contribution", TaskID: target.ID.String()})
+	if got := refs(target.ID, target.WorkRevision); len(got) != contentPageSize || full.ID != contentID(t, 96) {
+		t.Fatalf("full reference list = %d references, record %v", len(got), full.ID)
+	}
+}
+
+// Reattaching records at a later work revision must not displace distinct
+// earlier ones from what the next run carries (34 at revision 1, 32 of them
+// again at revision 2: all 34 carry, newest first).
+func TestCarriedTaskContentReferencesDeduplicateBeforeBound(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	store, run, _ := runningWorkerRun(t)
+	defer store.Close()
+	task, err := store.EnqueueTask(ctx, NewTask{ID: taskID(t, 100), ProjectID: run.ProjectID, IncarnationID: incarnationID(t, 101), Title: "target"}, mustTime(t, 40))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for seed := byte(120); seed < 154; seed++ {
+		item, err := store.CreateContent(ctx, knowledgeSpec(t, run.ProjectID, seed, ContentObservation, KnowledgeMetadata{Status: "tentative"}), mustTime(t, 41))
+		if err == nil {
+			err = store.AttachContentToTask(ctx, task.ID, run.ProjectID, item.ID, item.Revision, mustTime(t, 42))
+		}
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	conn, err := store.writer.Conn(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := conn.ExecContext(ctx, `INSERT INTO task_content_references(task_id, project_id, task_work_revision, content_id, content_revision, attached_at_ms) SELECT task_id, project_id, 2, content_id, content_revision, 43 FROM task_content_references WHERE task_id = ? ORDER BY content_id LIMIT 32`, task.ID.Bytes()); err != nil {
+		t.Fatal(err)
+	}
+	conn.Close()
+	carried, err := store.TaskContentReferences(ctx, run.ProjectID, task.ID, mustRevision(t, 2), true)
+	if err != nil || len(carried) != 34 || carried[0].TaskWorkRevision.Int64() != 2 || carried[31].TaskWorkRevision.Int64() != 2 || carried[32].TaskWorkRevision.Int64() != 1 {
+		t.Fatalf("carried = %d references, %v", len(carried), err)
+	}
+	if earlier, err := store.TaskContentReferences(ctx, run.ProjectID, task.ID, mustRevision(t, 1), true); err != nil || len(earlier) != 34 || earlier[0].TaskWorkRevision.Int64() != 1 {
+		t.Fatalf("revision 1 carried = %d references, %v", len(earlier), err)
+	}
+}
