@@ -726,7 +726,7 @@ func Build(request Request) (Launch, error) {
 			for i, arg := range browserArgs {
 				args[i] = tomlBasicString(arg)
 			}
-			config := "mcp_servers.factory_browser={command=" + tomlBasicString(browser) + ",args=[" + strings.Join(args, ",") + "],env_vars=[\"DARK_FACTORY_FACTORYCTL\",\"DARK_FACTORY_SOCKET\",\"DARK_FACTORY_ATTEMPT_TOKEN_FILE\"],enabled=true,required=true,default_tools_approval_mode=\"approve\"}"
+			config := "mcp_servers.factory_browser={command=" + tomlBasicString(browser) + ",args=[" + strings.Join(args, ",") + "],enabled=true,required=false,default_tools_approval_mode=\"approve\"}"
 			if len(config) > runner.MaxArgumentBytes {
 				return Launch{}, ErrInvalid
 			}
