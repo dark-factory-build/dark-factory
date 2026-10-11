@@ -262,6 +262,9 @@ func whyPullWaits(pr ProductionPullRequest, hasTask bool, task Task, op *review.
 	switch {
 	case pr.State != "open":
 		return "nobody: it is " + pr.State
+	case hasTask && task.Status == TaskCancelled:
+		// reconcilePull leaves it: an operator's cancel is final.
+		return "operator: its task was cancelled, so factoryd no longer advances it"
 	case hasTask && (task.Status == TaskQueued || task.Status == TaskRunning):
 		return "worker: its task is " + task.Status.String()
 	case op != nil && op.OwnerApproval:
