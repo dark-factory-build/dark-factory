@@ -57,8 +57,10 @@ func TestRealWorkersRespectCapacity(t *testing.T) {
 		}{agent, task, seed})
 	}
 
+	release := filepath.Join(fixture.root, "release")
 	for _, item := range ids {
-		body := fmt.Sprintf("set -eu\nwhile [ ! -e \"$HOME/release\" ]; do sleep 0.01; done\n%s --supervisor-attempt-succeed parallel\n", quoteShell(supervisorTestExecutable(t)))
+		ready := filepath.Join(fixture.root, fmt.Sprintf("ready-%d", item.seed))
+		body := fmt.Sprintf("set -eu\n: > %q\nwhile [ ! -e %q ]; do sleep 0.01; done\n%s --supervisor-attempt-succeed parallel\n", ready, release, quoteShell(supervisorTestExecutable(t)))
 		execSupervisorSQL(t, fixture.storePath, `UPDATE tasks SET body = ? WHERE id = ?`, body, item.task.Bytes())
 	}
 
@@ -87,6 +89,9 @@ func TestRealWorkersRespectCapacity(t *testing.T) {
 		return run, err
 	}
 	go func() { schedulerDone <- fixture.daemon.RunScheduler(ctx, fixture.spec) }()
+	for _, item := range ids[:2] {
+		waitForPath(t, filepath.Join(fixture.root, fmt.Sprintf("ready-%d", item.seed)))
+	}
 	select {
 	case <-blocked:
 	case <-time.After(15 * time.Second):
@@ -96,31 +101,15 @@ func TestRealWorkersRespectCapacity(t *testing.T) {
 	if err != nil || !found || third.Status != kernel.TaskQueued {
 		t.Fatalf("third task was not queued: %v, %v", third.Status, err)
 	}
+	if _, err := os.Stat(filepath.Join(fixture.root, "ready-30")); !os.IsNotExist(err) {
+		t.Fatalf("third worker started before capacity released: stat=%v", err)
+	}
 	recoverable, err := fixture.store.RecoverableRuns(context.Background())
 	if err != nil {
 		t.Fatal(err)
 	}
 	if len(recoverable) != 2 {
 		t.Fatalf("live recoverable runs = %d, want 2", len(recoverable))
-	}
-	deadline := time.Now().Add(15 * time.Second)
-	for time.Now().Before(deadline) {
-		active := 0
-		for _, run := range recoverable {
-			for _, resource := range fixture.resources(t, run.Run.ID) {
-				if resource.Kind == kernel.ResourceProviderProcess && resource.State == kernel.ResourceActive {
-					active++
-				}
-			}
-		}
-		if active == 2 {
-			break
-		}
-		time.Sleep(25 * time.Millisecond)
-		recoverable, err = fixture.store.RecoverableRuns(context.Background())
-		if err != nil {
-			t.Fatal(err)
-		}
 	}
 	providers := 0
 	for _, run := range recoverable {
@@ -142,13 +131,10 @@ func TestRealWorkersRespectCapacity(t *testing.T) {
 	if providers != 2 {
 		t.Fatalf("active provider identities = %d, want 2", providers)
 	}
-	for _, run := range recoverable {
-		release := filepath.Join(fixture.runtimeParentPath, run.Run.ID.String(), "home", "release")
-		if err := os.WriteFile(release, nil, 0o600); err != nil {
-			t.Fatal(err)
-		}
+	if err := os.WriteFile(release, nil, 0o600); err != nil {
+		t.Fatal(err)
 	}
-	deadline = time.Now().Add(30 * time.Second)
+	deadline := time.Now().Add(30 * time.Second)
 	for time.Now().Before(deadline) {
 		allDone := true
 		for _, item := range ids {
@@ -166,4 +152,16 @@ func TestRealWorkersRespectCapacity(t *testing.T) {
 		time.Sleep(25 * time.Millisecond)
 	}
 	t.Fatal("parallel workers did not settle")
+}
+
+func waitForPath(t *testing.T, path string) {
+	t.Helper()
+	deadline := time.Now().Add(15 * time.Second)
+	for time.Now().Before(deadline) {
+		if _, err := os.Stat(path); err == nil {
+			return
+		}
+		time.Sleep(25 * time.Millisecond)
+	}
+	t.Fatalf("path did not appear: %s", path)
 }
