@@ -458,7 +458,7 @@ func (store *Store) AcceptIntakeSnapshot(ctx context.Context, sourceID IntakeSou
 	if !validIntakeIssueSnapshot(snapshot) {
 		return IntakeAcceptance{}, ErrInvalidValue
 	}
-	tx, err := store.beginValidatedWrite(ctx)
+	tx, err := store.beginUncheckedWrite(ctx)
 	if err != nil {
 		return IntakeAcceptance{}, err
 	}
@@ -562,7 +562,7 @@ func (store *Store) ImportIntakeAcceptanceWithPriority(ctx context.Context, id I
 // intake poll replays each imported issue, and a whole-store walk per issue
 // overran the poll as the store grew (#1679, #1754).
 func (store *Store) importIntakeAcceptance(ctx context.Context, id IntakeAcceptanceID, at UnixMillis, priority int64, expectedSource ...IntakeSource) (Task, error) {
-	tx, err := store.beginValidatedWrite(ctx)
+	tx, err := store.beginUncheckedWrite(ctx)
 	if err != nil {
 		return Task{}, err
 	}
