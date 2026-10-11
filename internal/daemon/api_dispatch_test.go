@@ -522,9 +522,14 @@ func TestDaemonContendedOutcomeHonorsRequestCancellation(t *testing.T) {
 		}
 		done <- fixture.daemon.HandleConnection(ctx, connection)
 	}()
+	// An undeadlined call gets the client's 5s default, the same as the waits
+	// below, so a client that never hears the daemon would race them instead of
+	// failing. A longer explicit deadline leaves the daemon to end the call.
+	request, stop := context.WithTimeout(context.Background(), time.Minute)
+	defer stop()
 	result := make(chan error, 1)
 	go func() {
-		_, err := active.client.Succeed(context.Background(), "cancelled request must not commit")
+		_, err := active.client.Succeed(request, "cancelled request must not commit")
 		result <- err
 	}()
 	select {
