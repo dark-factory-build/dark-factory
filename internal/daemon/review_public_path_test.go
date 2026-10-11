@@ -62,7 +62,7 @@ func (b *publicReviewBackend) Enqueue(_ context.Context, operation review.Operat
 	b.enqueueSignal.Add(1)
 	b.enqueuedBase, b.enqueuedSHA, b.enqueuedBody = operation.Request.BaseRef, operation.Request.Base, operation.Request.Body
 	if b.enqueueRefusal != "" {
-		return enqueueRefused(errors.New("review: Maintainer rejected operation: refused: The request was refused: rejected before execution as " + b.enqueueRefusal + "."))
+		return maintainerRejection("refused: The request was refused: rejected before execution as " + b.enqueueRefusal + ".")
 	}
 	if b.leaveUnqueued > 0 {
 		b.leaveUnqueued--
