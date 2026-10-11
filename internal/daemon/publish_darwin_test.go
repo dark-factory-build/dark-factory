@@ -3,6 +3,7 @@ package daemon
 import (
 	"context"
 	"crypto/sha1"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -353,6 +354,67 @@ func TestFactorydPublishesACorrectionOnItsPullRequest(t *testing.T) {
 	if body["operation_id"] != uuid5("dark-factory:"+c.Change.String()+":body-"+app.tip[:8]+"-3") || body["pull_number"] != uint64(31) ||
 		!strings.Contains(text, "at "+app.tip+": +2 -1 across 3 files from "+c.Base) || !strings.HasSuffix(text, "\n\nCloses #9") {
 		t.Fatalf("corrected body = %+v", body)
+	}
+}
+
+// A correction may merge main twice after the worker's path was first
+// published.  The current main content must survive while the correction's
+// own path is applied, including a deliberate merge resolution.
+func TestFactorydPublishesCorrectionFromThePRTip(t *testing.T) {
+	fixture, c, source, app, checkout := publishFixture(t, 1, false)
+	ctx := context.Background()
+	root, git := filepath.Dir(source), change.TrustedGitExecutable
+	registered := strings.TrimSpace(supervisorGitOutput(t, git, "-C", root, "remote", "get-url", "origin"))
+
+	if err := os.WriteFile(filepath.Join(root, "a.txt"), []byte("worker\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	supervisorGit(t, git, "-C", root, "-c", "user.name=fixture", "-c", "user.email=fixture@example.invalid", "add", "a.txt")
+	supervisorGit(t, git, "-C", root, "-c", "user.name=fixture", "-c", "user.email=fixture@example.invalid", "commit", "-q", "-m", "worker")
+	worker := strings.TrimSpace(supervisorGitOutput(t, git, "-C", root, "rev-parse", "HEAD"))
+
+	if err := os.WriteFile(filepath.Join(registered, "a.txt"), []byte("main one\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	supervisorGit(t, git, "-C", registered, "-c", "user.name=fixture", "-c", "user.email=fixture@example.invalid", "add", "a.txt")
+	supervisorGit(t, git, "-C", registered, "-c", "user.name=fixture", "-c", "user.email=fixture@example.invalid", "commit", "-q", "-m", "main one")
+	supervisorGit(t, git, "-C", root, "fetch", "-q", "origin", "main")
+	supervisorGit(t, git, "-C", root, "merge", "-q", "--no-ff", "-s", "ours", "FETCH_HEAD", "-m", "import main")
+	if err := os.WriteFile(filepath.Join(root, "fix.txt"), []byte("correction\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	supervisorGit(t, git, "-C", root, "add", "fix.txt")
+	supervisorGit(t, git, "-C", root, "-c", "user.name=fixture", "-c", "user.email=fixture@example.invalid", "commit", "-q", "--amend", "--no-edit")
+	c.Head = strings.TrimSpace(supervisorGitOutput(t, git, "-C", root, "rev-parse", "HEAD"))
+
+	if err := os.WriteFile(filepath.Join(registered, "a.txt"), []byte("main two\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	supervisorGit(t, git, "-C", registered, "-c", "user.name=fixture", "-c", "user.email=fixture@example.invalid", "commit", "-q", "-am", "main two")
+	app.main = strings.TrimSpace(supervisorGitOutput(t, git, "-C", registered, "rev-parse", "HEAD"))
+	app.tip, c.Pull = worker, 31
+	withTip := func(ctx context.Context, ref, head string) (string, func(), error) {
+		gitDir, cleanup, err := checkout(ctx, ref, head)
+		if err == nil {
+			_, err = gitOutput(ctx, gitDir, "-c", "protocol.file.allow=always", "fetch", "--quiet", source, worker)
+		}
+		return gitDir, cleanup, err
+	}
+
+	if err := fixture.daemon.publishChange(ctx, c, "team/repo", source, app.call, withTip); err != nil {
+		t.Fatal(err)
+	}
+	if len(app.writes) != 2 || app.writes[0]["name"] != "publish_commit" || app.writes[1]["name"] != "update_pull_request_body" {
+		t.Fatalf("writes = %+v", app.writes)
+	}
+	changes := app.writes[0]["arguments"].(map[string]any)["changes"].([]map[string]any)
+	var content []byte
+	var err error
+	if len(changes) == 1 {
+		content, err = base64.StdEncoding.DecodeString(changes[0]["content_base64"].(string))
+	}
+	if err != nil || len(changes) != 1 || changes[0]["path"] != "fix.txt" || string(content) != "correction\n" {
+		t.Fatalf("correction changes = %+v", changes)
 	}
 }
 
