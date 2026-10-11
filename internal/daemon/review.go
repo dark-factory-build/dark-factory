@@ -417,7 +417,7 @@ func (daemon *Daemon) rebaseRetainedChange(ctx context.Context, state kernel.Cha
 	if err != nil {
 		return false, err
 	}
-	if facts.Dirty() || facts.Branch() != change.BranchName(state.ID.String()) {
+	if facts.Branch() != change.BranchName(state.ID.String()) {
 		return false, errors.New("rebased Change worktree failed verification")
 	}
 	newHead, err := kernelCommit(facts.Head())

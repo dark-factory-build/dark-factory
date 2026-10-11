@@ -1398,9 +1398,9 @@ func FetchBase(ctx context.Context, selection Selection, path string) error {
 
 // RebaseWorktree rebases a retained Change onto the selected current base.
 // The caller must have fetched selection.base to refs/remotes/origin/main
-// first. A clean rebase leaves the Change branch at its new head; a textual
-// conflict is reported only after a successful abort, while operational Git
-// failures remain retryable by the caller.
+// first. Autostash preserves the worker's staged and unstaged edits while the
+// Change branch moves; a textual conflict is reported only after a successful
+// abort, while operational Git failures remain retryable by the caller.
 func RebaseWorktree(ctx context.Context, selection Selection, path string) (WorktreeFacts, error) {
 	if !selection.valid() {
 		return WorktreeFacts{}, &ValidationError{Reason: "worktree selection is invalid"}
@@ -1419,7 +1419,7 @@ func RebaseWorktree(ctx context.Context, selection Selection, path string) (Work
 	// Use the linked worktree's .git indirection. Passing the private bare
 	// repository as --git-dir would select its unrelated HEAD and index.
 	gitArgs := []string{"-c", "core.hooksPath=/dev/null", "-c", "protocol.file.allow=always", "-C", path}
-	gitArgs = append(gitArgs, "rebase", "refs/remotes/origin/main")
+	gitArgs = append(gitArgs, "rebase", "--autostash", "refs/remotes/origin/main")
 	result, err := authority.runWithEnvironment(ctx, maxGitSelectionOutput, []string{
 		"GIT_COMMITTER_NAME=" + gitauthor.AutomationName,
 		"GIT_COMMITTER_EMAIL=" + gitauthor.AutomationEmail,
