@@ -372,7 +372,11 @@ func (daemon *Daemon) rebaseChange(ctx context.Context, open kernel.OpenPull) (b
 	if err != nil || !found || state.Phase != kernel.ChangeRetained || state.Selection == nil || state.HeadCommit == nil {
 		return false, err
 	}
-	return daemon.rebaseRetainedChange(ctx, state)
+	moved, err := daemon.rebaseRetainedChange(ctx, state)
+	if errors.Is(err, change.ErrRebaseConflict) {
+		return false, nil
+	}
+	return moved, err
 }
 
 // rebaseRetainedChange is the single retained-Change refresh used by review
@@ -408,7 +412,7 @@ func (daemon *Daemon) rebaseRetainedChange(ctx context.Context, state kernel.Cha
 	}
 	facts, err := change.RebaseWorktree(ctx, current, path)
 	if errors.Is(err, change.ErrRebaseConflict) {
-		return false, nil
+		return false, change.ErrRebaseConflict
 	}
 	if err != nil {
 		return false, err
