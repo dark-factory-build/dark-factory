@@ -142,7 +142,9 @@ func (store *Store) CreateAgent(ctx context.Context, spec NewAgent, at UnixMilli
 	return result, nil
 }
 
-func (store *Store) EnqueueTask(ctx context.Context, spec NewTask, at UnixMillis) (Task, error) {
+// EnqueueTask pins content in the creating transaction, as the browser enqueue
+// does; a replay returns the first enqueue's pins.
+func (store *Store) EnqueueTask(ctx context.Context, spec NewTask, at UnixMillis, content ...TaskContentReference) (Task, error) {
 	if err := validateNewTask(spec); err != nil {
 		return Task{}, err
 	}
@@ -164,6 +166,11 @@ func (store *Store) EnqueueTask(ctx context.Context, spec NewTask, at UnixMillis
 	result, err := insertTaskOnConnection(ctx, tx.connection, spec, at)
 	if err != nil {
 		return Task{}, tx.Rollback(err)
+	}
+	for _, item := range content {
+		if err := attachContentTx(ctx, tx, spec.ID, result.ProjectID, result.WorkRevision.Int64(), item.ContentID, item.ContentRevision, at); err != nil {
+			return Task{}, tx.Rollback(err)
+		}
 	}
 	if err = tx.Commit(ctx); err != nil {
 		return Task{}, err

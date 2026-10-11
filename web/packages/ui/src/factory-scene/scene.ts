@@ -75,8 +75,8 @@ export type SceneWorker = Readonly<{
   name: string;
   role: "orchestrator" | "worker";
   provider?: "claude_code" | "codex" | "shell";
-  /** A worker with a standing instruction. */
-  specialist?: boolean;
+  /** A worker with a standing instruction: its specialty and what it is doing, as the factory serves them. */
+  specialist?: Readonly<{ title: string; text: string; next: string }>;
   activity: "busy" | "waiting" | "needs-you" | "idle";
   paused?: boolean;
   appearance?: SpriteAppearance;
@@ -227,9 +227,13 @@ function sides(machine: SceneMachine) {
   const label = shape === "dock" || shape === "manifold" ? { x: 0, y: -11, width: chars, height: 10 }
     : shape === "gate" ? { x: width + 6, y: 2, width: 124, height: 23 }
     : { x: (width - chars) / 2, y: height + 1, width: chars, height: 10 };
-  const anchor = { x: width / 2, y: Math.max(height + 16, label.y + label.height + 13) };
+  // A line is worked at its control panel, the column at its right end, close up where its label leaves room;
+  // everything else from the middle of its front.
+  // Its footprint keeps the usual standing room either way, so where a worker stands never moves a machine.
+  const panel = shape === "line" && label.x + label.width <= width - 13 - WORKER_SIZE / 2, front = Math.max(height + 16, label.y + label.height + 13);
+  const anchor = { x: shape === "line" ? width - 13 : width / 2, y: panel ? height + WORKER_SIZE / 2 + 2 : front };
   const left = Math.min(0, label.x, anchor.x - WORKER_SIZE / 2) - MARGIN, top = Math.min(0, label.y) - MARGIN;
-  const right = Math.max(width, label.x + label.width, anchor.x + WORKER_SIZE / 2) + MARGIN, bottom = anchor.y + WORKER_SIZE / 2 + MARGIN;
+  const right = Math.max(width, label.x + label.width, anchor.x + WORKER_SIZE / 2) + MARGIN, bottom = front + WORKER_SIZE / 2 + MARGIN;
   return { shape, width, height, anchor, label, footprint: { x: Math.floor(left), y: Math.floor(top), width: Math.ceil(right - Math.floor(left)), height: Math.ceil(bottom - Math.floor(top)) } };
 }
 

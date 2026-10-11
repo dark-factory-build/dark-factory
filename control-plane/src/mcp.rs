@@ -507,7 +507,7 @@ fn tools() -> Value {
     }, {
         "name": "observe_pull_request_checks",
         "title": "Observe exact-head pull request checks",
-        "description": "Return the complete bounded set of GitHub check runs for one exact pull request head commit, each marked whether its base branch's rules require it.",
+        "description": "Return the complete bounded set of GitHub check runs for one exact pull request head commit, each marked whether its base branch's rules require it; a failed one carries its failure annotations.",
         "inputSchema": {
             "type": "object",
             "properties": {
@@ -532,7 +532,8 @@ fn tools() -> Value {
                             "status": {"type": "string"},
                             "conclusion": {"type": ["string", "null"]},
                             "url": {"type": "string"},
-                            "required": {"type": "boolean"}
+                            "required": {"type": "boolean"},
+                            "annotations": {"type": "array", "maxItems": 10, "items": {"type": "string", "maxLength": 240}}
                         },
                         "required": ["name", "status", "conclusion", "url", "required"],
                         "additionalProperties": false
@@ -680,7 +681,7 @@ fn tools() -> Value {
     }, {
         "name": "enqueue_pull_request",
         "title": "Add a pull request to its base branch's merge queue at an exact head",
-        "description": "Enqueue one pull request only while its head is still the stated commit and its base is still the stated branch. This operation requires that base's merge queue; it never falls back to direct merge. GitHub tests the entry against the queue's latest base and merges it. It is idempotent: a head already queued is success, and a refusal names its typed reason.",
+        "description": "Enqueue one pull request only while its head is still the stated commit and its base is still the stated branch. GitHub tests the entry against the queue's latest base and merges it. A base with no merge queue instead squash-merges the exact head once every check run at it has passed (commit statuses are not read), and entry_id is the merge commit. It is idempotent: a head already queued is success, and a refusal names its typed reason.",
         "inputSchema": {
             "type": "object",
             "properties": {
@@ -699,7 +700,7 @@ fn tools() -> Value {
                 "pull_number": {"type": "integer"},
                 "head_sha": {"type": "string"},
                 "entry_id": {"type": "string"},
-                "state_when_recorded": {"type": "string", "enum": ["QUEUED", "AWAITING_CHECKS", "MERGEABLE", "UNMERGEABLE", "LOCKED"]}
+                "state_when_recorded": {"type": "string", "enum": ["QUEUED", "AWAITING_CHECKS", "MERGEABLE", "UNMERGEABLE", "LOCKED", "MERGED"]}
             },
             "required": ["pull_number", "head_sha", "entry_id", "state_when_recorded"],
             "additionalProperties": false

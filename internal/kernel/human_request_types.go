@@ -111,6 +111,10 @@ type HumanRequest struct {
 	Revision          Revision
 	CreatedAt         UnixMillis
 	UpdatedAt         UnixMillis
+	// Continuation is set once the request's run yielded on it;
+	// ContinuationReply is the reply its task's next work revision resumes with.
+	Continuation      ContinuationState `json:"-"`
+	ContinuationReply string            `json:"-"`
 }
 
 // HumanRequestProjection is the bounded public list item. Canonical project,
@@ -137,6 +141,7 @@ type OperatorHumanRequest struct {
 	AgentID      AgentID
 	Status       HumanRequestStatus
 	Revision     Revision
+	RunRevision  Revision
 	QuestionText string
 	Options      []string
 }

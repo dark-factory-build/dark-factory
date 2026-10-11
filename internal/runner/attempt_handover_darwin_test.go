@@ -204,7 +204,7 @@ func withShortHandoverGrace(t *testing.T, d time.Duration) {
 // long, test-name-derived t.TempDir() path can exceed it.
 func shortRuntimeRoot(t *testing.T) string {
 	t.Helper()
-	path, err := os.MkdirTemp("/private/tmp", "df-runner-")
+	path, err := os.MkdirTemp(ShortTempDir(), "df-runner-")
 	if err != nil {
 		t.Fatal(err)
 	}

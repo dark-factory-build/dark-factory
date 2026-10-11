@@ -8,6 +8,8 @@ import { Miniflare, convertV4MiniflareOptions } from 'miniflare';
 const hash = value => createHash('sha256').update(value).digest('hex');
 const prefix = '/v1/github/connections';
 const json = (body, status = 200) => new Response(JSON.stringify(body), { status, headers: { 'content-type': 'application/json' } });
+const githubFixtures = JSON.parse(await readFile(join(process.cwd(), 'tests/fixtures/github-behaviors.json'), 'utf8'));
+const quotaFixture = githubFixtures.find(fixture => fixture.name === 'worker-503-on-github-quota-exhaustion');
 
 test('two principals: callback, pagination, refresh, replay, grants and revocation', async () => {
   const persistence = await mkdtemp(join(tmpdir(), 'df-connections-'));
@@ -293,6 +295,11 @@ test('two principals: callback, pagination, refresh, replay, grants and revocati
       assert.equal(failed.result.isError, true);
       assert.match(failed.result.content[0].text, /unavailable/);
     }
+    unavailable = ''; unavailableStatus = 503;
+    unavailable = '/user'; unavailableStatus = quotaFixture.github_status;
+    const quotaFailure = await send(`${alice.path}/mcp`, 'POST', { jsonrpc: '2.0', id: 1, method: 'tools/call', params: { name: 'observe_operation', arguments: { repository: 'team/shared', operation_id: '7d1f0f8e-7f1f-11f0-952e-acde48001122' } } }, alice.credential);
+    assert.equal(quotaFailure.status, quotaFixture.worker_status ?? 503);
+    assert.deepEqual(await quotaFailure.json(), quotaFixture.worker_response);
     unavailable = ''; unavailableStatus = 503;
     const issuePage = (await (await call(bob, 'list_issues', { repository: 'team/shared', page: 1, label: 'needs triage' })).json()).result.structuredContent;
     assert.equal(issuePage.repository_id, 2);

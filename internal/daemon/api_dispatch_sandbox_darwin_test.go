@@ -7,6 +7,8 @@ import (
 	"os/exec"
 	"path/filepath"
 	"testing"
+
+	"github.com/dark-factory-build/dark-factory/internal/runner"
 )
 
 func TestDispatchFixtureTraversesUnreadableAncestors(t *testing.T) {
@@ -45,7 +47,7 @@ func TestDispatchFixtureTraversesUnreadableAncestors(t *testing.T) {
 	}
 	// Real providers receive a private TMPDIR. Keep scratch and fixture cleanup
 	// inside that grant rather than inheriting a host/CI shared temp root.
-	privateTemp, err := os.MkdirTemp("/private/tmp", "df-ancestor-")
+	privateTemp, err := os.MkdirTemp(runner.ShortTempDir(), "df-ancestor-")
 	if err != nil {
 		t.Fatal(err)
 	}

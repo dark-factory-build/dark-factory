@@ -60,7 +60,7 @@ func (f *fakePublishMaintainer) call(_ context.Context, name string, arguments m
 	}
 	f.writes = append(f.writes, map[string]any{"name": name, "arguments": arguments})
 	if f.unavailable {
-		return nil, fmt.Errorf("review: Maintainer rejected operation: unavailable: Maintainer authority is unavailable.")
+		return nil, maintainerRejection("unavailable: Maintainer authority is unavailable.")
 	}
 	var result json.RawMessage
 	switch name {
@@ -71,7 +71,7 @@ func (f *fakePublishMaintainer) call(_ context.Context, name string, arguments m
 		for _, entry := range arguments["changes"].([]map[string]any) {
 			if f.refuse != "" && strings.HasPrefix(entry["path"].(string), f.refuse) {
 				if f.externalRefuse {
-					return nil, fmt.Errorf("review: Maintainer rejected operation: refused: branch precondition")
+					return nil, maintainerRejection("refused: The request was refused: rejected before execution as UNPROCESSABLE.")
 				}
 				return nil, fmt.Errorf("refused: %s cannot be written", f.refuse)
 			}
@@ -273,6 +273,8 @@ func TestAPlannedPullRequestCreateMovesToTheCurrentMain(t *testing.T) {
 func TestFirstPublicationOfAnAlreadyPublishedTreeOpensItsPullRequest(t *testing.T) {
 	fixture, c, source, app, checkout := publishFixture(t, 1, false)
 	ctx := context.Background()
+	backend := &publicReviewBackend{}
+	fixture.daemon.reviewBackend = func(string, uint64) review.Backend { return backend }
 	app.tip = c.Head // the earlier attempt's commit carries the same tree
 	withTip := func(ctx context.Context, ref, head string) (string, func(), error) {
 		gitDir, cleanup, err := checkout(ctx, ref, head)
@@ -286,6 +288,9 @@ func TestFirstPublicationOfAnAlreadyPublishedTreeOpensItsPullRequest(t *testing.
 	}
 	if len(app.writes) != 1 || app.writes[0]["name"] != "create_pull_request" || app.writes[0]["arguments"].(map[string]any)["head_sha"] != c.Head {
 		t.Fatalf("writes = %+v", app.writes)
+	}
+	if pending, err := fixture.store.InFlightReviewOperations(ctx); err != nil || len(pending) != 1 {
+		t.Fatalf("publication did not schedule one review: pending=%v err=%v", pending, err)
 	}
 }
 
@@ -345,9 +350,35 @@ func TestFactorydPublishesACorrectionOnItsPullRequest(t *testing.T) {
 		t.Fatalf("correction commit = %+v", commit)
 	}
 	text := body["body"].(string)
-	if body["operation_id"] != uuid5("dark-factory:"+c.Change.String()+":body-"+app.tip[:8]) || body["pull_number"] != uint64(31) ||
+	if body["operation_id"] != uuid5("dark-factory:"+c.Change.String()+":body-"+app.tip[:8]+"-3") || body["pull_number"] != uint64(31) ||
 		!strings.Contains(text, "at "+app.tip+": +2 -1 across 3 files from "+c.Base) || !strings.HasSuffix(text, "\n\nCloses #9") {
 		t.Fatalf("corrected body = %+v", body)
+	}
+}
+
+// A worker answering a verdict with evidence and no file change (#1706)
+// moves no head: its answer replaces the body and one fresh review of the
+// same head is claimed, instead of publication refusing "nothing to publish".
+func TestAnEvidenceOnlyCorrectionIsReviewedAgainAtTheSameHead(t *testing.T) {
+	fixture, c, source, app, checkout := publishFixture(t, 1, false)
+	ctx := context.Background()
+	app.tip, c.Pull = c.Head, 31 // the branch already carries the worker's tree
+	c.Task.Result = "Premise not reproduced: the cited line already guards it."
+	withTip := func(ctx context.Context, ref, head string) (string, func(), error) {
+		gitDir, cleanup, err := checkout(ctx, ref, head)
+		if err == nil {
+			_, err = gitOutput(ctx, gitDir, "-c", "protocol.file.allow=always", "fetch", "--quiet", source, head)
+		}
+		return gitDir, cleanup, err
+	}
+	if err := fixture.daemon.publishChange(ctx, c, "team/repo", source, app.call, withTip); err != nil {
+		t.Fatal(err)
+	}
+	if len(app.writes) != 1 || app.writes[0]["name"] != "update_pull_request_body" || !strings.Contains(app.writes[0]["arguments"].(map[string]any)["body"].(string), "Premise not reproduced") {
+		t.Fatalf("writes = %+v", app.writes)
+	}
+	if op := waitForDurableReview(t, fixture.store, c.Task.ProjectID, func(op review.Operation) bool { return op.State == "enqueued" }); op.Request.PullNumber != 31 || op.Request.Head != c.Head {
+		t.Fatalf("review = %+v", op)
 	}
 }
 

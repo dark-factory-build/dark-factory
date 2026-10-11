@@ -30,6 +30,12 @@ func repeatBytes(value byte, count int) []byte {
 	return result
 }
 
+func TestMissionBindingIgnoresNonDecisionContent(t *testing.T) {
+	if err := bindMissionDecision(context.Background(), nil, ProjectID{}, ContentAcceptanceScenario, `{"record_type":"proposal","record_id":"00000000000000000000000000000000","task_id":"00000000000000000000000000000000"}`, mustTime(t, 1)); err != nil {
+		t.Fatalf("non-decision content reached mission binding: %v", err)
+	}
+}
+
 func TestContentRevisionReplayAndHistoryRemainCASBound(t *testing.T) {
 	t.Parallel()
 	store, run, _ := runningWorkerRun(t)

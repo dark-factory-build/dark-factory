@@ -23,6 +23,9 @@ in_shard() { [ -z "$shard" ] || [ "$shard" = "$1" ]; }
 runs() {
     stage=$1
     shift
+    for package; do
+        [ -z "$linux_proved" ] || printf '%s\n' "$linux_proved" | /usr/bin/grep -qxF "$package" || return 1
+    done
     if [ "$shard" = affected ]; then
         for package; do
             printf '%s\n' "$affected_packages" | /usr/bin/grep -qxF "$package" && return 0
@@ -34,22 +37,9 @@ runs() {
 script_dir=$(CDPATH= cd -- "$(/usr/bin/dirname "$0")" && pwd -P)
 repository_root=$(CDPATH= cd -- "$script_dir/.." && pwd -P)
 CDPATH= cd -- "$repository_root"
-. "$script_dir/local-ci-environment.sh"
-. "$script_dir/go-gate-environment.sh"
-
-go_gate_supervisor_pid=
-go_gate_signal() {
-    signal=$1
-    trap - EXIT HUP INT TERM
-    go_gate_join_supervisor
-    exit $((128 + signal))
-}
-trap 'go_gate_signal 1' HUP
-trap 'go_gate_signal 2' INT
-trap 'go_gate_signal 15' TERM
-
 export GOTOOLCHAIN=local
 go=${DF_CI_GO-}
+[ -n "$go" ] || go=$(command -v go 2>/dev/null || true)
 [ -n "$go" ] || {
     echo "go-ci: Go is unavailable; add Go's bin directory to factoryd --tool-path (and its install root to --toolchain-read-roots)" >&2
     exit 1
@@ -57,6 +47,22 @@ go=${DF_CI_GO-}
 module=
 affected_packages=
 module=$("$go" list -m)
+# Linux tests only packages with native proof, and only once linux-coverage
+# accounts for every package and every Darwin-only test file.
+linux_proved=
+if [ "$(uname -s)" = Linux ]; then
+    coverage=$script_dir/linux-coverage
+    listed=$(/usr/bin/awk '($1 == "package" && $3 ~ /^(proved|L[0-9][0-9])$/) || ($1 == "test" && $3 ~ /^(shared|linux-equivalent|macos-only)$/) { print $1, $2 }' "$coverage" | sort)
+    wanted=$({ { GOOS=darwin "$go" list ./...; "$go" list ./...; } | sort -u | sed "s|^$module/|package |"
+        { git ls-files -co --exclude-standard '*_darwin_test.go'; git grep --untracked -l '^//go:build darwin' -- '*_test.go'; } | sort -u | sed 's/^/test /'; } | sort)
+    [ "$listed" = "$wanted" ] || {
+        echo "go-ci: scripts/linux-coverage must classify every package and Darwin-only test exactly once" >&2
+        printf '%s\n' "$listed" "$wanted" | sort | uniq -u | sed 's/^/go-ci:   /' >&2
+        exit 1
+    }
+    linux_proved=$(/usr/bin/awk -v module="$module" '$1 == "package" && $3 == "proved" { print module "/" $2 }' "$coverage")
+    echo "go-ci: Linux runs proved packages only:" $linux_proved
+fi
 if [ "$shard" = affected ]; then
     changed=$(git diff --name-only "$affected_base" HEAD --)
     if printf '%s\n' "$changed" | /usr/bin/grep -qxE 'go\.(mod|sum)'; then
@@ -110,17 +116,17 @@ is_process_sensitive() {
 
 if [ -z "$cacheable_only" ] && runs source "$module/internal/change"; then
     echo "go-ci: Git boundary resource census"
-    go_gate_stage 1200 "$go" test -short -timeout=20m -count=1 ./internal/change
+    "$go" test -short -timeout=20m -count=1 ./internal/change
 fi
 
 if [ -z "$cacheable_only" ] && runs source "$module/internal/changeworker"; then
     echo "go-ci: Change worker process tests"
-    go_gate_stage 1200 "$go" test -short -timeout=20m -count=1 ./internal/changeworker
+    "$go" test -short -timeout=20m -count=1 ./internal/changeworker
 fi
 
 if [ -z "$cacheable_only" ] && runs daemon "$module/internal/daemon"; then
     echo "go-ci: daemon process tests"
-    go_gate_stage 1200 "$go" test -short -timeout=20m -count=1 ./internal/daemon
+    "$go" test -short -timeout=20m -count=1 ./internal/daemon
 fi
 
 if [ -z "$cacheable_only" ] || [ "$cacheable_only" = 1 ]; then
@@ -144,7 +150,7 @@ done
 if [ -z "$cacheable_only" ] && [ -n "$process_args" ]; then
     echo "go-ci: process-sensitive Go tests"
     # shellcheck disable=SC2086
-    go_gate_stage 1200 "$go" test -short -timeout=20m -count=1 $process_args
+    "$go" test -short -timeout=20m -count=1 $process_args
 fi
 if [ -n "$cacheable_args" ]; then
     echo "go-ci: cacheable Go tests"
@@ -155,6 +161,6 @@ fi
 
 if [ -z "$cacheable_only" ] && runs source "$module/internal/e2e"; then
     echo "go-ci: browser, daemon and runner E2E"
-    go_gate_stage 1500 "$script_dir/go-e2e.sh" all ${client_built:+"$client_built"}
+    "$script_dir/go-e2e.sh" all ${client_built:+"$client_built"}
 fi
 echo "go-ci: PASS"

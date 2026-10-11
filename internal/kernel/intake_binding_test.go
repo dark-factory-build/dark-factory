@@ -192,7 +192,7 @@ func TestFailedIntakeWakesItsConfiguredOverseer(t *testing.T) {
 			if err != nil || !found {
 				t.Fatalf("overseer: %+v %v", overseer, err)
 			}
-			body, due, err := overseerWake(ctx, read.connection, overseer, 1000+overseerWakeSettle.Milliseconds())
+			body, due, err := overseerWake(ctx, read.connection, overseer, 1000+overseerWakeSettle.Milliseconds(), nil)
 			if err != nil || due != test.due || due && !strings.Contains(body, accepted.TaskID.String()) {
 				t.Fatalf("intake wake: due=%v body=%q err=%v, want due=%v", due, body, err, test.due)
 			}

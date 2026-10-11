@@ -1,5 +1,5 @@
 import type { PeerQuestionItem } from "@dark-factory/client";
-import type { SceneTask } from "../console-view.js";
+import { STANDING_TITLE, type SceneTask } from "../console-view.js";
 import { pointOnRoute, type Route } from "./movement.js";
 import type { ScenePoint } from "./scene.js";
 
@@ -24,6 +24,9 @@ export type FloorEvent = Readonly<{
 export type Seen = Readonly<{ tasks: ReadonlyMap<string, SceneTask["status"]>; questions: ReadonlyMap<string, boolean>; knowledge: ReadonlySet<string> }>;
 type Recorded = Readonly<{ key: string; agentId: string; reading: boolean }>;
 
+/** Work from the tray: an overseer's or specialist's own pass is queued to it alone, never handed over. */
+export const fromTray = (task: SceneTask) => task.title !== STANDING_TITLE;
+
 /** The first look is history, not news: it shows nothing. A task is only handed over if it was seen waiting. */
 export function observe(before: Seen | undefined, tasks: readonly SceneTask[], questions: readonly PeerQuestionItem[], recorded: readonly Recorded[] = []): Readonly<{ seen: Seen; events: readonly FloorEvent[] }> {
   // ponytail: grows by one entry per question seen while this floor is open; prune by age if a floor ever stays open for weeks.
@@ -31,7 +34,7 @@ export function observe(before: Seen | undefined, tasks: readonly SceneTask[], q
   const seen = { tasks: new Map(tasks.map((task) => [task.id, task.status])), questions: new Map([...(before?.questions ?? []), ...questions.map((question) => [question.id, question.answered] as const)]), knowledge: new Set([...(before?.knowledge ?? []), ...recorded.map((item) => item.key)]) };
   if (before === undefined) return { seen, events: [] };
   const agent = new Map(tasks.map((task) => [task.id, task.agentId]));
-  const events: FloorEvent[] = tasks.flatMap((task) => task.status === "running" && before.tasks.get(task.id) === "queued" && task.agentId !== "" ? [{ key: `assign ${task.id}`, kind: "assign" as const, to: task.agentId }] : []);
+  const events: FloorEvent[] = tasks.flatMap((task) => task.status === "running" && before.tasks.get(task.id) === "queued" && task.agentId !== "" && fromTray(task) ? [{ key: `assign ${task.id}`, kind: "assign" as const, to: task.agentId }] : []);
   for (const question of questions) {
     const asker = agent.get(question.source_task_id), asked = agent.get(question.target_task_id), was = before.questions.get(question.id);
     if (!asker || !asked || asker === asked || was === question.answered) continue;
