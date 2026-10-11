@@ -9,6 +9,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"maps"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -521,9 +522,14 @@ func TestDaemonContendedOutcomeHonorsRequestCancellation(t *testing.T) {
 		}
 		done <- fixture.daemon.HandleConnection(ctx, connection)
 	}()
+	// An undeadlined call gets the client's 5s default, the same as the waits
+	// below, so a client that never hears the daemon would race them instead of
+	// failing. A longer explicit deadline leaves the daemon to end the call.
+	request, stop := context.WithTimeout(context.Background(), time.Minute)
+	defer stop()
 	result := make(chan error, 1)
 	go func() {
-		_, err := active.client.Succeed(context.Background(), "cancelled request must not commit")
+		_, err := active.client.Succeed(request, "cancelled request must not commit")
 		result <- err
 	}()
 	select {
@@ -2055,4 +2061,169 @@ func TestDaemonOperatorReadsAdmitOnlySpecialistCarrier(t *testing.T) {
 		_, err := reader.Intake(ctx, api.IntakeInput{Action: "linear_disconnect"})
 		return err
 	})
+}
+
+// A specialist's operator views are its own project's; the operator still
+// reads the whole factory.
+func TestDaemonSpecialistOperatorReadsStayInItsProject(t *testing.T) {
+	fixture := newDispatchFixture(t)
+	ctx := context.Background()
+	other := prepareActiveAttemptInProject(t, fixture, 231, testID(231), "worker")
+	done := fixture.serve(t)
+	if _, err := other.client.RequestHuman(ctx, api.HumanQuestionInput{IdempotencyKey: testID(241), Question: "other project question"}); err != nil {
+		t.Fatal(err)
+	}
+	waitDispatch(t, done)
+	specialist := prepareActiveAttemptInProject(t, fixture, 211, testID(211), "worker", func() {
+		operator, err := api.NewOperatorClient(fixture.socket, fixture.operator)
+		if err != nil {
+			t.Fatal(err)
+		}
+		done := fixture.serve(t)
+		if _, err := operator.EnqueueTask(ctx, api.EnqueueTaskInput{ID: testID(213), ProjectID: testID(211), AssignedAgentID: testID(212), IncarnationID: testID(214), Title: "Standing instruction", Body: "Review.", Priority: 1}); err != nil {
+			t.Fatal(err)
+		}
+		waitDispatch(t, done)
+	})
+	done = fixture.serve(t)
+	if _, err := specialist.client.RequestHuman(ctx, api.HumanQuestionInput{IdempotencyKey: testID(242), Question: "own project question"}); err != nil {
+		t.Fatal(err)
+	}
+	waitDispatch(t, done)
+	agent, _, err := fixture.store.Agent(ctx, specialist.run.AgentID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	policy, after, instruction := kernel.IdleStandingInstruction, uint32(3600), "Review the factory."
+	if _, err := fixture.store.UpdateAgent(ctx, agent.ID, agent.Revision, kernel.AgentPatch{IdlePolicy: &policy, IdleAfterSeconds: &after, IdleInstruction: &instruction}, agent.UpdatedAt); err != nil {
+		t.Fatal(err)
+	}
+	for i, run := range []kernel.Run{specialist.run, other.run} {
+		raw, _ := hex.DecodeString(testID(byte(251 + i)))
+		id, _ := kernel.IntakeSourceIDFromBytes(raw)
+		if _, err := fixture.store.CreateIntakeSource(ctx, kernel.NewIntakeSource{ID: id, ProjectID: run.ProjectID, TargetRepositoryID: kernel.RepositoryID(run.ProjectID), GitHubRepositoryID: 42, GitHubRepositoryName: "team/issues", Policy: kernel.IntakePolicyManual, PollSeconds: 60, AdmissionLimit: 1}, mustKernelTime(t, 1001)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	reader, err := api.NewAttemptReaderFromEnvironment(fixture.socket)
+	if err != nil {
+		t.Fatal(err)
+	}
+	operator, err := api.NewOperatorClient(fixture.socket, fixture.operator)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// projects lists the projects each view reveals, wanting only own or both.
+	projects := func(client *api.OperatorClient) map[string]bool {
+		seen := map[string]bool{}
+		call := func(invoke func() error) {
+			t.Helper()
+			done := fixture.serve(t)
+			if err := invoke(); err != nil {
+				t.Fatal(err)
+			}
+			waitDispatch(t, done)
+		}
+		call(func() error {
+			snapshot, err := client.Snapshot(ctx)
+			for _, project := range snapshot.Projects {
+				seen["project "+project.ID] = true
+			}
+			for _, agent := range snapshot.Agents {
+				seen["agent "+agent.ProjectID] = true
+			}
+			for _, task := range snapshot.Tasks {
+				seen["task "+task.ProjectID] = true
+			}
+			return err
+		})
+		call(func() error {
+			requests, err := client.HumanRequests(ctx)
+			for _, request := range requests.Requests {
+				seen["human "+map[string]string{specialist.run.TaskID.String(): testID(211), other.run.TaskID.String(): testID(231)}[request.TaskID]] = true
+			}
+			return err
+		})
+		call(func() error {
+			intake, err := client.Intake(ctx, api.IntakeInput{Action: "list"})
+			for _, source := range intake.Sources {
+				seen["intake "+source.ProjectID] = true
+			}
+			return err
+		})
+		return seen
+	}
+	want := func(ids ...string) map[string]bool {
+		seen := map[string]bool{}
+		for _, id := range ids {
+			for _, view := range []string{"project", "agent", "task", "human", "intake"} {
+				seen[view+" "+id] = true
+			}
+		}
+		return seen
+	}
+	if got := projects(reader); !maps.Equal(got, want(testID(211))) {
+		t.Fatalf("specialist views = %v", got)
+	}
+	if got := projects(operator); !maps.Equal(got, want(testID(211), testID(231))) {
+		t.Fatalf("operator views = %v", got)
+	}
+	for name, client := range map[string]*api.OperatorClient{"specialist": reader, "operator": operator} {
+		task, _, err := fixture.store.Task(ctx, other.run.TaskID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		done := fixture.serve(t)
+		_, err = client.ReadTask(ctx, api.TaskReadInput{TaskID: task.ID.String(), ExpectedRevision: uint64(task.Revision.Int64())})
+		var remote *api.RemoteError
+		if forbidden := errors.As(err, &remote) && remote.Code() == api.RemoteForbidden; forbidden != (name == "specialist") || !forbidden && err != nil {
+			t.Fatalf("%s other-project task read = %v", name, err)
+		}
+		waitDispatch(t, done)
+	}
+	done = fixture.serve(t)
+	if intake, err := reader.Intake(ctx, api.IntakeInput{Action: "list", ProjectID: testID(231)}); err != nil || len(intake.Sources) != 1 || intake.Sources[0].ProjectID != testID(211) {
+		t.Fatalf("specialist other-project intake list = %+v, %v", intake, err)
+	}
+	waitDispatch(t, done)
+}
+
+// An overseer lists intake and requests one fresh exact-head review in its
+// own project (#1725), and reaches no other operator view or intake write.
+func TestDaemonOverseerListsIntakeAndRequestsAReview(t *testing.T) {
+	fixture := newDispatchFixture(t)
+	ctx := context.Background()
+	active := prepareActiveAttempt(t, fixture, 221)
+	reader, err := api.NewAttemptReaderFromEnvironment(fixture.socket)
+	if err != nil {
+		t.Fatal(err)
+	}
+	review := func(project string) func() error {
+		return func() error {
+			_, err := reader.Intake(ctx, api.IntakeInput{Action: "review_pr", ProjectID: project, ReviewRequest: &api.ReviewRequest{Repository: "team/repo", PullNumber: 7, Head: strings.Repeat("a", 40), Base: strings.Repeat("b", 40), BaseRef: "main", Provider: "codex"}})
+			return err
+		}
+	}
+	for name, invoke := range map[string]func() error{
+		"intake list": func() error { _, err := reader.Intake(ctx, api.IntakeInput{Action: "list"}); return err },
+		"review":      review(active.run.ProjectID.String()),
+	} {
+		done := fixture.serve(t)
+		if err := invoke(); err != nil {
+			t.Fatalf("overseer %s = %v", name, err)
+		}
+		waitDispatch(t, done)
+	}
+	for name, invoke := range map[string]func() error{
+		"status":                 func() error { _, err := reader.Snapshot(ctx); return err },
+		"review another project": review(testID(222)),
+		"intake write":           func() error { _, err := reader.Intake(ctx, api.IntakeInput{Action: "linear_disconnect"}); return err },
+	} {
+		done := fixture.serve(t)
+		var remote *api.RemoteError
+		if err := invoke(); !errors.As(err, &remote) || remote.Code() != api.RemoteForbidden {
+			t.Fatalf("overseer %s = %v, want forbidden", name, err)
+		}
+		waitDispatch(t, done)
+	}
 }

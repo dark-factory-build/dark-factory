@@ -681,6 +681,7 @@ type TaskReadInput struct {
 	ExpectedRevision uint64 `json:"expected_revision"`
 	Offset           uint64 `json:"offset,omitempty"`
 	PeerOffset       uint64 `json:"peer_offset,omitempty"`
+	PeerHead         uint64 `json:"peer_head,omitempty"`
 }
 
 // ProjectContentInput exposes bounded reads already used by the browser.
@@ -703,6 +704,7 @@ type TaskText struct {
 	PeerQuestions  []PeerQuestion          `json:"peer_questions,omitempty"`
 	NextOffset     *uint64                 `json:"next_offset,omitempty"`
 	NextPeerOffset *uint64                 `json:"next_peer_offset,omitempty"`
+	PeerHead       uint64                  `json:"peer_head,omitempty"`
 }
 
 // DashboardSnapshot deliberately contains only the bounded public Store

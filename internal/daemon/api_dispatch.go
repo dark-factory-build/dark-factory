@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -83,6 +84,7 @@ type Daemon struct {
 	// time, read only by the scheduler loop, and whether a pass is running.
 	pipelineAt   atomic.Int64 // unix nanoseconds of the next merge-stage pass
 	pipelineBusy atomic.Bool
+	reconcileMu  sync.Mutex // one reconciler pass at a time: startup's and the tick's
 	// The scheduler's Change reclaim pass (tickChangeReclaim), alike, and the
 	// Changes it kept, each logged once with its project and reason; healthMu
 	// guards it for the operator's health read.
@@ -316,19 +318,26 @@ func (daemon *Daemon) markAttemptAPICall(ctx context.Context, call api.Call) {
 // transport and domain validation belongs to kernel constructors/Store
 // methods; there is no forwarding service layer here.
 func (daemon *Daemon) dispatch(ctx context.Context, call api.Call) api.Reply {
+	// scope is nil for the operator's factory-wide reads and the specialist's
+	// project otherwise.
+	var scope *kernel.ProjectID
 	switch call.Kind() {
 	case api.CallSnapshot, api.CallHumanRequests, api.CallTaskRead, api.CallIntake:
-		if raw, attempt := call.AttemptDigest(); attempt && !daemon.specialistRead(ctx, raw, call) {
-			return newErrorReply(api.RemoteForbidden)
+		if raw, attempt := call.AttemptDigest(); attempt {
+			project, ok := daemon.attemptOperatorCall(ctx, raw, call)
+			if !ok {
+				return newErrorReply(api.RemoteForbidden)
+			}
+			scope = &project
 		}
 	}
 	switch call.Kind() {
 	case api.CallHealth:
 		return daemon.health(ctx, call)
 	case api.CallSnapshot:
-		return daemon.snapshot(ctx)
+		return daemon.snapshot(ctx, scope)
 	case api.CallHumanRequests:
-		return daemon.humanRequests(ctx)
+		return daemon.humanRequests(ctx, scope)
 	case api.CallHumanReply:
 		return daemon.humanReplyOperator(ctx, call)
 	case api.CallHumanCancel:
@@ -346,7 +355,7 @@ func (daemon *Daemon) dispatch(ctx context.Context, call api.Call) api.Reply {
 	case api.CallEnqueueTask:
 		return daemon.enqueueTask(ctx, call)
 	case api.CallTaskRead:
-		return daemon.taskRead(ctx, call)
+		return daemon.taskRead(ctx, call, scope)
 	case api.CallProjectContent:
 		return daemon.projectContent(ctx, call)
 	case api.CallOperatorWorkerOperation:
@@ -484,6 +493,9 @@ func (daemon *Daemon) dispatch(ctx context.Context, call api.Call) api.Reply {
 		if !ok {
 			return newErrorReply(api.RemoteInvalidRequest)
 		}
+		if scope != nil {
+			input.ProjectID = scope.String()
+		}
 		return api.NewContentReply(daemon.Intake(ctx, input))
 	case api.CallGitHubConnection:
 		input, ok := call.GitHubConnectionInput()
@@ -530,17 +542,31 @@ func (daemon *Daemon) dispatch(ctx context.Context, call api.Call) api.Reply {
 	}
 }
 
-// specialistRead admits a specialist's review run (its carrier) to the
-// operator's read views, and of intake only its list; every other attempt,
-// and every write, is refused.
-func (daemon *Daemon) specialistRead(ctx context.Context, raw api.AttemptDigest, call api.Call) bool {
+// attemptOperatorCall admits a specialist's review run (its carrier) to the
+// operator's read views of its own project, and of intake only its list; an
+// overseer to the intake list and to one fresh exact-head review in its own
+// project. Every other attempt, and every other write, is refused.
+func (daemon *Daemon) attemptOperatorCall(ctx context.Context, raw api.AttemptDigest, call api.Call) (kernel.ProjectID, bool) {
 	digest, err := attemptDigest(raw)
 	if err != nil {
-		return false
+		return kernel.ProjectID{}, false
 	}
 	authority, err := daemon.store.AuthenticateAttempt(ctx, digest)
 	intake, _ := call.IntakeInput()
-	return err == nil && authority.Specialist && (call.Kind() != api.CallIntake || intake.Action == "list")
+	overseer := authority.Role == kernel.RoleOrchestrator
+	switch {
+	case err != nil:
+		return authority.ProjectID, false
+	case call.Kind() != api.CallIntake:
+		return authority.ProjectID, authority.Specialist
+	case intake.Action == "list":
+		return authority.ProjectID, authority.Specialist || overseer
+	}
+	return authority.ProjectID, overseer && intake.Action == "review_pr" && intake.ProjectID == authority.ProjectID.String()
+}
+
+func inScope(scope *kernel.ProjectID, project kernel.ProjectID) bool {
+	return scope == nil || *scope == project
 }
 
 func (daemon *Daemon) agentPaths(ctx context.Context, call api.Call) api.Reply {
@@ -583,7 +609,7 @@ func (daemon *Daemon) agentPaths(ctx context.Context, call api.Call) api.Reply {
 	return reply
 }
 
-func (daemon *Daemon) taskRead(ctx context.Context, call api.Call) api.Reply {
+func (daemon *Daemon) taskRead(ctx context.Context, call api.Call, scope *kernel.ProjectID) api.Reply {
 	input, ok := call.TaskReadInput()
 	if !ok || input.ExpectedRevision > uint64(^uint64(0)>>1) {
 		return newErrorReply(api.RemoteInvalidRequest)
@@ -602,6 +628,9 @@ func (daemon *Daemon) taskRead(ctx context.Context, call api.Call) api.Reply {
 	}
 	if !found {
 		return newErrorReply(api.RemoteNotFound)
+	}
+	if !inScope(scope, task.ProjectID) {
+		return newErrorReply(api.RemoteForbidden)
 	}
 	if task.Revision != expected {
 		return newErrorReply(api.RemoteRevisionConflict)
@@ -634,7 +663,14 @@ func (daemon *Daemon) taskRead(ctx context.Context, call api.Call) api.Reply {
 	if err != nil {
 		return newErrorReply(remoteErrorCode(err))
 	}
-	questions, nextPeerOffset, _, err := daemon.store.PeerQuestionsForTask(ctx, task.ID, input.PeerOffset, kernel.EventSequence{})
+	peerExpectedHead := kernel.EventSequence{}
+	if input.PeerHead != 0 {
+		peerExpectedHead, err = kernel.NewEventSequence(int64(input.PeerHead))
+		if err != nil {
+			return newErrorReply(api.RemoteInvalidRequest)
+		}
+	}
+	questions, nextPeerOffset, peerHead, err := daemon.store.PeerQuestionsForTask(ctx, task.ID, input.PeerOffset, peerExpectedHead)
 	if err != nil {
 		return newErrorReply(remoteErrorCode(err))
 	}
@@ -651,6 +687,7 @@ func (daemon *Daemon) taskRead(ctx context.Context, call api.Call) api.Reply {
 		result.NextOffset = &next
 	}
 	result.NextPeerOffset = nextPeerOffset
+	result.PeerHead = uint64(peerHead.Int64())
 	reply, err := api.NewTaskTextReply(result)
 	if err != nil {
 		return newErrorReply(api.RemoteInternal)
@@ -685,13 +722,16 @@ func (daemon *Daemon) workerOperation(ctx context.Context, call api.Call) api.Re
 	return reply
 }
 
-func (daemon *Daemon) humanRequests(ctx context.Context) api.Reply {
+func (daemon *Daemon) humanRequests(ctx context.Context, scope *kernel.ProjectID) api.Reply {
 	requests, err := daemon.store.OperatorHumanRequests(ctx)
 	if err != nil {
 		return newErrorReply(remoteErrorCode(err))
 	}
 	result := api.HumanRequestList{Requests: make([]api.HumanRequest, 0, len(requests))}
 	for _, request := range requests {
+		if !inScope(scope, request.ProjectID) {
+			continue
+		}
 		result.Requests = append(result.Requests, api.HumanRequest{ID: request.ID.String(), RunID: request.RunID.String(), TaskID: request.TaskID.String(), AgentID: request.AgentID.String(), Status: request.Status.String(), Revision: uint64(request.Revision.Int64()), RunRevision: uint64(request.RunRevision.Int64()), Question: request.QuestionText, Options: append([]string{}, request.Options...)})
 	}
 	return api.NewHumanRequestListReply(result)
@@ -1180,10 +1220,15 @@ func (daemon *Daemon) oversight(ctx context.Context, project kernel.ProjectID) (
 	return status, nil
 }
 
-func (daemon *Daemon) snapshot(ctx context.Context) api.Reply {
+func (daemon *Daemon) snapshot(ctx context.Context, scope *kernel.ProjectID) api.Reply {
 	snapshot, err := daemon.store.Snapshot(ctx)
 	if err != nil {
 		return newErrorReply(remoteErrorCode(err))
+	}
+	if scope != nil {
+		snapshot.Projects = slices.DeleteFunc(snapshot.Projects, func(project kernel.ProjectSummary) bool { return project.ID != *scope })
+		snapshot.Agents = slices.DeleteFunc(snapshot.Agents, func(agent kernel.AgentSummary) bool { return agent.ProjectID != *scope })
+		snapshot.Tasks = slices.DeleteFunc(snapshot.Tasks, func(task kernel.TaskSummary) bool { return task.ProjectID != *scope })
 	}
 	public := projectSnapshot(snapshot)
 	reply, err := api.NewSnapshotReply(public)
@@ -1757,7 +1802,7 @@ func (daemon *Daemon) sendBack(ctx context.Context, call api.Call) api.Reply {
 	}
 	// An attempt is authenticated before anything is read on its behalf, so a
 	// credential the kernel would refuse learns nothing about any task.
-	var digest kernel.AttemptDigest
+	var digest *kernel.AttemptDigest
 	var authority kernel.AttemptAuthority
 	raw, attempt := call.AttemptDigest()
 	if attempt {
@@ -1772,7 +1817,7 @@ func (daemon *Daemon) sendBack(ctx context.Context, call api.Call) api.Reply {
 		if authority.Role != kernel.RoleOrchestrator {
 			return newErrorReply(api.RemoteUnauthorized)
 		}
-		digest = kDigest
+		digest = &kDigest
 	}
 	// The body a send-back leaves is the provider's whole task, so it must fit
 	// the provider of the agent that will run it, or the retry would be queued
@@ -1803,12 +1848,7 @@ func (daemon *Daemon) sendBack(ctx context.Context, call api.Call) api.Reply {
 	if _, _, err := provider.PrepareTask(agent.Provider, []byte(kernel.SentBackBody(current, input.Note))); err != nil {
 		return newErrorReply(api.RemoteTooLarge)
 	}
-	var task kernel.Task
-	if attempt {
-		task, err = daemon.store.SendBackTaskForAttempt(ctx, digest, taskID, input.Head, input.Note, at)
-	} else {
-		task, err = daemon.store.SendBackTask(ctx, taskID, current.Revision, input.Head, input.Note, at)
-	}
+	task, err := daemon.store.SendBackTask(ctx, digest, taskID, current.Revision, input.Head, input.Note, at)
 	if err != nil {
 		// A stale head names the Change head to observe instead.
 		if errors.Is(err, kernel.ErrSuperseded) {
@@ -2018,7 +2058,7 @@ func (daemon *Daemon) overseerUpdateTask(ctx context.Context, call api.Call) api
 		if err != nil {
 			return newErrorReply(api.RemoteInternal)
 		}
-		task, err := daemon.store.RetryTaskForOverseer(ctx, digest, id, expected, assigned, at)
+		task, err := daemon.store.RetryTask(ctx, &digest, id, expected, assigned, at, 0)
 		if err != nil {
 			return newErrorReply(remoteErrorCode(err))
 		}
@@ -2116,7 +2156,7 @@ func (daemon *Daemon) operatorUpdateTask(ctx context.Context, call api.Call) api
 		if err != nil {
 			return newErrorReply(api.RemoteInternal)
 		}
-		task, err := daemon.store.RetryTaskForOperator(ctx, id, expected, value, at)
+		task, err := daemon.store.RetryTask(ctx, nil, id, expected, value, at, 0)
 		if err != nil {
 			return newErrorReply(remoteErrorCode(err))
 		}

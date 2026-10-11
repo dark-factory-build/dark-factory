@@ -73,7 +73,8 @@ const (
   factoryctl attempt peer ask --task ID --idempotency-key HEX32 --question TEXT
   factoryctl attempt peer answer --question ID --revision REVISION --idempotency-key HEX32 --answer TEXT
   factoryctl attempt terminal observe --project ID --task ID --run ID [--cursor N] [--max-bytes N]
-  factoryctl attempt status | human list | intake list|config [--project ID] | task read --task ID --revision REVISION [--offset N] (a specialist's review run only)
+  factoryctl attempt status | human list | intake list|config [--project ID] | task read --task ID --revision REVISION [--offset N] (a specialist's review run only; an overseer may list intake)
+  factoryctl attempt review --project ID --repository OWNER/REPO --pull N --head SHA --base SHA --base-ref REF (an overseer only: one fresh review of a head with no verdict of record; a same-head BLOCK stands)
   factoryctl terminal observe --project ID --task ID --run ID [--cursor N] [--max-bytes N] [--text]
   factoryctl attempt send-back --task ID [--head SHA] --note TEXT
   factoryctl overseer status [--task ID] [--offset N --head HEAD] [--text-offset RUNES --head HEAD]
@@ -296,6 +297,7 @@ type attemptCommand struct {
 	limit               uint64
 	cursor              string
 	peerOffset          uint64
+	peerHead            uint64
 	head                uint64
 	textOffset          uint64
 	terminalText        bool
@@ -778,6 +780,11 @@ func parse(args []string) (attemptCommand, bool, bool) {
 		return command, help, ok && (command.kind == commandStatus && command.project == "" || command.kind == commandHumanList || command.kind == commandTaskRead || command.kind == commandIntake && command.intake.Action == "list")
 	}
 	switch args[1] {
+	case "review":
+		// The attempt credential reaches the operator's intake call; the
+		// daemon admits only an overseer, in its own project.
+		input, ok := parseReview(args[2:], io.Discard)
+		return attemptCommand{kind: commandIntake, intake: input, attemptRead: true}, false, ok && api.ValidIntakeInput(input)
 	case "task":
 		if len(args) == 2 {
 			return attemptCommand{kind: commandAttemptTask}, false, true
@@ -1658,7 +1665,7 @@ func parseOperator(args []string) (attemptCommand, bool, bool) {
 	case "task send-back":
 		command.kind, names = commandTaskSendBack, []string{"--task", "--head", "--note"}
 	case "task read":
-		command.kind, names = commandTaskRead, []string{"--task", "--revision", "--offset", "--peer-offset"}
+		command.kind, names = commandTaskRead, []string{"--task", "--revision", "--offset", "--peer-offset", "--peer-head"}
 	default:
 		return attemptCommand{}, false, false
 	}
@@ -1751,6 +1758,8 @@ func parseOperator(args []string) (attemptCommand, bool, bool) {
 			command.offset = count
 		case name == "--peer-offset" && command.kind == commandTaskRead && isCount:
 			command.peerOffset = count
+		case name == "--peer-head" && command.kind == commandTaskRead && isCount:
+			command.peerHead = count
 		case name == "--head" && command.kind == commandTaskSendBack:
 			command.sourceCommit = value
 		case name == "--note" && command.kind == commandTaskSendBack && validOperatorText(value, 1, 8192):
@@ -2518,7 +2527,7 @@ func runOperator(ctx context.Context, command attemptCommand, getenv func(string
 			Revision uint64 `json:"revision"`
 		}{ID: command.id, Head: result.Head, Revision: result.Revision})
 	case commandTaskRead:
-		result, callErr := client.ReadTask(callContext, api.TaskReadInput{TaskID: command.id, ExpectedRevision: command.expectedRevision, Offset: command.offset})
+		result, callErr := client.ReadTask(callContext, api.TaskReadInput{TaskID: command.id, ExpectedRevision: command.expectedRevision, Offset: command.offset, PeerOffset: command.peerOffset, PeerHead: command.peerHead})
 		if callErr != nil {
 			return writeWebFailure(stderr, "task read", callErr)
 		}

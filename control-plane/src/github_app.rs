@@ -279,8 +279,9 @@ fn close_on_merge_is_default(value: &bool) -> bool {
     *value
 }
 
-/// Replace an open pull request's body. The App adds its own operation marker
-/// so a lost response can be reconciled without adopting a different edit.
+/// Replace an open pull request's body, and with `close` close it unmerged in
+/// the same write. The App adds its own operation marker so a lost response
+/// can be reconciled without adopting a different edit.
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct UpdatePullRequestBody {
@@ -288,6 +289,9 @@ pub(crate) struct UpdatePullRequestBody {
     pub(crate) operation_id: String,
     pub(crate) pull_number: i64,
     pub(crate) body: String,
+    /// Omitted means false, preserving old request digests.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub(crate) close: bool,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -3697,6 +3701,8 @@ impl Authority {
         #[derive(Serialize)]
         struct Body {
             body: String,
+            #[serde(skip_serializing_if = "Option::is_none")]
+            state: Option<&'static str>,
         }
         let pull: PullRequest = github_json_request(
             worker::Method::Patch,
@@ -3707,6 +3713,7 @@ impl Authority {
             token.as_str(),
             Some(&Body {
                 body: request.marked_body()?,
+                state: request.close.then_some("closed"),
             }),
         )
         .await?;
@@ -4547,10 +4554,13 @@ impl PullRequest {
         if self.number != request.pull_number {
             return Err(OperationError::Conflict);
         }
-        if self.state != "open" || self.merged {
+        if self.merged || self.state != "open" && !request.close {
             return Err(OperationError::Conflict);
         }
-        if self.body.as_deref() != Some(request.marked_body()?.as_str()) {
+        // A closing write is complete only once its body and its close landed.
+        if self.body.as_deref() != Some(request.marked_body()?.as_str())
+            || request.close && self.state != "closed"
+        {
             return Ok(None);
         }
         Ok(Some(PullRequestResult {
@@ -7401,6 +7411,7 @@ mod tests {
             operation_id: "1c8a5c44-7f1f-11f0-952e-acde48001122".into(),
             pull_number: 407,
             body: "Updated cumulative production-line delta.".into(),
+            close: false,
         };
         assert!(update.validate().is_ok());
         assert!(
@@ -7454,6 +7465,23 @@ mod tests {
             "b".repeat(40),
             "the body operation reports its observed head; it does not claim a head condition GitHub cannot enforce"
         );
+        // Closing a superseded pull request (#1725) completes only on a closed
+        // pull carrying its body; a plain body write never adopts a closed one.
+        assert!(
+            serde_json::to_value(&update)
+                .unwrap()
+                .get("close")
+                .is_none()
+        );
+        let closing = UpdatePullRequestBody {
+            close: true,
+            ..update.clone()
+        };
+        updated_pull.body = Some(closing.marked_body().unwrap());
+        assert!(updated_pull.body_result(&closing).unwrap().is_none());
+        updated_pull.state = "closed".into();
+        assert!(updated_pull.body_result(&closing).unwrap().is_some());
+        assert!(updated_pull.body_result(&update).is_err());
 
         let mut review: SubmitPullRequestReview = serde_json::from_value(serde_json::json!({
             "repository": "dark-factory-build/dark-factory",
