@@ -61,7 +61,7 @@ ORDER BY version LIMIT 33`
 // carrier task that last named it and whether OverseerRewakeAfter has passed
 // since any wake named it. It takes the wake query's arguments; ?7 and ?8 are
 // named only so the counts agree.
-const overseerStalledItems = overseerItems + `SELECT last, CASE WHEN id IS NULL THEN detail || ' ' || item_key ELSE (` + overseerWakeLine + `) END,
+const overseerStalledItems = overseerItems + `SELECT last, CASE WHEN id IS NULL THEN detail || CASE WHEN instr(detail, ' [reviewer:') > 0 THEN '' ELSE ' ' || item_key END ELSE (` + overseerWakeLine + `) END,
 	named_at + ?6 <= ?3 FROM counted AS due WHERE wakes > rewakes AND ?7 + ?8 >= 0 ORDER BY last, version`
 
 const overseerItems = `WITH carrier AS MATERIALIZED (SELECT t.id AS task, t.created_at_ms AS at, substr(t.body, instr(t.body, 'Factory causal wake: ')) AS names,
@@ -97,8 +97,14 @@ item AS (
 	JOIN production_records AS p ON p.project_id = e.project_id AND p.repository = e.repository AND p.kind = 'pull_request'
 	  AND p.identity = CAST(json_extract(e.document, '$.request.PullNumber') AS TEXT)
 	WHERE e.project_id = ?1 AND e.kind = 'reviewer' AND COALESCE(json_extract(e.document, '$.escalation'), '') <> ''
-	  AND json_extract(p.document, '$.state') = 'open'
+	  AND COALESCE(json_extract(e.document, '$.route_pending'), 0) = 0 AND json_extract(p.document, '$.state') = 'open'
 	  AND lower(json_extract(p.document, '$.head')) = lower(json_extract(e.document, '$.request.Head'))
+	  AND NOT EXISTS (SELECT 1 FROM production_records AS newer
+	    WHERE newer.project_id = e.project_id AND newer.repository = e.repository AND newer.kind = 'reviewer'
+	      AND json_extract(newer.document, '$.request.PullNumber') = json_extract(e.document, '$.request.PullNumber')
+	      AND lower(json_extract(newer.document, '$.request.Head')) = lower(json_extract(e.document, '$.request.Head'))
+	      AND json_extract(newer.document, '$.escalation') = json_extract(e.document, '$.escalation')
+	      AND (newer.observed_at_ms > e.observed_at_ms OR (newer.observed_at_ms = e.observed_at_ms AND newer.identity > e.identity)))
 	UNION ALL SELECT NULL, COALESCE(json_extract(d.document, '$.failed_at'), d.observed_at_ms), 0, CASE json_extract(d.document, '$.state')
 	  WHEN 'failed' THEN printf('Escalated: factoryd %s failed in phase %s: %s', d.identity, json_extract(d.document, '$.phase'), replace(json_extract(d.document, '$.reason'), char(10), ' '))
 	  ELSE printf('Escalated: factoryd %s is %s after a release failed in phase %s', d.identity, json_extract(d.document, '$.state'), replace(json_extract(d.document, '$.cause'), char(10), ' ')) END,
@@ -448,7 +454,9 @@ func (store *Store) OverseerItems(ctx context.Context, project ProjectID, at Uni
 					return nil, errors.Join(err, rows.Close())
 				}
 				if escalation {
-					item.Line += " " + key
+					if !strings.Contains(item.Line, key) {
+						item.Line += " " + key
+					}
 				}
 				items = append(items, item)
 			}
@@ -481,7 +489,11 @@ func overseerWake(ctx context.Context, connection *sql.Conn, agent Agent, at int
 			break
 		}
 		if escalation {
-			escalations = append(escalations, strings.ToValidUTF8(detail[:min(len(detail), 256)], "")+" "+key+escalationWhy(ctx, connection, agent.ProjectID, key))
+			line := strings.ToValidUTF8(detail[:min(len(detail), 256)], "")
+			if !strings.Contains(line, key) {
+				line += " " + key
+			}
+			escalations = append(escalations, line+escalationWhy(ctx, connection, agent.ProjectID, key))
 		} else if !slices.Contains(lines, detail) {
 			lines = append(lines, detail)
 		}
@@ -525,7 +537,7 @@ const overseerWakeCounts = `WITH open_pr AS (SELECT p.repository, CAST(json_extr
 		  AND json_extract(c.document, '$.conclusion') IN ('failure', 'timed_out', 'action_required', 'cancelled', 'startup_failure')) AS failing
 	FROM open_pr)
 SELECT printf('worker tasks queued=%d running=%d; open factory PRs conflicting=%d failing=%d approved-not-queued=%d', COALESCE(SUM(t.status = 'queued'), 0), COALESCE(SUM(t.status = 'running'), 0),
-	(SELECT COALESCE(SUM(merge_state = 'dirty' OR COALESCE(mergeable = 0, 0)), 0) FROM classified),
+	(SELECT COALESCE(SUM(COALESCE(mergeable = 0, 0)), 0) FROM classified),
 	(SELECT COALESCE(SUM(failing), 0) FROM classified),
 	(SELECT COALESCE(SUM(review = 'allow' AND NOT failing AND merge_state <> 'dirty' AND COALESCE(mergeable, 1) <> 0 AND merge_queue = 'none'), 0) FROM classified))
 FROM tasks AS t LEFT JOIN agents AS a ON a.id = t.assigned_agent_id
