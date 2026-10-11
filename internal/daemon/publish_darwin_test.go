@@ -402,6 +402,55 @@ func TestCorrectionKeepsWorkerCommitsAndMainChanges(t *testing.T) {
 	}
 }
 
+func TestCorrectionExcludesImportedMainCommits(t *testing.T) {
+	fixture, c, source, app, checkout := publishFixture(t, 1, false)
+	ctx := context.Background()
+	root, git := filepath.Dir(source), change.TrustedGitExecutable
+	workerHead := c.Head
+	registered := strings.TrimSpace(supervisorGitOutput(t, git, "-C", root, "remote", "get-url", "origin"))
+	supervisorGit(t, git, "-C", registered, "fetch", "-q", "--update-head-ok", root, "HEAD:worker")
+	if err := os.WriteFile(filepath.Join(registered, "main-only.txt"), []byte("main 1\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	supervisorGit(t, git, "-C", registered, "-c", "user.name=fixture", "-c", "user.email=fixture@example.invalid", "add", "main-only.txt")
+	supervisorGit(t, git, "-C", registered, "-c", "user.name=fixture", "-c", "user.email=fixture@example.invalid", "commit", "-q", "-m", "main 1")
+	m1 := strings.TrimSpace(supervisorGitOutput(t, git, "-C", registered, "rev-parse", "HEAD"))
+	app.main = m1
+	supervisorGit(t, git, "-C", registered, "merge", "-q", "--no-ff", "worker", "-m", "published")
+	app.tip = strings.TrimSpace(supervisorGitOutput(t, git, "-C", registered, "rev-parse", "HEAD"))
+	if err := os.WriteFile(filepath.Join(registered, "main-only.txt"), []byte("main 2\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	supervisorGit(t, git, "-C", registered, "-c", "user.name=fixture", "-c", "user.email=fixture@example.invalid", "add", "main-only.txt")
+	supervisorGit(t, git, "-C", registered, "-c", "user.name=fixture", "-c", "user.email=fixture@example.invalid", "commit", "-q", "-m", "main 2")
+	app.main = strings.TrimSpace(supervisorGitOutput(t, git, "-C", registered, "rev-parse", "HEAD"))
+	supervisorGit(t, git, "-C", root, "fetch", "-q", "origin", "main")
+	supervisorGit(t, git, "-C", root, "merge", "-q", "--no-ff", m1, "-m", "integrate main")
+	if err := os.WriteFile(filepath.Join(root, "f00.txt"), []byte("correction\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	supervisorGit(t, git, "-C", root, "-c", "user.name=fixture", "-c", "user.email=fixture@example.invalid", "add", "f00.txt")
+	supervisorGit(t, git, "-C", root, "-c", "user.name=fixture", "-c", "user.email=fixture@example.invalid", "commit", "-q", "-m", "correction")
+	c.Head = strings.TrimSpace(supervisorGitOutput(t, git, "-C", root, "rev-parse", "HEAD"))
+	app.journal[uuid5("dark-factory:"+c.Change.String()+":publish-"+workerHead[:8]+"-1")] = json.RawMessage(`{"commit_sha":"published","parent_sha":"` + c.Base + `"}`)
+	c.Pull = 31
+	if err := fixture.daemon.publishChange(ctx, c, "team/repo", source, app.call, checkout); err != nil {
+		t.Fatal(err)
+	}
+	if len(app.writes) < 1 || app.writes[0]["name"] != "publish_commit" {
+		t.Fatalf("writes = %+v", app.writes)
+	}
+	changes := app.writes[0]["arguments"].(map[string]any)["changes"].([]map[string]any)
+	for _, entry := range changes {
+		if entry["path"] == "main-only.txt" {
+			t.Fatalf("imported main path published: %+v", changes)
+		}
+	}
+	if len(changes) != 1 || changes[0]["path"] != "f00.txt" {
+		t.Fatalf("correction changes = %+v", changes)
+	}
+}
+
 func TestEvidenceOnlyCorrectionKeepsMainChangeOnWorkerPath(t *testing.T) {
 	fixture, c, source, app, checkout := publishFixture(t, 1, false)
 	ctx := context.Background()
