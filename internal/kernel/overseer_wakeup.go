@@ -93,12 +93,11 @@ item AS (
 	JOIN agents AS o ON o.id = i.overseer_agent_id
 	WHERE t.project_id = ?1 AND o.id = ?4 AND ` + taskEndedAutomatically + ` AND NOT ` + taskIssueWithdrawn + `
 	UNION ALL SELECT NULL, e.observed_at_ms, CASE WHEN json_extract(e.document, '$.owner_approval') THEN 0 ELSE 3 END,
-	  'Escalated: ' || json_extract(e.document, '$.escalation') || ' [reviewer:' || e.identity || ']',
-	  'Escalated: ' || json_extract(e.document, '$.escalation') FROM production_records AS e
+	  'Escalated: ' || json_extract(e.document, '$.escalation'), '[reviewer:' || e.identity || ']' FROM production_records AS e
 	JOIN production_records AS p ON p.project_id = e.project_id AND p.repository = e.repository AND p.kind = 'pull_request'
 	  AND p.identity = CAST(json_extract(e.document, '$.request.PullNumber') AS TEXT)
 	WHERE e.project_id = ?1 AND e.kind = 'reviewer' AND COALESCE(json_extract(e.document, '$.escalation'), '') <> ''
-	  AND json_extract(p.document, '$.state') = 'open'
+	  AND COALESCE(json_extract(e.document, '$.route_pending'), 0) = 0 AND json_extract(p.document, '$.state') = 'open'
 	  AND lower(json_extract(p.document, '$.head')) = lower(json_extract(e.document, '$.request.Head'))
 	  AND NOT EXISTS (SELECT 1 FROM production_records AS newer
 	    WHERE newer.project_id = e.project_id AND newer.repository = e.repository AND newer.kind = 'reviewer'
@@ -519,7 +518,7 @@ func overseerWake(ctx context.Context, connection *sql.Conn, agent Agent, at int
 			if !strings.Contains(line, key) {
 				line += " " + key
 			}
-			escalations = append(escalations, line)
+			escalations = append(escalations, line+escalationWhy(ctx, connection, agent.ProjectID, key))
 		} else if !slices.Contains(lines, detail) {
 			lines = append(lines, detail)
 		}

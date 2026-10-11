@@ -168,7 +168,7 @@ func (store *Store) EnqueueTask(ctx context.Context, spec NewTask, at UnixMillis
 		return Task{}, tx.Rollback(err)
 	}
 	for _, item := range content {
-		if err := attachContentTx(ctx, tx, spec.ID, result.ProjectID, result.WorkRevision.Int64(), item.ContentID, item.ContentRevision, at); err != nil {
+		if err := attachContentTx(ctx, tx, spec.ID, result.ProjectID, result.WorkRevision.Int64(), item.ContentID, item.ContentRevision, at, false); err != nil {
 			return Task{}, tx.Rollback(err)
 		}
 	}

@@ -1025,7 +1025,7 @@ func TestInstalledBrowserBridgeUsesOnlyRunPathsForBothProviders(t *testing.T) {
 				var found bool
 				for i, arg := range args {
 					if kind == kernel.ProviderCodex && strings.HasPrefix(arg, "mcp_servers.factory_browser=") {
-						found = strings.Contains(arg, tomlBasicString(runtime.temp)) && strings.Contains(arg, "required=true") && strings.Contains(arg, `env_vars=["DARK_FACTORY_FACTORYCTL","DARK_FACTORY_SOCKET","DARK_FACTORY_ATTEMPT_TOKEN_FILE"]`) && strings.Contains(arg, `default_tools_approval_mode="approve"`)
+						found = strings.Contains(arg, tomlBasicString(runtime.temp)) && strings.Contains(arg, "required=false") && !strings.Contains(arg, "env_vars") && strings.Contains(arg, `default_tools_approval_mode="approve"`)
 					}
 					if kind == kernel.ProviderClaudeCode && arg == "--mcp-config" {
 						var config struct {
@@ -1055,6 +1055,59 @@ func TestInstalledBrowserBridgeUsesOnlyRunPathsForBothProviders(t *testing.T) {
 				t.Fatalf("unsafe bridge: %v", err)
 			}
 		})
+	}
+}
+
+// The installed bridge starts its server in each TMPDIR shape the Change
+// worker gives a run, with no attempt credentials or factory call (#1753).
+func TestBrowserBridgeStartsInRunnerTemp(t *testing.T) {
+	python, err := exec.LookPath("python3")
+	if err != nil {
+		t.Skip("python3 unavailable")
+	}
+	root, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	source, err := os.ReadFile("../../scripts/dark-factory-browser-mcp.py")
+	if err != nil {
+		t.Fatal(err)
+	}
+	bridge := filepath.Join(root, "dark-factory-browser-mcp")
+	node := filepath.Join(root, "node")
+	for path, body := range map[string]string{bridge: string(source), node: "#!/bin/sh\nprintf '%s\\n' \"$PWD\" \"$@\" > \"$0.out\"\n", root + "/cli.js": "", root + "/browser": ""} {
+		if err := os.WriteFile(path, []byte(body), 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	config, _ := json.Marshal(map[string]any{"command": []string{node, root + "/cli.js"}, "executable": root + "/browser", "origins": []string{"http://127.0.0.1:5196"}, "headless": true})
+	if err := os.WriteFile(bridge+".json", config, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	// The runtime's own tmp, and the short one when the shared directory allows it.
+	runtime := filepath.Join(root, "1c9ffc2e693fc7e136a920e20a3092ed")
+	temps := []string{filepath.Join(runtime, "tmp")}
+	if err := os.MkdirAll(temps[0], 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if short := runner.ClaimPrivateTemp(runtime); short != "" {
+		t.Cleanup(func() { _ = os.RemoveAll(short) })
+		temps = append(temps, short)
+	}
+	for _, temp := range temps {
+		command := exec.Command(python, "-I", bridge, "--runtime-dir", temp)
+		command.Env = []string{"PATH=/usr/bin:/bin"}
+		if output, err := command.CombinedOutput(); err != nil {
+			t.Fatalf("bridge in %s: %v: %s", temp, err, output)
+		}
+		launched, err := os.ReadFile(node + ".out")
+		if err != nil {
+			t.Fatal(err)
+		}
+		lines := strings.Split(string(launched), "\n")
+		if !strings.HasPrefix(lines[0], temp+"/browser-") || !slices.Contains(lines, lines[0]+"/output") {
+			t.Fatalf("bridge in %s launched %q", temp, lines)
+		}
 	}
 }
 

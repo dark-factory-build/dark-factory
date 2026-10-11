@@ -57,10 +57,12 @@ func (store *Store) UpdateAgentForOverseer(ctx context.Context, digest AttemptDi
 	return store.updateAgent(ctx, &digest, id, expected, patch, at)
 }
 
-// UpdateAgentForOperator applies the same bounded lifecycle edit, or one
-// appearance edit, without inventing browser authority for the local operator.
+// UpdateAgentForOperator applies one appearance edit, or the same bounded
+// lifecycle edit with any of cadence, wake-on and model (factoryctl agent set),
+// without inventing browser authority for the local operator. The standing
+// instruction, its policy and budget, and the account keep their own commands.
 func (store *Store) UpdateAgentForOperator(ctx context.Context, id AgentID, expected Revision, patch AgentPatch, at UnixMillis) (Agent, error) {
-	if (patch.Paused == nil && patch.Archived == nil) == (patch.Appearance == nil) || patch.Paused != nil && patch.Archived != nil || patch.Model != nil || patch.ReasoningEffort != nil || patch.AccountID != nil || patch.IdlePolicy != nil || patch.IdleAfterSeconds != nil || patch.IdleInstruction != nil || patch.IdleRunBudget != nil || patch.IdleWakeOn != nil {
+	if patch == (AgentPatch{}) || patch.Appearance != nil && patch != (AgentPatch{Appearance: patch.Appearance}) || patch.Paused != nil && patch.Archived != nil || patch.AccountID != nil || patch.IdlePolicy != nil || patch.IdleInstruction != nil || patch.IdleRunBudget != nil {
 		return Agent{}, fmt.Errorf("%w: invalid operator agent update", ErrInvalidValue)
 	}
 	return store.updateAgent(ctx, nil, id, expected, patch, at)

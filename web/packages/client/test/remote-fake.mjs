@@ -14,7 +14,21 @@ export const RELAY_ORIGIN = "wss://relay.example";
 export const PWA_ORIGIN = "https://app.darkfactory.build";
 
 export const tick = () => new Promise((resolve) => setTimeout(resolve, 0));
-export async function settle(rounds = 8) { for (let index = 0; index < rounds; index++) await tick(); }
+// Key generation and signing run on crypto.subtle's thread pool, which no
+// fixed number of ticks outlasts on a loaded runner, so settle waits for every
+// call in flight and then for rounds quiet ticks.
+let subtleInFlight = 0;
+for (const name of ["generateKey", "importKey", "exportKey", "sign", "verify", "digest"]) {
+  const subtle = globalThis.crypto.subtle;
+  const call = subtle[name].bind(subtle);
+  subtle[name] = (...args) => {
+    subtleInFlight += 1;
+    return call(...args).finally(() => { subtleInFlight -= 1; });
+  };
+}
+export async function settle(rounds = 8) {
+  for (let quiet = 0; quiet < rounds; quiet = subtleInFlight > 0 ? 0 : quiet + 1) await tick();
+}
 
 export function nodeId(character = "a") { return character.repeat(32); }
 

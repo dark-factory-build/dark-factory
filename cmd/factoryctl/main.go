@@ -74,6 +74,7 @@ const (
   factoryctl attempt peer answer --question ID --revision REVISION --idempotency-key HEX32 --answer TEXT
   factoryctl attempt terminal observe --project ID --task ID --run ID [--cursor N] [--max-bytes N]
   factoryctl attempt status | human list | intake list|config [--project ID] | task read --task ID --revision REVISION [--offset N] (a specialist's review run only; an overseer may list intake)
+  factoryctl attempt report [--since 24h|7d] [--by hour|half-day|day] | why --pull N | --task ID (an overseer or a specialist, in its own project)
   factoryctl attempt review --project ID --repository OWNER/REPO --pull N --head SHA --base SHA --base-ref REF (an overseer only: one fresh review of a head with no verdict of record; a same-head BLOCK stands)
   factoryctl terminal observe --project ID --task ID --run ID [--cursor N] [--max-bytes N] [--text]
   factoryctl attempt send-back --task ID [--head SHA] --note TEXT
@@ -102,6 +103,8 @@ const (
   factoryctl agent idle-policy --agent ID --revision REVISION --policy wait
   factoryctl agent idle-policy --agent ID --revision REVISION --policy standing_instruction --after-seconds N --instruction TEXT [--run-budget N] [--wake-on failures|merges|failures,merges]
   factoryctl agent pause|resume|archive|restore --agent ID --revision REVISION
+  factoryctl agent set --agent ID [--cadence DURATION] [--wake-on failures|merges|failures,merges|none] [--model TEXT] [--reasoning-effort EFFORT] [--pause|--resume]
+    Changes only the named fields at the current revision; the standing instruction is kept.
   factoryctl worker stop --operation-id ID --task ID --task-revision REVISION --run ID --run-revision REVISION
   factoryctl worker replace --operation-id ID --task ID --task-revision REVISION --run ID --run-revision REVISION --successor-task ID --successor-incarnation ID --instruction TEXT
   factoryctl worker message --operation-id ID --task ID --task-revision REVISION --run ID --run-revision REVISION --message TEXT
@@ -118,6 +121,10 @@ const (
   factoryctl task add --project ID [--repository ID] --agent ID|any --title TEXT [--body TEXT] [--priority N] [--content ID:REVISION[,ID:REVISION...]] [--task-id ID --incarnation-id ID]
     --agent any queues the task for any eligible worker in the project; the first worker admitted keeps it.
     --content pins up to eight project content revisions before any worker can admit the task.
+  factoryctl report [--project ID] [--since 24h|7d] [--by hour|half-day|day]
+    Per bucket: runs, failure %, tokens (worker, overseer, specialist), merges and tokens per merge; then the top five tasks and pull requests by tokens.
+  factoryctl why --pull N | --task ID [--project ID]
+    One line each: exact head, checks, review at head, queue, task, the reconciler's last action and why, and whom it waits on.
   factoryctl status [--project ID]
     --project prints what factoryd waits on there instead: held health conditions,
     the overseers' due and stalled items, Changes reclaim keeps by reason, and
@@ -134,6 +141,9 @@ const (
     factory's service, with rollback, if it descends from the running build.
     --wait exits 0 verified, 1 failed its trial, 75 refused with no effect.
   factoryctl task read --task ID --revision REVISION [--offset N]
+  factoryctl production --project ID [--offset N --limit N]
+  factoryctl task history --task ID
+  factoryctl task list --agent ID [--cursor UPDATED_AT_MS:TASK_ID]
   factoryctl dispatch on|off [--revision REVISION]
   factoryctl capacity --workers N --revision REVISION
     Worker slots only; the separate overseer lane remains available.
@@ -212,6 +222,9 @@ const (
 	commandTaskAdd
 	commandTaskSendBack
 	commandTaskRead
+	commandProduction
+	commandTaskHistory
+	commandTaskList
 	commandDispatch
 	commandCapacity
 	commandStatus
@@ -243,6 +256,8 @@ const (
 	commandOutcomeWrite
 	commandOutcomeRead
 	commandOutcomeList
+	commandReport
+	commandAgentSet
 )
 
 type attemptCommand struct {
@@ -288,6 +303,10 @@ type attemptCommand struct {
 	priority            int64
 	prioritySet         bool
 	offset              uint64
+	limit               uint64
+	cursor              string
+	peerOffset          uint64
+	peerHead            uint64
 	head                uint64
 	textOffset          uint64
 	terminalText        bool
@@ -311,6 +330,8 @@ type attemptCommand struct {
 	knowledgeThread     string
 	contentKind         string
 	intake              api.IntakeInput
+	report              api.ReportInput
+	agentSet            api.OverseerAgentUpdateInput
 	contentID           string
 	contentRevision     uint64
 	description         string
@@ -416,7 +437,7 @@ func runWithDependencies(ctx context.Context, args []string, getenv func(string)
 	if command.kind == commandRemoteStatus {
 		return runRemote(ctx, getenv, stdout, stderr)
 	}
-	if command.kind == commandAgentPaths || command.kind == commandOperatorTerminalObserve || command.kind == commandWorkerOperation || command.kind == commandProjectCreate || command.kind == commandProjectRepository || command.kind == commandIntake || command.kind == commandProjectLimits || command.kind == commandAgentCreate || command.kind == commandAgentIdlePolicy || command.kind == commandAccountsDiscover || command.kind == commandAccountsList || command.kind == commandAccountLink || command.kind == commandAgentSelectAccount || command.kind == commandAgentSelectModel || command.kind == commandTaskAdd || command.kind == commandTaskSendBack || command.kind == commandTaskRead || command.kind == commandDispatch || command.kind == commandCapacity || command.kind == commandStatus || command.kind == commandCompactStorage || command.kind == commandBackupCreate || command.kind == commandBackupVerify || command.kind == commandHumanList || command.kind == commandHumanReply || command.kind == commandHumanCancel {
+	if command.kind == commandAgentPaths || command.kind == commandOperatorTerminalObserve || command.kind == commandWorkerOperation || command.kind == commandProjectCreate || command.kind == commandProjectRepository || command.kind == commandIntake || command.kind == commandProjectLimits || command.kind == commandAgentCreate || command.kind == commandAgentIdlePolicy || command.kind == commandAccountsDiscover || command.kind == commandAccountsList || command.kind == commandAccountLink || command.kind == commandAgentSelectAccount || command.kind == commandAgentSelectModel || command.kind == commandTaskAdd || command.kind == commandTaskSendBack || command.kind == commandTaskRead || command.kind == commandProduction || command.kind == commandTaskHistory || command.kind == commandTaskList || command.kind == commandDispatch || command.kind == commandCapacity || command.kind == commandStatus || command.kind == commandCompactStorage || command.kind == commandBackupCreate || command.kind == commandBackupVerify || command.kind == commandHumanList || command.kind == commandHumanReply || command.kind == commandHumanCancel || command.kind == commandReport || command.kind == commandAgentSet {
 		return runOperator(ctx, command, getenv, stdout, stderr)
 	}
 	if command.kind >= commandContentCreate && command.kind <= commandContentAttachments && len(args) > 0 && args[0] == "content" {
@@ -683,7 +704,13 @@ func parse(args []string) (attemptCommand, bool, bool) {
 		command.operatorControl = ok
 		return command, help, ok
 	}
-	if len(args) >= 1 && (args[0] == "status" || args[0] == "storage" || args[0] == "backup" || args[0] == "content" || args[0] == "outcome" || args[0] == "project" || args[0] == "agent" || args[0] == "account" || args[0] == "task" || args[0] == "worker" || args[0] == "dispatch" || args[0] == "capacity" || args[0] == "intake") {
+	if len(args) >= 1 && (args[0] == "report" || args[0] == "why") {
+		return parseReport(args)
+	}
+	if len(args) >= 2 && args[0] == "agent" && args[1] == "set" {
+		return parseAgentSet(args[2:])
+	}
+	if len(args) >= 1 && (args[0] == "status" || args[0] == "storage" || args[0] == "backup" || args[0] == "content" || args[0] == "outcome" || args[0] == "project" || args[0] == "agent" || args[0] == "account" || args[0] == "task" || args[0] == "worker" || args[0] == "dispatch" || args[0] == "capacity" || args[0] == "intake" || args[0] == "production") {
 		return parseOperator(args)
 	}
 	if len(args) >= 1 && args[0] == "overseer" {
@@ -763,6 +790,11 @@ func parse(args []string) (attemptCommand, bool, bool) {
 	}
 	if args[1] == "outcome" {
 		return parseOutcome(args)
+	}
+	if args[1] == "report" || args[1] == "why" {
+		command, help, ok := parseReport(args[1:])
+		command.attemptRead = true
+		return command, help, ok
 	}
 	if args[1] == "status" || args[1] == "human" || args[1] == "intake" || args[1] == "task" && len(args) > 2 {
 		command, help, ok := parse(args[1:])
@@ -1396,6 +1428,29 @@ func parseWeb(args []string) (attemptCommand, bool, bool) {
 }
 
 func parseOperator(args []string) (attemptCommand, bool, bool) {
+	if len(args) >= 1 && args[0] == "production" {
+		values, ok := pairedFlagValues(args[1:], false, "--project", "--offset", "--limit")
+		if !ok || !validHumanRequestKey(values["--project"]) {
+			return attemptCommand{}, false, false
+		}
+		offset, offsetOK := parseCount(values["--offset"], true)
+		limit, limitOK := parseRevision(values["--limit"])
+		if values["--offset"] == "" {
+			offset, offsetOK = 0, true
+		}
+		if values["--limit"] == "" {
+			limit, limitOK = 8, true
+		}
+		return attemptCommand{kind: commandProduction, project: values["--project"], offset: offset, limit: limit}, false, offsetOK && limitOK && limit > 0 && limit <= 8
+	}
+	if len(args) >= 2 && args[0] == "task" && args[1] == "history" {
+		values, ok := pairedFlagValues(args[2:], false, "--task")
+		return attemptCommand{kind: commandTaskHistory, id: values["--task"]}, false, ok && validHumanRequestKey(values["--task"])
+	}
+	if len(args) >= 2 && args[0] == "task" && args[1] == "list" {
+		values, ok := pairedFlagValues(args[2:], false, "--agent", "--cursor")
+		return attemptCommand{kind: commandTaskList, agent: values["--agent"], cursor: values["--cursor"]}, false, ok && validHumanRequestKey(values["--agent"]) && (values["--cursor"] == "" || validOperatorText(values["--cursor"], 1, 256))
+	}
 	if len(args) >= 2 && args[0] == "intake" {
 		input := api.IntakeInput{Action: strings.ReplaceAll(args[1], "-", "_")}
 		if input.Action == "config" {
@@ -1632,7 +1687,7 @@ func parseOperator(args []string) (attemptCommand, bool, bool) {
 	case "task send-back":
 		command.kind, names = commandTaskSendBack, []string{"--task", "--head", "--note"}
 	case "task read":
-		command.kind, names = commandTaskRead, []string{"--task", "--revision", "--offset"}
+		command.kind, names = commandTaskRead, []string{"--task", "--revision", "--offset", "--peer-offset", "--peer-head"}
 	default:
 		return attemptCommand{}, false, false
 	}
@@ -1723,6 +1778,10 @@ func parseOperator(args []string) (attemptCommand, bool, bool) {
 			command.id = value
 		case name == "--offset" && command.kind == commandTaskRead && isCount:
 			command.offset = count
+		case name == "--peer-offset" && command.kind == commandTaskRead && isCount:
+			command.peerOffset = count
+		case name == "--peer-head" && command.kind == commandTaskRead && isCount:
+			command.peerHead = count
 		case name == "--head" && command.kind == commandTaskSendBack:
 			command.sourceCommit = value
 		case name == "--note" && command.kind == commandTaskSendBack && validOperatorText(value, 1, 8192):
@@ -2233,6 +2292,12 @@ func runOperator(ctx context.Context, command attemptCommand, getenv func(string
 	if command.kind >= commandOutcomeWrite && command.kind <= commandOutcomeList {
 		return runOutcome(callContext, client, command, stdout, stderr)
 	}
+	if command.kind == commandReport {
+		return runReport(callContext, client, command, stdout, stderr)
+	}
+	if command.kind == commandAgentSet {
+		return runAgentSet(callContext, client, command, stdout, stderr)
+	}
 	switch command.kind {
 	case commandIntake:
 		result, callErr := client.Intake(callContext, command.intake)
@@ -2490,11 +2555,54 @@ func runOperator(ctx context.Context, command attemptCommand, getenv func(string
 			Revision uint64 `json:"revision"`
 		}{ID: command.id, Head: result.Head, Revision: result.Revision})
 	case commandTaskRead:
-		result, callErr := client.ReadTask(callContext, api.TaskReadInput{TaskID: command.id, ExpectedRevision: command.expectedRevision, Offset: command.offset})
+		result, callErr := client.ReadTask(callContext, api.TaskReadInput{TaskID: command.id, ExpectedRevision: command.expectedRevision, Offset: command.offset, PeerOffset: command.peerOffset, PeerHead: command.peerHead})
 		if callErr != nil {
 			return writeWebFailure(stderr, "task read", callErr)
 		}
 		return writeJSON(stdout, result)
+	case commandProduction:
+		input, _ := json.Marshal(struct {
+			ProjectID string `json:"project_id"`
+			Offset    uint64 `json:"offset"`
+			Limit     uint64 `json:"limit"`
+		}{command.project, command.offset, command.limit})
+		result, callErr := client.ProjectContent(callContext, api.ProjectContentInput{Operation: "production", Input: input})
+		if callErr != nil {
+			return writeWebFailure(stderr, "production", callErr)
+		}
+		return writeJSON(stdout, json.RawMessage(result))
+	case commandTaskHistory:
+		input, _ := json.Marshal(struct {
+			TaskID string `json:"task_id"`
+		}{command.id})
+		result, callErr := client.ProjectContent(callContext, api.ProjectContentInput{Operation: "task_history", Input: input})
+		if callErr != nil {
+			return writeWebFailure(stderr, "task history", callErr)
+		}
+		return writeJSON(stdout, json.RawMessage(result))
+	case commandTaskList:
+		input := struct {
+			AgentID           string `json:"agent_id"`
+			BeforeUpdatedAtMS *int64 `json:"before_updated_at_ms,omitempty"`
+			BeforeTaskID      string `json:"before_task_id,omitempty"`
+		}{AgentID: command.agent}
+		if command.cursor != "" {
+			parts := strings.Split(command.cursor, ":")
+			if len(parts) != 2 {
+				return writeWebFailure(stderr, "task list", api.ErrInvalidInput)
+			}
+			at, err := strconv.ParseInt(parts[0], 10, 64)
+			if err != nil || !validHumanRequestKey(parts[1]) {
+				return writeWebFailure(stderr, "task list", api.ErrInvalidInput)
+			}
+			input.BeforeUpdatedAtMS, input.BeforeTaskID = &at, parts[1]
+		}
+		raw, _ := json.Marshal(input)
+		result, callErr := client.ProjectContent(callContext, api.ProjectContentInput{Operation: "task_list", Input: raw})
+		if callErr != nil {
+			return writeWebFailure(stderr, "task list", callErr)
+		}
+		return writeJSON(stdout, json.RawMessage(result))
 	case commandOverseerTaskUpdate:
 		input := api.OverseerTaskUpdateInput{TaskID: command.id, ExpectedRevision: command.expectedRevision, Cancel: command.cancel, Retry: command.retry, RemoveAttachments: command.removeAttachments}
 		if command.title != "" {

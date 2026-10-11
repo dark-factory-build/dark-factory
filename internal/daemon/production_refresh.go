@@ -471,6 +471,7 @@ func readMaintainerChecks(ctx context.Context, call maintainerMCP, repository st
 			Status     string  `json:"status"`
 			Conclusion *string `json:"conclusion"`
 			URL        string  `json:"url"`
+			Required   bool    `json:"required"`
 		} `json:"checks"`
 	}
 	if json.Unmarshal(content, &value) != nil || !strings.EqualFold(value.Head, pr.Head) || len(value.Checks) > 100 {
@@ -490,7 +491,7 @@ func readMaintainerChecks(ctx context.Context, call maintainerMCP, repository st
 			conclusion = *check.Conclusion
 		}
 		key := sha256.Sum256([]byte(strings.ToLower(pr.Head) + "\x00" + check.Name))
-		checks = append(checks, kernel.ProductionCheck{ID: hex.EncodeToString(key[:16]), Name: check.Name, Revision: strings.ToLower(pr.Head), Scope: "head", State: check.Status, Conclusion: conclusion, URL: check.URL, PullRequests: []uint64{pr.Number}, Jobs: []kernel.ProductionJob{}})
+		checks = append(checks, kernel.ProductionCheck{ID: hex.EncodeToString(key[:16]), Name: check.Name, Revision: strings.ToLower(pr.Head), Scope: "head", State: check.Status, Conclusion: conclusion, URL: check.URL, Required: check.Required, PullRequests: []uint64{pr.Number}, Jobs: []kernel.ProductionJob{}})
 	}
 	return checks, nil
 }

@@ -335,8 +335,10 @@ An operator can install `scripts/dark-factory-browser-mcp.py` as the executable
 Claude then receive the explicit `factory_browser` MCP server; an absent bridge
 leaves browser tools unavailable, and an unsafe installed bridge refuses launch.
 This reuses Playwright MCP, not Codex desktop control or a personal browser.
-The bridge authenticates the live attempt through `factoryctl attempt task`
-before starting the server. Chromium starts on the first browser action.
+The bridge receives no attempt credentials and makes no factory call, and it is
+never a required server: a bridge that cannot start leaves that run without
+browser tools (Codex reports the failed server at startup) instead of ending
+it. Chromium starts on the first browser action.
 
 Install a pinned `@playwright/mcp@0.0.80` separately from application dependencies
 (`npm install --prefix TOOL_DIRECTORY --ignore-scripts --save-exact

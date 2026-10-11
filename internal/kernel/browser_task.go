@@ -121,7 +121,7 @@ func (store *Store) EnqueueTaskForBrowserAgentRepositoryMode(ctx context.Context
 		}
 	}
 	for _, item := range content {
-		if err := attachContentTx(ctx, tx, taskID, result.ProjectID, result.WorkRevision.Int64(), item.ContentID, item.ContentRevision, at); err != nil {
+		if err := attachContentTx(ctx, tx, taskID, result.ProjectID, result.WorkRevision.Int64(), item.ContentID, item.ContentRevision, at, false); err != nil {
 			return BrowserTaskEnqueue{}, tx.Rollback(err)
 		}
 	}

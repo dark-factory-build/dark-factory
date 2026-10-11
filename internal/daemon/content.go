@@ -395,7 +395,7 @@ func (daemon *Daemon) content(ctx context.Context, call api.Call) api.Reply {
 			if e != nil {
 				return newErrorReply(api.RemoteInvalidRequest)
 			}
-			refs, err = daemon.store.TaskContentReferences(ctx, pid, t, r)
+			refs, err = daemon.store.TaskContentReferences(ctx, pid, t, r, false)
 		} else {
 			r, e := revision(attachments.TaskWorkRevision)
 			if e != nil {

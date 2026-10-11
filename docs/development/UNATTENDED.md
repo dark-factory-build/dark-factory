@@ -41,7 +41,11 @@ transcripts and Codex rollouts, for work in that run's directory since its
 admission). Once `tokens_used` reaches a nonzero `token_limit`, the project
 admits nothing more; running work finishes. Like the run allowance, the budget
 is additional to what is already recorded, and zero removes the ceiling.
-`factoryctl status` reports both figures per project. This counts billable
+`factoryctl status` reports both figures per project. `factoryctl report [--since 24h]
+[--by half-day]` reads spend per bucket against merges, with tokens per merge,
+and `factoryctl why --pull N | --task ID` says whom one item waits on.
+`factoryctl agent set --agent ID --cadence 30m` (or `--wake-on`, `--model`,
+`--pause`) changes one field and keeps the standing instruction. This counts billable
 tokens, not money: Codex counts uncached input plus output, while Claude counts
 input plus cache creation plus output, excluding cache reads. The shell provider spends none,
 and a run adopted by recovery after a daemon restart records none. Legacy

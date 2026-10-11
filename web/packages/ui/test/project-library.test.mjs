@@ -277,7 +277,7 @@ test("consequential knowledge and historical states remain visible outside discl
 });
 
 
-test("editor preserves scope fields in one form and outcomes remain reachable", async (t) => {
+test("editor preserves scope fields in one form, and the Library contains curated documents only", async (t) => {
   const calls = [], doc = { ...metadata, revision: 3, source_references: JSON.stringify({ status: "current", scope: "repository", entities: ["project:node"], evidence: ["source:test"], branch: "topic", environment: "staging" }) };
   const renderer = await mount(t, { open: true, call: async (operation, input) => { calls.push({ operation, input }); return operation === "search" ? { items: [doc] } : operation === "read" ? doc : operation === "body" ? { body: "Existing text", complete: true } : { items: [] }; } });
   await click(renderer, "Optional guide"); await click(renderer, "Edit document");
@@ -297,10 +297,8 @@ test("editor preserves scope fields in one form and outcomes remain reachable", 
   for (const [name, value] of [["scope", "repository"], ["entities", "project:node"], ["evidence", "source:test"], ["branch", "topic"], ["environment", "staging"]]) assert.equal(sources.findByProps({ name }).props.defaultValue, value);
   await click(renderer, "Cancel"); await click(renderer, "Read document");
   assert.ok(!calls.some(({ operation }) => operation.startsWith("outcome")), "documents never fetch outcomes");
-  await click(renderer, "Outcomes");
-  assert.ok(renderer.root.findByProps({ "aria-label": "Project outcomes" }));
-  assert.equal(renderer.root.findAllByType("details").length, 0);
-  assert.equal(calls.at(-1).operation, "outcome_list");
+  assert.ok(!renderer.root.findAllByType("button").some((node) => words(node) === "Outcomes"));
+  assert.ok(!calls.some(({ operation }) => operation.startsWith("outcome")), "the Library never fetches outcomes");
   await click(renderer, "Documents"); assert.ok(renderer.root.findByProps({ type: "search" }));
 });
 

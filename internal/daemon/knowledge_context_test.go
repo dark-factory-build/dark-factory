@@ -455,9 +455,9 @@ func TestKnowledgeAllExplicitRevisionPinsAreBounded(t *testing.T) {
 		refs[i].ContentID, _ = decodeID(testID(byte(i+1)), kernel.ContentIDFromBytes)
 		refs[i].ContentRevision = revision
 	}
-	text, receipts, err := renderKnowledgeAttachments(kernel.ProviderCodex, refs)
-	if err != nil || len(text) > knowledgeAttachmentBytes || len(receipts) != 64 {
-		t.Fatalf("explicit pin manifest: bytes=%d receipts=%d err=%v", len(text), len(receipts), err)
+	text, receipts := renderKnowledgeAttachments(kernel.ProviderCodex, refs)
+	if len(text) > knowledgeAttachmentBytes || len(receipts) != 64 {
+		t.Fatalf("explicit pin manifest: bytes=%d receipts=%d", len(text), len(receipts))
 	}
 	for _, ref := range refs {
 		if !strings.Contains(string(text), ref.ContentID.String()+"@9223372036854775807") {
