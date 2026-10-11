@@ -397,15 +397,29 @@ func (client *OperatorClient) WorkerOperation(ctx context.Context, operationID s
 }
 
 func (client *OperatorClient) ReadTask(ctx context.Context, input TaskReadInput) (TaskText, error) {
-	if !validID(input.TaskID) || input.ExpectedRevision == 0 || input.Offset > uint64(^uint64(0)>>1) {
+	if !validID(input.TaskID) || input.ExpectedRevision == 0 || input.Offset > uint64(^uint64(0)>>1) || input.PeerOffset > uint64(^uint64(0)>>1) || input.PeerHead > uint64(^uint64(0)>>1) || input.PeerOffset != 0 && input.PeerHead == 0 {
 		return TaskText{}, ErrInvalidInput
 	}
 	var result TaskText
 	if err := client.client.call(ctx, "task_read", input, &result); err != nil {
 		return TaskText{}, err
 	}
-	if result.TaskID != input.TaskID || result.Revision != input.ExpectedRevision || !validText(result.Instruction, 0, 8192) || !validText(result.Feedback, 0, 8192) || result.Outcome != nil && !validText(*result.Outcome, 0, 8192) || result.NextOffset != nil && *result.NextOffset != input.Offset+2048 {
+	if result.TaskID != input.TaskID || result.Revision != input.ExpectedRevision || !validText(result.Instruction, 0, 8192) || !validText(result.Feedback, 0, 8192) || result.Outcome != nil && !validText(*result.Outcome, 0, 8192) || result.NextOffset != nil && *result.NextOffset != input.Offset+2048 || result.NextPeerOffset != nil && *result.NextPeerOffset <= input.PeerOffset || result.NextPeerOffset != nil && result.PeerHead == 0 {
 		return TaskText{}, ErrProtocol
+	}
+	return result, nil
+}
+
+func (client *OperatorClient) ProjectContent(ctx context.Context, input ProjectContentInput) (json.RawMessage, error) {
+	if !validProjectContentInput(input) {
+		return nil, ErrInvalidInput
+	}
+	var result json.RawMessage
+	if err := client.client.call(ctx, "project_content", input, &result); err != nil {
+		return nil, err
+	}
+	if len(result) == 0 || !json.Valid(result) {
+		return nil, ErrProtocol
 	}
 	return result, nil
 }

@@ -294,7 +294,7 @@ func TestKnowledgeAttachmentScopeAndLifecycle(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if refs, err := store.TaskContentReferences(ctx, run.ProjectID, created.ID, created.WorkRevision); err != nil || len(refs) != 1 || refs[0].ContentID != local.ID {
+	if refs, err := store.TaskContentReferences(ctx, run.ProjectID, created.ID, created.WorkRevision, false); err != nil || len(refs) != 1 || refs[0].ContentID != local.ID {
 		t.Fatalf("enqueue pins: %+v %v", refs, err)
 	}
 }
