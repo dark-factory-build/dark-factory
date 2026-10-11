@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"unicode/utf8"
 
 	"github.com/dark-factory-build/dark-factory/internal/api"
 	"github.com/dark-factory-build/dark-factory/internal/kernel"
@@ -124,7 +125,21 @@ func (daemon *Daemon) projectContent(ctx context.Context, call api.Call) api.Rep
 			if item.Kind == kernel.TaskInterventionReplace && item.SuccessorTaskID != nil {
 				body = "Replaced by task " + item.SuccessorTaskID.String()
 			}
+			if len(body) > 1024 {
+				body = body[:1024]
+				for !utf8.ValidString(body) {
+					body = body[:len(body)-1]
+				}
+			}
 			entries = append(entries, map[string]any{"operation_id": item.OperationID.String(), "kind": item.Kind.String(), "actor": item.Actor.String(), "body": body, "status": item.State.String(), "created_at_ms": item.CreatedAt.Int64()})
+			encoded, marshalErr := json.Marshal(map[string]any{"task_id": input.TaskID, "entries": entries})
+			if marshalErr != nil {
+				return newErrorReply(api.RemoteInternal)
+			}
+			if len(encoded)+4096 >= 1<<20 {
+				entries = entries[:len(entries)-1]
+				break
+			}
 		}
 		return api.NewContentReply(map[string]any{"task_id": input.TaskID, "entries": entries})
 	default:
