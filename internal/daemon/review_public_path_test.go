@@ -137,6 +137,41 @@ func TestPublicReviewPathPersistsKilledProviderFailureAndRetries(t *testing.T) {
 	}
 }
 
+// A review_pr claim on a pull request no refresh has recorded is still its
+// reconciler's: a failed one is retried once, unasked.
+func TestAClaimedReviewOfAnUnrecordedPullIsRetried(t *testing.T) {
+	fixture, project := reviewPublicFixture(t)
+	customerMode(t, fixture)
+	backend := &publicReviewBackend{killed: true}
+	fixture.daemon.reviewBackend = func(string, uint64) review.Backend { return backend }
+	request := publishedReviewRequest()
+	request.PullNumber = 44
+	if _, err := reviewNow(context.Background(), fixture.daemon, project, request); err == nil {
+		t.Fatal("a killed provider reported success")
+	}
+	backend.killed = false
+	if _, err := fixture.daemon.advanceReviewOperations(context.Background(), false); err != nil {
+		t.Fatal(err)
+	}
+	retried := func() bool {
+		open, err := fixture.store.OpenPulls(context.Background())
+		for _, pull := range open {
+			for _, document := range pull.Operations {
+				if strings.Contains(string(document), `"state":"enqueued"`) && strings.Contains(string(document), `"retry_of":"`) {
+					return err == nil
+				}
+			}
+		}
+		return false
+	}
+	for deadline := time.Now().Add(2 * time.Second); !retried() && time.Now().Before(deadline); {
+		time.Sleep(5 * time.Millisecond)
+	}
+	if !retried() || backend.reviews != 2 {
+		t.Fatalf("unrecorded pull's failed review was not retried: reviews=%d", backend.reviews)
+	}
+}
+
 // reviewNow claims and runs a review in the foreground, as reviewPR's
 // background launch does.
 func reviewNow(ctx context.Context, daemon *Daemon, project kernel.ProjectID, request api.ReviewRequest) (string, error) {

@@ -65,6 +65,15 @@ func (daemon *Daemon) claimReview(ctx context.Context, project kernel.ProjectID,
 	if err != nil {
 		return review.Operation{}, err
 	}
+	// The pull request is recorded before its review is, so the reconciler,
+	// which reads reviews through it, retries or relaunches this one.
+	at, err := daemon.timestamp()
+	if err == nil {
+		err = daemon.store.RecordProductionReview(ctx, project, repository, op.Request.PullNumber, kernel.ProductionReview{Head: op.Request.Head, State: "unknown"}, at)
+	}
+	if err != nil {
+		return review.Operation{}, err
+	}
 	return op, coordinator.Store.Create(ctx, op)
 }
 

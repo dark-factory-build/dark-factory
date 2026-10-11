@@ -829,8 +829,9 @@ func (store *Store) RecordProductionReview(ctx context.Context, project ProjectI
 	if json.Unmarshal([]byte(body), &pr) != nil || pr.Number != number || !validProductionPull(pr) {
 		return tx.Rollback(ErrCorruptState)
 	}
-	if review.State == "allow" && pr.Review.Head == review.Head && pr.Review.State == "block" {
-		// Nothing clears a block at the same head.
+	if review.State == "unknown" || review.State == "allow" && pr.Review.Head == review.Head && pr.Review.State == "block" {
+		// A claim records only a pull request not yet recorded, and nothing
+		// clears a block at the same head.
 		return tx.Commit(ctx)
 	}
 	pr.Review = review
