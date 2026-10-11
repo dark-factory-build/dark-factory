@@ -659,6 +659,12 @@ func TestPublishableIntakeChangeIsFactorydsUntilPublishedOrFailed(t *testing.T) 
 	if len(found) != 1 || found[0].Change != change.ID || found[0].Task.ID != worker.TaskID || found[0].Accepted.ID != accepted.ID || found[0].Head != hex.EncodeToString(head) || found[0].Base != strings.Repeat("01", 20) || closed() {
 		t.Fatalf("candidates = %+v, closed=%v", found, closed())
 	}
+	if _, err := store.writer.ExecContext(ctx, `UPDATE tasks SET title = 'Repair login' WHERE id = ?`, worker.TaskID.Bytes()); err != nil {
+		t.Fatal(err)
+	}
+	if found := candidates(); len(found) != 1 || found[0].Repair {
+		t.Fatalf("ordinary task was classified as repair: %+v", found)
+	}
 	// Publication no longer depends on which agent owns other intake tasks.
 	legacy, err := store.EnqueueTask(ctx, NewTask{ID: taskID(t, 249), IncarnationID: incarnationID(t, 249), ProjectID: worker.ProjectID, AssignedAgentID: overseer.ID, Title: "legacy intake"}, mustTime(t, 69))
 	if err != nil {
@@ -711,6 +717,12 @@ func TestPublishableIntakeChangeIsFactorydsUntilPublishedOrFailed(t *testing.T) 
 	if err := store.RecordPublication(ctx, worker.ProjectID, worker.TaskID, "example/factory", pr, mustTime(t, 71)); err != nil {
 		t.Fatal(err)
 	}
+	if _, err := store.writer.ExecContext(ctx, `UPDATE tasks SET title = 'ordinary task' WHERE id = ?`, worker.TaskID.Bytes()); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.writer.ExecContext(ctx, `UPDATE production_records SET document = json_set(document, '$.branch', 'feature/login') WHERE kind = 'pull_request' AND identity = '5'`); err != nil {
+		t.Fatal(err)
+	}
 	var linked int
 	if err := store.writer.QueryRowContext(ctx, `SELECT count(*) FROM publication_tasks WHERE task_id = ? AND change_id = ?`, worker.TaskID.Bytes(), change.ID.Bytes()).Scan(&linked); err != nil || linked != 1 {
 		t.Fatalf("publication linked to its Change: %d %v", linked, err)
@@ -722,6 +734,9 @@ func TestPublishableIntakeChangeIsFactorydsUntilPublishedOrFailed(t *testing.T) 
 	}
 	if found := candidates(); len(found) != 1 || found[0].Pull != 5 {
 		t.Fatalf("first-publication rebase correction candidates = %+v", found)
+	}
+	if !found[0].Repair {
+		t.Fatalf("host pull provenance was not retained after its title changed: %+v", found[0])
 	}
 	if _, err := store.writer.ExecContext(ctx, `UPDATE changes SET updated_at_ms = 70 WHERE id = ?`, change.ID.Bytes()); err != nil {
 		t.Fatal(err)

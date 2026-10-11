@@ -530,7 +530,7 @@ func (store *Store) PublishableChanges(ctx context.Context, at UnixMillis) ([]Pu
 		return nil, err
 	}
 	defer tx.Close()
-	rows, err := tx.connection.QueryContext(ctx, `SELECT c.id, c.task_id, c.revision, lower(hex(c.base_commit)), lower(hex(c.head_commit)), COALESCE(p.pull_number, 0), COALESCE((SELECT lower(hex(repository_id)) FROM task_repository_bindings WHERE task_id = c.task_id), ''), COALESCE((SELECT json_extract(r.document, '$.branch') FROM production_records r WHERE r.project_id = p.project_id AND r.repository = p.repository AND r.kind = 'pull_request' AND r.identity = CAST(p.pull_number AS TEXT)), ''), t.title LIKE 'Repair %' FROM changes c
+	rows, err := tx.connection.QueryContext(ctx, `SELECT c.id, c.task_id, c.revision, lower(hex(c.base_commit)), lower(hex(c.head_commit)), COALESCE(p.pull_number, 0), COALESCE((SELECT lower(hex(repository_id)) FROM task_repository_bindings WHERE task_id = c.task_id), ''), COALESCE((SELECT json_extract(r.document, '$.branch') FROM production_records r WHERE r.project_id = p.project_id AND r.repository = p.repository AND r.kind = 'pull_request' AND r.identity = CAST(p.pull_number AS TEXT)), ''), p.pull_number IS NOT NULL AND COALESCE((SELECT json_extract(r.document, '$.branch') FROM production_records r WHERE r.project_id = p.project_id AND r.repository = p.repository AND r.kind = 'pull_request' AND r.identity = CAST(p.pull_number AS TEXT)), '') <> 'factory/' || substr(lower(hex(c.id)), 1, 12) FROM changes c
 		JOIN tasks t ON t.id = c.task_id AND t.incarnation_id = c.task_incarnation_id
 		LEFT JOIN intake_task_bindings b ON b.task_id = c.task_id LEFT JOIN intake_acceptances a ON a.id = b.acceptance_id
 		LEFT JOIN publication_tasks p ON p.task_id = c.task_id AND c.updated_at_ms > p.created_at_ms
