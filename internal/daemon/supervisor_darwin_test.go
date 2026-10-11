@@ -146,11 +146,9 @@ func TestMain(m *testing.M) {
 }
 
 func TestCodexContinuationContextPreservesMaximumOriginalTask(t *testing.T) {
-	var condition kernel.ContinuationConditionID
-	copy(condition[:], supervisorIDBytes(240))
-	revision, _ := kernel.NewRevision(1)
+	request, _ := kernel.HumanRequestIDFromBytes(supervisorIDBytes(240))
 	task := bytes.Repeat([]byte{'x'}, runner.MaxNativeTaskBytes)
-	contexts := []kernel.ContinuationContext{{ConditionKind: kernel.ConditionHumanRequest, ConditionID: condition, ConditionRevision: revision, ResolutionDetail: "continue"}}
+	contexts := []kernel.ContinuationContext{{RequestID: request, ResolutionDetail: "continue"}}
 	framed, err := providerTaskWithContinuationContext(kernel.ProviderCodex, task, contexts)
 	if err == nil || framed != nil {
 		t.Fatalf("maximum Codex API continuation framing: bytes=%d err=%v", len(framed), err)
@@ -178,11 +176,9 @@ func TestCodexContinuationContextPreservesMaximumOriginalTask(t *testing.T) {
 }
 
 func TestProviderContinuationContextPreservesMaximumProviderTask(t *testing.T) {
-	var condition kernel.ContinuationConditionID
-	copy(condition[:], supervisorIDBytes(241))
-	revision, _ := kernel.NewRevision(1)
+	request, _ := kernel.HumanRequestIDFromBytes(supervisorIDBytes(241))
 	task := bytes.Repeat([]byte{'x'}, runner.MaxProviderTaskBytes)
-	framed, err := providerTaskWithContinuationContext(kernel.ProviderClaudeCode, task, []kernel.ContinuationContext{{ConditionKind: kernel.ConditionHumanRequest, ConditionID: condition, ConditionRevision: revision, ResolutionDetail: "continue"}})
+	framed, err := providerTaskWithContinuationContext(kernel.ProviderClaudeCode, task, []kernel.ContinuationContext{{RequestID: request, ResolutionDetail: "continue"}})
 	if err == nil || framed != nil {
 		t.Fatalf("maximum provider continuation framing: bytes=%d err=%v", len(framed), err)
 	}
@@ -1719,7 +1715,9 @@ func TestSupervisorCleanupUncertaintyBlocksTerminal(t *testing.T) {
 	// has made the name removable, the sweep removes the runtime, releases
 	// it and settles the run.
 	runtimePath := filepath.Join(fixture.runtimeParentPath, run.ID.String())
-	unsafe := filepath.Join(runtimePath, "tmp", "unsafe")
+	// The shell provider's HOME is the runtime home; its TMPDIR is the short
+	// private one outside the runtime.
+	unsafe := filepath.Join(runtimePath, "home", "unsafe")
 	sweep := func(want RecoveredRunAction) {
 		t.Helper()
 		dispositions, sweepErr := fixture.daemon.RecoverAbandonedRuns(context.Background(), fixture.runtimeParent, fixture.changeParent)
@@ -2016,6 +2014,9 @@ func TestSupervisorActivationErrorAfterDurableMarkerJoinsInnerOwner(t *testing.T
 			if resource.State != kernel.ResourceReleased {
 				t.Fatalf("released provider = %+v, observed inner %+v", resource, observedInner)
 			}
+			if observation := runner.ObserveProcess(observedInner); observation.Presence != runner.Absent {
+				t.Fatalf("activation ambiguity left inner owner alive: %+v", observation)
+			}
 		case kernel.ResourceRunnerProcess:
 			identity, identityErr := runnerIdentity(resource.Identity)
 			if identityErr != nil {
@@ -2272,7 +2273,7 @@ func newSupervisorFixture(t *testing.T, program string) *supervisorFixture {
 func newSupervisorRoleFixture(t *testing.T, program string, role kernel.AgentRole) *supervisorFixture {
 	t.Helper()
 	baselineFDs := supervisorFDCount(t)
-	root, err := os.MkdirTemp("/private/tmp", "dark-factory-supervisor-")
+	root, err := os.MkdirTemp(runner.ShortTempDir(), "dark-factory-supervisor-")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -2822,7 +2823,7 @@ func cleanupFailureProgram(t *testing.T) string {
 	if err != nil {
 		t.Fatal(err)
 	}
-	return "set -eu\nprintf x > __WITNESS__\nprintf x > \"$TMPDIR/unsafe\" && chmod 4600 \"$TMPDIR/unsafe\"\n" + quoteShell(executable) + " --supervisor-attempt-succeed typed-success\n"
+	return "set -eu\nprintf x > __WITNESS__\nprintf x > \"$HOME/unsafe\" && chmod 4600 \"$HOME/unsafe\"\n" + quoteShell(executable) + " --supervisor-attempt-succeed typed-success\n"
 }
 
 func quoteShell(value string) string { return "'" + strings.ReplaceAll(value, "'", "'\\''") + "'" }

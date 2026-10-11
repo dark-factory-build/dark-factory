@@ -2,6 +2,7 @@ package provider
 
 import (
 	"bytes"
+	"context"
 	"crypto/sha1"
 	"crypto/sha256"
 	"encoding/json"
@@ -10,6 +11,7 @@ import (
 	"io"
 	"maps"
 	"os"
+	"os/exec"
 	"os/user"
 	"path/filepath"
 	"slices"
@@ -34,6 +36,7 @@ const (
 	maxPathBytes     = 4096
 	claudeConfigDir  = ".claude"
 	codexConfigDir   = ".codex"
+	pnpmVersion      = "11.19.0"
 	// bootstrapPrompt is both native providers' fixed positional prompt: the
 	// exact task is read through the attempt API, never typed into the PTY.
 	bootstrapPrompt = `Use the factory_attempt.factory tool with argv ["attempt","task"] before doing anything else. The returned JSON task field is the exact task: complete only that task. When it reports an observed problem, rerun its cited commands or read its cited file:line before editing, and quote each with what you saw in your attempt succeed result; if the problem does not reproduce, end with attempt fail and a detail starting "premise not reproduced:" that quotes them instead. Use this tool for every factoryctl attempt or overseer command, passing argv without the executable; shell commands cannot access the attempt API. Peer collaboration is asynchronous: use argv ["attempt","peer","status"] to read or answer task-linked questions, but it grants no task or terminal control. For a stale paged peer status, restart from the first page. Before exiting, report the durable outcome with attempt succeed, block, or fail through this tool. When assigned a writable task checkout, read and edit it directly, including corrections after send-back; never add Git remotes or fetch from the network inside it. Never substitute another task or private Change path. Scope file discovery to the task checkout and private runtime home. Locate tools with command -v and the checkout's documented setup. Never recursively search the user home, Library, Documents, Desktop, Music or Photos for tools or instructions. If a required path is not provided or present, report the missing prerequisite instead of widening the search. In UI review, screenshots are illustrative only and never blocking evidence; judge correctness from render tests and source behavior.`
@@ -697,9 +700,9 @@ func Build(request Request) (Launch, error) {
 		// runtime root every run and could never itself be found again;
 		// previousWorkingDirectory instead names the same agent's most recent
 		// terminal run's cwd, so its standing tasks share one continuing
-		// session. Neither ever changes argv beyond an optional leading
-		// "resume <id>": Codex assigns its own session id, there is nothing
-		// to derive.
+		// session. A resumed Codex launch carries its marker through the attempt
+		// MCP server so the daemon can omit repeated standing context; Codex
+		// still assigns its own session id, so there is nothing to derive.
 		discoveryCwd := request.workingDirectory
 		if request.role == kernel.RoleOrchestrator {
 			discoveryCwd = request.previousWorkingDirectory
@@ -717,7 +720,7 @@ func Build(request Request) (Launch, error) {
 		hooks := "hooks.Stop=[{hooks=[{type=\"command\",command=" + tomlBasicString(stop) + "}]}]"
 		argv = append(argv, "-c", hooks, "--strict-config", "--dangerously-bypass-hook-trust", "--no-alt-screen", "-c", "tui.resume_cwd=\"current\"", "-c", "check_for_update_on_startup=false", "-c", "tool_output_token_limit=32768", "-c", codexUntrustedProjectConfig(request.workingDirectory), "-c", "default_permissions="+tomlBasicString(codexPermissionName(request.runtime)), "-c", `approval_policy="never"`, "-c", permissions, "--disable", "computer_use", "--disable", "browser_use", "--disable", "plugins")
 		attemptServer := codexAttemptServerName(request.runtime)
-		argv = append(argv, "-c", "mcp_servers."+attemptServer+"={command="+tomlBasicString(request.runtime.factoryctl)+`,args=["attempt","mcp"],env_vars=["DARK_FACTORY_SOCKET","DARK_FACTORY_ATTEMPT_TOKEN_FILE"],enabled=true,required=true,tools={factory={approval_mode="approve"}}}`)
+		argv = append(argv, "-c", "mcp_servers."+attemptServer+"={command="+tomlBasicString(request.runtime.factoryctl)+`,args=["attempt","mcp"],env_vars=["DARK_FACTORY_SOCKET","DARK_FACTORY_ATTEMPT_TOKEN_FILE","DARK_FACTORY_OVERSEER_SESSION_RESUMED"],enabled=true,required=true,tools={factory={approval_mode="approve"}}}`)
 		if browser != "" {
 			args := make([]string, len(browserArgs))
 			for i, arg := range browserArgs {
@@ -798,7 +801,9 @@ func sandboxGrants(request Request) []grant {
 	// consume that cache, but never mutate the operator home or the cache that
 	// belongs to another trust context.
 	if request.role == kernel.RoleWorker && request.installation.provider != kernel.ProviderShell {
-		grants = append(grants, grant{goModuleCachePath(request.runtime.accountHome), false})
+		grants = append(grants,
+			grant{goModuleCachePath(request.runtime.accountHome), false},
+			grant{pnpmStorePath(request.runtime.accountHome), false})
 	}
 	for _, root := range filepath.SplitList(request.runtime.toolchainReadRoots) {
 		grants = append(grants, grant{root, false})
@@ -1149,6 +1154,8 @@ func (runtime RuntimePaths) environmentForRole(kind kernel.Provider, role kernel
 			"CARGO_HOME="+filepath.Join(runtime.home, ".cargo"),
 			"RUSTUP_HOME="+filepath.Join(runtime.accountHome, ".rustup"),
 			"COREPACK_HOME="+filepath.Join(runtime.home, ".cache", "corepack"),
+			"COREPACK_ENABLE_NETWORK=0",
+			"pnpm_config_store_dir="+pnpmStorePath(runtime.accountHome),
 			"npm_config_cache="+filepath.Join(runtime.home, ".cache", "npm"),
 			"XDG_CACHE_HOME="+filepath.Join(runtime.home, ".cache"))
 		if role == kernel.RoleWorker {
@@ -1236,11 +1243,148 @@ func AccountEnvironment(kind kernel.Provider, accountHome, accountConfig string)
 	return nil
 }
 
+// PrepareWebDependencies is the Change-introduced host preparation path for
+// the locked web workspace. It runs before the provider sandbox is built so
+// pnpm can create the Change's node_modules tree, while every pnpm destination
+// is explicitly bound to the Change, private runtime, or trusted store; the
+// checkout's pnpm configuration cannot redirect host writes elsewhere.
+func (runtime RuntimePaths) PrepareWebDependencies(ctx context.Context, workingDirectory string) error {
+	if !runtime.valid() || !validAbsolute(workingDirectory, maxPathBytes) {
+		return ErrInvalid
+	}
+	web := filepath.Join(workingDirectory, "web")
+	webInfo, err := os.Lstat(web)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	if webInfo.Mode()&os.ModeSymlink != 0 || !webInfo.IsDir() {
+		return fmt.Errorf("provider: web workspace is not a directory")
+	}
+	packagePath := filepath.Join(web, "package.json")
+	packageInfo, err := os.Lstat(packagePath)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	if packageInfo.Mode()&os.ModeSymlink != 0 || !packageInfo.Mode().IsRegular() {
+		return fmt.Errorf("provider: web package manifest is not a regular file")
+	}
+	if err := validatePnpmStoreDirectory(runtime.accountHome); err != nil {
+		return err
+	}
+	if err := prepareCorepackPnpm(runtime.accountHome, runtime.home); err != nil {
+		return err
+	}
+	toolPath := ""
+	for _, directory := range filepath.SplitList(runtime.toolPath) {
+		if _, err := os.Stat(filepath.Join(directory, "node")); err == nil {
+			toolPath = directory
+			break
+		}
+	}
+	if toolPath == "" {
+		return fmt.Errorf("provider: Node tool is unavailable")
+	}
+	store := pnpmStorePath(runtime.accountHome)
+	modules := filepath.Join(web, "node_modules")
+	command := exec.CommandContext(ctx, filepath.Join(toolPath, "node"), filepath.Join(toolPath, "corepack"), "pnpm", "install", "--offline", "--frozen-lockfile", "--ignore-scripts", "--config.ignorePnpmfile=true", "--config.storeDir="+store, "--config.modulesDir="+modules, "--config.virtualStoreDir="+filepath.Join(modules, ".pnpm"), "--config.stateDir="+filepath.Join(runtime.home, ".cache", "pnpm-state"))
+	command.Dir = web
+	command.Env = runtime.environmentForRole(kernel.ProviderCodex, kernel.RoleWorker)
+	if output, err := command.CombinedOutput(); err != nil {
+		return fmt.Errorf("provider: prepare web dependencies: %w: %s", err, strings.TrimSpace(string(output)))
+	}
+	return nil
+}
+
+func prepareCorepackPnpm(accountHome, runtimeHome string) error {
+	source := filepath.Join(accountHome, "Library", "Caches", "dark-factory", "local-ci", "trusted", "corepack", "v1", "pnpm", pnpmVersion)
+	packagePath := filepath.Join(source, "package.json")
+	packageStat, err := os.Lstat(packagePath)
+	if err != nil || packageStat.Mode()&os.ModeSymlink != 0 || !packageStat.Mode().IsRegular() {
+		return fmt.Errorf("provider: inspect trusted pnpm executable: invalid package metadata")
+	}
+	packageJSON, err := os.ReadFile(packagePath)
+	if err != nil {
+		return fmt.Errorf("provider: inspect trusted pnpm executable: %w", err)
+	}
+	var packageInfo struct {
+		Name    string `json:"name"`
+		Version string `json:"version"`
+	}
+	if json.Unmarshal(packageJSON, &packageInfo) != nil || packageInfo.Name != "pnpm" || packageInfo.Version != pnpmVersion {
+		return fmt.Errorf("provider: trusted pnpm executable is not pinned")
+	}
+	destination := filepath.Join(runtimeHome, ".cache", "corepack", "v1", "pnpm", pnpmVersion)
+	if err := os.MkdirAll(destination, 0o700); err != nil {
+		return err
+	}
+	return filepath.WalkDir(source, func(path string, entry os.DirEntry, walkErr error) error {
+		if walkErr != nil {
+			return walkErr
+		}
+		if entry.Type()&os.ModeSymlink != 0 {
+			return fmt.Errorf("provider: trusted pnpm executable contains a symlink")
+		}
+		relative, err := filepath.Rel(source, path)
+		if err != nil {
+			return err
+		}
+		target := filepath.Join(destination, relative)
+		if entry.IsDir() {
+			return os.MkdirAll(target, 0o700)
+		}
+		if !entry.Type().IsRegular() {
+			return fmt.Errorf("provider: trusted pnpm executable contains a non-regular file")
+		}
+		info, err := entry.Info()
+		if err != nil {
+			return err
+		}
+		input, err := os.Open(path)
+		if err != nil {
+			return err
+		}
+		output, err := os.OpenFile(target, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, info.Mode().Perm())
+		if err != nil {
+			_ = input.Close()
+			return err
+		}
+		_, copyErr := io.Copy(output, input)
+		closeErr := errors.Join(input.Close(), output.Close())
+		return errors.Join(copyErr, closeErr, os.Chmod(target, info.Mode().Perm()))
+	})
+}
+
 // goModuleCachePath is the one shared-cache path native workers may see. It
 // matches local-ci.sh's trusted cache layout and deliberately
 // leaves the rest of the account home outside the provider grant.
 func goModuleCachePath(accountHome string) string {
 	return filepath.Join(accountHome, "Library", "Caches", "dark-factory", "local-ci", "trusted", "go-mod")
+}
+
+func pnpmStorePath(accountHome string) string {
+	return filepath.Join(accountHome, "Library", "Caches", "dark-factory", "local-ci", "trusted", "pnpm-store")
+}
+
+func validatePnpmStoreDirectory(accountHome string) error {
+	path := pnpmStorePath(accountHome)
+	info, err := os.Lstat(path)
+	if err != nil {
+		return fmt.Errorf("provider: inspect trusted pnpm store: %w", err)
+	}
+	if info.Mode()&os.ModeSymlink != 0 || !info.IsDir() {
+		return fmt.Errorf("provider: trusted pnpm store is not a directory")
+	}
+	stat, ok := info.Sys().(*syscall.Stat_t)
+	if !ok || uint64(stat.Uid) != uint64(os.Geteuid()) || info.Mode().Perm()&0o022 != 0 {
+		return fmt.Errorf("provider: trusted pnpm store has unsafe ownership or mode")
+	}
+	return nil
 }
 
 // PrepareGoModuleCache provisions the exact trusted directory that native

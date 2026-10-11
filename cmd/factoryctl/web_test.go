@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/dark-factory-build/dark-factory/internal/api"
+	"github.com/dark-factory-build/dark-factory/internal/runner"
 	"golang.org/x/sys/unix"
 )
 
@@ -91,7 +92,7 @@ func TestWebStatusWithoutDaemonIsBoundedAndDoesNotReadOperatorToken(t *testing.T
 }
 
 func TestWebStatusWithStaleSocketIsBoundedAndDoesNotReadOperatorToken(t *testing.T) {
-	directory, err := os.MkdirTemp("/private/tmp", "df-stale-")
+	directory, err := os.MkdirTemp(runner.ShortTempDir(), "df-stale-")
 	if err != nil {
 		t.Fatal(err)
 	}

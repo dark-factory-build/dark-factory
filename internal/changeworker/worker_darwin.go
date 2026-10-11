@@ -93,6 +93,11 @@ func runProvider(ctx context.Context) (resultErr error) {
 	}
 
 	temp := filepath.Join(config.RuntimePath, TempName)
+	// A short TMPDIR, so the provider's tests can bind Unix sockets beneath
+	// it; the runner removes it when the run ends. A taken name keeps tmp.
+	if short := runner.ClaimPrivateTemp(config.RuntimePath); short != "" {
+		temp = short
+	}
 	token := filepath.Join(config.RuntimePath, AttemptTokenName)
 	runtimePaths, err := provider.NewRuntimePaths(
 		home, temp, config.AttemptSocket, token, factoryctl.Path(), filepath.Dir(publishedPath), config.ToolPath, config.AccountHome, config.AccountConfigDir, config.ToolchainReadRoots,
@@ -103,6 +108,12 @@ func runProvider(ctx context.Context) (resultErr error) {
 	}
 	if shouldPrepareGoModuleCache(config.Role, config.Provider) {
 		if err := runtimePaths.PrepareGoModuleCache(); err != nil {
+			_ = cwd.Close()
+			return err
+		}
+	}
+	if config.Role == kernel.RoleWorker && config.Provider != kernel.ProviderShell {
+		if err := runtimePaths.PrepareWebDependencies(ctx, publishedPath); err != nil {
 			_ = cwd.Close()
 			return err
 		}
@@ -161,7 +172,12 @@ func runProvider(ctx context.Context) (resultErr error) {
 		_ = cwd.Close()
 		return provider.ErrInvalid
 	}
-	spec, err := runner.PrepareCommittedExecSpec(launch.Executable(), launch.Argv(), launch.Environment(), publishedPath)
+	environment := launch.Environment()
+	argv := launch.Argv()
+	if config.Role == kernel.RoleOrchestrator && config.Provider == kernel.ProviderCodex && len(argv) > 1 && argv[1] == "resume" {
+		environment = append(environment, "DARK_FACTORY_OVERSEER_SESSION_RESUMED=1")
+	}
+	spec, err := runner.PrepareCommittedExecSpec(launch.Executable(), argv, environment, publishedPath)
 	if err != nil {
 		_ = cwd.Close()
 		return err

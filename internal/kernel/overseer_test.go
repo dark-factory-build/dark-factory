@@ -323,7 +323,7 @@ func TestOverseerSnapshotFirstPageShowsYieldedTerminalQuestionAndRefusesOrphan(t
 		t.Fatalf("selected yielded task = %+v, %v", detail, err)
 	}
 	// Without its waiting continuation a terminal run's open question is corrupt.
-	corruptSQL(t, store, `UPDATE continuations SET state = 'cancelled' WHERE condition_kind = 'human_request' AND condition_id = ?`, request.ID.Bytes())
+	corruptSQL(t, store, `UPDATE human_requests SET continuation = NULL WHERE id = ?`, request.ID.Bytes())
 	if _, err := store.OverseerSnapshotForAttempt(ctx, overseer.CredentialDigest, OverseerSnapshotRequest{}); !errors.Is(err, ErrCorruptState) {
 		t.Fatalf("orphaned terminal question = %v", err)
 	}

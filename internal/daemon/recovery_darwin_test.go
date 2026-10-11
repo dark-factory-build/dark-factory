@@ -50,7 +50,7 @@ func newRecoveryFixtureFor(t *testing.T, seed byte, role kernel.AgentRole, provi
 	ctx := context.Background()
 	// Short prefix: a takeover.sock fixture binds a real Unix domain socket
 	// inside this tree, and sockaddr_un's sun_path budget is only 104 bytes.
-	root, err := os.MkdirTemp("/private/tmp", "df-rec-")
+	root, err := os.MkdirTemp(runner.ShortTempDir(), "df-rec-")
 	if err != nil {
 		t.Fatal(err)
 	}

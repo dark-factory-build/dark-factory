@@ -18,6 +18,7 @@ import (
 	"github.com/dark-factory-build/dark-factory/internal/daemon"
 	"github.com/dark-factory-build/dark-factory/internal/install"
 	"github.com/dark-factory-build/dark-factory/internal/kernel"
+	"github.com/dark-factory-build/dark-factory/internal/runner"
 )
 
 const testOrigin = "https://factoryd.test.invalid"
@@ -448,7 +449,7 @@ func TestCleanupContinuationRoutesAndDeduplicatesRun(t *testing.T) {
 
 func initializedHome(t *testing.T) string {
 	t.Helper()
-	root, err := os.MkdirTemp("/private/tmp", "dark-factory-factoryd-")
+	root, err := os.MkdirTemp(runner.ShortTempDir(), "dark-factory-factoryd-")
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -36,7 +36,7 @@ type forgedResultWire struct {
 // the digest committed at admission.
 func TestForgedProofArtifactIsRefusedByComposedConsumption(t *testing.T) {
 	ctx := context.Background()
-	base, err := os.MkdirTemp("/private/tmp", "dark-factory-proof-binding-")
+	base, err := os.MkdirTemp(runner.ShortTempDir(), "dark-factory-proof-binding-")
 	if err != nil {
 		t.Fatal(err)
 	}
