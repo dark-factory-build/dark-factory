@@ -680,16 +680,29 @@ type TaskReadInput struct {
 	TaskID           string `json:"task_id"`
 	ExpectedRevision uint64 `json:"expected_revision"`
 	Offset           uint64 `json:"offset,omitempty"`
+	PeerOffset       uint64 `json:"peer_offset,omitempty"`
+}
+
+// ProjectContentInput exposes bounded reads already used by the browser.
+type ProjectContentInput struct {
+	Operation string          `json:"operation"`
+	Input     json.RawMessage `json:"input"`
+}
+
+func validProjectContentInput(value ProjectContentInput) bool {
+	return (value.Operation == "production" || value.Operation == "task_history" || value.Operation == "task_list") && len(value.Input) > 0 && len(value.Input) <= 64*1024 && json.Valid(value.Input)
 }
 
 type TaskText struct {
-	Attachments []kernel.TaskAttachment `json:"attachments,omitempty"`
-	TaskID      string                  `json:"task_id"`
-	Revision    uint64                  `json:"revision"`
-	Instruction string                  `json:"instruction"`
-	Feedback    string                  `json:"feedback"`
-	Outcome     *string                 `json:"outcome,omitempty"`
-	NextOffset  *uint64                 `json:"next_offset,omitempty"`
+	Attachments    []kernel.TaskAttachment `json:"attachments,omitempty"`
+	TaskID         string                  `json:"task_id"`
+	Revision       uint64                  `json:"revision"`
+	Instruction    string                  `json:"instruction"`
+	Feedback       string                  `json:"feedback"`
+	Outcome        *string                 `json:"outcome,omitempty"`
+	PeerQuestions  []PeerQuestion          `json:"peer_questions,omitempty"`
+	NextOffset     *uint64                 `json:"next_offset,omitempty"`
+	NextPeerOffset *uint64                 `json:"next_peer_offset,omitempty"`
 }
 
 // DashboardSnapshot deliberately contains only the bounded public Store
