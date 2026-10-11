@@ -473,7 +473,7 @@ func benchmarkValidationStore(b *testing.B) *Store {
 	return store
 }
 
-func TestValidatedWriteChecksCancelledRunAndRelationships(t *testing.T) {
+func TestPeriodicValidationChecksCancelledRunAndRelationships(t *testing.T) {
 	t.Parallel()
 	for _, test := range []struct{ name, corrupt string }{
 		{"valid", ""},
@@ -489,22 +489,14 @@ func TestValidatedWriteChecksCancelledRunAndRelationships(t *testing.T) {
 			if test.corrupt != "" {
 				corruptSQL(t, store, test.corrupt)
 			}
-			before := captureWriteFootprint(t, store)
-			tx, err := store.beginValidatedWrite(context.Background())
-			if tx != nil {
-				defer tx.Close()
-				defer tx.Rollback(nil)
-			}
+			err := store.Validate(context.Background())
 			if test.corrupt == "" {
 				if err != nil {
-					t.Fatalf("valid cancelled run: %v", err)
+					t.Fatalf("valid cancelled run validation: %v", err)
 				}
 			} else {
 				if !errors.Is(err, ErrCorruptState) {
-					t.Fatalf("corrupted cancelled run accepted: %v", err)
-				}
-				if after := captureWriteFootprint(t, store); after != before {
-					t.Fatalf("refusal changed durable footprint: before=%+v after=%+v", before, after)
+					t.Fatalf("corrupted cancelled run accepted by periodic validation: %v", err)
 				}
 			}
 		})

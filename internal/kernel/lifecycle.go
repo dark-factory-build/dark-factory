@@ -361,6 +361,9 @@ func (store *Store) ProposeAttemptOutcome(ctx context.Context, digest AttemptDig
 	if !found || run.Phase != RunRunning || run.CredentialRevokedAt != nil {
 		return Run{}, tx.Rollback(ErrUnauthorized)
 	}
+	if _, err := loadRunRelationships(ctx, tx.connection, run); err != nil {
+		return Run{}, tx.Rollback(err)
+	}
 	finalizing, err := store.enterFinalizing(ctx, tx, run, run.Revision, proposal, at, nil)
 	if err != nil && (errors.Is(err, ErrConflict) || errors.Is(err, ErrRevisionConflict)) {
 		return Run{}, NewOutcomeRefusal(err)

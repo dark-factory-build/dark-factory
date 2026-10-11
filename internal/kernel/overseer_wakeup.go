@@ -187,7 +187,6 @@ func (store *Store) EnqueueOverseerWakeups(ctx context.Context, at UnixMillis, h
 		return nil, tx.Rollback(err)
 	}
 	var tasks []Task
-	changed := false
 	for _, agent := range agents {
 		cursor, found, err := overseerWakeCursor(ctx, tx.connection, agent.ID)
 		if err != nil {
@@ -237,17 +236,12 @@ func (store *Store) EnqueueOverseerWakeups(ctx context.Context, at UnixMillis, h
 				return nil, tx.Rollback(err)
 			}
 			tasks = append(tasks, task)
-			changed = true
 		}
 		if cursor != factory.Head.Int64() || !found {
 			if err := setOverseerWakeCursor(ctx, tx.connection, agent, factory.Head.Int64()); err != nil {
 				return nil, tx.Rollback(err)
 			}
-			changed = true
 		}
-	}
-	if !changed {
-		return nil, tx.Rollback(nil)
 	}
 	if err := tx.Commit(ctx); err != nil {
 		return nil, err

@@ -87,9 +87,6 @@ func (store *Store) ReadPublicSnapshot(ctx context.Context) (PublicSnapshot, err
 		return PublicSnapshot{}, err
 	}
 	defer tx.Close()
-	if err := validateDurableControls(ctx, tx.connection); err != nil {
-		return PublicSnapshot{}, err
-	}
 	state, err := factoryState(ctx, tx.connection)
 	if err != nil {
 		return PublicSnapshot{}, err

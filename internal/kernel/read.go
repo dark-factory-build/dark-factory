@@ -371,11 +371,33 @@ func (store *Store) Snapshot(ctx context.Context) (DashboardSnapshot, error) {
 		return DashboardSnapshot{}, err
 	}
 	defer tx.Close()
-	if err := validateDurableControls(ctx, tx.connection); err != nil {
-		return DashboardSnapshot{}, err
-	}
 	state, err := factoryState(ctx, tx.connection)
 	if err != nil {
+		return DashboardSnapshot{}, err
+	}
+	activeRows, err := tx.connection.QueryContext(ctx, `SELECT `+runColumns+` FROM runs WHERE phase <> 'terminal'`)
+	if err != nil {
+		return DashboardSnapshot{}, err
+	}
+	for activeRows.Next() {
+		run, found, scanErr := scanRun(activeRows)
+		if scanErr != nil || !found {
+			activeRows.Close()
+			if scanErr == nil {
+				scanErr = ErrCorruptState
+			}
+			return DashboardSnapshot{}, scanErr
+		}
+		if _, err := loadRunRelationships(ctx, tx.connection, run); err != nil {
+			activeRows.Close()
+			return DashboardSnapshot{}, err
+		}
+	}
+	if err := activeRows.Err(); err != nil {
+		activeRows.Close()
+		return DashboardSnapshot{}, err
+	}
+	if err := activeRows.Close(); err != nil {
 		return DashboardSnapshot{}, err
 	}
 	activeRuns, err := activeRunCount(ctx, tx.connection, state.Capacity)
