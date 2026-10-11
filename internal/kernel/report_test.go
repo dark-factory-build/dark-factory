@@ -97,10 +97,10 @@ func TestReportAndWhyReadTheReconcilersState(t *testing.T) {
 
 func TestReportLessonCountersUseLatestRevision(t *testing.T) {
 	t.Parallel()
-	store, _, project, _ := newAdmissionStore(t, RoleOrchestrator, 1)
+	store, run, keys := runningWorkerRun(t)
 	defer store.Close()
 	ctx := context.Background()
-	spec := contentSpec(t, project.ID, 221, "lesson")
+	spec := contentSpec(t, run.ProjectID, 221, "lesson")
 	spec.Kind = ContentLesson
 	spec.Author = "operator:local"
 	spec.SourceReferences = `{"status":"needs_revalidation","evidence":["old source"],"verification":"go test ./internal/kernel"}`
@@ -108,13 +108,16 @@ func TestReportLessonCountersUseLatestRevision(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	if err := store.RecordContentAccessForAttempt(ctx, keys.AttemptDigest, ContentAccess{ContentID: lesson.ID, ContentRevision: lesson.Revision, Kind: "read", ByteLength: 1, CreatedAt: mustTime(t, 10)}); err != nil {
+		t.Fatal(err)
+	}
 	spec.Title = "revalidated"
 	spec.SourceReferences = `{"status":"current","evidence":["new source"],"verification":"go test ./internal/kernel"}`
 	if _, err := store.ReviseContent(ctx, lesson.Revision, spec, mustTime(t, 11)); err != nil {
 		t.Fatal(err)
 	}
-	lines, err := store.Report(ctx, &project.ID, 0, 3600000)
-	if err != nil || len(lines) != 1 || lines[0] != "lessons=1 reads=0 citations=1 stale=0" {
+	lines, err := store.Report(ctx, &run.ProjectID, 0, 3600000)
+	if err != nil || len(lines) != 2 || lines[1] != "lessons=1 reads=0 citations=1 stale=0" {
 		t.Fatalf("latest lesson report = %q, %v", lines, err)
 	}
 }
