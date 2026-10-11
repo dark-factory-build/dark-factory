@@ -7,16 +7,19 @@
 # the top 20 file pairs changed together, with the share of the rarer file's
 # commits that also touched the other.
 set -eu
+script_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+repo_dir=$(pwd)
 complexity=$(mktemp ".hotspots.XXXXXX")
 trap 'rm -f "$complexity"' EXIT HUP INT TERM
-go tool gocognit -ignore '_test\.go$' . >"$complexity"
-git log --no-merges --no-renames --numstat --format=tformat:@ "$@" | awk -v complexity="$complexity" '
+go -C "$script_dir/.." tool gocognit -ignore '_test\.go$' "$repo_dir" >"$complexity"
+git log --no-merges --no-renames --numstat --format=tformat:@ "$@" | awk -v complexity="$complexity" -v repo_dir="$repo_dir/" '
 BEGIN {
     while ((getline line < complexity) > 0) {
         # gocognit fields: complexity package function file:line:column.
         split(line, fields, /[[:space:]]+/)
         if (fields[1] !~ /^[0-9]+$/) continue
         pos = fields[4]; sub(/:[0-9]+:[0-9]+$/, "", pos); sub(/^\.\//, "", pos)
+        if (index(pos, repo_dir) == 1) pos = substr(pos, length(repo_dir) + 1)
         if (fields[1] > max[pos]) { max[pos] = fields[1]; fn[pos] = fields[3] }
     }
     close(complexity)
