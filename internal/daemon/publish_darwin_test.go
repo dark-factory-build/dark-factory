@@ -345,9 +345,35 @@ func TestFactorydPublishesACorrectionOnItsPullRequest(t *testing.T) {
 		t.Fatalf("correction commit = %+v", commit)
 	}
 	text := body["body"].(string)
-	if body["operation_id"] != uuid5("dark-factory:"+c.Change.String()+":body-"+app.tip[:8]) || body["pull_number"] != uint64(31) ||
+	if body["operation_id"] != uuid5("dark-factory:"+c.Change.String()+":body-"+app.tip[:8]+"-3") || body["pull_number"] != uint64(31) ||
 		!strings.Contains(text, "at "+app.tip+": +2 -1 across 3 files from "+c.Base) || !strings.HasSuffix(text, "\n\nCloses #9") {
 		t.Fatalf("corrected body = %+v", body)
+	}
+}
+
+// A worker answering a verdict with evidence and no file change (#1706)
+// moves no head: its answer replaces the body and one fresh review of the
+// same head is claimed, instead of publication refusing "nothing to publish".
+func TestAnEvidenceOnlyCorrectionIsReviewedAgainAtTheSameHead(t *testing.T) {
+	fixture, c, source, app, checkout := publishFixture(t, 1, false)
+	ctx := context.Background()
+	app.tip, c.Pull = c.Head, 31 // the branch already carries the worker's tree
+	c.Task.Result = "Premise not reproduced: the cited line already guards it."
+	withTip := func(ctx context.Context, ref, head string) (string, func(), error) {
+		gitDir, cleanup, err := checkout(ctx, ref, head)
+		if err == nil {
+			_, err = gitOutput(ctx, gitDir, "-c", "protocol.file.allow=always", "fetch", "--quiet", source, head)
+		}
+		return gitDir, cleanup, err
+	}
+	if err := fixture.daemon.publishChange(ctx, c, "team/repo", source, app.call, withTip); err != nil {
+		t.Fatal(err)
+	}
+	if len(app.writes) != 1 || app.writes[0]["name"] != "update_pull_request_body" || !strings.Contains(app.writes[0]["arguments"].(map[string]any)["body"].(string), "Premise not reproduced") {
+		t.Fatalf("writes = %+v", app.writes)
+	}
+	if op := waitForDurableReview(t, fixture.store, c.Task.ProjectID, func(op review.Operation) bool { return op.State == "enqueued" }); op.Request.PullNumber != 31 || op.Request.Head != c.Head {
+		t.Fatalf("review = %+v", op)
 	}
 }
 
