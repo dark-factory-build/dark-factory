@@ -722,9 +722,10 @@ fn tools() -> Value {
                 "pull_number": {"type": "integer", "minimum": 1},
                 "head_sha": {"type": "string", "pattern": "^[0-9a-f]{40}$"},
                 "base": {"type": "string", "minLength": 1, "maxLength": 255},
+                "base_sha": {"type": "string", "pattern": "^[0-9a-f]{40}$"},
                 "reviewed_body_digest": {"type": "string", "pattern": "^sha256:[0-9a-fA-F]{64}$"}
             },
-            "required": ["repository", "pull_number", "head_sha", "base", "reviewed_body_digest"],
+            "required": ["repository", "pull_number", "head_sha", "base", "base_sha", "reviewed_body_digest"],
             "additionalProperties": false
         },
         "outputSchema": {
@@ -1036,6 +1037,17 @@ fn operation_error(id: Value, error: OperationError) -> Response {
             id,
             "conflict",
             "The exact-head, operation, or observed-object binding did not match.",
+        ),
+        OperationError::EnqueueBinding {
+            binding,
+            expected,
+            observed,
+        } => tool_error(
+            id,
+            "conflict",
+            &format!(
+                "enqueue {binding} binding did not match: expected {expected}, observed {observed}."
+            ),
         ),
         // The reason names the fact; the wrapper must not promise more than the
         // reason supports. Some refusals are preconditions that can come to

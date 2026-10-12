@@ -82,3 +82,15 @@ func TestOnlyARejectionTheSameRequestMeetsAgainIsPermanent(t *testing.T) {
 		}
 	}
 }
+
+func TestEnqueueBindingConflictSelectsItsRecovery(t *testing.T) {
+	for _, binding := range []string{"head", "base", "body_digest", "operation_id"} {
+		err := maintainerRejection("conflict: enqueue " + binding + " binding did not match: expected old, observed new.")
+		if got := enqueueBinding(err); got != binding {
+			t.Errorf("binding=%q got %q", binding, got)
+		}
+	}
+	if got := enqueueBinding(maintainerRejection("conflict: The exact-head, operation, or observed-object binding did not match.")); got != "" {
+		t.Fatalf("generic conflict classified as %q", got)
+	}
+}

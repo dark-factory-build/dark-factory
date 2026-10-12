@@ -108,6 +108,12 @@ pub(crate) enum OperationError {
     InvalidFooter(String),
     #[error("operation ID is already bound to a different request")]
     Conflict,
+    #[error("enqueue {binding} binding did not match: expected {expected}, observed {observed}")]
+    EnqueueBinding {
+        binding: &'static str,
+        expected: String,
+        observed: String,
+    },
     /// The request was refused determinately. Distinct from `Indeterminate`,
     /// which means the outcome is genuinely unknown. Most refusals leave the
     /// operation ID retryable once the precondition the reason names actually
@@ -716,6 +722,10 @@ pub(crate) struct EnqueuePullRequest {
     /// different branch than the caller believes would be enqueued onto that
     /// branch's queue instead.
     pub(crate) base: String,
+    /// The base commit independently reviewed with the head. The branch name
+    /// alone is not enough: main may advance after review and before enqueue.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) base_sha: Option<String>,
     /// Digest of the exact rendered PR body that was independently reviewed,
     /// checked immediately before enqueue. GitHub atomically binds only the
     /// head; a body edit can race with that write.
@@ -1593,7 +1603,11 @@ impl AppAuthority {
             .await?;
         let repository = self.0.repository_metadata(&token).await?;
         if request.base != repository.default_branch {
-            return Err(OperationError::Conflict);
+            return Err(OperationError::EnqueueBinding {
+                binding: "base",
+                expected: request.base.clone(),
+                observed: repository.default_branch,
+            });
         }
         let queueless = match self.0.reconcile_enqueue(&token, &request).await {
             Ok(Some(result)) => return Ok(result),
@@ -2305,6 +2319,9 @@ impl EnqueuePullRequest {
     fn validate(&self) -> Result<(), OperationError> {
         valid_exact_integer(self.pull_number)?;
         valid_sha(&self.head_sha)?;
+        if let Some(base_sha) = &self.base_sha {
+            valid_sha(base_sha)?;
+        }
         valid_ref(&self.base)?;
         valid_digest(&self.reviewed_body_digest).map_err(|_| OperationError::InvalidInput)
     }
@@ -3991,7 +4008,11 @@ impl Authority {
         )
         .await?;
         if pull.number != pull_number || pull.head.sha != expected_sha {
-            return Err(OperationError::Conflict);
+            return Err(OperationError::EnqueueBinding {
+                binding: "head",
+                expected: expected_sha.to_owned(),
+                observed: pull.head.sha,
+            });
         }
         Ok(pull)
     }
@@ -4927,11 +4948,29 @@ fn revalidate_enqueue_pull(
     pull: &PullRequest,
     request: &EnqueuePullRequest,
 ) -> Result<(), OperationError> {
-    if pull.base.name != request.base
-        || pull.body.as_deref().map(text_digest).as_deref()
-            != Some(request.reviewed_body_digest.as_str())
-    {
-        return Err(OperationError::Conflict);
+    if pull.base.name != request.base {
+        return Err(OperationError::EnqueueBinding {
+            binding: "base",
+            expected: request.base.clone(),
+            observed: pull.base.name.clone(),
+        });
+    }
+    if let Some(expected) = &request.base_sha {
+        if &pull.base.sha != expected {
+            return Err(OperationError::EnqueueBinding {
+                binding: "base",
+                expected: expected.clone(),
+                observed: pull.base.sha.clone(),
+            });
+        }
+    }
+    let observed = pull.body.as_deref().map(text_digest).unwrap_or_default();
+    if observed != request.reviewed_body_digest {
+        return Err(OperationError::EnqueueBinding {
+            binding: "body_digest",
+            expected: request.reviewed_body_digest.clone(),
+            observed,
+        });
     }
     Ok(())
 }
@@ -7202,6 +7241,7 @@ mod tests {
             pull_number: 848,
             head_sha: "a".repeat(40),
             base: "main".into(),
+            base_sha: None,
             reviewed_body_digest: text_digest("reviewed body"),
         };
         let pull = |body: &str| PullRequest {
@@ -7228,10 +7268,13 @@ mod tests {
             revalidate_enqueue_pull(&pull("reviewed body"), &request),
             Ok(())
         );
-        assert_eq!(
+        assert!(matches!(
             revalidate_enqueue_pull(&pull("edited after review"), &request),
-            Err(OperationError::Conflict)
-        );
+            Err(OperationError::EnqueueBinding {
+                binding: "body_digest",
+                ..
+            })
+        ));
 
         // Repeating a queueless enqueue after its direct merge landed still
         // revalidates and answers the merge without a second mutation.
@@ -7327,6 +7370,7 @@ mod tests {
             pull_number: 329,
             head_sha: head.clone(),
             base: "main".into(),
+            base_sha: None,
             reviewed_body_digest: text_digest("reviewed body"),
         };
         assert!(request.validate().is_ok());

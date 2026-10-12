@@ -324,6 +324,25 @@ func (daemon *Daemon) reconcilePull(ctx context.Context, open kernel.OpenPull, u
 					action, note = review.SendBack, op.Conversation
 					err = daemon.sendBackPull(ctx, open, task, op, note)
 				}
+			} else if binding := enqueueBinding(err); binding != "" {
+				// A binding conflict is a stale observation, not an enqueue
+				// failure. Repeating the same request is exactly the race that
+				// produced it; refresh the pull, or start a new review when its
+				// reviewed body is no longer the one GitHub stores.
+				if !strings.Contains(op.LastAction, "enqueue "+binding+" binding") {
+					LogFactoryd(daemon.log, "factoryd: enqueue %s#%d binding %s: %v\n", open.Repository, open.Pull.Number, binding, err)
+				}
+				switch binding {
+				case "body_digest", "operation_id":
+					err = daemon.reviewHead(ctx, coordinator, open, "")
+					action = review.Review
+					note = "the enqueue binding changed: " + binding
+				default:
+					op.Failures = 0
+					op.LastAction = "enqueue " + binding + " binding changed; re-observe before enqueue"
+					err = nil
+					action = review.Wait
+				}
 			}
 		}
 	}
@@ -875,7 +894,7 @@ func (b *daemonReviewBackend) Observe(ctx context.Context, operationID string) (
 }
 
 func (b *daemonReviewBackend) Enqueue(ctx context.Context, operation review.Operation) error {
-	err := b.call(ctx, "enqueue_pull_request", map[string]any{"repository": b.repository, "pull_number": operation.Request.PullNumber, "head_sha": operation.Request.Head, "base": operation.Request.BaseRef, "reviewed_body_digest": reviewedBodyDigest(operation)})
+	err := b.call(ctx, "enqueue_pull_request", map[string]any{"repository": b.repository, "pull_number": operation.Request.PullNumber, "head_sha": operation.Request.Head, "base": operation.Request.BaseRef, "base_sha": operation.Request.Base, "reviewed_body_digest": reviewedBodyDigest(operation)})
 	if errors.Is(err, review.ErrOwnerApproval) {
 		err = fmt.Errorf("%w; owned paths: %s", err, b.ownedPaths(ctx, operation.Request))
 	}
@@ -967,6 +986,24 @@ func (r maintainerRejection) Is(target error) bool {
 	return target == review.ErrPermanent && (strings.HasPrefix(why, "invalid_input:") || strings.Contains(why, "too large for GitHub to return whole")) ||
 		target == review.ErrOwnerApproval && refused && (strings.Contains(strings.ToLower(why), "required codeowners approval") || strings.Contains(strings.ToLower(why), "waiting on code owner review") || strings.Contains(why, "CODEOWNERS_APPROVAL")) ||
 		target == review.ErrConversation && refused && strings.Contains(strings.ToLower(why), "conversation must be resolved")
+}
+
+func enqueueBinding(err error) string {
+	var rejection maintainerRejection
+	if !errors.As(err, &rejection) {
+		return ""
+	}
+	line, _, _ := strings.Cut(string(rejection), "\n")
+	const prefix = "conflict: enqueue "
+	if !strings.HasPrefix(line, prefix) {
+		return ""
+	}
+	rest := strings.TrimPrefix(line, prefix)
+	binding, _, ok := strings.Cut(rest, " binding did not match:")
+	if !ok || (binding != "head" && binding != "base" && binding != "body_digest" && binding != "operation_id") {
+		return ""
+	}
+	return binding
 }
 
 func reviewedBodyDigest(operation review.Operation) string {
