@@ -6,11 +6,15 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/dark-factory-build/dark-factory/internal/api"
+	"github.com/dark-factory-build/dark-factory/internal/install"
+	"github.com/dark-factory-build/dark-factory/internal/runner"
 )
 
 func TestParseExactOperatorCommands(t *testing.T) {
@@ -260,6 +264,30 @@ func TestOperatorCommandsRequireExactEnvironmentBeforeDialing(t *testing.T) {
 	exit := run(context.Background(), []string{"dispatch", "on"}, func(string) string { return "" }, &stdout, &stderr)
 	if exit != exitFailure || stdout.Len() != 0 || !strings.Contains(stderr.String(), "operator client configuration is invalid") {
 		t.Fatalf("missing environment = exit %d stdout %q stderr %q", exit, stdout.String(), stderr.String())
+	}
+}
+
+// An absent socket under its home is a daemon that is down or restarting,
+// not a misconfigured shell (#1830).
+func TestOperatorCommandReportsAbsentSocketAsDaemonDown(t *testing.T) {
+	directory, err := os.MkdirTemp(runner.ShortTempDir(), "dark-factory-factoryctl-down-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.RemoveAll(directory)
+	home := filepath.Join(directory, "home")
+	if _, err := install.Init(context.Background(), home); err != nil {
+		t.Fatal(err)
+	}
+	token := filepath.Join(home, "operator.token")
+	writeToken(t, token, bytes.Repeat([]byte{'O'}, 32))
+	environment := map[string]string{"DARK_FACTORY_SOCKET": install.LocalAPISocketPath(home), "DARK_FACTORY_OPERATOR_TOKEN_FILE": token}
+	for _, args := range [][]string{{"dispatch", "on"}, {"release", strings.Repeat("a", 40)}} {
+		var stdout, stderr bytes.Buffer
+		exit := run(context.Background(), args, func(name string) string { return environment[name] }, &stdout, &stderr)
+		if exit != exitFailure || stdout.Len() != 0 || stderr.String() != "factoryctl: factoryd is not running or is restarting\n" {
+			t.Fatalf("%v with absent socket = exit %d stdout %q stderr %q", args, exit, stdout.String(), stderr.String())
+		}
 	}
 }
 

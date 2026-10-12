@@ -541,10 +541,6 @@ func openProcess(ctx context.Context, configuration config) (_ *process, resultE
 	} else {
 		// Recovery reports its failures and never refuses the boot: the
 		// scheduler's ticks sweep ownerless runs and advance reviews again.
-		startupPhase("review recovery")
-		if _, err := owner.daemon.RecoverReviewOperations(ownedContext); err != nil {
-			daemon.LogFactoryd(recoveryLog, "factoryd: review recovery: %v\n", err)
-		}
 		startupPhase("daemon")
 		// A leftover finalizing worker run with an available Change needs the
 		// Git executable to settle its worktree; publish it before the sweep
@@ -628,6 +624,12 @@ func openProcess(ctx context.Context, configuration config) (_ *process, resultE
 	owner.schedulerStart = true
 	go func() {
 		defer close(owner.schedulerDone)
+		// Review recovery reconciles every open pull request over GitHub, so
+		// it is the scheduler's first pass, not a wait before the listener.
+		startupPhase("review recovery")
+		if _, err := owner.daemon.RecoverReviewOperations(ownedContext); err != nil {
+			daemon.LogFactoryd(recoveryLog, "factoryd: review recovery: %v\n", err)
+		}
 		owner.schedulerErr = owner.daemon.RunScheduler(ownedContext, owner.supervisorSpec)
 	}()
 	startupPhase("scheduler")

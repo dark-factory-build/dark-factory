@@ -1070,14 +1070,17 @@ func (store *Store) RecoverRunningReviewOperations(ctx context.Context, at UnixM
 			delete(item.document, "detail")
 		} else if verdict == "" {
 			// Nothing external was written: startup relaunches it, so a
-			// daemon restart (every release) never fails a review.
+			// daemon restart (every release) never fails a review. It keeps
+			// its updated_at, so startup knows the previous daemon left it.
 			item.document["state"] = json.RawMessage(`"running"`)
 			delete(item.document, "detail")
 		} else {
 			item.document["state"] = json.RawMessage(`"failed"`)
 			item.document["detail"] = json.RawMessage(`"review interrupted after an external write may have occurred; observe the original operation"`)
 		}
-		item.document["updated_at"] = updatedAt
+		if verdict != "" {
+			item.document["updated_at"] = updatedAt
+		}
 		if err := productionRecordOnConnection(ctx, tx.connection, item.project, item.repository, "reviewer", item.identity, "", item.document, at.Int64()); err != nil {
 			return 0, tx.Rollback(err)
 		}

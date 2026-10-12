@@ -105,43 +105,55 @@ func TestPublicationReviewClaimSurvivesInterruptionBeforeCoordinatorResume(t *te
 	}
 }
 
+// An interrupted claim, running or persisted as gating before the pre-review
+// gate was removed, is the previous daemon's: startup resumes it once even
+// when this daemon booted at its own clock's now (#1830).
 func TestRestartResumesPublicationReviewWithoutDuplicateSubmit(t *testing.T) {
-	fixture, projectID := reviewPublicFixture(t)
-	incarnation, err := kernel.IncarnationIDFromBytes(mustIDBytes(t, testID(247)))
-	if err != nil {
-		t.Fatal(err)
-	}
-	task, err := fixture.store.EnqueueTask(context.Background(), kernel.NewTask{ID: mustTaskID(t, testID(248)), IncarnationID: incarnation, ProjectID: projectID, Title: "publish"}, mustKernelTime(t, 3))
-	if err != nil {
-		t.Fatal(err)
-	}
-	head, base := strings.Repeat("a", 40), strings.Repeat("b", 40)
-	prepared, err := review.Prepare(review.Request{Repository: "team/repo", PullNumber: 10, Head: head, Base: base, BaseRef: "main", Body: "fixture body", Provider: "codex"}, func() time.Time { return time.Unix(3, 0) })
-	if err != nil {
-		t.Fatal(err)
-	}
-	pr := kernel.ProductionPullRequest{Number: 10, Title: "Ship it", URL: "https://github.com/team/repo/pull/10", Head: head, Branch: "feature/ship", Base: "main", State: "open", Review: kernel.ProductionReview{Head: head, State: "unknown"}}
-	if err := fixture.store.RecordPublicationWithReviewOperation(context.Background(), projectID, task.ID, "team/repo", pr, prepared.ID, prepared, mustKernelTime(t, 4)); err != nil {
-		t.Fatal(err)
-	}
+	for _, test := range []struct {
+		state string
+		count int // a gating claim is also rewritten as running
+	}{{"running", 1}, {"gating", 2}} {
+		t.Run(test.state, func(t *testing.T) {
+			fixture, projectID := reviewPublicFixture(t)
+			incarnation, err := kernel.IncarnationIDFromBytes(mustIDBytes(t, testID(247)))
+			if err != nil {
+				t.Fatal(err)
+			}
+			task, err := fixture.store.EnqueueTask(context.Background(), kernel.NewTask{ID: mustTaskID(t, testID(248)), IncarnationID: incarnation, ProjectID: projectID, Title: "publish"}, mustKernelTime(t, 3))
+			if err != nil {
+				t.Fatal(err)
+			}
+			head, base := strings.Repeat("a", 40), strings.Repeat("b", 40)
+			prepared, err := review.Prepare(review.Request{Repository: "team/repo", PullNumber: 10, Head: head, Base: base, BaseRef: "main", Body: "fixture body", Provider: "codex"}, func() time.Time { return time.Unix(3, 0) })
+			if err != nil {
+				t.Fatal(err)
+			}
+			prepared.State = test.state
+			pr := kernel.ProductionPullRequest{Number: 10, Title: "Ship it", URL: "https://github.com/team/repo/pull/10", Head: head, Branch: "feature/ship", Base: "main", State: "open", Review: kernel.ProductionReview{Head: head, State: "unknown"}}
+			if err := fixture.store.RecordPublicationWithReviewOperation(context.Background(), projectID, task.ID, "team/repo", pr, prepared.ID, prepared, mustKernelTime(t, 4)); err != nil {
+				t.Fatal(err)
+			}
 
-	restarted, err := newDaemon(fixture.store, func() time.Time { return time.Unix(5, 0) })
-	if err != nil {
-		t.Fatal(err)
-	}
-	backend := &publicReviewBackend{}
-	restarted.reviewBackend = func(string, uint64) review.Backend { return backend }
-	if count, err := restarted.RecoverReviewOperations(context.Background()); err != nil || count != 1 {
-		t.Fatalf("startup reconciliation count=%d err=%v", count, err)
-	}
-	// An interrupted claim is still running, so startup resumes it once, up
-	// to its verdict; the pull request's reconciler enqueues it.
-	recovered := waitForDurableReview(t, fixture.store, projectID, func(op review.Operation) bool { return op.State == "enqueued" })
-	if recovered.ID != prepared.ID || recovered.State != "enqueued" || backend.reviews != 1 || backend.submits != 1 || backend.enqueues != 0 || len(backend.journal) != 1 {
-		t.Fatalf("recovered operation=%+v backend=%+v", recovered, backend)
-	}
-	if count, err := restarted.RecoverReviewOperations(context.Background()); err != nil || count != 0 {
-		t.Fatalf("second reconciliation count=%d err=%v", count, err)
+			restarted, err := newDaemon(fixture.store, func() time.Time { return time.Unix(5, 0) })
+			if err != nil {
+				t.Fatal(err)
+			}
+			restarted.bootedAt = restarted.now()
+			backend := &publicReviewBackend{}
+			restarted.reviewBackend = func(string, uint64) review.Backend { return backend }
+			if count, err := restarted.RecoverReviewOperations(context.Background()); err != nil || count != test.count {
+				t.Fatalf("startup reconciliation count=%d err=%v", count, err)
+			}
+			// An interrupted claim is still running, so startup resumes it once, up
+			// to its verdict; the pull request's reconciler enqueues it.
+			recovered := waitForDurableReview(t, fixture.store, projectID, func(op review.Operation) bool { return op.State == "enqueued" })
+			if recovered.ID != prepared.ID || recovered.State != "enqueued" || backend.reviews != 1 || backend.submits != 1 || backend.enqueues != 0 || len(backend.journal) != 1 {
+				t.Fatalf("recovered operation=%+v backend=%+v", recovered, backend)
+			}
+			if count, err := restarted.RecoverReviewOperations(context.Background()); err != nil || count != 0 {
+				t.Fatalf("second reconciliation count=%d err=%v", count, err)
+			}
+		})
 	}
 }
 

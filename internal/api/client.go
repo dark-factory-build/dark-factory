@@ -804,7 +804,7 @@ func (client client) exchange(ctx context.Context, method string, encoded []byte
 	// to retry, not an invalid client. The new socket is bound before it is
 	// made private, so an invalid one is retried too: nothing was sent.
 	if err != nil {
-		if socketAbsent(client.socketPath) {
+		if SocketAbsent(client.socketPath) {
 			return classifyUndelivered(ctx, ErrTransport)
 		}
 		return classifyUndelivered(ctx, ErrInvalidClient)
@@ -1488,9 +1488,9 @@ type lost struct{ err error }
 
 func (failure lost) Error() string { return failure.err.Error() }
 
-// socketAbsent is the gap between daemon generations: the private parent
+// SocketAbsent is the gap between daemon generations: the private parent
 // stands and only the socket name is missing.
-func socketAbsent(path string) bool {
+func SocketAbsent(path string) bool {
 	root, _, err := openPrivateParent(path)
 	if err != nil {
 		return false

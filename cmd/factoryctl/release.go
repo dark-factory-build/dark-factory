@@ -32,8 +32,7 @@ func runRelease(ctx context.Context, args []string, getenv func(string) string, 
 	start, wait := slices.Contains(args, "--start"), slices.Contains(args, "--wait")
 	client, err := api.NewOperatorClient(getenv("DARK_FACTORY_SOCKET"), getenv("DARK_FACTORY_OPERATOR_TOKEN_FILE"))
 	if err != nil {
-		_, _ = io.WriteString(stderr, "factoryctl: operator client configuration is invalid\n")
-		return exitFailure
+		return operatorClientFailure(stderr, getenv("DARK_FACTORY_SOCKET"))
 	}
 	return release(ctx, start, wait, func(start bool) (kernel.ProductionDelivery, error) {
 		callContext, cancel := context.WithTimeout(ctx, 30*time.Second)
