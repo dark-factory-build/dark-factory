@@ -86,6 +86,7 @@ type Daemon struct {
 	pipelineAt   atomic.Int64 // unix nanoseconds of the next merge-stage pass
 	pipelineBusy atomic.Bool
 	reconcileMu  sync.Mutex // one reconciler pass at a time: startup's and the tick's
+	bootedAt     time.Time  // before the listener: startup resumes only older reviews
 	// The scheduler's Change reclaim pass (tickChangeReclaim), alike, and the
 	// Changes it kept, each logged once with its project and reason; healthMu
 	// guards it for the operator's health read.
@@ -207,7 +208,7 @@ func newDaemon(store *kernel.Store, now func() time.Time) (*Daemon, error) {
 		return nil, fmt.Errorf("%w: invalid daemon", kernel.ErrInvalidValue)
 	}
 	cleanupCtx, cleanupCancel := context.WithCancel(context.Background())
-	return &Daemon{log: os.Stderr, store: store, now: now, livenessClock: time.Now, cleanupCtx: cleanupCtx, cleanupCancel: cleanupCancel, browsers: make(map[*BrowserRuntime]struct{}), browserClientGates: &browserClientGates{}, attempts: make(map[kernel.RunID]*liveAttempt), supervisors: make(map[*supervisorRegistration]struct{}), schedulerWake: make(chan struct{}, 1), productionRefreshAt: make(map[kernel.ProjectID]time.Time)}, nil
+	return &Daemon{log: os.Stderr, store: store, now: now, bootedAt: now(), livenessClock: time.Now, cleanupCtx: cleanupCtx, cleanupCancel: cleanupCancel, browsers: make(map[*BrowserRuntime]struct{}), browserClientGates: &browserClientGates{}, attempts: make(map[kernel.RunID]*liveAttempt), supervisors: make(map[*supervisorRegistration]struct{}), schedulerWake: make(chan struct{}, 1), productionRefreshAt: make(map[kernel.ProjectID]time.Time)}, nil
 }
 
 func (daemon *Daemon) livenessTimestamp() time.Time {

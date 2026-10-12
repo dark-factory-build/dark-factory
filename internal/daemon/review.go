@@ -206,6 +206,9 @@ func (daemon *Daemon) reconcilePull(ctx context.Context, open kernel.OpenPull, u
 	}
 	store := durableReviewStore{store: daemon.store, project: open.Project, repository: open.Repository, now: daemon.now}
 	since := daemon.now().Sub(op.UpdatedAt)
+	// The listener is open during startup recovery, so a review this daemon
+	// accepted is already running: startup takes over only inherited ones.
+	startup = startup && op.UpdatedAt.Before(daemon.bootedAt)
 	switch {
 	case op.State == "running":
 		if startup || since > reviewOrphanedAfter {

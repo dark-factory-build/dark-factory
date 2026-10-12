@@ -852,20 +852,69 @@ func TestMergeStageRunsOnlyOnTheCustomerPath(t *testing.T) {
 	}
 }
 
-// blockedObserveBackend holds the next ObservePull open until release, as a
-// slow GitHub read holds one pull request's reconcile.
-type blockedObserveBackend struct {
+// heldBackend holds the next call of its held method open until release, as
+// a slow GitHub read holds a reconcile or a slow provider holds a review.
+type heldBackend struct {
 	*publicReviewBackend
+	held             string
 	armed            atomic.Bool
 	entered, release chan struct{}
 }
 
-func (b *blockedObserveBackend) ObservePull(ctx context.Context, operation review.Operation) (review.Pull, error) {
-	if b.armed.CompareAndSwap(true, false) {
+func newHeldBackend(held string) *heldBackend {
+	b := &heldBackend{publicReviewBackend: &publicReviewBackend{}, held: held, entered: make(chan struct{}), release: make(chan struct{})}
+	b.armed.Store(true)
+	return b
+}
+
+func (b *heldBackend) hold(method string) {
+	if method == b.held && b.armed.CompareAndSwap(true, false) {
 		close(b.entered)
 		<-b.release
 	}
+}
+
+func (b *heldBackend) ObservePull(ctx context.Context, operation review.Operation) (review.Pull, error) {
+	b.hold("ObservePull")
 	return b.publicReviewBackend.ObservePull(ctx, operation)
+}
+
+func (b *heldBackend) Review(ctx context.Context, clone string, request review.Request) (review.Verdict, error) {
+	b.hold("Review")
+	return b.publicReviewBackend.Review(ctx, clone, request)
+}
+
+func waitHeld(t *testing.T, b *heldBackend) {
+	t.Helper()
+	select {
+	case <-b.entered:
+	case <-time.After(5 * time.Second):
+		t.Fatalf("%s was never called", b.held)
+	}
+}
+
+// Startup recovery runs after factoryd's listener opens (#1830), so a review
+// the API accepted can be running when recovery reads it. Recovery takes over
+// only reviews the previous daemon left, so this one's provider runs once.
+func TestStartupRecoveryDoesNotRelaunchAReviewThisDaemonAccepted(t *testing.T) {
+	fixture, project := reviewPublicFixture(t)
+	ctx := context.Background()
+	backend := newHeldBackend("Review")
+	fixture.daemon.reviewBackend = func(string, uint64) review.Backend { return backend }
+	input := api.IntakeInput{Action: "review_pr", ProjectID: project.String(), ReviewRequest: &api.ReviewRequest{Repository: "team/repo", PullNumber: 7, Head: strings.Repeat("a", 40), Base: strings.Repeat("b", 40), BaseRef: "main", Provider: "codex"}}
+	if result := fixture.daemon.Intake(ctx, input); result.State != "ok" || result.ReviewOperation == "" {
+		t.Fatalf("review_pr answered %+v", result)
+	}
+	waitHeld(t, backend)
+	count, err := fixture.daemon.RecoverReviewOperations(ctx)
+	close(backend.release)
+	if err != nil || count != 0 {
+		t.Fatalf("startup recovery took over a review this daemon accepted: count=%d err=%v", count, err)
+	}
+	op := waitForDurableReview(t, fixture.store, project, func(op review.Operation) bool { return op.State == "enqueued" })
+	if backend.reviews != 1 || backend.submits != 1 {
+		t.Fatalf("operation=%+v backend=%+v", op, backend.publicReviewBackend)
+	}
 }
 
 // factoryd's listener opens before startup review recovery (#1830), so an API
@@ -875,7 +924,8 @@ func TestAPIAnswersWhileStartupReviewReconcileIsBlocked(t *testing.T) {
 	fixture, project, _, settle := publishedTask(t)
 	settle()
 	ctx := context.Background()
-	backend := &blockedObserveBackend{publicReviewBackend: &publicReviewBackend{}, entered: make(chan struct{}), release: make(chan struct{})}
+	backend := newHeldBackend("ObservePull")
+	backend.armed.Store(false)
 	fixture.daemon.reviewBackend = func(string, uint64) review.Backend { return backend }
 	if _, err := reviewNow(ctx, fixture.daemon, project, publishedReviewRequest()); err != nil {
 		t.Fatal(err)
@@ -888,11 +938,7 @@ func TestAPIAnswersWhileStartupReviewReconcileIsBlocked(t *testing.T) {
 		_, err := fixture.daemon.RecoverReviewOperations(ctx)
 		recovered <- err
 	}()
-	select {
-	case <-backend.entered:
-	case <-time.After(5 * time.Second):
-		t.Fatal("startup review recovery never reconciled the open pull request")
-	}
+	waitHeld(t, backend)
 
 	client, err := api.NewOperatorClient(fixture.socket, fixture.operator)
 	if err != nil {
