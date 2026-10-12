@@ -39,10 +39,9 @@ func projectSnapshot(snapshot kernel.DashboardSnapshot) api.DashboardSnapshot {
 			ID: task.ID.String(), ProjectID: task.ProjectID.String(), AssignedAgentID: optionalAgentText(task.AssignedAgentID),
 			IncarnationID: task.IncarnationID.String(), WorkRevision: uint64(task.WorkRevision.Int64()), Title: task.Title, Status: task.Status, Priority: task.Priority, Revision: uint64(task.Revision.Int64()), BlockedReason: task.BlockedReason, UpdatedAtMS: uint64(task.UpdatedAt.Int64()), IssueNumber: task.IssueNumber, MissionID: task.MissionID,
 		}
+		result.Tasks = append(result.Tasks, projected)
 		if task.AssignedAgentID == (kernel.AgentID{}) {
 			result.SharedTasks = append(result.SharedTasks, projected)
-		} else {
-			result.Tasks = append(result.Tasks, projected)
 		}
 	}
 	for _, item := range snapshot.Accounts {
