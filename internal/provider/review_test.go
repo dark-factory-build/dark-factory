@@ -31,6 +31,36 @@ func TestReviewUsageLimitedRequiresProviderMarkers(t *testing.T) {
 	}
 }
 
+func TestClaudeConfinementResolvesMissingWritableChildAlias(t *testing.T) {
+	root := t.TempDir()
+	target := filepath.Join(root, "target")
+	link := filepath.Join(root, "link")
+	if err := os.Mkdir(target, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(target, link); err != nil {
+		t.Fatal(err)
+	}
+	missing := filepath.Join(link, "missing")
+	settings, err := claudeConfinement([]grant{{missing, true}}, nil, map[string]any{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var parsed struct {
+		Sandbox struct {
+			Filesystem struct{ AllowWrite []string }
+		}
+	}
+	if err := json.Unmarshal([]byte(settings), &parsed); err != nil {
+		t.Fatal(err)
+	}
+	for _, path := range []string{"/" + missing, "/" + filepath.Join(target, "missing")} {
+		if !slices.Contains(parsed.Sandbox.Filesystem.AllowWrite, path) {
+			t.Fatalf("missing writable alias %s: %v", path, parsed.Sandbox.Filesystem.AllowWrite)
+		}
+	}
+}
+
 // The prompt carries untrusted task, pull request, diff and dispute text, so
 // a Claude reviewer's file tools get the worker's confinement: user data is
 // denied, the checkout and toolchain are re-allowed, and nothing else is.
