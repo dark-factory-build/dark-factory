@@ -31,6 +31,28 @@ type publishCheckout func(ctx context.Context, ref, head string) (string, func()
 // Change: the next pass retries it.
 var errPublishLater, errRepositoryDisabled = errors.New("publication waits for the next pass"), errors.New("repository disabled for new work")
 
+type publishIndeterminate struct{ step string }
+
+func (e publishIndeterminate) Error() string {
+	return "publication operation " + e.step + " is indeterminate"
+}
+
+type observedPull struct {
+	Number     uint64 `json:"number"`
+	URL        string `json:"url"`
+	Head       string `json:"head_sha"`
+	Base       string `json:"base_sha"`
+	State      string `json:"state"`
+	Body       string `json:"body"`
+	Mergeable  *bool  `json:"mergeable"`
+	MergeState string `json:"merge_state_status"`
+}
+
+type observedPublication struct {
+	ref  string
+	pull *observedPull
+}
+
 // publishSettledChanges publishes each succeeded intake worker's settled
 // Change as one pull request through the project's Maintainer connection,
 // records it against the worker task and launches factoryd's review; a
@@ -199,6 +221,9 @@ func (daemon *Daemon) publishPull(ctx context.Context, c kernel.PublishableChang
 		}
 		state = observed.State
 		if err != nil || observed.State != "completed" {
+			if err == nil && observed.State == "indeterminate" {
+				return false, publishIndeterminate{step: step}
+			}
 			return false, err
 		}
 		return true, json.Unmarshal(observed.Result, result)
@@ -216,6 +241,57 @@ func (daemon *Daemon) publishPull(ctx context.Context, c kernel.PublishableChang
 			err = json.Unmarshal(response, &ref)
 		}
 		return ref.Head, err // "" when the branch does not exist
+	}
+	observe := func(branch string, pull uint64) (observedPublication, error) {
+		ref, err := refHead(branch)
+		if err != nil {
+			return observedPublication{}, err
+		}
+		observed := observedPublication{ref: ref}
+		args := map[string]any{"repository": repo, "page": 1, "per_page": 100}
+		if pull != 0 {
+			args["pull_number"] = pull
+		}
+		response, err := call(ctx, "list_pull_requests", args)
+		if err != nil {
+			return observed, err
+		}
+		var page struct {
+			PullRequests []observedPull `json:"pull_requests"`
+		}
+		if err := json.Unmarshal(response, &page); err != nil {
+			return observed, err
+		}
+		for i := range page.PullRequests {
+			if pull == 0 || page.PullRequests[i].Number == pull {
+				observed.pull = &page.PullRequests[i]
+				break
+			}
+		}
+		return observed, nil
+	}
+	recover := func(step, expected string, pull uint64, expectPull bool) (observedPublication, string, bool, error) {
+		observed, err := observe(branch, pull)
+		if err != nil {
+			return observed, "", false, err
+		}
+		// A changed branch ref is the durable receipt for a commit write. The
+		// pull observation is the receipt for a create-pull write.
+		if pull == 0 && observed.ref != "" && observed.ref != expected {
+			return observed, "", true, nil
+		}
+		if expectPull && observed.pull != nil && (pull != 0 || observed.pull.Head == observed.ref) {
+			return observed, "", true, nil
+		}
+		token := observed.ref
+		if observed.pull != nil {
+			token = observed.pull.Head
+		}
+		if token == "" {
+			token = "missing"
+		}
+		retry := step + "-observed-" + token[:min(len(token), 12)]
+		return observed, retry, false, nil
 	}
 	prefix := "publish-" + c.Head[:8] + "-"
 	var first struct {
@@ -280,9 +356,22 @@ func (daemon *Daemon) publishPull(ctx context.Context, c kernel.PublishableChang
 	for i := 0; i*50 < len(changes); i++ {
 		step := prefix + strconv.Itoa(i+1)
 		var commit struct {
-			SHA string `json:"commit_sha"`
+			Parent string `json:"parent_sha"`
+			SHA    string `json:"commit_sha"`
 		}
 		done, err := completed(step, &commit)
+		if indeterminate, ok := err.(publishIndeterminate); ok {
+			observed, retry, landed, observeErr := recover(indeterminate.step, head, c.Pull, false)
+			if observeErr != nil {
+				return observeErr
+			}
+			if landed {
+				commit.SHA, commit.Parent, done, err = observed.ref, head, true, nil
+			} else {
+				step, done, err = retry, false, nil
+				done, err = completed(step, &commit)
+			}
+		}
 		if err == nil && !done {
 			var response json.RawMessage
 			arguments := map[string]any{"repository": repo, "operation_id": operation(step), "branch": branch, "expected_head_sha": head, "message": message, "changes": changes[i*50 : min(len(changes), i*50+50)]}
@@ -325,6 +414,14 @@ func (daemon *Daemon) publishPull(ctx context.Context, c kernel.PublishableChang
 		if !c.Repair {
 			step := fmt.Sprintf("body-%s-%d", head[:8], c.Revision.Int64())
 			done, err := completed(step, new(json.RawMessage))
+			retryStep, varObserved := step, (*observedPull)(nil)
+			if indeterminate, ok := err.(publishIndeterminate); ok {
+				observed, retry, _, observeErr := recover(indeterminate.step, head, c.Pull, false)
+				if observeErr != nil {
+					return observeErr
+				}
+				retryStep, varObserved, done, err = retry, observed.pull, false, nil
+			}
 			var current struct {
 				PullRequests []struct {
 					Body string `json:"body"`
@@ -344,7 +441,12 @@ func (daemon *Daemon) publishPull(ctx context.Context, c kernel.PublishableChang
 				if !closesIssue(text, issue, files) {
 					footer, body = "Refs", referencing(body, issue)
 				}
-				_, err = call(ctx, "update_pull_request_body", map[string]any{"repository": repo, "operation_id": operation(step), "pull_number": c.Pull, "body": fmt.Sprintf("%s\n\n%s #%d", body, footer, issue)})
+				wanted := fmt.Sprintf("%s\n\n%s #%d", body, footer, issue)
+				if varObserved != nil && varObserved.Body == wanted {
+					done = true
+				} else {
+					_, err = call(ctx, "update_pull_request_body", map[string]any{"repository": repo, "operation_id": operation(retryStep), "pull_number": c.Pull, "body": wanted})
+				}
 			}
 			if err != nil {
 				return err
@@ -366,6 +468,19 @@ func (daemon *Daemon) publishPull(ctx context.Context, c kernel.PublishableChang
 	}
 	step, base := "pr-"+c.Head[:8], ""
 	done, err = completed(step, &pull)
+	if indeterminate, ok := err.(publishIndeterminate); ok {
+		observed, retry, landed, observeErr := recover(indeterminate.step, head, 0, true)
+		if observeErr != nil {
+			return observeErr
+		}
+		if landed && observed.pull != nil {
+			pull.Number, pull.URL, pull.Head, pull.Base = observed.pull.Number, observed.pull.URL, observed.pull.Head, observed.pull.Base
+			done, err = true, nil
+		} else {
+			step, done, err = retry, false, nil
+			done, err = completed(step, &pull)
+		}
+	}
 	if err == nil && !done {
 		base, err = refHead("main")
 	}
