@@ -339,20 +339,12 @@ func (store *Store) validateOpen(ctx context.Context) error {
 	return errors.Join(err, tx.Close())
 }
 
-func (store *Store) validateOpenWithRetry(ctx context.Context) error {
-	err := store.validateOpen(ctx)
-	if errors.Is(err, ErrCorruptState) {
-		err = store.validateOpen(ctx)
-	}
-	return err
-}
-
 // Validate checks one coherent durable snapshot without holding the writer.
 // Corruption it finds becomes a hold that refuses validated writes and
 // snapshot reads until a later validation passes; a timeout or interruption
 // is not corruption and leaves the hold as it was.
 func (store *Store) Validate(ctx context.Context) error {
-	err := store.validateOpenWithRetry(ctx)
+	err := store.validateOpen(ctx)
 	switch {
 	case err == nil:
 		store.held.Store(nil)

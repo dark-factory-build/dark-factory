@@ -97,30 +97,6 @@ func TestOperationalOpenCancellationOwnsPhysicalConnectContext(t *testing.T) {
 	}
 }
 
-func TestOperationalOpenRetriesCorruptSnapshotOnce(t *testing.T) {
-	path, _ := walSnapshotFixture(t, "")
-	calls := 0
-	sqliteOpenableSnapshotHook = func() error {
-		calls++
-		if calls == 1 {
-			return fmt.Errorf("%w: transient inspection fault", ErrCorruptState)
-		}
-		return nil
-	}
-	defer func() { sqliteOpenableSnapshotHook = nil }()
-
-	store, err := Open(context.Background(), path)
-	if err != nil {
-		t.Fatalf("open after transient corrupt snapshot = %v", err)
-	}
-	if calls != 2 {
-		t.Fatalf("openable snapshot validations = %d, want 2", calls)
-	}
-	if err := store.Close(); err != nil {
-		t.Fatalf("close = %v", err)
-	}
-}
-
 func TestOpenRequiresCanonicalOwnerOnlyDatabaseParent(t *testing.T) {
 	image, err := NewDatabaseImage(context.Background(), FactoryConfig{}, mustTime(t, 1))
 	if err != nil {
