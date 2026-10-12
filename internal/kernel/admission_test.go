@@ -161,6 +161,38 @@ func TestCancelledProducerCancelsItsQueuedConsumers(t *testing.T) {
 	}
 }
 
+// Full worker slots hold worker work, not an overseer's, which takes its
+// project's own slot.
+func TestWhyCapacityFollowsTheTasksRole(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	store, _, project, overseer := newAdmissionStore(t, RoleOrchestrator, 1)
+	defer store.Close()
+	worker, err := store.CreateAgent(ctx, NewAgent{ID: agentID(t, 215), ProjectID: project.ID, Name: "worker", Role: RoleWorker, Provider: ProviderCodex, ToolBudgetLimit: 5}, mustTime(t, 4))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.EnqueueTask(ctx, NewTask{ID: taskID(t, 216), ProjectID: project.ID, AssignedAgentID: worker.ID, IncarnationID: incarnationID(t, 217), Title: "running"}, mustTime(t, 5)); err != nil {
+		t.Fatal(err)
+	}
+	if admitted, err := store.AdmitNext(ctx, admissionKeys(t, 220, nil), mustTime(t, 6)); err != nil || !admitted.Admitted() {
+		t.Fatalf("worker admission = %+v, %v", admitted, err)
+	}
+	shared, err := store.EnqueueTask(ctx, NewTask{ID: taskID(t, 218), ProjectID: project.ID, IncarnationID: incarnationID(t, 219), Title: "shared"}, mustTime(t, 7))
+	if err != nil {
+		t.Fatal(err)
+	}
+	overseerTask, err := store.EnqueueTask(ctx, NewTask{ID: taskID(t, 221), ProjectID: project.ID, AssignedAgentID: overseer.ID, IncarnationID: incarnationID(t, 222), Title: "overseer"}, mustTime(t, 8))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for id, want := range map[TaskID]string{shared.ID: "waits on: capacity: every worker slot is in use", overseerTask.ID: "waits on: worker: its task is queued for the next admission"} {
+		if lines, err := store.Why(ctx, nil, 0, id); err != nil || lines[len(lines)-1] != want {
+			t.Fatalf("why %s = %q, %v", id, lines, err)
+		}
+	}
+}
+
 func TestAdmissionConsumesExactSuccessfulProducerRevision(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()

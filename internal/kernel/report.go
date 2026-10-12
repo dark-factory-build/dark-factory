@@ -313,8 +313,13 @@ func whyPullWaits(pr ProductionPullRequest, hasTask bool, task Task, taskWaits s
 func whyTaskWaits(ctx context.Context, c *sql.Conn, task Task) (string, error) {
 	switch task.Status {
 	case TaskQueued:
+		factory, err := factoryState(ctx, c)
+		if err != nil {
+			return "", err
+		}
+		const workers = `(SELECT COUNT(*) FROM runs WHERE role = 'worker' AND phase <> 'terminal')`
 		var blocker string
-		err := c.QueryRowContext(ctx, `SELECT COALESCE(
+		err = c.QueryRowContext(ctx, `SELECT COALESCE(
 			(SELECT 'factoryd: dispatch is disabled' FROM factory WHERE dispatch_enabled = 0),
 			(SELECT 'intake: its issue was withdrawn' WHERE `+taskIssueWithdrawn+`),
 			(SELECT 'prerequisite: task ' || lower(hex(u.id)) || ' is ' || u.status || ' at work revision ' || u.work_revision || '; it needs revision ' || p.upstream_work_revision || ' to succeed'
@@ -328,9 +333,14 @@ func whyTaskWaits(ctx context.Context, c *sql.Conn, task Task) (string, error) {
 				FROM agents AS g WHERE g.id = t.assigned_agent_id AND (g.archived OR g.paused OR g.role <> 'orchestrator' AND g.tool_calls_used >= g.tool_budget_limit OR EXISTS (SELECT 1 FROM runs AS r WHERE r.agent_id = g.id AND r.phase <> 'terminal'))),
 			(SELECT 'account limit: its project has spent its run budget' FROM projects AS p WHERE p.id = t.project_id AND p.run_budget_limit > 0 AND p.runs_used >= p.run_budget_limit),
 			(SELECT 'account limit: its project has spent its token limit' FROM project_tokens AS k WHERE k.project_id = t.project_id AND k.token_limit > 0 AND k.tokens_used >= k.token_limit),
-			(SELECT 'capacity: ' || COUNT(*) || ' worker runs fill every slot' FROM runs WHERE role = 'worker' AND phase <> 'terminal' HAVING COUNT(*) >= (SELECT capacity FROM factory)),
+			(SELECT CASE WHEN a.role = 'orchestrator' THEN 'capacity: its project has an overseer run in progress'
+				WHEN `+workers+` >= ?1 THEN 'capacity: every worker slot is in use'
+				ELSE 'capacity: a specialist waits while it would take the last free worker slot or exceed its project''s specialist_runs' END
+				FROM tasks AS c LEFT JOIN agents AS a ON a.id = c.assigned_agent_id WHERE c.id = t.id
+				  AND (a.role = 'orchestrator' AND (SELECT COUNT(*) FROM runs WHERE role = 'orchestrator' AND project_id = t.project_id AND phase <> 'terminal') >= 1
+				    OR a.role IS NOT 'orchestrator' AND (`+workers+` >= ?1 OR `+specialistCarrierSQL+` AND `+specialistCarrierHeldSQL+`))),
 			'worker: its task is queued for the next admission')
-			FROM tasks AS t WHERE t.id = ?`, task.ID.Bytes()).Scan(&blocker)
+			FROM tasks AS t WHERE t.id = ?2`, factory.Capacity, task.ID.Bytes()).Scan(&blocker)
 		return blocker, err
 	case TaskRunning:
 		return "worker: its task is running", nil
