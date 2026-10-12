@@ -44,7 +44,7 @@ export type AuthResultBody = { client_id: string; capabilities: CapabilityMask }
 export type ErrorBody = { code: ErrorCode; retryable: boolean };
 
 export type FactoryItem = { dispatch_enabled: boolean; capacity: number; active_runs: number; revision: bigint };
-export type ProjectItem = { id: string; name: string; run_budget_limit: bigint; runs_used: bigint; max_run_seconds: number; specialist_runs: number; specialist_open_proposals: number; revision: bigint };
+export type ProjectItem = { id: string; name: string; max_run_seconds: number; revision: bigint };
 /**
  * `model` and `reasoning_effort` are the agent's own overrides; empty means it
  * inherits. `effective_*` is what the run will actually use, and `model_source`
@@ -691,13 +691,9 @@ function factoryItem(value: unknown, wire: boolean): FactoryItem {
   if (active_runs > capacity + 1) malformed(); return { dispatch_enabled: value.dispatch_enabled, capacity, active_runs, revision: decimal(value.revision, wire, true) };
 }
 function projectItem(value: unknown, wire: boolean): ProjectItem {
-  if (!isObject(value)) malformed(); requireKeys(value, ["id", "name", "revision"], wire, ["run_budget_limit", "runs_used", "max_run_seconds", "specialist_runs", "specialist_open_proposals"]);
-  const run_budget_limit = present(value, "run_budget_limit") ? decimal(value.run_budget_limit, wire) : 0n;
-  const runs_used = present(value, "runs_used") ? decimal(value.runs_used, wire) : 0n;
+  if (!isObject(value)) malformed(); requireKeys(value, ["id", "name", "revision"], wire, ["max_run_seconds"]);
   const max_run_seconds = present(value, "max_run_seconds") ? integer(value.max_run_seconds, 0, 86400) : 0;
-  const specialist_runs = present(value, "specialist_runs") ? integer(value.specialist_runs, 0, 16) : 0;
-  const specialist_open_proposals = present(value, "specialist_open_proposals") ? integer(value.specialist_open_proposals, 0, 32) : 0;
-  return { id: dynamicID(value.id), name: boundedText(value.name, 1, MAX_PROJECT_NAME_BYTES), run_budget_limit, runs_used, max_run_seconds, specialist_runs, specialist_open_proposals, revision: decimal(value.revision, wire, true) };
+  return { id: dynamicID(value.id), name: boundedText(value.name, 1, MAX_PROJECT_NAME_BYTES), max_run_seconds, revision: decimal(value.revision, wire, true) };
 }
 function spriteAppearance(value: unknown, wire: boolean): SpriteAppearance {
   if (!isObject(value)) malformed();
