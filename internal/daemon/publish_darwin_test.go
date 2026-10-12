@@ -139,8 +139,9 @@ func (f *fakePublishMaintainer) call(_ context.Context, name string, arguments m
 		return nil, fmt.Errorf("unexpected tool %s", name)
 	}
 	f.journal[id] = result
-	if landCreate || landCommit {
+	if landCreate || landCommit && f.commitWrites == 2 {
 		f.landCreateIndeterminate = false
+		f.landSecondCommit = false
 		return nil, maintainerRejection("unavailable: Maintainer authority is unavailable.")
 	}
 	if f.loseNext {
@@ -658,7 +659,7 @@ func TestIndeterminateLandedCorrectionCommitBatchIsRecorded(t *testing.T) {
 	if err := fixture.daemon.publishChange(context.Background(), c, "team/repo", source, app.call, checkout); err != nil {
 		t.Fatal(err)
 	}
-	if app.commitWrites != 2 || len(app.writes) != 2 {
+	if app.commitWrites != 3 || len(app.writes) != 4 {
 		t.Fatalf("landed correction commits = %d / %+v", app.commitWrites, app.writes)
 	}
 }

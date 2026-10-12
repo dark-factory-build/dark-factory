@@ -324,7 +324,7 @@ func (daemon *Daemon) publishPull(ctx context.Context, c kernel.PublishableChang
 		// A correction is already represented by the existing pull operation.
 		// Route only that operation here: entering advanceReviewOperations would
 		// reacquire reconcileMu when publication was reached from reconciliation.
-		if c.Pull != 0 && dirty {
+		if c.Pull != 0 {
 			pulls, err := daemon.store.OpenPulls(ctx)
 			if err != nil {
 				return errors.Join(err, errPublishLater)
@@ -352,9 +352,6 @@ func (daemon *Daemon) publishPull(ctx context.Context, c kernel.PublishableChang
 		if err != nil {
 			return observed, "", false, err
 		}
-		if err := routeObserved(observed); err != nil {
-			return observed, "", false, err
-		}
 		// A changed branch ref is the durable receipt for a commit write. The
 		// pull observation is the receipt for a create-pull write.
 		if observed.ref != "" && observed.ref != expected {
@@ -362,6 +359,9 @@ func (daemon *Daemon) publishPull(ctx context.Context, c kernel.PublishableChang
 		}
 		if expectPull && observed.pull != nil && (pull != 0 || observed.pull.Head == observed.ref) {
 			return observed, "", true, nil
+		}
+		if err := routeObserved(observed); err != nil {
+			return observed, "", false, err
 		}
 		token := observed.ref
 		if observed.pull != nil {
