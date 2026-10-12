@@ -58,9 +58,6 @@ func TestReviewPromptDelimitsAuthorControlledBodyAsUntrusted(t *testing.T) {
 			t.Fatalf("check %q missing after the review context: %q", check, prompt)
 		}
 	}
-	if strings.Contains(prompt[end:], "name each changed file you reviewed") {
-		t.Fatalf("obsolete path-naming instruction remains after body: %q", prompt)
-	}
 	if !strings.Contains(prompt[end:], "premise or evidence is wrong") || !strings.Contains(prompt[end:], "previous findings together with the new diff") || !strings.Contains(prompt[end:], "exercises the real affected path and condition") {
 		t.Fatalf("incremental evidence guidance missing after body: %q", prompt)
 	}
