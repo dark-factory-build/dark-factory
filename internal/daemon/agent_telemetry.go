@@ -16,6 +16,7 @@ import (
 type runTelemetry struct {
 	tokensIn, tokensOut, costUSD float64
 	toolCalls, apiRequests       uint64
+	subagents                    uint64
 	lastActivity, updated        time.Time
 	cumulative                   map[string]float64
 }
@@ -105,6 +106,11 @@ func (daemon *Daemon) recordAgentTelemetry(points []opgraph.AgentPoint) {
 		case opgraph.APIRequest:
 			entry.apiRequests++
 			entry.lastActivity = now
+		case opgraph.SubagentStart:
+			entry.subagents++
+		case opgraph.SubagentEnd:
+			// An end whose start was lost, or came before this run's counts, is ignored.
+			entry.subagents -= min(entry.subagents, 1)
 		}
 	}
 }
@@ -122,7 +128,7 @@ func (daemon *Daemon) runTelemetryView(id kernel.RunID) *browserprotocol.RunTele
 	count := func(value float64) uint64 { return uint64(min(math.Round(value), float64(limit))) }
 	view := &browserprotocol.RunTelemetry{
 		TokensIn: count(entry.tokensIn), TokensOut: count(entry.tokensOut), CostMicroUSD: count(entry.costUSD * 1e6),
-		ToolCalls: min(entry.toolCalls, limit), APIRequests: min(entry.apiRequests, limit),
+		ToolCalls: min(entry.toolCalls, limit), APIRequests: min(entry.apiRequests, limit), Subagents: min(entry.subagents, limit),
 	}
 	if !entry.lastActivity.IsZero() {
 		quiet := uint64(max(daemon.now().Sub(entry.lastActivity), 0) / time.Second)
