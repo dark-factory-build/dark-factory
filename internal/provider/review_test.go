@@ -41,6 +41,10 @@ func TestClaudeConfinementResolvesMissingWritableChildAlias(t *testing.T) {
 	if err := os.Symlink(target, link); err != nil {
 		t.Fatal(err)
 	}
+	resolvedTarget, err := filepath.EvalSymlinks(target)
+	if err != nil {
+		t.Fatal(err)
+	}
 	missing := filepath.Join(link, "missing")
 	settings, err := claudeConfinement([]grant{{missing, true}}, nil, map[string]any{})
 	if err != nil {
@@ -54,7 +58,7 @@ func TestClaudeConfinementResolvesMissingWritableChildAlias(t *testing.T) {
 	if err := json.Unmarshal([]byte(settings), &parsed); err != nil {
 		t.Fatal(err)
 	}
-	for _, path := range []string{"/" + missing, "/" + filepath.Join(target, "missing")} {
+	for _, path := range []string{"/" + missing, "/" + filepath.Join(resolvedTarget, "missing")} {
 		if !slices.Contains(parsed.Sandbox.Filesystem.AllowWrite, path) {
 			t.Fatalf("missing writable alias %s: %v", path, parsed.Sandbox.Filesystem.AllowWrite)
 		}

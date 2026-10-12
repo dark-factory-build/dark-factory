@@ -950,7 +950,7 @@ func claudeConfinement(grants []grant, allow []string, hooks map[string]any, ext
 	for _, grant := range grants {
 		rule := "/" + grant.path // a leading "//" is Claude's absolute path
 		read = append(read, rule)
-		allow = append(allow, "Read("+rule+")", "Read("+rule+"/**)")
+		allow = append(allow, "Read("+rule+"/**)")
 		if grant.write {
 			write = append(write, rule)
 			allow = append(allow, "Edit("+rule+"/**)")
