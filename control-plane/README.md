@@ -134,9 +134,32 @@ submitted again.
 The review base for the large-publication work (`4b9b6f1`) contains the original
 50-file publication loop and per-file blob requests. Inline tree content,
 100-file publication, and legacy receipt reconciliation/suffix recovery are
-introduced by this Change; they are not pre-change defects. Reviews and release
-notes should keep that baseline distinction and identify intermediate recovery
-heads when describing regressions.
+introduced by this Change; they are not pre-change defects. The implementation
+has four related parts:
+
+- UTF-8 file contents are sent as Git tree `content`, so ordinary text files do
+  not require one Git blob request apiece. Non-UTF-8 content still uses the
+  blob endpoint, preserving binary files and executable modes. Deletes and
+  unchanged-tree inheritance retain their existing Git tree semantics.
+- `publish_commit` accepts 100 changes, and the MCP envelope and schema are
+  sized for that unit. A local connection harness publishes 100 UTF-8 files in
+  one commit and asserts that no per-file blob request is made; the same
+  harness covers the binary fallback and an unavailable/replayed operation.
+- New publications use a versioned operation namespace and retain the 100-file
+  unit. The daemon still understands receipts written by the old 50-file
+  namespace. It reconciles completed old batches before continuing, and when a
+  suffix is indeterminate it preserves the completed prefix, retries the
+  unfinished suffix under the recoverable namespace, and clears the merge
+  parent after the external commit is recovered.
+- The daemon tests cover a completed first legacy batch, an indeterminate first
+  batch, and an indeterminate later suffix. The first-batch test verifies the
+  actual resulting tree, including the deleted path, rather than only checking
+  operation bookkeeping.
+
+Reviews and release notes should keep the `4b9b6f1` baseline distinction,
+identify intermediate recovery heads when describing regressions, and state
+that the Maintainer's actual subrequest-plan limit and the post-deployment
+five-Change live signal require separate operational verification.
 
 GitHub App installation tokens are minted only inside the Worker, scoped to the
 one repository the operation names, and downscoped per operation. They are held
