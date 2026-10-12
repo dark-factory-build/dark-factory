@@ -100,8 +100,10 @@ Every record carries `status` (`tentative` unless verified), `evidence`
   ./cmd` (duplicated blocks) only after those two views. Cite the numbers, and
   name what goes in every proposal.
 - GitHub, unauthenticated only (60 requests an hour shared by this machine;
-  never use a token; use few): issues, PRs, Actions runs, e.g.
+  never use a token; use few): issues, PRs, Actions runs and their jobs'
+  conclusions, e.g.
   `curl -s https://api.github.com/repos/OWNER/REPO/actions/runs?per_page=30`.
+  Job logs need admin rights (HTTP 403): do not diagnose CI from logs.
 - The public web if your provider has it; check it works, else report it
   unavailable.
 - Console: with `factory_browser`, run `cd web && corepack pnpm install
@@ -118,7 +120,9 @@ Reviews need factory capacity of at least 2 and the project's `specialist_runs`
 of at least 1. A run is cancelled at 30 minutes. `idle_run_budget` (0 =
 unlimited) caps reviews enqueued for you. One proposal per run; the project's
 `specialist_open_proposals` caps your open ones; one accepted proposal's task
-is active at a time. Quiet reviews back the cadence off up to eight times.
+is active at a time. A finished review that records no proposal or amendment
+is quiet (a blocked one is not); quiet reviews back the cadence off up to
+eight times.
 
 ## Boundaries
 
