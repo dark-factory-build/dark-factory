@@ -19,7 +19,7 @@ use crate::{
 };
 
 pub(crate) const PATH: &str = "/mcp";
-// `publish_commit` permits 50 files with one million encoded characters each.
+// `publish_commit` permits 100 files with one million encoded characters each.
 // Leave room for their paths and the JSON-RPC envelope without accepting an
 // unbounded allocation before typed validation.
 pub(crate) const MAX_BODY_BYTES: usize = 52 * 1024 * 1024;

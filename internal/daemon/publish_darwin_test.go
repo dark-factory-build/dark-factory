@@ -174,11 +174,11 @@ func publishFixture(t *testing.T, files int, workflow bool) (*dispatchFixture, k
 }
 
 // First publication end to end, with the first commit's response lost: the
-// retry replays nothing the journal completed, chains 52 entries over two
-// commits, opens the pull request from the accepted issue with a redacted
+// retry replays nothing the journal completed, publishes 100 entries in one
+// commit, opens the pull request from the accepted issue with a redacted
 // body, records it under the worker task and starts factoryd's review.
 func TestFactorydPublishesASettledIntakeChange(t *testing.T) {
-	fixture, c, source, app, checkout := publishFixture(t, 51, false)
+	fixture, c, source, app, checkout := publishFixture(t, 99, false)
 	ctx := context.Background()
 	app.loseNext = true
 	if err := fixture.daemon.publishChange(ctx, c, "team/repo", source, app.call, checkout); err == nil {
@@ -190,21 +190,20 @@ func TestFactorydPublishesASettledIntakeChange(t *testing.T) {
 	if err := fixture.daemon.publishChange(ctx, c, "team/repo", source, app.call, checkout); err != nil {
 		t.Fatal(err)
 	}
-	first, second, pull := app.writes[0]["arguments"].(map[string]any), app.writes[1]["arguments"].(map[string]any), app.writes[2]["arguments"].(map[string]any)
-	if len(app.writes) != 3 || first["operation_id"] != uuid5("dark-factory:"+c.Change.String()+":publish-"+c.Head[:8]+"-1") || second["operation_id"] != uuid5("dark-factory:"+c.Change.String()+":publish-"+c.Head[:8]+"-2") || pull["operation_id"] != uuid5("dark-factory:"+c.Change.String()+":pr-"+c.Head[:8]) {
+	first, pull := app.writes[0]["arguments"].(map[string]any), app.writes[1]["arguments"].(map[string]any)
+	if len(app.writes) != 2 || first["operation_id"] != uuid5("dark-factory:"+c.Change.String()+":publish-"+c.Head[:8]+"-1") || pull["operation_id"] != uuid5("dark-factory:"+c.Change.String()+":pr-"+c.Head[:8]) {
 		t.Fatalf("writes = %+v", app.writes)
 	}
 	firstCommit := fmt.Sprintf("%x", sha1.Sum([]byte(first["operation_id"].(string))))
-	secondCommit := fmt.Sprintf("%x", sha1.Sum([]byte(second["operation_id"].(string))))
-	if first["expected_head_sha"] != c.Base || len(first["changes"].([]map[string]any)) != 50 || second["expected_head_sha"] != firstCommit || len(second["changes"].([]map[string]any)) != 2 || first["message"] != "Fix the thing" || first["branch"] != "factory/"+c.Change.String()[:12] {
-		t.Fatalf("commit chain: first=%v second=%v", first["expected_head_sha"], second["expected_head_sha"])
+	if first["expected_head_sha"] != c.Base || len(first["changes"].([]map[string]any)) != 100 || first["message"] != "Fix the thing" || first["branch"] != "factory/"+c.Change.String()[:12] {
+		t.Fatalf("commit: base=%v changes=%d", first["expected_head_sha"], len(first["changes"].([]map[string]any)))
 	}
 	body := pull["body"].(string)
-	if pull["head_sha"] != secondCommit || pull["issue_number"] != uint64(9) || pull["source_repository"] != nil || pull["close_on_merge"] != true || pull["base_sha"] != c.Base ||
-		strings.Contains(body, "example.com") || strings.Contains(body, "/Users/") || !strings.Contains(body, "Implemented it") || !strings.Contains(body, secondCommit) || !strings.Contains(body, "+51 -1 across 52 files") || !strings.HasSuffix(body, "The merge queue runs the gate.") {
+	if pull["head_sha"] != firstCommit || pull["issue_number"] != uint64(9) || pull["source_repository"] != nil || pull["close_on_merge"] != true || pull["base_sha"] != c.Base ||
+		strings.Contains(body, "example.com") || strings.Contains(body, "/Users/") || !strings.Contains(body, "Implemented it") || !strings.Contains(body, firstCommit) || !strings.Contains(body, "+99 -1 across 100 files") || !strings.HasSuffix(body, "The merge queue runs the gate.") {
 		t.Fatalf("pull request = %+v", pull)
 	}
-	if pr := readProductionPull(t, fixture.store, c.Task.ProjectID, 31); pr.Head != secondCommit || pr.Branch != "factory/"+c.Change.String()[:12] {
+	if pr := readProductionPull(t, fixture.store, c.Task.ProjectID, 31); pr.Head != firstCommit || pr.Branch != "factory/"+c.Change.String()[:12] {
 		t.Fatalf("recorded pull = %+v", pr)
 	}
 	page, err := fixture.store.Production(ctx, c.Task.ProjectID, 0, 8, kernel.UnixMillis{})
@@ -216,7 +215,7 @@ func TestFactorydPublishesASettledIntakeChange(t *testing.T) {
 			t.Fatalf("publication tasks = %v, want the worker %s", record.Tasks, c.Task.ID)
 		}
 	}
-	if op := waitForDurableReview(t, fixture.store, c.Task.ProjectID, func(op review.Operation) bool { return op.State == "enqueued" }); op.State != "enqueued" || op.Request.PullNumber != 31 || op.Request.Head != secondCommit {
+	if op := waitForDurableReview(t, fixture.store, c.Task.ProjectID, func(op review.Operation) bool { return op.State == "enqueued" }); op.State != "enqueued" || op.Request.PullNumber != 31 || op.Request.Head != firstCommit {
 		t.Fatalf("review = %+v", op)
 	}
 }

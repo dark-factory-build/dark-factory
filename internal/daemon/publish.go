@@ -277,7 +277,7 @@ func (daemon *Daemon) publishPull(ctx context.Context, c kernel.PublishableChang
 		return errors.New("nothing to publish: its head " + c.Head + " changes no file from " + diffFrom)
 	}
 	message := publicationMessage(c)
-	for i := 0; i*50 < len(changes); i++ {
+	for i := 0; i*100 < len(changes); i++ {
 		step := prefix + strconv.Itoa(i+1)
 		var commit struct {
 			SHA string `json:"commit_sha"`
@@ -285,7 +285,7 @@ func (daemon *Daemon) publishPull(ctx context.Context, c kernel.PublishableChang
 		done, err := completed(step, &commit)
 		if err == nil && !done {
 			var response json.RawMessage
-			arguments := map[string]any{"repository": repo, "operation_id": operation(step), "branch": branch, "expected_head_sha": head, "message": message, "changes": changes[i*50 : min(len(changes), i*50+50)]}
+			arguments := map[string]any{"repository": repo, "operation_id": operation(step), "branch": branch, "expected_head_sha": head, "message": message, "changes": changes[i*100 : min(len(changes), i*100+100)]}
 			if i == 0 && mergeParent != "" {
 				arguments["merge_parent_sha"] = mergeParent
 			}

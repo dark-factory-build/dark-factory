@@ -36,7 +36,7 @@ Access policy, or App configuration is live.
 - `POST /mcp` is a stateless Streamable HTTP MCP JSON-RPC endpoint. It is
   installed only with the complete operation authority. Its 52 MiB envelope
   ceiling is derived above the largest request the typed publication schema
-  permits (50 files with 1,000,000 encoded characters each), rather than
+  permits (100 files with 1,000,000 encoded characters each), rather than
   reusing the webhook's unrelated 64 KiB limit or adding a lower aggregate
   limit. The endpoint is reached only after Cloudflare Access has supplied
   one authenticated JWT assertion

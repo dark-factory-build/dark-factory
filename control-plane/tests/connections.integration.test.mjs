@@ -28,6 +28,7 @@ test('two principals: callback, pagination, refresh, replay, grants and revocati
   const permissionSet = { contents: 'write', issues: 'write', metadata: 'read', pull_requests: 'write' };
   const grants = [], requestedPermissions = [];
   const publishedCommits = [];
+  let blobCreates = 0;
   const recoveryPulls = [];
   let recoveryPostMode = '', recoveryPostCount = 0, recoveryPullVisible = false;
   let aliceLogin = 'alice';
@@ -73,7 +74,7 @@ test('two principals: callback, pagination, refresh, replay, grants and revocati
         if (url.pathname.startsWith('/repos/team/shared/git/commits/')) return json({ message: 'base', tree: { sha: 'd'.repeat(40) }, parents: [] });
         if (url.pathname === '/repos/team/shared/git/trees' && request.method === 'POST') return json({ sha: 'e'.repeat(40) }, 201);
         if (url.pathname.startsWith('/repos/team/shared/git/trees/')) return json({ tree: [], truncated: false });
-        if (url.pathname === '/repos/team/shared/git/blobs') return json({ sha: 'f'.repeat(40) }, 201);
+        if (url.pathname === '/repos/team/shared/git/blobs') { blobCreates++; return json({ sha: 'f'.repeat(40) }, 201); }
         if (url.pathname.startsWith('/repos/team/shared/git/refs/heads/') && request.method === 'PATCH') {
           const body = await request.json();
           assert.equal(body.force, false);
@@ -236,6 +237,11 @@ test('two principals: callback, pagination, refresh, replay, grants and revocati
     const renamedPublication = await (await call(alice, 'publish_commit', { ...publication, operation_id: '7d1f0f8e-7f1f-11f0-952e-acde48001123' })).json();
     assert.equal(renamedPublication.result.isError, false, JSON.stringify(renamedPublication));
     assert.deepEqual(publishedCommits[1].author, { name: 'alice-renamed', email: '10+alice-renamed@users.noreply.github.com' });
+    const largePublication = { ...publication, operation_id: '7d1f0f8e-7f1f-11f0-952e-acde48001124', changes: Array.from({ length: 100 }, (_, i) => ({ path: `bulk/file-${i}.txt`, content_base64: 'bGluZSAxMDAK' })) };
+    const largeResult = await (await call(alice, 'publish_commit', largePublication)).json();
+    assert.equal(largeResult.result.isError, false, JSON.stringify(largeResult));
+    assert.equal(publishedCommits.length, 3, '100 UTF-8 files publish in one commit');
+    assert.equal(blobCreates, 0, 'UTF-8 tree content does not create per-file blobs');
     aliceLogin = 'alice';
     const id = '6d1f0f8e-7f1f-11f0-952e-acde48001122';
     const args = { repository: 'team/shared', operation_id: id, title: 'private fixture', body: 'accepted bytes' };

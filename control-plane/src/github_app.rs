@@ -24,7 +24,7 @@ const GITHUB_API_VERSION: &str = "2026-03-10";
 pub(crate) const MAX_GITHUB_RESPONSE_BYTES: usize = 8 * 1024 * 1024;
 /// Publication bounds. A commit is a bounded, reviewable unit of work, not a
 /// bulk upload channel, and the Worker must hold every blob in memory.
-const MAX_COMMIT_FILES: usize = 50;
+const MAX_COMMIT_FILES: usize = 100;
 const MAX_COMMIT_FILE_BYTES: usize = 1_000_000;
 const MAX_ISSUE_LABELS: usize = 100;
 const MAX_ISSUE_LABEL_BYTES: usize = 50;
@@ -3186,21 +3186,28 @@ impl Authority {
         for change in &request.changes {
             let sha = match change.content_base64.as_deref() {
                 Some(content) => {
-                    let blob: GitObjectId = github_json_request(
-                        worker::Method::Post,
-                        &format!(
-                            "https://api.github.com/repos/{}/{}/git/blobs",
-                            token.repository.owner, token.repository.name
-                        ),
-                        token.as_str(),
-                        Some(&BlobRequest {
-                            content,
-                            encoding: "base64",
-                        }),
-                    )
-                    .await?;
-                    valid_sha(&blob.sha)?;
-                    Some(blob.sha)
+                    let bytes = general_purpose::STANDARD
+                        .decode(content)
+                        .map_err(|_| OperationError::InvalidInput)?;
+                    if std::str::from_utf8(&bytes).is_ok() {
+                        None
+                    } else {
+                        let blob: GitObjectId = github_json_request(
+                            worker::Method::Post,
+                            &format!(
+                                "https://api.github.com/repos/{}/{}/git/blobs",
+                                token.repository.owner, token.repository.name
+                            ),
+                            token.as_str(),
+                            Some(&BlobRequest {
+                                content,
+                                encoding: "base64",
+                            }),
+                        )
+                        .await?;
+                        valid_sha(&blob.sha)?;
+                        Some(blob.sha)
+                    }
                 }
                 None => None,
             };
@@ -4204,6 +4211,7 @@ struct BlobRequest<'a> {
 #[cfg(any(target_arch = "wasm32", test))]
 mod publish_tree {
     use super::{FileChange, GitTreeEntry, OperationError};
+    use base64::Engine;
     use serde::Serialize;
 
     #[derive(Serialize)]
@@ -4213,6 +4221,8 @@ mod publish_tree {
         #[serde(rename = "type")]
         kind: &'static str,
         sha: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        content: Option<String>,
     }
 
     #[derive(Serialize)]
@@ -4273,6 +4283,17 @@ mod publish_tree {
                     mode,
                     kind: "blob",
                     sha: sha.clone(),
+                    content: match (change.content_base64.as_deref(), sha) {
+                        (Some(encoded), None) => Some(
+                            String::from_utf8(
+                                super::general_purpose::STANDARD
+                                    .decode(encoded)
+                                    .map_err(|_| OperationError::InvalidInput)?,
+                            )
+                            .map_err(|_| OperationError::InvalidInput)?,
+                        ),
+                        _ => None,
+                    },
                 })
             })
             .collect::<Result<Vec<_>, OperationError>>()?;
@@ -6879,10 +6900,10 @@ mod tests {
                 "base_tree": "base-tree",
                 "tree": [
                     {"path": "bin/tool", "mode": "100755", "type": "blob", "sha": "a".repeat(40)},
-                    {"path": "notes.txt", "mode": "100644", "type": "blob", "sha": null},
+                    {"path": "notes.txt", "mode": "100644", "type": "blob", "sha": null, "content": "hello"},
                     {"path": "nested/tool", "mode": "100755", "type": "blob", "sha": "b".repeat(40)},
-                    {"path": "new.txt", "mode": "100644", "type": "blob", "sha": null},
-                    {"path": "new/directory/file.txt", "mode": "100644", "type": "blob", "sha": null}
+                    {"path": "new.txt", "mode": "100644", "type": "blob", "sha": null, "content": "hello"},
+                    {"path": "new/directory/file.txt", "mode": "100644", "type": "blob", "sha": null, "content": "hello"}
                 ]
             })
         );
@@ -6906,9 +6927,9 @@ mod tests {
             serde_json::json!({
                 "base_tree": "base-tree",
                 "tree": [
-                    {"path": "new/gate.sh", "mode": "100755", "type": "blob", "sha": null},
+                    {"path": "new/gate.sh", "mode": "100755", "type": "blob", "sha": null, "content": "hello"},
                     // Unstated still inherits, so the old behaviour is intact.
-                    {"path": "bin/tool", "mode": "100755", "type": "blob", "sha": null}
+                    {"path": "bin/tool", "mode": "100755", "type": "blob", "sha": null, "content": "hello"}
                 ]
             })
         );
