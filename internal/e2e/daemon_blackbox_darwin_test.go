@@ -97,7 +97,7 @@ type factorydProcess struct {
 // record, and the SIGKILL crash cuts the recovery matrix proves black-box.
 func TestBlackBoxDaemonLifecycle(t *testing.T) {
 	if os.Getenv("DARK_FACTORY_DAEMON_E2E") != "1" {
-		t.Skip("run through scripts/go-e2e.sh daemon")
+		t.Fatal("daemon E2E requires scripts/go-e2e.sh daemon; run that command instead")
 	}
 	fixture := newBlackBoxFixture(t)
 

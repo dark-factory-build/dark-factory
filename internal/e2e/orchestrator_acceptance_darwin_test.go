@@ -22,7 +22,7 @@ import (
 // durable outcome; the factoryd stderr tail is logged on any failure.
 func TestBlackBoxOrchestratorAcceptance(t *testing.T) {
 	if os.Getenv("DARK_FACTORY_DAEMON_E2E") != "1" {
-		t.Skip("run through scripts/go-e2e.sh daemon")
+		t.Fatal("daemon E2E requires scripts/go-e2e.sh daemon; run that command instead")
 	}
 	fixture := newBlackBoxFixture(t)
 	foreignRepo := filepath.Join(fixture.root, "foreign")
