@@ -341,6 +341,7 @@ type liveAttempt struct {
 	beforeRenewCommit        func()
 	beforeAttachEffect       func()
 	beforeProviderStateCheck func() error
+	beforeRetainedOutcome    func()
 }
 
 // stalled reports whether this attempt has had no terminal-output growth and

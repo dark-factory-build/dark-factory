@@ -439,26 +439,25 @@ func TestSupervisorCancelsRetainedOutcomeRetryWithWriterBlocked(t *testing.T) {
 	defer lock.Exec("ROLLBACK")
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	var calls atomic.Int32
-	var released atomic.Bool
-	retryReached := make(chan error, 1)
+	// As in TestSupervisorConvergesRefusedProviderOutcome, a backwards clock
+	// refuses the provider's outcome call, which the live owner retains.
+	var refuse atomic.Bool
 	fixture.daemon.now = func() time.Time {
-		if released.Load() {
-			switch calls.Add(1) {
-			case 1:
-				return time.UnixMilli(1)
-			case 2:
-				// The first call was the API refusal; this is the supervisor's
-				// retry after authenticating the runner result. Keep the writer
-				// unavailable until RunNext has returned from cancellation.
-				_, lockErr := lock.Exec("BEGIN IMMEDIATE")
-				retryReached <- lockErr
-				cancel()
-			}
+		if refuse.CompareAndSwap(true, false) {
+			return time.UnixMilli(1)
 		}
 		return time.Now()
 	}
-	fixture.spec.beforeProviderRelease = func() { released.Store(true) }
+	fixture.spec.beforeProviderRelease = func() { refuse.Store(true) }
+	retryReached := make(chan error, 1)
+	// The supervisor retries that retained proposal after authenticating the
+	// runner result. Keep the writer unavailable until RunNext has returned
+	// from cancellation.
+	fixture.spec.beforeRetainedOutcome = func() {
+		_, lockErr := lock.Exec("BEGIN IMMEDIATE")
+		retryReached <- lockErr
+		cancel()
+	}
 	done := make(chan error, 1)
 	go func() {
 		_, runErr := fixture.daemon.RunNext(ctx, fixture.spec)

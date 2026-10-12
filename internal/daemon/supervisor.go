@@ -52,6 +52,7 @@ type SupervisorSpec struct {
 	beforeProviderStateCheck func() error
 	afterProviderRelease     func() error
 	beforeProviderRelease    func()
+	beforeRetainedOutcome    func() // before the retained outcome proposal is retried
 
 	// admissionObserved is a package-private scheduling hint. The Darwin
 	// supervisor invokes it exactly once after AdmitNext commits successfully;

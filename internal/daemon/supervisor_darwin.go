@@ -828,7 +828,7 @@ func (daemon *Daemon) runNext(ctx context.Context, spec SupervisorSpec) (resultR
 		}
 	}
 	live.attemptDigest = digest
-	live.beforeProviderStateCheck = spec.beforeProviderStateCheck
+	live.beforeProviderStateCheck, live.beforeRetainedOutcome = spec.beforeProviderStateCheck, spec.beforeRetainedOutcome
 	if err := daemon.registerLiveAttempt(live); err != nil {
 		return daemon.failRun(run, kernel.FailureInternal, err)
 	}
@@ -1008,6 +1008,9 @@ func (daemon *Daemon) attemptResultTail(
 	// A competing durable outcome wins normally: its unauthorized response is
 	// not a license to replace that outcome.
 	if pending, ok := live.pendingOutcomeSnapshot(); ok {
+		if live.beforeRetainedOutcome != nil {
+			live.beforeRetainedOutcome()
+		}
 		at, proposalErr := daemon.timestamp()
 		if proposalErr != nil {
 			return kernel.Run{}, proposalErr
