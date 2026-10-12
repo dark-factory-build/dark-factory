@@ -28,3 +28,17 @@ func TestLogFactorydPrefixesWithUTCRFC3339(t *testing.T) {
 		t.Fatalf("line = %q", got)
 	}
 }
+
+func TestHourlyMaintenanceNamesOnlyTheSlowStep(t *testing.T) {
+	var output bytes.Buffer
+	timeMaintenance(&output, "ExpireBlockedTasks", func() { time.Sleep(1100 * time.Millisecond) })
+	// Slow logging between steps, such as a long expiry list or an archive
+	// error, belongs to no step.
+	time.Sleep(1100 * time.Millisecond)
+	timeMaintenance(&output, "ArchiveHistory", func() {})
+
+	lines := strings.Split(strings.TrimSuffix(output.String(), "\n"), "\n")
+	if len(lines) != 1 || !strings.Contains(lines[0], "factoryd: hourly maintenance ExpireBlockedTasks took 1.1") {
+		t.Fatalf("maintenance log = %q", lines)
+	}
+}

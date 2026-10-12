@@ -179,14 +179,7 @@ func (daemon *Daemon) RunScheduler(ctx context.Context, spec SupervisorSpec) err
 				}
 				if now := daemon.now(); !now.Before(nextAttachmentCleanup) {
 					if at, err := kernel.NewUnixMillis(now.UnixMilli()); err == nil {
-						// Each maintenance step over a second is named: they share the writer.
-						timed := func(step string, run func()) {
-							started := time.Now()
-							run()
-							if took := time.Since(started); took > time.Second {
-								LogFactoryd(daemon.log, "factoryd: hourly maintenance %s took %s\n", step, took.Round(time.Millisecond))
-							}
-						}
+						timed := func(step string, run func()) { timeMaintenance(daemon.log, step, run) }
 						var expired []kernel.TaskID
 						timed("ExpireBlockedTasks", func() { expired, _ = daemon.store.ExpireBlockedTasks(ownedCtx, at) })
 						for _, id := range expired {
