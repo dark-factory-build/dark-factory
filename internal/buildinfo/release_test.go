@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -210,4 +211,32 @@ func readFile(t *testing.T, path string) []byte {
 		t.Fatal(err)
 	}
 	return content
+}
+
+// BuildRelease hands every console and go build command to the supplied run,
+// which the daemon uses to record each command's process group (#1854).
+func TestBuildReleaseRunsEveryCommandThroughRun(t *testing.T) {
+	t.Parallel()
+	dir, out := t.TempDir(), t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "VERSION"), []byte("1.2.3\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "go.mod"), []byte("module example\n\ngo 1.24\n\ntoolchain go1.27.0\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	var ran []string
+	identity, err := BuildRelease(t.Context(), dir, fixtureSource, "darwin/arm64", out, nil, func(command *exec.Cmd) ([]byte, error) {
+		ran = append(ran, strings.Join(command.Args[1:3], " ")+" "+filepath.Base(command.Args[len(command.Args)-1]))
+		if command.Args[1] == "go" {
+			return nil, os.WriteFile(command.Args[len(command.Args)-2], nil, 0o600)
+		}
+		return nil, nil
+	})
+	want := []string{"corepack pnpm --ignore-scripts", "corepack pnpm console", "go build factoryd", "go build factoryctl", "go build factory-runner"}
+	if expected, _ := Expected("1.2.3", fixtureSource, "darwin/arm64"); err != nil || identity != expected || strings.Join(ran, "\n") != strings.Join(want, "\n") {
+		t.Fatalf("BuildRelease = %+v, %v; ran %q", identity, err, ran)
+	}
+	if info, err := os.Stat(filepath.Join(out, "factoryd")); err != nil || info.Mode().Perm() != 0o755 {
+		t.Fatalf("built factoryd: %v, %v", info, err)
+	}
 }
