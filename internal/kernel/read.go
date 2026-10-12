@@ -474,8 +474,9 @@ func (store *Store) Snapshot(ctx context.Context) (DashboardSnapshot, error) {
 	}
 	for taskRows.Next() {
 		var rawID, rawProjectID, rawAgentID, rawIncarnationID []byte
-		var title, rawStatus, missionID string
+		var title, rawStatus string
 		var rawBlockedReason sql.NullString
+		var missionID sql.NullString
 		var workRevision, priority, rawRevision int64
 		var updatedAt, issueNumber sql.NullInt64
 		if err := taskRows.Scan(&rawID, &rawProjectID, &rawAgentID, &rawIncarnationID, &workRevision, &title, &rawStatus, &priority, &rawBlockedReason, &rawRevision, &updatedAt, &issueNumber, &missionID); err != nil {
@@ -499,7 +500,7 @@ func (store *Store) Snapshot(ctx context.Context) (DashboardSnapshot, error) {
 			taskRows.Close()
 			return DashboardSnapshot{}, ErrSnapshotTooLarge
 		}
-		snapshot.Tasks = append(snapshot.Tasks, TaskSummary{ID: id, ProjectID: projectID, AssignedAgentID: agentID, IncarnationID: incarnationID, WorkRevision: workRev, Title: title, Status: status.String(), BlockedReason: rawBlockedReason.String, Priority: priority, Revision: revision, UpdatedAt: updated, IssueNumber: issueNumber.Int64, MissionID: missionID})
+		snapshot.Tasks = append(snapshot.Tasks, TaskSummary{ID: id, ProjectID: projectID, AssignedAgentID: agentID, IncarnationID: incarnationID, WorkRevision: workRev, Title: title, Status: status.String(), BlockedReason: rawBlockedReason.String, Priority: priority, Revision: revision, UpdatedAt: updated, IssueNumber: issueNumber.Int64, MissionID: missionID.String})
 	}
 	if err := taskRows.Close(); err != nil {
 		return DashboardSnapshot{}, err
