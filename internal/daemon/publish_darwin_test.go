@@ -109,6 +109,10 @@ func (f *fakePublishMaintainer) call(_ context.Context, name string, arguments m
 // worker head adds files, deletes one, and adds a workflow when asked; a
 // worker task in the review fixture's project, and that Change as a candidate.
 func publishFixture(t *testing.T, files int, workflow bool) (*dispatchFixture, kernel.PublishableChange, string, *fakePublishMaintainer, publishCheckout) {
+	return publishFixtureMode(t, files, workflow, false)
+}
+
+func publishFixtureMode(t *testing.T, files int, workflow, integratedMain bool) (*dispatchFixture, kernel.PublishableChange, string, *fakePublishMaintainer, publishCheckout) {
 	t.Helper()
 	git := change.TrustedGitExecutable
 	registered := t.TempDir()
@@ -129,6 +133,17 @@ func publishFixture(t *testing.T, files int, workflow bool) (*dispatchFixture, k
 	// Git directory, never in the registered repository the clone borrows.
 	root = filepath.Join(t.TempDir(), "change")
 	supervisorGit(t, git, "clone", "-q", registered, root)
+	main := base
+	if integratedMain {
+		if err := os.WriteFile(filepath.Join(registered, "main.txt"), []byte("new main\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		supervisorGit(t, git, "-C", registered, "-c", "user.name=fixture", "-c", "user.email=fixture@example.invalid", "add", "main.txt")
+		supervisorGit(t, git, "-C", registered, "-c", "user.name=fixture", "-c", "user.email=fixture@example.invalid", "commit", "-q", "-m", "main update")
+		main = strings.TrimSpace(supervisorGitOutput(t, git, "-C", registered, "rev-parse", "HEAD"))
+		supervisorGit(t, git, "-C", root, "-c", "protocol.file.allow=always", "fetch", "--quiet", registered, main)
+		supervisorGit(t, git, "-C", root, "merge", "--no-edit", "FETCH_HEAD")
+	}
 	run("rm", "-q", "gone.txt")
 	for i := range files {
 		if err := os.WriteFile(filepath.Join(root, fmt.Sprintf("f%02d.txt", i)), []byte(fmt.Sprintf("line %d\n", i)), 0o644); err != nil {
@@ -178,7 +193,7 @@ func publishFixture(t *testing.T, files int, workflow bool) (*dispatchFixture, k
 		supervisorGit(t, git, "clone", "-q", "--shared", registered, clone)
 		return filepath.Join(clone, ".git"), func() {}, nil
 	}
-	return fixture, candidate, filepath.Join(root, ".git"), &fakePublishMaintainer{main: base, journal: map[string]json.RawMessage{}}, checkout
+	return fixture, candidate, filepath.Join(root, ".git"), &fakePublishMaintainer{main: main, journal: map[string]json.RawMessage{}}, checkout
 }
 
 // First publication end to end, with the first commit's response lost: the
@@ -250,8 +265,9 @@ func TestFactorydPreservesLegacyFiftyFilePublicationReceipts(t *testing.T) {
 }
 
 func TestFactorydRecoversAnIndeterminateLegacyPublication(t *testing.T) {
-	fixture, c, source, app, checkout := publishFixture(t, 99, false)
+	fixture, c, source, app, checkout := publishFixtureMode(t, 99, false, true)
 	firstOperation := uuid5("dark-factory:" + c.Change.String() + ":publish-" + c.Head[:8] + "-1")
+	secondOperation := uuid5("dark-factory:" + c.Change.String() + ":publish-" + c.Head[:8] + "-2")
 	firstCommit := strings.Repeat("a", 40)
 	app.tip = firstCommit
 	app.journal[firstOperation], _ = json.Marshal(map[string]any{
@@ -263,7 +279,6 @@ func TestFactorydRecoversAnIndeterminateLegacyPublication(t *testing.T) {
 	if err := fixture.daemon.publishChange(context.Background(), c, "team/repo", source, app.call, checkout); err != nil {
 		t.Fatal(err)
 	}
-	secondOperation := uuid5("dark-factory:" + c.Change.String() + ":publish-" + c.Head[:8] + "-2")
 	if !app.indeterminate[secondOperation] {
 		t.Fatalf("failed batch was not journalled indeterminate: %+v", app.indeterminate)
 	}
