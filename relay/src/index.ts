@@ -75,6 +75,10 @@ async function routeIngest(request: Request, env: Env, node: string): Promise<Re
 	}
 	const length = request.headers.get('Content-Length');
 	if (length === null || !/^\d{1,7}$/.test(length)) return new Response(null, { status: 411 });
-	if (Number(length) > INGEST_LIMIT) return new Response(null, { status: 413 });
+	if (Number(length) > INGEST_LIMIT) {
+		const reader = request.body?.getReader();
+		while (reader !== undefined && !(await reader.read()).done) {}
+		return new Response(null, { status: 413 });
+	}
 	return await env.FACTORY_RELAY.getByName(node).fetch(request);
 }
