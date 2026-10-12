@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -79,6 +80,39 @@ func TestReviewPromptCarriesPriorBlockingFindingsToANewHead(t *testing.T) {
 	if !strings.Contains(prompt[end:], "A test that reports SKIP is not verification") || !strings.Contains(prompt[end:], "treat that claim as unverified") {
 		t.Fatalf("skip-verification instruction missing after body: %q", prompt)
 	}
+}
+
+func TestPriorAllowedOperationAllowsRebasedBase(t *testing.T) {
+	open := kernel.OpenPull{History: []json.RawMessage{mustJSON(t, review.Operation{
+		ID: "prior", Request: review.Request{Head: strings.Repeat("a", 40), Base: strings.Repeat("b", 40), BaseRef: "main"}, Verdict: "allow", DiffID: "same-diff",
+	})}}
+	request := review.Request{Head: strings.Repeat("c", 40), Base: strings.Repeat("d", 40), BaseRef: "main"}
+	prior, ok := priorAllowedOperation(open, request)
+	if !ok || prior.ID != "prior" {
+		t.Fatalf("rebased base did not retain prior approval: %+v, %v", prior, ok)
+	}
+}
+
+func TestPriorBlockingFindingsAreBoundedAndIncludeSameHead(t *testing.T) {
+	var history []json.RawMessage
+	for i := range 17 {
+		history = append(history, mustJSON(t, review.Operation{
+			Request: review.Request{Head: strings.Repeat("a", 40)}, Verdict: "request_changes", Detail: fmt.Sprintf("finding-%d-%s", i, strings.Repeat("x", 4000)),
+		}))
+	}
+	findings := priorBlockingFindings(kernel.OpenPull{History: history}, strings.Repeat("a", 40))
+	if len(findings) > 8*4000+7 || !strings.Contains(findings, "finding-16-") || strings.Contains(findings, "finding-0-") {
+		t.Fatalf("unbounded or stale findings: bytes=%d, %q", len(findings), findings[:min(len(findings), 128)])
+	}
+}
+
+func mustJSON(t *testing.T, value any) json.RawMessage {
+	t.Helper()
+	document, err := json.Marshal(value)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return document
 }
 
 // reviewerFixture publishes pull 12 from an author worker on the provider

@@ -24,6 +24,7 @@ type publicReviewBackend struct {
 	enqueueRefusal                          string // the broker's refusal class, if any
 	leaveUnqueued                           int
 	reviews, submits, enqueues              int
+	requests                                []review.Request
 	enqueueSignal                           atomic.Int32
 	enqueuedBase, enqueuedSHA, enqueuedBody string
 	journal                                 map[string]string
@@ -42,7 +43,11 @@ func (b *publicReviewBackend) StoredPull(_ context.Context, pull uint64, head st
 func (b *publicReviewBackend) CloneReadOnly(context.Context, review.Request) (string, func(), error) {
 	return "/fixture-review", func() {}, nil
 }
-func (b *publicReviewBackend) Review(context.Context, string, review.Request) (review.Verdict, error) {
+func (b *publicReviewBackend) Review(_ context.Context, _ string, request review.Request) (review.Verdict, error) {
+	// Keep the request so public reconciliation tests can assert the durable
+	// incremental-review input, not just the provider verdict.
+	// (The provider itself is intentionally a fixture.)
+	b.requests = append(b.requests, request)
 	b.reviews++
 	if b.killed {
 		return review.Verdict{}, errors.New("provider killed at launch")
@@ -604,7 +609,7 @@ func TestADisputedBlockIsReviewedOnceMoreThenEscalatedOnce(t *testing.T) {
 	answer := current().Result
 	tick(3)
 	upheld := current()
-	if backend.reviews != 2 || upheld.WorkRevision.Int64() != 3 || !strings.Contains(kernel.TaskFeedback(upheld), "fixture findings") || answer != "" && !strings.Contains(kernel.TaskFeedback(upheld), answer) {
+	if backend.reviews != 2 || len(backend.requests) != 2 || !strings.Contains(backend.requests[1].PriorFindings, "fixture findings") || upheld.WorkRevision.Int64() != 3 || !strings.Contains(kernel.TaskFeedback(upheld), "fixture findings") || answer != "" && !strings.Contains(kernel.TaskFeedback(upheld), answer) {
 		t.Fatalf("disputed block: reviews %d, task revision %d, feedback %q", backend.reviews, upheld.WorkRevision.Int64(), kernel.TaskFeedback(upheld))
 	}
 	admitPublished(t, fixture, 240, fixture.daemon.now().UnixMilli()+1)() // answered again
