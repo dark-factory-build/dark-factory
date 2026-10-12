@@ -685,9 +685,6 @@ func (m *packMaintainer) call(_ context.Context, name string, arguments map[stri
 	if name != "publish_pack" || len(envelope) > 512<<10 {
 		m.t.Fatalf("%s request of %d bytes", name, len(envelope))
 	}
-	if m.result != nil {
-		return m.result, nil
-	}
 	identity := map[string]any{}
 	for key, value := range arguments {
 		identity[key] = value
@@ -698,6 +695,10 @@ func (m *packMaintainer) call(_ context.Context, name string, arguments map[stri
 	fields, _ := json.Marshal(identity)
 	if m.fields == "" {
 		m.fields = string(fields)
+	}
+	// As the journal does, a completed operation answers only its own request.
+	if m.result != nil && string(fields) == m.fields {
+		return m.result, nil
 	}
 	switch {
 	case string(fields) != m.fields || index > len(m.chunks) || index < len(m.chunks) && m.chunks[index] != chunk:
@@ -782,6 +783,9 @@ func TestPublishPackSendsExactObjectsInReplaySafeChunks(t *testing.T) {
 	if err := publishPack(ctx, m.call, gitDir, "team/repo", operation, "factory/d2fe80c351a5", "", base, head); !errors.Is(err, maintainer.ErrUnavailable) {
 		t.Fatalf("lost push response = %v", err)
 	}
+	// Git may repack between attempts; the replay must still be the same
+	// pack, or its digest is another request and the journal refuses it.
+	run("-c", "pack.compression=1", "repack", "-q", "-a", "-d", "-f", "--window=2", "--depth=1")
 	if err := publishPack(ctx, m.call, gitDir, "team/repo", operation, "factory/d2fe80c351a5", "", base, head); err != nil {
 		t.Fatal(err)
 	}

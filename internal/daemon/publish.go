@@ -510,7 +510,11 @@ func publishPack(ctx context.Context, call publishCall, gitDir, repo, operation,
 			return fmt.Errorf("%s changes review authority: %s", head, name)
 		}
 	}
-	command := exec.CommandContext(ctx, change.TrustedGitExecutable, "--git-dir", gitDir, "pack-objects", "--stdout", "--revs", "--quiet")
+	// The pack's digest is the operation's identity, so a retry must rebuild
+	// the same bytes however Git has since packed these objects: nothing is
+	// reused, and one thread at a fixed compression makes the build
+	// deterministic for one Git version.
+	command := exec.CommandContext(ctx, change.TrustedGitExecutable, "--git-dir", gitDir, "-c", "pack.compression=9", "pack-objects", "--stdout", "--revs", "--quiet", "--no-reuse-delta", "--no-reuse-object", "--threads=1")
 	command.Env = append(filteredReviewEnvironment(), "GIT_CONFIG_NOSYSTEM=1", "GIT_CONFIG_GLOBAL=/dev/null")
 	command.Stdin = strings.NewReader(head + "\n^" + known + "\n")
 	pack, err := command.Output()
