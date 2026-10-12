@@ -65,6 +65,7 @@ type Daemon struct {
 	// outside a paired client's gate.
 	browserRemote       func(context.Context, string)
 	productionRefreshMu sync.Mutex
+	profileMu           sync.Mutex
 	// publicRepos caches what an anonymous GitHub reader sees of each
 	// repository the public world names (public_work.go).
 	publicRepoMu        sync.Mutex
@@ -263,6 +264,12 @@ func (daemon *Daemon) HandleConnection(ctx context.Context, connection *api.Conn
 		dispatchContext, cancel = context.WithTimeout(ctx, retainedSourceDispatchTimeout)
 		defer cancel()
 	}
+	if call.Kind() == api.CallProfile {
+		input, _ := call.ProfileInput()
+		cancel()
+		dispatchContext, cancel = context.WithTimeout(ctx, time.Duration(input.Seconds+30)*time.Second)
+		defer cancel()
+	}
 	if call.Kind() == api.CallCompactStorage || call.Kind() == api.CallBackupCreate || call.Kind() == api.CallBackupVerify {
 		cancel()
 		dispatchContext, cancel = context.WithTimeout(ctx, storageCompactionDispatchTimeout)
@@ -342,6 +349,8 @@ func (daemon *Daemon) dispatch(ctx context.Context, call api.Call) api.Reply {
 	switch call.Kind() {
 	case api.CallHealth:
 		return daemon.health(ctx, call)
+	case api.CallProfile:
+		return daemon.profile(ctx, call)
 	case api.CallSnapshot:
 		return daemon.snapshot(ctx, scope)
 	case api.CallHumanRequests:

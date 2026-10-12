@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/dark-factory-build/dark-factory/internal/api"
 )
@@ -18,6 +19,7 @@ func TestParseExactOperatorCommands(t *testing.T) {
 		name string
 		args []string
 	}{
+		{name: "debug profile", args: []string{"debug", "profile", "--seconds", "30"}},
 		{name: "select model", args: []string{"agent", "select-model", "--agent", id, "--revision", "7", "--model", "gpt-5.6-luna"}},
 		{name: "project create", args: []string{"project", "create", "--name", "North Workshop", "--root", "/private/tmp/repo"}},
 		{name: "project limits", args: []string{"project", "limits", "--project", id, "--revision", "7", "--run-budget", "20", "--max-run-seconds", "900"}},
@@ -123,6 +125,7 @@ func TestParseExactOperatorCommands(t *testing.T) {
 		{"capacity", "--workers", "2"},
 		{"capacity", "--workers", "2", "--revision", "0"},
 		{"project", "make", "--name", "n", "--root", "/r"},
+		{"debug", "profile", "--seconds", "4294967296"},
 	}
 	for _, args := range invalid {
 		t.Run("invalid "+strings.Join(args, " "), func(t *testing.T) {
@@ -135,6 +138,28 @@ func TestParseExactOperatorCommands(t *testing.T) {
 		if _, help, ok := parse(args); !help || !ok {
 			t.Fatalf("help form rejected: %v", args)
 		}
+	}
+}
+
+func TestDebugProfileCLIUsesOperatorAPIAndExtendedTimeout(t *testing.T) {
+	fixture := newAPIFixture(t)
+	defer fixture.close(t)
+	done := serveOne(fixture.listener, func(call api.Call) api.Reply {
+		input, ok := call.ProfileInput()
+		if !ok || input.Seconds != 300 {
+			t.Errorf("profile call = kind %v input %+v ok=%v", call.Kind(), input, ok)
+		}
+		return api.NewContentReply(api.ProfileResult{CPUPath: "/home/cpu", HeapPath: "/home/heap", GoroutinePath: "/home/goroutine", Seconds: input.Seconds})
+	})
+	var stdout, stderr bytes.Buffer
+	exit := run(context.Background(), []string{"debug", "profile", "--seconds", "300"}, webEnvironment(fixture), &stdout, &stderr)
+	result := awaitServer(t, done)
+	if result.err != nil || exit != 0 || stderr.Len() != 0 || !strings.Contains(stdout.String(), `"seconds":300`) {
+		t.Fatalf("debug profile = exit %d stdout %q stderr %q server=%v", exit, stdout.String(), stderr.String(), result.err)
+	}
+	command, help, ok := parse([]string{"debug", "profile", "--seconds", "300"})
+	if !ok || help || operatorRequestTimeout(command) != 330*time.Second {
+		t.Fatalf("profile timeout = %+v help=%t ok=%t timeout=%s", command, help, ok, operatorRequestTimeout(command))
 	}
 }
 

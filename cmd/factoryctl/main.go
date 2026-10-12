@@ -148,6 +148,7 @@ const (
   factoryctl capacity --workers N --revision REVISION
     Worker slots only; the separate overseer lane remains available.
   factoryctl web status
+	factoryctl debug profile --seconds N
   factoryctl web pair
   factoryctl web list-clients [--after CLIENT_ID]
   factoryctl web revoke CLIENT_ID --revision REVISION
@@ -199,6 +200,7 @@ const (
 	commandWebPair
 	commandWebListClients
 	commandWebRevoke
+	commandProfile
 	commandRemoteStatus
 	commandInit
 	commandDoctor
@@ -296,6 +298,7 @@ type attemptCommand struct {
 	capacity            uint16
 	maxBytes            uint32
 	maxRunSeconds       uint32
+	seconds             uint32
 	tokenBudget         *uint64
 	specialistRuns      *uint32
 	openProposals       *uint32
@@ -437,7 +440,7 @@ func runWithDependencies(ctx context.Context, args []string, getenv func(string)
 	if command.kind == commandRemoteStatus {
 		return runRemote(ctx, getenv, stdout, stderr)
 	}
-	if command.kind == commandAgentPaths || command.kind == commandOperatorTerminalObserve || command.kind == commandWorkerOperation || command.kind == commandProjectCreate || command.kind == commandProjectRepository || command.kind == commandIntake || command.kind == commandProjectLimits || command.kind == commandAgentCreate || command.kind == commandAgentIdlePolicy || command.kind == commandAccountsDiscover || command.kind == commandAccountsList || command.kind == commandAccountLink || command.kind == commandAgentSelectAccount || command.kind == commandAgentSelectModel || command.kind == commandTaskAdd || command.kind == commandTaskSendBack || command.kind == commandTaskRead || command.kind == commandProduction || command.kind == commandTaskHistory || command.kind == commandTaskList || command.kind == commandDispatch || command.kind == commandCapacity || command.kind == commandStatus || command.kind == commandCompactStorage || command.kind == commandBackupCreate || command.kind == commandBackupVerify || command.kind == commandHumanList || command.kind == commandHumanReply || command.kind == commandHumanCancel || command.kind == commandReport || command.kind == commandAgentSet {
+	if command.kind == commandProfile || command.kind == commandAgentPaths || command.kind == commandOperatorTerminalObserve || command.kind == commandWorkerOperation || command.kind == commandProjectCreate || command.kind == commandProjectRepository || command.kind == commandIntake || command.kind == commandProjectLimits || command.kind == commandAgentCreate || command.kind == commandAgentIdlePolicy || command.kind == commandAccountsDiscover || command.kind == commandAccountsList || command.kind == commandAccountLink || command.kind == commandAgentSelectAccount || command.kind == commandAgentSelectModel || command.kind == commandTaskAdd || command.kind == commandTaskSendBack || command.kind == commandTaskRead || command.kind == commandProduction || command.kind == commandTaskHistory || command.kind == commandTaskList || command.kind == commandDispatch || command.kind == commandCapacity || command.kind == commandStatus || command.kind == commandCompactStorage || command.kind == commandBackupCreate || command.kind == commandBackupVerify || command.kind == commandHumanList || command.kind == commandHumanReply || command.kind == commandHumanCancel || command.kind == commandReport || command.kind == commandAgentSet {
 		return runOperator(ctx, command, getenv, stdout, stderr)
 	}
 	if command.kind >= commandContentCreate && command.kind <= commandContentAttachments && len(args) > 0 && args[0] == "content" {
@@ -710,7 +713,15 @@ func parse(args []string) (attemptCommand, bool, bool) {
 	if len(args) >= 2 && args[0] == "agent" && args[1] == "set" {
 		return parseAgentSet(args[2:])
 	}
-	if len(args) >= 1 && (args[0] == "status" || args[0] == "storage" || args[0] == "backup" || args[0] == "content" || args[0] == "outcome" || args[0] == "project" || args[0] == "agent" || args[0] == "account" || args[0] == "task" || args[0] == "worker" || args[0] == "dispatch" || args[0] == "capacity" || args[0] == "intake" || args[0] == "production") {
+	if len(args) >= 3 && args[0] == "debug" && args[1] == "profile" {
+		values, ok := pairedFlagValues(args[2:], false, "--seconds")
+		seconds, parsed := parseCount(values["--seconds"], false)
+		if !ok || !parsed || seconds > 300 {
+			return attemptCommand{}, false, false
+		}
+		return attemptCommand{kind: commandProfile, seconds: uint32(seconds)}, false, true
+	}
+	if len(args) >= 1 && (args[0] == "debug" || args[0] == "status" || args[0] == "storage" || args[0] == "backup" || args[0] == "content" || args[0] == "outcome" || args[0] == "project" || args[0] == "agent" || args[0] == "account" || args[0] == "task" || args[0] == "worker" || args[0] == "dispatch" || args[0] == "capacity" || args[0] == "intake" || args[0] == "production") {
 		return parseOperator(args)
 	}
 	if len(args) >= 1 && args[0] == "overseer" {
@@ -2277,7 +2288,7 @@ func runOperator(ctx context.Context, command attemptCommand, getenv func(string
 		_, _ = io.WriteString(stderr, "factoryctl: operator client configuration is invalid\n")
 		return exitFailure
 	}
-	timeout := attemptRequestTimeout
+	timeout := operatorRequestTimeout(command)
 	if command.kind == commandIntake || command.kind == commandStatus && command.project != "" {
 		timeout = 120 * time.Second
 	}
@@ -2299,6 +2310,12 @@ func runOperator(ctx context.Context, command attemptCommand, getenv func(string
 		return runAgentSet(callContext, client, command, stdout, stderr)
 	}
 	switch command.kind {
+	case commandProfile:
+		result, callErr := client.Profile(callContext, api.ProfileInput{Seconds: command.seconds})
+		if callErr != nil {
+			return writeWebFailure(stderr, "debug profile", callErr)
+		}
+		return writeJSON(stdout, result)
 	case commandIntake:
 		result, callErr := client.Intake(callContext, command.intake)
 		if callErr != nil {
@@ -2690,6 +2707,13 @@ func runOperator(ctx context.Context, command attemptCommand, getenv func(string
 	default:
 		return exitUsage
 	}
+}
+
+func operatorRequestTimeout(command attemptCommand) time.Duration {
+	if command.kind == commandProfile {
+		return time.Duration(command.seconds+30) * time.Second
+	}
+	return attemptRequestTimeout
 }
 
 func runOverseer(ctx context.Context, command attemptCommand, getenv func(string) string, stdout, stderr io.Writer) int {

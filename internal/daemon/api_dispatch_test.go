@@ -41,6 +41,33 @@ func newDispatchFixture(t *testing.T) *dispatchFixture {
 	return newDispatchFixtureAt(t, runner.ShortTempDir())
 }
 
+func TestProfileOperatorAPIWritesProfiles(t *testing.T) {
+	fixture := newDispatchFixture(t)
+	fixture.daemon.home = filepath.Dir(filepath.Dir(fixture.socket))
+	operator, err := api.NewOperatorClient(fixture.socket, fixture.operator)
+	if err != nil {
+		t.Fatal(err)
+	}
+	done := fixture.serve(t)
+	result, err := operator.Profile(context.Background(), api.ProfileInput{Seconds: 1})
+	waitDispatch(t, done)
+	if err != nil {
+		t.Fatalf("profile: %v", err)
+	}
+	if result.Seconds != 1 {
+		t.Fatalf("profile seconds = %d", result.Seconds)
+	}
+	for _, path := range []string{result.CPUPath, result.HeapPath, result.GoroutinePath} {
+		info, statErr := os.Stat(path)
+		if statErr != nil {
+			t.Fatalf("profile %q: %v", path, statErr)
+		}
+		if info.Size() == 0 || info.Mode().Perm() != 0o600 {
+			t.Fatalf("profile %q metadata = size %d mode %o", path, info.Size(), info.Mode().Perm())
+		}
+	}
+}
+
 func TestBackupCreateOperatorAPI(t *testing.T) {
 	fixture := newDispatchFixture(t)
 	backup := filepath.Join(t.TempDir(), "factory.sqlite3")

@@ -10,7 +10,6 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
-	"syscall"
 	"testing"
 	"time"
 
@@ -962,33 +961,6 @@ func TestParseToolchainReadRoots(t *testing.T) {
 	for _, roots := range []string{"", "/", "/Users/operator", "relative"} {
 		if _, _, ok := parse([]string{"--home", "/private/factory/home", "--toolchain-read-roots", roots}); ok {
 			t.Fatalf("accepted roots %q", roots)
-		}
-	}
-}
-
-func TestSIGUSR1WritesCPUProfile(t *testing.T) {
-	path := filepath.Join(t.TempDir(), profileName)
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	profileOnSignal(ctx, path)
-	if err := syscall.Kill(os.Getpid(), syscall.SIGUSR1); err != nil {
-		t.Fatal(err)
-	}
-	for deadline := time.Now().Add(5 * time.Second); ; time.Sleep(10 * time.Millisecond) {
-		if _, err := os.Stat(path); err == nil {
-			break
-		}
-		if time.Now().After(deadline) {
-			t.Fatal("SIGUSR1 started no profile")
-		}
-	}
-	cancel() // ends the profile early; it is written on stop
-	for deadline := time.Now().Add(5 * time.Second); ; time.Sleep(10 * time.Millisecond) {
-		if info, err := os.Stat(path); err == nil && info.Size() > 0 {
-			return
-		}
-		if time.Now().After(deadline) {
-			t.Fatal("profile was not written")
 		}
 	}
 }
