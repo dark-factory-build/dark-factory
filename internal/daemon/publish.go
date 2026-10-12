@@ -371,7 +371,10 @@ func (daemon *Daemon) publishPull(ctx context.Context, c kernel.PublishableChang
 							task = stored
 						}
 					}
-					return errors.Join(daemon.sendBackPull(ctx, open, task, op, observationDetail(observed)), errPublishLater)
+					if err := daemon.sendBackPull(ctx, open, task, op, observationDetail(observed)); err != nil {
+						return err
+					}
+					return errPublishLater
 				}
 			}
 			if found {
@@ -578,7 +581,7 @@ func (daemon *Daemon) publishPull(ctx context.Context, c kernel.PublishableChang
 					footer, body = "Refs", referencing(body, issue)
 				}
 				wanted := fmt.Sprintf("%s\n\n%s #%d", body, footer, issue)
-				if varObserved != nil && varObserved.Body == wanted {
+				if varObserved != nil && (varObserved.Body == wanted || varObserved.Body == wanted+"\n\n<!-- dark-factory:operation -->") {
 					done = true
 				} else if observedErr != nil {
 					err = observedErr

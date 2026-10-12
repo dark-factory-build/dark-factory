@@ -152,7 +152,7 @@ func (f *fakePublishMaintainer) call(_ context.Context, name string, arguments m
 	case "create_pull_request":
 		result, _ = json.Marshal(map[string]any{"number": 31, "url": "https://github.com/team/repo/pull/31", "head_sha": arguments["head_sha"], "base_sha": arguments["base_sha"]})
 	case "update_pull_request_body":
-		f.body = arguments["body"].(string)
+		f.body = arguments["body"].(string) + "\n\n<!-- dark-factory:operation -->"
 		result, _ = json.Marshal(map[string]any{"number": arguments["pull_number"], "head_sha": f.tip})
 	default:
 		return nil, fmt.Errorf("unexpected tool %s", name)
