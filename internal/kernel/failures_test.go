@@ -25,6 +25,14 @@ func TestFailureSignatureIgnoresIdentifiersAndNumbers(t *testing.T) {
 	}
 }
 
+func TestFailureSignatureKeepsNodeAndTAPTestsDistinct(t *testing.T) {
+	node := failureSignature("check", "main", sql.NullInt64{}, sql.NullInt64{}, sql.NullInt64{}, "Failing step: Run tests: ✖ renders board")
+	tap := failureSignature("check", "main", sql.NullInt64{}, sql.NullInt64{}, sql.NullInt64{}, "Failing step: Run tests: not ok 3 - console loads")
+	if node == tap || !strings.Contains(node, "test renders") || !strings.Contains(tap, "test console") {
+		t.Fatalf("signatures = %q / %q", node, tap)
+	}
+}
+
 // One failure is enough: the first run of a signature is reported as new, an
 // unscoped report covers every project, and a window after it reports nothing.
 func TestReportListsFailureSignaturesFromTheFirstOccurrence(t *testing.T) {

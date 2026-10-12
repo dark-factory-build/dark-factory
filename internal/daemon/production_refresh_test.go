@@ -151,6 +151,38 @@ func TestRefreshProjectsMergeGroupAndMainChecks(t *testing.T) {
 	}
 }
 
+func TestProductionObservationKeepsSameRevisionHeadAndMainChecks(t *testing.T) {
+	revision := strings.Repeat("a", 40)
+	call := func(_ context.Context, request json.RawMessage, _ map[string]uint64) (json.RawMessage, error) {
+		var value struct {
+			Params struct {
+				Name string `json:"name"`
+			} `json:"params"`
+		}
+		if err := json.Unmarshal(request, &value); err != nil {
+			t.Fatal(err)
+		}
+		switch value.Params.Name {
+		case "list_pull_requests":
+			return json.RawMessage(`{"jsonrpc":"2.0","id":1,"result":{"structuredContent":{"pull_requests":[{"number":7,"head_sha":"` + revision + `","base_ref":"main","base_sha":"` + revision + `","state":"open"}],"next_page":null}}}`), nil
+		case "observe_pull_request_checks":
+			return json.RawMessage(`{"jsonrpc":"2.0","id":1,"result":{"structuredContent":{"head_sha":"` + revision + `","checks":[{"name":"build","status":"completed","conclusion":"failure","url":"https://github.com/o/r/actions/runs/13","required":false}]}}}`), nil
+		case "observe_repository_checks":
+			return json.RawMessage(`{"jsonrpc":"2.0","id":1,"result":{"structuredContent":{"revision":"` + revision + `","checks":[{"name":"build","status":"completed","conclusion":"failure","url":"https://github.com/o/r/actions/runs/14","required":false}]}}}`), nil
+		default:
+			t.Fatalf("unexpected maintainer tool %s", value.Params.Name)
+			return nil, nil
+		}
+	}
+	got, err := productionObservation(context.Background(), call, "o/r", 1, nil, nil, func(error) {})
+	if err != nil || len(got.Checks) != 2 {
+		t.Fatalf("observation = %+v, %v", got, err)
+	}
+	if got.Checks[0].Scope != "head" || got.Checks[1].Scope != "main" || got.Checks[0].ID == got.Checks[1].ID {
+		t.Fatalf("same-revision checks = %+v", got.Checks)
+	}
+}
+
 func TestRefreshRejectsStaleQueueObservation(t *testing.T) {
 	head := strings.Repeat("a", 40)
 	pull := kernel.ProductionPullRequest{Number: 7, Head: head, Base: "main"}

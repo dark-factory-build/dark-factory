@@ -100,12 +100,21 @@ func failureSignature(kind, code string, exit, signal, runner sql.NullInt64, det
 			words = append(words, word)
 		}
 	}
-	if _, test, ok := strings.Cut(strings.ToLower(detail), "--- fail:"); ok {
-		fields := strings.Fields(test)
-		if len(fields) > 0 {
-			if name := strings.TrimFunc(fields[0], func(r rune) bool { return !unicode.IsLetter(r) }); name != "" {
-				words = append(words, "test", name)
+	lower := strings.ToLower(detail)
+	for _, marker := range []string{"--- fail:", "✖", "not ok"} {
+		if offset := strings.Index(lower, marker); offset >= 0 {
+			fields := strings.Fields(detail[offset+len(marker):])
+			if marker == "not ok" && len(fields) > 0 && strings.Trim(fields[0], "0123456789") == "" {
+				fields = fields[1:]
 			}
+			for _, field := range fields {
+				word := strings.ToLower(strings.TrimFunc(field, func(r rune) bool { return !unicode.IsLetter(r) }))
+				if word != "" && !strings.ContainsFunc(word, unicode.IsDigit) {
+					words = append(words, "test", word)
+					break
+				}
+			}
+			break
 		}
 	}
 	return strings.Join(parts, "/") + " " + strings.Join(words, " ")

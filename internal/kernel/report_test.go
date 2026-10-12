@@ -126,6 +126,25 @@ func TestFailureLedgerKeepsDistinctMergeGroupTestsDistinct(t *testing.T) {
 	}
 }
 
+func TestReportKeepsDistinctNodeFailuresDistinct(t *testing.T) {
+	t.Parallel()
+	store, _, project, _ := newAdmissionStore(t, RoleOrchestrator, 1)
+	defer store.Close()
+	revision := strings.Repeat("a", 40)
+	checks := []ProductionCheck{
+		{ID: "node:1", Name: "main", Revision: revision, Scope: "main", State: "completed", Conclusion: "failure", URL: "https://github.com/o/r/actions/runs/1", Jobs: []ProductionJob{{Name: "node", State: "completed", Conclusion: "failure", URL: "https://github.com/o/r/actions/runs/1", Annotations: []string{"Failing step: Run tests: ✖ renders board"}}}},
+		{ID: "node:2", Name: "main", Revision: revision, Scope: "main", State: "completed", Conclusion: "failure", URL: "https://github.com/o/r/actions/runs/2", Jobs: []ProductionJob{{Name: "node", State: "completed", Conclusion: "failure", URL: "https://github.com/o/r/actions/runs/2", Annotations: []string{"Failing step: Run tests: ✖ console loads"}}}},
+	}
+	if err := store.RecordProductionObservation(context.Background(), project.ID, ProductionObservation{Repository: "example/factory", ObservedAt: 10, Checks: checks}, mustTime(t, 10)); err != nil {
+		t.Fatal(err)
+	}
+	lines, err := store.Report(context.Background(), &project.ID, 0, 3600000)
+	joined := strings.Join(lines, "\n")
+	if err != nil || strings.Count(joined, "failure new x1") != 2 || !strings.Contains(joined, "test renders") || !strings.Contains(joined, "test console") {
+		t.Fatalf("report = %q, %v", lines, err)
+	}
+}
+
 func TestReportIncludesMainCheckWithoutPullRequest(t *testing.T) {
 	t.Parallel()
 	store, _, project, _ := newAdmissionStore(t, RoleOrchestrator, 1)
