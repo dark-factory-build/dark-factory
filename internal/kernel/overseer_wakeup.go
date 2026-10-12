@@ -92,19 +92,21 @@ item AS (
 	JOIN intake_acceptances AS i ON i.id = b.acceptance_id
 	JOIN agents AS o ON o.id = i.overseer_agent_id
 	WHERE t.project_id = ?1 AND o.id = ?4 AND ` + taskEndedAutomatically + ` AND NOT ` + taskIssueWithdrawn + `
-	UNION ALL SELECT NULL, e.observed_at_ms, 0,
-	  'Escalated: ' || json_extract(e.document, '$.escalation'), '[reviewer:' || e.identity || ']' FROM production_records AS e
-	JOIN production_records AS p ON p.project_id = e.project_id AND p.repository = e.repository AND p.kind = 'pull_request'
-	  AND p.identity = CAST(json_extract(e.document, '$.request.PullNumber') AS TEXT)
-	WHERE e.project_id = ?1 AND e.kind = 'reviewer' AND COALESCE(json_extract(e.document, '$.escalation'), '') <> ''
-	  AND json_extract(p.document, '$.state') = 'open'
-	  AND lower(json_extract(p.document, '$.head')) = lower(json_extract(e.document, '$.request.Head'))
-	  AND NOT EXISTS (SELECT 1 FROM production_records AS newer
-	    WHERE newer.project_id = e.project_id AND newer.repository = e.repository AND newer.kind = 'reviewer'
-	      AND json_extract(newer.document, '$.request.PullNumber') = json_extract(e.document, '$.request.PullNumber')
-	      AND lower(json_extract(newer.document, '$.request.Head')) = lower(json_extract(e.document, '$.request.Head'))
-	      AND json_extract(newer.document, '$.escalation') = json_extract(e.document, '$.escalation')
-	      AND (newer.observed_at_ms > e.observed_at_ms OR (newer.observed_at_ms = e.observed_at_ms AND newer.identity > e.identity)))
+	-- Only the newest of identical escalations (same pull, head and reason)
+	-- names a reviewer item. The cheap open-PR and head filters run first; a
+	-- correlated NOT EXISTS over every reviewer record held the writer for
+	-- seconds on each scheduler tick (12 Oct 2026).
+	UNION ALL SELECT NULL, at, 0, 'Escalated: ' || escalation, '[reviewer:' || identity || ']' FROM (
+	  SELECT e.observed_at_ms AS at, json_extract(e.document, '$.escalation') AS escalation, e.identity,
+	    row_number() OVER (PARTITION BY e.repository, json_extract(e.document, '$.request.PullNumber'), lower(json_extract(e.document, '$.request.Head')), json_extract(e.document, '$.escalation')
+	      ORDER BY e.observed_at_ms DESC, e.identity DESC) AS newest
+	  FROM production_records AS e
+	  JOIN production_records AS p ON p.project_id = e.project_id AND p.repository = e.repository AND p.kind = 'pull_request'
+	    AND p.identity = CAST(json_extract(e.document, '$.request.PullNumber') AS TEXT)
+	  WHERE e.project_id = ?1 AND e.kind = 'reviewer' AND COALESCE(json_extract(e.document, '$.escalation'), '') <> ''
+	    AND json_extract(p.document, '$.state') = 'open'
+	    AND lower(json_extract(p.document, '$.head')) = lower(json_extract(e.document, '$.request.Head'))
+	) WHERE newest = 1
 	UNION ALL SELECT NULL, COALESCE(json_extract(d.document, '$.failed_at'), d.observed_at_ms), 0, CASE json_extract(d.document, '$.state')
 	  WHEN 'failed' THEN printf('Escalated: factoryd %s failed in phase %s: %s', d.identity, json_extract(d.document, '$.phase'), replace(json_extract(d.document, '$.reason'), char(10), ' '))
 	  ELSE printf('Escalated: factoryd %s is %s after a release failed in phase %s', d.identity, json_extract(d.document, '$.state'), replace(json_extract(d.document, '$.cause'), char(10), ' ')) END,
