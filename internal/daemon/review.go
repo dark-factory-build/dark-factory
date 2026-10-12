@@ -956,8 +956,11 @@ func (r maintainerRejection) Error() string {
 // for a CODEOWNERS approval (GitHub's "Waiting on code owner review") waits
 // for the owner, and one over an unresolved conversation goes back to its
 // task (#1857). Any other refusal can come to hold (#1531) and is retried.
+// Only the broker's first line classifies: the thread bodies after it are
+// reviewers' text.
 func (r maintainerRejection) Is(target error) bool {
-	why, refused := string(r), strings.HasPrefix(string(r), "refused:") && !strings.Contains(string(r), "RATE_LIMITED")
+	why, _, _ := strings.Cut(string(r), "\n")
+	refused := strings.HasPrefix(why, "refused:") && !strings.Contains(why, "RATE_LIMITED")
 	return target == review.ErrPermanent && (strings.HasPrefix(why, "invalid_input:") || strings.Contains(why, "too large for GitHub to return whole")) ||
 		target == review.ErrOwnerApproval && refused && (strings.Contains(strings.ToLower(why), "required codeowners approval") || strings.Contains(strings.ToLower(why), "waiting on code owner review") || strings.Contains(why, "CODEOWNERS_APPROVAL")) ||
 		target == review.ErrConversation && refused && strings.Contains(strings.ToLower(why), "conversation must be resolved")

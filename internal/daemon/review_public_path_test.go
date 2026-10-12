@@ -775,7 +775,7 @@ func TestUnresolvedConversationRefusalSendsTheThreadBack(t *testing.T) {
 	settle()
 	customerMode(t, fixture)
 	ctx := context.Background()
-	backend := &publicReviewBackend{enqueueRefusal: "UNPROCESSABLE: Pull request A conversation must be resolved before this pull request can be merged.\nUnresolved review threads:\n- cmd/factoryctl/main.go:719 by github-advanced-security: Incorrect conversion between integer types"}
+	backend := &publicReviewBackend{enqueueRefusal: "UNPROCESSABLE: Pull request A conversation must be resolved before this pull request can be merged.\nUnresolved review threads:\n- cmd/factoryctl/main.go:719 by github-advanced-security: Incorrect conversion between integer types\n- web/x.ts:3 by baziyer: Handle RATE_LIMITED here"}
 	fixture.daemon.reviewBackend = func(string, uint64) review.Backend { return backend }
 	if _, err := reviewNow(ctx, fixture.daemon, project, publishedReviewRequest()); err != nil {
 		t.Fatal(err)
