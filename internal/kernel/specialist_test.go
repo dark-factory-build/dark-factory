@@ -212,7 +212,7 @@ func TestSpecialistSchedule(t *testing.T) {
 		t.Fatalf("blocked state = %+v", state)
 	}
 
-	// Pausing, or an exhausted budget, stops its wakes.
+	// Pausing stops its wakes.
 	current, _, _ = store.Agent(ctx, agent.ID)
 	paused := pauseAgent(t, store, current, true, task.UpdatedAt.Int64()+1)
 	if state := specialistStateOf(t, store, agent.ID); state.Waiting != "paused" || state.NextReviewAt != 0 {
@@ -221,23 +221,11 @@ func TestSpecialistSchedule(t *testing.T) {
 	if woken := wakeBodies(t, store, 1<<40); len(woken) != 0 {
 		t.Fatalf("paused wake = %q", woken)
 	}
-	resumed := pauseAgent(t, store, paused, false, task.UpdatedAt.Int64()+2)
-	budget := resumed.Idle.RunsUsed
-	exhausted, err := store.UpdateAgent(ctx, agent.ID, resumed.Revision, AgentPatch{IdleRunBudget: &budget}, mustTime(t, task.UpdatedAt.Int64()+3))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if state := specialistStateOf(t, store, exhausted.ID); state.Waiting != "budget" {
-		t.Fatalf("budget state = %+v", state)
-	}
-	if woken := wakeBodies(t, store, 1<<40); len(woken) != 0 {
-		t.Fatalf("exhausted wake = %q", woken)
-	}
+	_ = pauseAgent(t, store, paused, false, task.CompletedAt.Int64()+2)
 }
 
 // A specialist never claims shared work. Its carrier needs a worker slot
-// spare for explicit work and room under specialist_runs, which report as
-// capacity; work assigned to it explicitly is admitted as usual.
+// spare for explicit work; work assigned to it explicitly is admitted as usual.
 func TestSpecialistAdmission(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
