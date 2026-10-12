@@ -18,7 +18,9 @@
       "state",
       "queue_state",
       "merge_commit_sha",
-      "merge_group"
+      "merge_group",
+      "main_revision",
+      "main_checks"
     ],
     "properties": {
       "pull_number": "integer",
@@ -28,7 +30,9 @@
       "state": "string",
       "queue_state": "string|null",
       "merge_commit_sha": "string|null",
-      "merge_group": "object|null"
+      "merge_group": "object|null",
+      "main_revision": "string|null",
+      "main_checks": "array"
     }
   }
 }

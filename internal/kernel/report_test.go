@@ -109,6 +109,23 @@ func TestReportIncludesFailedMergeGroupCheck(t *testing.T) {
 	}
 }
 
+func TestFailureLedgerKeepsDistinctMergeGroupTestsDistinct(t *testing.T) {
+	t.Parallel()
+	store, _, project, _ := newAdmissionStore(t, RoleOrchestrator, 1)
+	defer store.Close()
+	for id, test := range map[string]string{"12": "TestQueue", "13": "TestOther"} {
+		check := ProductionCheck{ID: "merge-group:" + id, Name: "merge_group", Revision: strings.Repeat(id[:1], 40), Scope: "merge_group", State: "completed", Conclusion: "failure", URL: "https://github.com/o/r/actions/runs/" + id, PullRequests: []uint64{7}, Jobs: []ProductionJob{{Name: "go", State: "completed", Conclusion: "failure", URL: "https://github.com/o/r/actions/runs/" + id, Annotations: []string{"--- FAIL: " + test}}}}
+		if err := store.RecordProductionObservation(context.Background(), project.ID, ProductionObservation{Repository: "example/factory", ObservedAt: 10, Checks: []ProductionCheck{check}}, mustTime(t, 10)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	lines, err := store.Report(context.Background(), &project.ID, 0, 3600000)
+	joined := strings.Join(lines, "\n")
+	if err != nil || strings.Count(joined, "failure new x1") != 2 || !strings.Contains(joined, "test testqueue") || !strings.Contains(joined, "test testother") {
+		t.Fatalf("report = %q, %v", lines, err)
+	}
+}
+
 func TestReportLessonCountersUseLatestRevision(t *testing.T) {
 	t.Parallel()
 	// The lesson counters are new report behavior; this guards their stated

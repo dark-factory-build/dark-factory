@@ -609,6 +609,8 @@ pub(crate) struct PullRequestMergeResult {
     pub(crate) queue_state: Option<String>,
     pub(crate) merge_commit_sha: Option<String>,
     pub(crate) merge_group: Option<MergeGroupRun>,
+    pub(crate) main_revision: Option<String>,
+    pub(crate) main_checks: Vec<CheckResult>,
 }
 
 /// The newest completed merge-group run that built an open, no longer queued
@@ -1689,6 +1691,7 @@ impl AppAuthority {
                 repository,
                 BTreeMap::from([
                     ("contents", "read"),
+                    ("checks", "read"),
                     ("merge_queues", "read"),
                     ("metadata", "read"),
                     ("pull_requests", "read"),
@@ -1718,6 +1721,8 @@ impl AppAuthority {
             queue_state: None,
             merge_commit_sha: None,
             merge_group: None,
+            main_revision: None,
+            main_checks: Vec::new(),
         };
         if pull.merged {
             result.state = MergeObservationState::Merged;
@@ -1752,6 +1757,32 @@ impl AppAuthority {
             }
             None if result.pull_state == "open" => {
                 result.merge_group = self.0.merge_group_run(&request).await;
+                if let Ok(reference) = self.0.read_ref(&token, &request.base).await {
+                    if reference.object.kind == "commit" && valid_sha(&reference.object.sha).is_ok()
+                    {
+                        result.main_revision = Some(reference.object.sha.clone());
+                        if let Ok(checks) = self
+                            .0
+                            .checks(
+                                &token,
+                                ObservePullRequestChecks {
+                                    repository: request.repository.clone(),
+                                    pull_number: 0,
+                                    head_sha: reference.object.sha,
+                                },
+                                &request.base,
+                                None,
+                            )
+                            .await
+                        {
+                            result.main_checks = checks
+                                .checks
+                                .into_iter()
+                                .filter(|check| check.status == "completed")
+                                .collect();
+                        }
+                    }
+                }
             }
             None => {}
         }

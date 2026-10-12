@@ -631,9 +631,23 @@ fn tools() -> Value {
                     },
                     "required": ["run_id", "url", "conclusion", "failed_jobs"],
                     "additionalProperties": false
-                }
+                },
+                "main_revision": {"type": ["string", "null"]},
+                "main_checks": {"type": "array", "maxItems": 100, "items": {
+                    "type": "object",
+                    "properties": {
+                        "name": {"type": "string"},
+                        "status": {"type": "string"},
+                        "conclusion": {"type": ["string", "null"]},
+                        "url": {"type": "string"},
+                        "required": {"type": "boolean"},
+                        "annotations": {"type": "array", "maxItems": 40, "items": {"type": "string", "maxLength": 240}}
+                    },
+                    "required": ["name", "status", "conclusion", "url", "required", "annotations"],
+                    "additionalProperties": false
+                }}
             },
-            "required": ["pull_number", "head_sha", "base", "pull_state", "state", "queue_state", "merge_commit_sha", "merge_group"],
+            "required": ["pull_number", "head_sha", "base", "pull_state", "state", "queue_state", "merge_commit_sha", "merge_group", "main_revision", "main_checks"],
             "additionalProperties": false
         },
         "annotations": {"readOnlyHint": true, "destructiveHint": false, "openWorldHint": true}

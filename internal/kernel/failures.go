@@ -100,5 +100,13 @@ func failureSignature(kind, code string, exit, signal, runner sql.NullInt64, det
 			words = append(words, word)
 		}
 	}
+	if _, test, ok := strings.Cut(strings.ToLower(detail), "--- fail:"); ok {
+		fields := strings.Fields(test)
+		if len(fields) > 0 {
+			if name := strings.TrimFunc(fields[0], func(r rune) bool { return !unicode.IsLetter(r) }); name != "" {
+				words = append(words, "test", name)
+			}
+		}
+	}
 	return strings.Join(parts, "/") + " " + strings.Join(words, " ")
 }

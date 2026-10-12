@@ -280,7 +280,7 @@ func pullRequestObservation(ctx context.Context, call maintainerMCP, repository 
 		}
 		if pr.Review.State == "allow" {
 			pr.MergeQueue = "unknown"
-			queue, group, err := readMaintainerMergeQueue(ctx, call, repository, githubID, pr)
+			queue, group, mainChecks, mainRevision, err := readMaintainerMergeQueue(ctx, call, repository, githubID, pr)
 			if err != nil {
 				fault(err)
 				result.Unavailable = "merge_queue"
@@ -289,6 +289,7 @@ func pullRequestObservation(ctx context.Context, call maintainerMCP, repository 
 				if group != nil {
 					result.Checks = append(result.Checks, mergeGroupCheck(pr, group))
 				}
+				result.Checks = append(result.Checks, mainChecksToProduction(mainChecks, mainRevision)...)
 			}
 		}
 		result.PullRequests = append(result.PullRequests, pr)
@@ -325,19 +326,38 @@ func pullRequestNeedsExactRead(pull maintainerPullRequest, known map[uint64]kern
 	return !ok || prior.Mergeable == nil || !strings.EqualFold(prior.Head, pull.Head) || !strings.EqualFold(prior.Base, pull.Base) || !strings.EqualFold(prior.BaseSHA, pull.BaseSHA)
 }
 
-func readMaintainerMergeQueue(ctx context.Context, call maintainerMCP, repository string, githubID uint64, pr kernel.ProductionPullRequest) (string, *review.GroupRun, error) {
+func readMaintainerMergeQueue(ctx context.Context, call maintainerMCP, repository string, githubID uint64, pr kernel.ProductionPullRequest) (string, *review.GroupRun, []maintainerMainCheck, string, error) {
 	content, err := maintainerTool(ctx, call, repository, githubID, "observe_pull_request_merge", observePullRequestMergeArguments(repository, pr.Number, pr.Head, pr.Base))
 	if err != nil {
-		return "", nil, err
+		return "", nil, nil, "", err
 	}
 	var merge observePullRequestMergeResponse
 	if json.Unmarshal(content, &merge) != nil || merge.PullNumber != pr.Number || merge.Head != pr.Head {
-		return "", nil, errors.New("Maintainer returned an invalid merge observation")
+		return "", nil, nil, "", errors.New("Maintainer returned an invalid merge observation")
 	}
 	if merge.State == "ACTIVE_QUEUE" {
-		return "active", nil, nil
+		return "active", nil, nil, "", nil
 	}
-	return "none", merge.Group, nil
+	return "none", merge.Group, merge.MainChecks, merge.MainRevision, nil
+}
+
+func mainChecksToProduction(checks []maintainerMainCheck, revision string) []kernel.ProductionCheck {
+	if len(checks) == 0 || len(revision) != 40 || strings.Trim(revision, "0123456789abcdef") != "" {
+		return nil
+	}
+	result := make([]kernel.ProductionCheck, 0, len(checks))
+	for _, check := range checks {
+		if check.Status != "completed" {
+			continue
+		}
+		key := sha256.Sum256([]byte(strings.ToLower(revision) + "\x00" + check.Name))
+		conclusion := ""
+		if check.Conclusion != nil {
+			conclusion = *check.Conclusion
+		}
+		result = append(result, kernel.ProductionCheck{ID: hex.EncodeToString(key[:16]), Name: check.Name, Revision: strings.ToLower(revision), Scope: "main", State: check.Status, Conclusion: conclusion, URL: check.URL, Required: check.Required, Jobs: []kernel.ProductionJob{{Name: check.Name, State: check.Status, Conclusion: conclusion, URL: check.URL, Annotations: check.Annotations}}})
+	}
+	return result
 }
 
 func mergeGroupCheck(pr kernel.ProductionPullRequest, group *review.GroupRun) kernel.ProductionCheck {
@@ -550,6 +570,15 @@ func productionPullRequest(value maintainerPullRequest) kernel.ProductionPullReq
 type maintainerPullRequestPage struct {
 	PullRequests []maintainerPullRequest `json:"pull_requests"`
 	NextPage     *int                    `json:"next_page"`
+}
+
+type maintainerMainCheck struct {
+	Name        string   `json:"name"`
+	Status      string   `json:"status"`
+	Conclusion  *string  `json:"conclusion"`
+	URL         string   `json:"url"`
+	Required    bool     `json:"required"`
+	Annotations []string `json:"annotations"`
 }
 
 func readMaintainerPullRequests(ctx context.Context, call maintainerMCP, repository string, githubID uint64, arguments map[string]any) (maintainerPullRequestPage, error) {

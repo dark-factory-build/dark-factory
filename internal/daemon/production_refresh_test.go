@@ -92,7 +92,7 @@ func TestRefreshReadsQueueStateForApprovedPulls(t *testing.T) {
 				}
 				return json.RawMessage(`{"jsonrpc":"2.0","id":1,"result":{"structuredContent":` + content + `}}`), nil
 			}
-			got, group, err := readMaintainerMergeQueue(context.Background(), call, "o/r", 1, pull)
+			got, group, _, _, err := readMaintainerMergeQueue(context.Background(), call, "o/r", 1, pull)
 			if err != nil || got != test.want {
 				t.Fatalf("queue=%q err=%v, want %q", got, err, test.want)
 			}
@@ -106,13 +106,45 @@ func TestRefreshReadsQueueStateForApprovedPulls(t *testing.T) {
 	}
 }
 
+func TestRefreshProjectsMergeGroupAndMainChecks(t *testing.T) {
+	head, base := strings.Repeat("a", 40), strings.Repeat("b", 40)
+	call := func(_ context.Context, request json.RawMessage, _ map[string]uint64) (json.RawMessage, error) {
+		var value struct {
+			Params struct {
+				Name string `json:"name"`
+			} `json:"params"`
+		}
+		if err := json.Unmarshal(request, &value); err != nil {
+			t.Fatal(err)
+		}
+		switch value.Params.Name {
+		case "list_pull_requests":
+			return json.RawMessage(`{"jsonrpc":"2.0","id":1,"result":{"structuredContent":{"pull_requests":[{"number":7,"head_sha":"` + head + `","base_ref":"main","base_sha":"` + base + `","state":"open","review":{"head":"` + head + `","state":"allow"}}],"next_page":null}}}`), nil
+		case "observe_pull_request_merge":
+			return json.RawMessage(`{"jsonrpc":"2.0","id":1,"result":{"structuredContent":{"pull_number":7,"head_sha":"` + head + `","state":"NOT_QUEUED","merge_group":{"run_id":12,"url":"https://github.com/o/r/actions/runs/12","conclusion":"failure","failed_jobs":[{"name":"go","conclusion":"failure","annotations":["--- FAIL: TestQueue"]}]},"main_revision":"` + base + `","main_checks":[{"name":"main","status":"completed","conclusion":"failure","url":"https://github.com/o/r/actions/runs/13","required":false,"annotations":[]}]}}}`), nil
+		case "observe_pull_request_checks":
+			return json.RawMessage(`{"jsonrpc":"2.0","id":1,"result":{"structuredContent":{"pull_number":7,"head_sha":"` + head + `","checks":[]}}}`), nil
+		default:
+			t.Fatalf("unexpected maintainer tool %s", value.Params.Name)
+			return nil, nil
+		}
+	}
+	got, err := pullRequestObservation(context.Background(), call, "o/r", 1, nil, nil, func(error) {})
+	if err != nil || len(got.Checks) != 2 {
+		t.Fatalf("observation = %+v, %v", got, err)
+	}
+	if got.Checks[0].Scope != "merge_group" || got.Checks[0].Jobs[0].Annotations[0] != "--- FAIL: TestQueue" || got.Checks[1].Scope != "main" || got.Checks[1].Revision != base {
+		t.Fatalf("projected checks = %+v", got.Checks)
+	}
+}
+
 func TestRefreshRejectsStaleQueueObservation(t *testing.T) {
 	head := strings.Repeat("a", 40)
 	pull := kernel.ProductionPullRequest{Number: 7, Head: head, Base: "main"}
 	call := func(_ context.Context, _ json.RawMessage, _ map[string]uint64) (json.RawMessage, error) {
 		return json.RawMessage(`{"jsonrpc":"2.0","id":1,"result":{"structuredContent":{"pull_number":7,"head_sha":"` + strings.Repeat("b", 40) + `","state":"NOT_QUEUED"}}}`), nil
 	}
-	if _, _, err := readMaintainerMergeQueue(context.Background(), call, "o/r", 1, pull); err == nil {
+	if _, _, _, _, err := readMaintainerMergeQueue(context.Background(), call, "o/r", 1, pull); err == nil {
 		t.Fatal("stale merge observation accepted")
 	}
 }
