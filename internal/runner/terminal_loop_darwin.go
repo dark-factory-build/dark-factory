@@ -865,8 +865,10 @@ func (o *terminalOwner) consumePTY(data []byte, readErr error) error {
 // empty. Only credit is applied; the daemon reads no other command's answer
 // once the PTY has ended.
 func (o *terminalOwner) awaitFirstCredit() error {
-	deadline := time.Now().Add(time.Second)
-	for o.credit == 0 && o.sent == 0 && o.daemonOpen && o.daemonDecoder != nil && !o.detached && time.Now().Before(deadline) {
+	// The daemon grants first credit as soon as it reads TerminalReady, so a
+	// short bound suffices; with nothing retained there is nothing to wait for.
+	deadline := time.Now().Add(250 * time.Millisecond)
+	for o.credit == 0 && o.sent == 0 && o.ring.Head() > o.sent && o.daemonOpen && o.daemonDecoder != nil && !o.detached && time.Now().Before(deadline) {
 		fds := []unix.PollFd{{Fd: int32(o.daemon.Fd()), Events: unix.POLLIN}}
 		if n, err := unix.Poll(fds, 50); n == 0 || errors.Is(err, unix.EINTR) {
 			continue
