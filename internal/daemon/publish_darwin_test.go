@@ -260,6 +260,48 @@ func TestFactorydPublishesASettledIntakeChange(t *testing.T) {
 	}
 }
 
+func TestFactorydRecoversAnIndeterminateLegacyFirstBatch(t *testing.T) {
+	fixture, c, source, app, checkout := publishFixture(t, 99, false)
+	ctx := context.Background()
+	firstOperation := uuid5("dark-factory:" + c.Change.String() + ":publish-" + c.Head[:8] + "-1")
+	entries, err := publicationEntries(ctx, source, c.Base, c.Head)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 100 {
+		t.Fatalf("fixture entries = %d", len(entries))
+	}
+	app.indeterminate = map[string]bool{}
+	app.indeterminateOnUnavailable = true
+	app.unavailable = true
+	if _, err := app.call(ctx, "publish_commit", map[string]any{
+		"repository": "team/repo", "operation_id": firstOperation, "branch": "factory/" + c.Change.String()[:12],
+		"expected_head_sha": c.Base, "message": "Fix the thing", "changes": entries[:50],
+	}); err == nil {
+		t.Fatal("legacy first batch did not become indeterminate")
+	}
+	app.unavailable = false
+	app.indeterminateOnUnavailable = false
+	if err := fixture.daemon.publishChange(ctx, c, "team/repo", source, app.call, checkout); err != nil {
+		t.Fatal(err)
+	}
+	if len(app.writes) != 3 {
+		t.Fatalf("recovery writes = %+v", app.writes)
+	}
+	commit := app.writes[1]["arguments"].(map[string]any)
+	if commit["operation_id"] != uuid5("dark-factory:"+c.Change.String()+":publish-v2-"+c.Head[:8]+"-1") || commit["expected_head_sha"] != c.Base {
+		t.Fatalf("recovered first batch = %+v", commit)
+	}
+	changes := commit["changes"].([]map[string]any)
+	if len(changes) != 100 || changes[0]["path"] != "f00.txt" || changes[98]["path"] != "f98.txt" || changes[99]["path"] != "gone.txt" || changes[99]["content_base64"] != nil {
+		t.Fatalf("recovered tree = %+v", changes)
+	}
+	commitSHA := fmt.Sprintf("%x", sha1.Sum([]byte(commit["operation_id"].(string))))
+	if app.writes[2]["name"] != "create_pull_request" || app.writes[2]["arguments"].(map[string]any)["head_sha"] != commitSHA {
+		t.Fatalf("recovered pull request = %+v", app.writes[2])
+	}
+}
+
 func TestFactorydPreservesLegacyFiftyFilePublicationReceipts(t *testing.T) {
 	fixture, c, source, app, checkout := publishFixture(t, 99, false)
 	firstOperation := uuid5("dark-factory:" + c.Change.String() + ":publish-" + c.Head[:8] + "-1")
