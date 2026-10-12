@@ -573,6 +573,34 @@ func (daemon *Daemon) previewIntake(ctx context.Context, source kernel.IntakeSou
 				}
 			}
 		}
+		if tick && found && reason == string(kernel.IntakeContentChanged) && accepted.WithdrawnAt == nil {
+			task, taskFound, err := daemon.store.Task(ctx, accepted.TaskID)
+			if err != nil {
+				return failure(err)
+			}
+			merged, err := daemon.store.TaskHasMergedPullRequest(ctx, accepted.TaskID)
+			if err != nil {
+				return failure(err)
+			}
+			if taskFound && task.Status == kernel.TaskSucceeded && merged && len(result.ImportedTasks) < int(source.AdmissionLimit) {
+				at, err := daemon.timestamp()
+				if err != nil {
+					return failure(err)
+				}
+				accepted, err = daemon.store.AcceptIntakeSnapshot(ctx, source.ID, snapshot, at, source.Revision)
+				if err != nil {
+					return failure(err)
+				}
+				task, err = daemon.importAcceptedIntake(ctx, accepted, false, &issue)
+				if err != nil {
+					return failure(err)
+				}
+				candidate.AcceptanceID = accepted.ID.String()
+				candidate.TaskID = task.ID.String()
+				candidate.Reason = "reopened"
+				result.ImportedTasks = append(result.ImportedTasks, task.ID.String())
+			}
+		}
 		if tick && found && accepted.WithdrawnAt != nil {
 			if err := daemon.reconcileIntakeWithdrawal(ctx, accepted); err != nil {
 				candidate.Reason = "withdrawal_pending"

@@ -793,6 +793,26 @@ func (store *Store) TaskOpenPullRequest(ctx context.Context, task TaskID) (Produ
 	return pr, err == nil, err
 }
 
+// TaskHasMergedPullRequest is the delivery proof needed before an edited,
+// reopened intake issue may become a new acceptance. An open pull is not
+// enough: the previous task must have reached the merged live gate.
+func (store *Store) TaskHasMergedPullRequest(ctx context.Context, task TaskID) (bool, error) {
+	if task.zero() {
+		return false, ErrInvalidValue
+	}
+	read, err := store.beginRead(ctx)
+	if err != nil {
+		return false, err
+	}
+	defer read.Close()
+	var found int
+	err = read.connection.QueryRowContext(ctx, `SELECT 1 FROM publication_tasks p JOIN production_records r ON r.project_id = p.project_id AND r.repository = p.repository AND r.kind = 'pull_request' AND r.identity = CAST(p.pull_number AS TEXT) WHERE p.task_id = ? AND json_extract(r.document, '$.state') = 'merged' LIMIT 1`, task.Bytes()).Scan(&found)
+	if errors.Is(err, sql.ErrNoRows) {
+		return false, nil
+	}
+	return err == nil && found == 1, err
+}
+
 func (store *Store) ProductionReviewBlocks(ctx context.Context, project ProjectID, repo string, number uint64, head string) (bool, error) {
 	tx, err := store.beginRead(ctx)
 	if err != nil {
