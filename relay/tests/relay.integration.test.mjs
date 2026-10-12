@@ -431,9 +431,10 @@ test('text and binary frames route in both directions to exactly one socket', as
 	const bravo = await openControl(node, await controlCredential(node));
 	const [openAlpha, openBravo] = await host.tap.nextRecords(2);
 
+	// Two sockets have no shared order, so each frame is awaited before the next is sent.
 	alpha.tap.send('alpha says hello');
-	bravo.tap.send(Buffer.from([0xde, 0xad, 0xbe, 0xef]));
 	const first = await host.tap.nextRecord();
+	bravo.tap.send(Buffer.from([0xde, 0xad, 0xbe, 0xef]));
 	const second = await host.tap.nextRecord();
 	assert.deepEqual(
 		[
