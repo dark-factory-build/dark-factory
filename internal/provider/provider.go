@@ -853,16 +853,16 @@ func codexProfile(name string, grants []grant, network string) string {
 	return "permissions." + name + `={filesystem={` + strings.Join(entries, ",") + `},network=` + network + `}`
 }
 
-// CodexReadOnly is the -c overrides that let a Codex exec's local commands
-// read only paths (and Codex's minimal system profile), with no network. It
-// replaces --sandbox read-only, which reads the whole disk. Each path is
-// granted under its resolved spelling as well.
-func CodexReadOnly(paths ...string) []string {
+// CodexReview is the -c overrides that let a Codex exec's local commands
+// write only writable, read only readable (and Codex's minimal system
+// profile), with no network. It replaces --sandbox read-only, which reads the
+// whole disk. Each path is granted under its resolved spelling as well.
+func CodexReview(writable []string, readable ...string) []string {
 	var grants []grant
-	for _, path := range paths {
-		grants = append(grants, grant{path, false})
+	for i, path := range append(writable, readable...) {
+		grants = append(grants, grant{path, i < len(writable)})
 		if resolved, err := filepath.EvalSymlinks(path); err == nil && resolved != path {
-			grants = append(grants, grant{resolved, false})
+			grants = append(grants, grant{resolved, i < len(writable)})
 		}
 	}
 	return []string{"-c", `default_permissions="dark-factory-review"`, "-c", codexProfile("dark-factory-review", grants, "{enabled=false}")}

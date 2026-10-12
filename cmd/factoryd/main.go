@@ -527,7 +527,7 @@ func openProcess(ctx context.Context, configuration config) (_ *process, resultE
 	if err := owner.daemon.ConfigureMaintainer(owner.home); err != nil {
 		return nil, err
 	}
-	owner.daemon.ConfigureHost(configuration.home, owner.supervisorSpec.ToolPath)
+	owner.daemon.ConfigureHost(configuration.home, owner.supervisorSpec.ToolPath, owner.supervisorSpec.ToolchainReadRoots, owner.supervisorSpec.AccountHome)
 	// A trial child proves every boot step that can refuse the process, and
 	// acts on nothing: no recovery, runs, ticks, GitHub or relay, and every
 	// call but web_status refused, so a trial that does not promote leaves
