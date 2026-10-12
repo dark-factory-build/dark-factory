@@ -589,10 +589,11 @@ func TestDisabledAcceptedRepositoryEscalatesOnce(t *testing.T) {
 }
 
 // Only a Change completing its intake issue closes it on merge: one whose
-// result says it is partial (Refs #N) publishes as a reference (#1795).
+// result says it is partial (Refs #N) publishes as a reference (#1795),
+// even when that marker lies past what the body shows.
 func TestAPartialIntakeChangeReferencesItsIssue(t *testing.T) {
 	fixture, c, source, app, checkout := publishFixture(t, 1, false)
-	c.Task.Result = "Refs #9, partial: items 1 and 5. Fixes #9 once item 2 lands."
+	c.Task.Result = "Partial: items 1 and 5. Fixes #9 once item 2 lands.\n" + strings.Repeat("report line\n", 3000) + "Refs #9" // beyond the 24000-byte body
 	if err := fixture.daemon.publishChange(context.Background(), c, "team/repo", source, app.call, checkout); err != nil {
 		t.Fatal(err)
 	}

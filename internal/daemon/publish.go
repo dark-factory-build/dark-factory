@@ -337,7 +337,7 @@ func (daemon *Daemon) publishPull(ctx context.Context, c kernel.PublishableChang
 				}
 			}
 			if err == nil && !done {
-				footer, text := "Closes", result
+				footer, text := "Closes", c.Task.Result
 				for _, pull := range current.PullRequests {
 					text += "\n" + pull.Body
 				}
@@ -375,7 +375,7 @@ func (daemon *Daemon) publishPull(ctx context.Context, c kernel.PublishableChang
 		step += "-" + base
 		done, err = completed(step, &pull)
 	}
-	closes := closesIssue(result, issue, files)
+	closes := closesIssue(c.Task.Result, issue, files)
 	if !closes {
 		body = referencing(body, issue)
 	}
