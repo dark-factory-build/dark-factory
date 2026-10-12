@@ -17,6 +17,7 @@ import (
 	"github.com/dark-factory-build/dark-factory/internal/kernel"
 	"github.com/dark-factory-build/dark-factory/internal/maintainer"
 	"github.com/dark-factory-build/dark-factory/internal/opgraph"
+	"github.com/dark-factory-build/dark-factory/internal/review"
 )
 
 const productionRefreshPRLimit = 100
@@ -279,11 +280,15 @@ func pullRequestObservation(ctx context.Context, call maintainerMCP, repository 
 		}
 		if pr.Review.State == "allow" {
 			pr.MergeQueue = "unknown"
-			if queue, err := readMaintainerMergeQueue(ctx, call, repository, githubID, pr); err != nil {
+			queue, group, err := readMaintainerMergeQueue(ctx, call, repository, githubID, pr)
+			if err != nil {
 				fault(err)
 				result.Unavailable = "merge_queue"
 			} else {
 				pr.MergeQueue = queue
+				if group != nil {
+					result.Checks = append(result.Checks, mergeGroupCheck(pr, group))
+				}
 			}
 		}
 		result.PullRequests = append(result.PullRequests, pr)
@@ -320,19 +325,27 @@ func pullRequestNeedsExactRead(pull maintainerPullRequest, known map[uint64]kern
 	return !ok || prior.Mergeable == nil || !strings.EqualFold(prior.Head, pull.Head) || !strings.EqualFold(prior.Base, pull.Base) || !strings.EqualFold(prior.BaseSHA, pull.BaseSHA)
 }
 
-func readMaintainerMergeQueue(ctx context.Context, call maintainerMCP, repository string, githubID uint64, pr kernel.ProductionPullRequest) (string, error) {
+func readMaintainerMergeQueue(ctx context.Context, call maintainerMCP, repository string, githubID uint64, pr kernel.ProductionPullRequest) (string, *review.GroupRun, error) {
 	content, err := maintainerTool(ctx, call, repository, githubID, "observe_pull_request_merge", observePullRequestMergeArguments(repository, pr.Number, pr.Head, pr.Base))
 	if err != nil {
-		return "", err
+		return "", nil, err
 	}
 	var merge observePullRequestMergeResponse
 	if json.Unmarshal(content, &merge) != nil || merge.PullNumber != pr.Number || merge.Head != pr.Head {
-		return "", errors.New("Maintainer returned an invalid merge observation")
+		return "", nil, errors.New("Maintainer returned an invalid merge observation")
 	}
 	if merge.State == "ACTIVE_QUEUE" {
-		return "active", nil
+		return "active", nil, nil
 	}
-	return "none", nil
+	return "none", merge.Group, nil
+}
+
+func mergeGroupCheck(pr kernel.ProductionPullRequest, group *review.GroupRun) kernel.ProductionCheck {
+	jobs := make([]kernel.ProductionJob, 0, len(group.Jobs))
+	for _, job := range group.Jobs {
+		jobs = append(jobs, kernel.ProductionJob{Name: job.Name, State: "completed", Conclusion: job.Conclusion, URL: group.URL, Annotations: job.Annotations})
+	}
+	return kernel.ProductionCheck{ID: fmt.Sprintf("merge-group:%d", group.ID), Name: "merge_group", Revision: strings.ToLower(pr.Head), Scope: "merge_group", State: "completed", Conclusion: group.Conclusion, URL: group.URL, PullRequests: []uint64{pr.Number}, Jobs: jobs}
 }
 
 // recordCIObservations is the github adapter: the checks a refresh read light the jobs of the repository's CI unit, and fail them on a failed

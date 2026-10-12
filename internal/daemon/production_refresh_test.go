@@ -87,11 +87,20 @@ func TestRefreshReadsQueueStateForApprovedPulls(t *testing.T) {
 					t.Fatalf("unexpected request %s", request)
 				}
 				content := fmt.Sprintf(`{"pull_number":7,"head_sha":"%s","state":"%s"}`, head, test.state)
+				if test.state == "NOT_QUEUED" {
+					content = fmt.Sprintf(`{"pull_number":7,"head_sha":"%s","state":"NOT_QUEUED","merge_group":{"run_id":12,"url":"https://github.com/o/r/actions/runs/12","conclusion":"failure","failed_jobs":[{"name":"go","conclusion":"failure","annotations":["--- FAIL: TestQueue (0.01s)"]}]}}`, head)
+				}
 				return json.RawMessage(`{"jsonrpc":"2.0","id":1,"result":{"structuredContent":` + content + `}}`), nil
 			}
-			got, err := readMaintainerMergeQueue(context.Background(), call, "o/r", 1, pull)
+			got, group, err := readMaintainerMergeQueue(context.Background(), call, "o/r", 1, pull)
 			if err != nil || got != test.want {
 				t.Fatalf("queue=%q err=%v, want %q", got, err, test.want)
+			}
+			if test.state == "NOT_QUEUED" && (group == nil || group.ID != 12 || group.Jobs[0].Annotations[0] != "--- FAIL: TestQueue (0.01s)") {
+				t.Fatalf("merge group = %+v", group)
+			}
+			if test.state == "ACTIVE_QUEUE" && group != nil {
+				t.Fatalf("active queue unexpectedly had merge group %+v", group)
 			}
 		})
 	}
@@ -103,7 +112,7 @@ func TestRefreshRejectsStaleQueueObservation(t *testing.T) {
 	call := func(_ context.Context, _ json.RawMessage, _ map[string]uint64) (json.RawMessage, error) {
 		return json.RawMessage(`{"jsonrpc":"2.0","id":1,"result":{"structuredContent":{"pull_number":7,"head_sha":"` + strings.Repeat("b", 40) + `","state":"NOT_QUEUED"}}}`), nil
 	}
-	if _, err := readMaintainerMergeQueue(context.Background(), call, "o/r", 1, pull); err == nil {
+	if _, _, err := readMaintainerMergeQueue(context.Background(), call, "o/r", 1, pull); err == nil {
 		t.Fatal("stale merge observation accepted")
 	}
 }

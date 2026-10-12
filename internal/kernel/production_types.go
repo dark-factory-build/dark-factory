@@ -59,11 +59,12 @@ type ProductionCheck struct {
 }
 
 type ProductionJob struct {
-	ID         string `json:"id"`
-	Name       string `json:"name"`
-	State      string `json:"state"`
-	Conclusion string `json:"conclusion"`
-	URL        string `json:"url"`
+	ID          string   `json:"id"`
+	Name        string   `json:"name"`
+	State       string   `json:"state"`
+	Conclusion  string   `json:"conclusion"`
+	URL         string   `json:"url"`
+	Annotations []string `json:"annotations,omitempty"`
 }
 
 type ProductionReviewer struct {

@@ -95,6 +95,20 @@ func TestReportAndWhyReadTheReconcilersState(t *testing.T) {
 	}
 }
 
+func TestReportIncludesFailedMergeGroupCheck(t *testing.T) {
+	t.Parallel()
+	store, _, project, _ := newAdmissionStore(t, RoleOrchestrator, 1)
+	defer store.Close()
+	check := ProductionCheck{ID: "merge-group:12", Name: "merge_group", Revision: strings.Repeat("a", 40), Scope: "merge_group", State: "completed", Conclusion: "failure", URL: "https://github.com/o/r/actions/runs/12", PullRequests: []uint64{7}, Jobs: []ProductionJob{{Name: "go", State: "completed", Conclusion: "failure", URL: "https://github.com/o/r/actions/runs/12", Annotations: []string{"--- FAIL: TestQueue"}}}}
+	if err := store.RecordProductionObservation(context.Background(), project.ID, ProductionObservation{Repository: "example/factory", ObservedAt: 10, Checks: []ProductionCheck{check}}, mustTime(t, 10)); err != nil {
+		t.Fatal(err)
+	}
+	lines, err := store.Report(context.Background(), &project.ID, 0, 3600000)
+	if err != nil || len(lines) != 3 || !strings.Contains(lines[0], "failure new x1") || !strings.Contains(lines[0], "TestQueue") {
+		t.Fatalf("report = %q, %v", lines, err)
+	}
+}
+
 func TestReportLessonCountersUseLatestRevision(t *testing.T) {
 	t.Parallel()
 	// The lesson counters are new report behavior; this guards their stated
