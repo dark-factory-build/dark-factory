@@ -778,3 +778,20 @@ func TestOverseerItemsShowStalledAndDue(t *testing.T) {
 		t.Fatalf("stalled item = %+v", items[1])
 	}
 }
+
+// Identical escalations (same pull, head and reason) name one reviewer item:
+// the newest. An older duplicate is not a second item.
+func TestOverseerIdenticalEscalationsNameOnlyTheNewest(t *testing.T) {
+	t.Parallel()
+	store, worker, _ := wakeFixture(t)
+	head := strings.Repeat("a", 40)
+	escalate(t, store, worker.ProjectID, "7", "open", head, head, 1000)
+	if _, err := store.writer.ExecContext(context.Background(), `INSERT INTO production_records (project_id, repository, kind, identity, visual_id, document, observed_at_ms) VALUES (?, 'example/factory', 'reviewer', 'op7-again', '', ?, 1100)`,
+		worker.ProjectID.Bytes(), `{"request":{"PullNumber":7,"Head":"`+strings.ToUpper(head)+`"},"escalation":"stuck 7"}`); err != nil {
+		t.Fatal(err)
+	}
+	bodies := wakeBodies(t, store, 1100+overseerWakeSettle.Milliseconds())
+	if len(bodies) != 1 || strings.Count(bodies[0], "Escalated: stuck 7") != 1 || !strings.Contains(bodies[0], "[reviewer:op7-again]") || strings.Contains(bodies[0], "[reviewer:op7]") {
+		t.Fatalf("duplicate escalation wake = %q", bodies)
+	}
+}
