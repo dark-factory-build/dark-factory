@@ -3653,7 +3653,7 @@ impl Authority {
             entry: Option<QueueEntry>,
         }
 
-        let (data, failure): (Option<Data>, Option<GraphQlFailure>) = github_graphql(
+        let (data, mut failure): (Option<Data>, Option<GraphQlFailure>) = github_graphql(
             &token.token,
             "mutation($pull:ID!,$head:GitObjectID!){\
              enqueuePullRequest(input:{pullRequestId:$pull,expectedHeadOid:$head}){\
@@ -3668,14 +3668,56 @@ impl Authority {
             .and_then(|data| data.enqueue)
             .and_then(|payload| payload.entry);
         if entry.is_none() {
-            if let Some(GraphQlFailure::Rejected(kinds)) = &failure {
+            if let Some(GraphQlFailure::Rejected(kinds)) = &mut failure {
                 if kinds.codeowners_approval {
                     return Err(OperationError::Refused(RefusalReason::CodeownersApproval));
+                }
+                // GitHub names no thread, so the refusal carries them (#1857).
+                if kinds
+                    .message
+                    .to_ascii_lowercase()
+                    .contains("conversation must be resolved")
+                {
+                    kinds.message += &self.unresolved_threads(token, request.pull_number).await;
                 }
             }
         }
         let entry = enqueue_outcome(entry, failure)?;
         entry.into_result(request)
+    }
+
+    /// The pull request's unresolved review threads, best effort: a failed
+    /// read still leaves GitHub's own refusal line.
+    async fn unresolved_threads(&self, token: &RepositoryToken, pull_number: i64) -> String {
+        // Resolved threads come first as often as not, so page until 20
+        // unresolved ones are read or the threads end (10 pages at most).
+        let (mut threads, mut after) = (Vec::new(), None::<String>);
+        for _ in 0..10 {
+            let variables = serde_json::json!({
+                "owner": token.repository.owner,
+                "name": token.repository.name,
+                "number": pull_number,
+                "after": after,
+            });
+            after = match github_graphql::<serde_json::Value, _>(
+                &token.token,
+                "query($owner:String!,$name:String!,$number:Int!,$after:String){\
+                 repository(owner:$owner,name:$name){pullRequest(number:$number){\
+                 reviewThreads(first:100,after:$after){pageInfo{hasNextPage endCursor} \
+                 nodes{isResolved path line comments(first:1){nodes{author{login} body}}}}}}}",
+                &variables,
+            )
+            .await
+            {
+                Ok((data, None)) => unresolved_threads_page(data, &mut threads),
+                _ => return " (its review threads were unreadable)".to_owned(),
+            };
+            if after.is_none() || threads.len() >= 20 {
+                break;
+            }
+        }
+        threads.truncate(20);
+        format!("\nUnresolved review threads:{}", threads.concat())
     }
 
     /// Answer "is this pull request queued at the head I stated?" by reading
@@ -4784,6 +4826,40 @@ struct GitObject {
     sha: String,
     #[serde(rename = "type")]
     kind: String,
+}
+
+/// Appends each unresolved thread on one page of reviewThreads as
+/// `path:line by author: first comment`, bounded, and returns the next
+/// page's cursor.
+#[cfg(any(target_arch = "wasm32", test))]
+fn unresolved_threads_page(
+    data: Option<serde_json::Value>,
+    threads: &mut Vec<String>,
+) -> Option<String> {
+    let page = data?
+        .pointer("/repository/pullRequest/reviewThreads")?
+        .clone();
+    for thread in page["nodes"].as_array()?.iter() {
+        if thread["isResolved"] != false {
+            continue;
+        }
+        let comment = &thread["comments"]["nodes"][0];
+        let body = comment["body"].as_str().unwrap_or_default();
+        let body: String = body
+            .replace(char::is_control, " ")
+            .chars()
+            .take(240)
+            .collect();
+        threads.push(format!(
+            "\n- {}:{} by {}: {body}",
+            thread["path"].as_str().unwrap_or("?"),
+            thread["line"],
+            comment["author"]["login"].as_str().unwrap_or("?"),
+        ));
+    }
+    (page["pageInfo"]["hasNextPage"] == true)
+        .then(|| page["pageInfo"]["endCursor"].as_str().map(str::to_owned))
+        .flatten()
 }
 
 #[cfg(any(target_arch = "wasm32", test))]
@@ -8723,6 +8799,34 @@ mod tests {
             merged_pull_commit_response(Some(missing_commit), None, &rest.head.sha),
             Err(OperationError::Indeterminate)
         ));
+    }
+
+    #[test]
+    fn unresolved_threads_name_path_line_author_and_first_comment() {
+        let page = |nodes, next: bool| {
+            Some(
+                serde_json::json!({"repository": {"pullRequest": {"reviewThreads": {"pageInfo": {"hasNextPage": next, "endCursor": "c1"}, "nodes": nodes}}}}),
+            )
+        };
+        let mut threads = Vec::new();
+        // A first page of only resolved threads names none and leads on.
+        let resolved = serde_json::json!([{"isResolved": true, "path": "done.go", "line": 1, "comments": {"nodes": [{"author": {"login": "a"}, "body": "fixed"}]}}]);
+        assert_eq!(
+            unresolved_threads_page(page(resolved, true), &mut threads).as_deref(),
+            Some("c1")
+        );
+        assert!(threads.is_empty());
+        let open = serde_json::json!([{"isResolved": false, "path": "cmd/factoryctl/main.go", "line": 719, "comments": {"nodes": [{"author": {"login": "github-advanced-security"}, "body": "## Incorrect conversion\nParseUint to uint32"}]}}]);
+        assert_eq!(
+            unresolved_threads_page(page(open, false), &mut threads),
+            None
+        );
+        assert_eq!(
+            threads,
+            [
+                "\n- cmd/factoryctl/main.go:719 by github-advanced-security: ## Incorrect conversion ParseUint to uint32"
+            ]
+        );
     }
 
     #[test]

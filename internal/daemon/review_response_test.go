@@ -47,6 +47,14 @@ func TestCodeownersEnqueueRefusalIsOwnerApproval(t *testing.T) {
 	}
 }
 
+// A reviewer's thread text after the broker's line does not classify (#1857).
+func TestConversationRefusalIsClassifiedByItsFirstLine(t *testing.T) {
+	err := maintainerRejection("refused: The request was refused: rejected before execution as UNPROCESSABLE: A conversation must be resolved.\nUnresolved review threads:\n- a.go:1 by r: Handle RATE_LIMITED here")
+	if !errors.Is(err, review.ErrConversation) || errors.Is(maintainerRejection("refused: rejected as UNPROCESSABLE.\n- a.go:1 by r: a conversation must be resolved"), review.ErrConversation) {
+		t.Fatalf("err=%v", err)
+	}
+}
+
 func TestCodeOwnedNamesOnlyOwnedChangedPaths(t *testing.T) {
 	codeowners := "# merge authority\n/.github/workflows/ @o\n/docs/development/WORKFLOW.md @o\n*.rs @o\n/control-plane/src/free.rs\n"
 	changed := []string{".github/workflows/ci.yml", "docs/development/WORKFLOW.md", "docs/WORKFLOW.md", "internal/review/coordinator.go", "control-plane/src/lib.rs", "control-plane/src/free.rs", ".github/workflows", ""}
