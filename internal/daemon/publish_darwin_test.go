@@ -36,6 +36,9 @@ type fakePublishMaintainer struct {
 	bodyIndeterminate       bool
 	bodyWrites              int
 	extraPull               bool
+	dirty                   bool
+	queued                  bool
+	closed                  bool
 	landSecondCommit        bool
 	commitWrites            int
 	loseNext                bool   // the next write lands but its response is lost
@@ -73,14 +76,24 @@ func (f *fakePublishMaintainer) call(_ context.Context, name string, arguments m
 		if number == nil {
 			number = uint64(31)
 		}
-		pull := map[string]any{"number": number, "url": "https://github.com/team/repo/pull/31", "head_sha": f.tip, "head_ref": f.headRef, "base_sha": f.main, "base_ref": "main", "state": "open", "mergeable": true, "merge_state_status": "clean", "body": f.body}
+		state, mergeable, mergeState := "open", true, "clean"
+		if f.closed {
+			state, mergeable, mergeState = "closed", true, "unknown"
+		} else if f.dirty {
+			mergeable, mergeState = false, "dirty"
+		}
+		pull := map[string]any{"number": number, "url": "https://github.com/team/repo/pull/31", "head_sha": f.tip, "head_ref": f.headRef, "base_sha": f.main, "base_ref": "main", "state": state, "mergeable": mergeable, "merge_state_status": mergeState, "body": f.body}
 		pulls := []any{pull}
 		if f.extraPull {
 			pulls = []any{map[string]any{"number": uint64(29), "url": "https://github.com/team/repo/pull/29", "head_sha": f.tip, "head_ref": "factory/other", "base_sha": f.main, "base_ref": "main", "state": "open", "mergeable": true, "merge_state_status": "clean"}, pull}
 		}
 		return json.Marshal(map[string]any{"pull_requests": pulls})
 	case "observe_pull_request_merge":
-		return json.Marshal(map[string]any{"pull_number": arguments["pull_number"], "head_sha": f.tip, "base": "main", "state": "INACTIVE", "queue_state": nil, "merge_commit_sha": nil, "merge_group": nil})
+		mergeState := "INACTIVE"
+		if f.queued {
+			mergeState = "ACTIVE_QUEUE"
+		}
+		return json.Marshal(map[string]any{"pull_number": arguments["pull_number"], "head_sha": f.tip, "base": "main", "state": mergeState, "queue_state": nil, "merge_commit_sha": nil, "merge_group": nil})
 	}
 	if _, replay := f.journal[id]; replay || f.planned[id] {
 		return nil, fmt.Errorf("conflict: operation %s replayed", id)

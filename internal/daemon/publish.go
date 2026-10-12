@@ -31,10 +31,16 @@ type publishCheckout func(ctx context.Context, ref, head string) (string, func()
 // Change: the next pass retries it.
 var errPublishLater, errRepositoryDisabled = errors.New("publication waits for the next pass"), errors.New("repository disabled for new work")
 
-type publishIndeterminate struct{ step string }
+type publishIndeterminate struct {
+	step        string
+	observation string
+}
 
 func (e publishIndeterminate) Error() string {
-	return "publication operation " + e.step + " is indeterminate"
+	if e.observation == "" {
+		return "publication operation " + e.step + " is indeterminate"
+	}
+	return "publication operation " + e.step + " is indeterminate: " + e.observation
 }
 
 type observedPull struct {
@@ -288,6 +294,25 @@ func (daemon *Daemon) publishPull(ctx context.Context, c kernel.PublishableChang
 		}
 		return observed, nil
 	}
+	observationDetail := func(observed observedPublication) string {
+		if observed.pull == nil {
+			return fmt.Sprintf("branch=%s, pull=absent", observed.ref)
+		}
+		mergeable := "unknown"
+		if observed.pull.Mergeable != nil {
+			mergeable = strconv.FormatBool(*observed.pull.Mergeable)
+		}
+		return fmt.Sprintf("branch=%s, pull=%d head=%s state=%s mergeable=%s merge_state=%s queue=%s", observed.ref, observed.pull.Number, observed.pull.Head, observed.pull.State, mergeable, observed.pull.MergeState, observed.pull.MergeQueue)
+	}
+	retryCompleted := func(step string, result any, observed observedPublication) (bool, error) {
+		done, err := completed(step, result)
+		var indeterminate publishIndeterminate
+		if errors.As(err, &indeterminate) {
+			indeterminate.observation = observationDetail(observed)
+			err = indeterminate
+		}
+		return done, err
+	}
 	routeObserved := func(observed observedPublication) error {
 		if observed.pull == nil {
 			return nil
@@ -296,8 +321,31 @@ func (daemon *Daemon) publishPull(ctx context.Context, c kernel.PublishableChang
 		if !dirty && observed.pull.MergeQueue == "" && observed.pull.State == "open" {
 			return nil
 		}
-		_, err := daemon.advanceReviewOperations(ctx, false)
-		return errors.Join(err, errPublishLater)
+		// A correction is already represented by the existing pull operation.
+		// Route only that operation here: entering advanceReviewOperations would
+		// reacquire reconcileMu when publication was reached from reconciliation.
+		if c.Pull != 0 && dirty {
+			pulls, err := daemon.store.OpenPulls(ctx)
+			if err != nil {
+				return errors.Join(err, errPublishLater)
+			}
+			for _, open := range pulls {
+				if open.Repository != repo || open.Pull.Number != c.Pull {
+					continue
+				}
+				var op review.Operation
+				if len(open.Operations) != 0 && json.Unmarshal(open.Operations[len(open.Operations)-1], &op) == nil {
+					task := c.Task
+					if open.Task != (kernel.TaskID{}) {
+						if stored, found, taskErr := daemon.store.Task(ctx, open.Task); taskErr == nil && found {
+							task = stored
+						}
+					}
+					return errors.Join(daemon.sendBackPull(ctx, open, task, op, observationDetail(observed)), errPublishLater)
+				}
+			}
+		}
+		return errPublishLater
 	}
 	recover := func(step, expected string, pull uint64, expectPull bool) (observedPublication, string, bool, error) {
 		observed, err := observe(branch, pull)
@@ -347,14 +395,14 @@ func (daemon *Daemon) publishPull(ctx context.Context, c kernel.PublishableChang
 	if err == nil {
 		done, err = completed(prefix+"1", &first)
 		if indeterminate, ok := err.(publishIndeterminate); ok {
-			_, retry, landed, observeErr := recover(indeterminate.step, checked, c.Pull, false)
+			observed, retry, landed, observeErr := recover(indeterminate.step, checked, c.Pull, false)
 			if observeErr != nil {
 				return observeErr
 			}
 			if landed {
 				first.Parent, done, err = checked, true, nil
 			} else {
-				done, err = completed(retry, &first)
+				done, err = retryCompleted(retry, &first, observed)
 			}
 		}
 	}
@@ -415,7 +463,7 @@ func (daemon *Daemon) publishPull(ctx context.Context, c kernel.PublishableChang
 				commit.SHA, commit.Parent, done, err = observed.ref, head, true, nil
 			} else {
 				step, done, err = retry, false, nil
-				done, err = completed(step, &commit)
+				done, err = retryCompleted(step, &commit, observed)
 			}
 		}
 		if err == nil && !done {
@@ -467,7 +515,7 @@ func (daemon *Daemon) publishPull(ctx context.Context, c kernel.PublishableChang
 					return observeErr
 				}
 				retryStep, varObserved, done, err = retry, observed.pull, false, nil
-				done, err = completed(retryStep, new(json.RawMessage))
+				done, err = retryCompleted(retryStep, new(json.RawMessage), observed)
 			}
 			var current struct {
 				PullRequests []struct {
@@ -527,7 +575,7 @@ func (daemon *Daemon) publishPull(ctx context.Context, c kernel.PublishableChang
 			done, err = true, nil
 		} else {
 			step, done, err = retry, false, nil
-			done, err = completed(step, &pull)
+			done, err = retryCompleted(step, &pull, observed)
 		}
 	}
 	if err == nil && !done {
@@ -548,7 +596,7 @@ func (daemon *Daemon) publishPull(ctx context.Context, c kernel.PublishableChang
 				done, err = true, nil
 			} else {
 				step, done, err = retry, false, nil
-				done, err = completed(step, &pull)
+				done, err = retryCompleted(step, &pull, observed)
 			}
 		}
 	}
