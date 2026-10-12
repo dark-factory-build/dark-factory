@@ -111,13 +111,13 @@ type FactoryItem struct {
 type ProjectItem struct {
 	ID             string  `json:"id"`
 	Name           string  `json:"name"`
-	RunBudgetLimit Decimal `json:"run_budget_limit"`
-	RunsUsed       Decimal `json:"runs_used"`
+	RunBudgetLimit Decimal `json:"-"`
+	RunsUsed       Decimal `json:"-"`
 	MaxRunSeconds  uint32  `json:"max_run_seconds"`
 	// The project's specialist limits: reviews running at once, and open
 	// proposals per specialist.
-	SpecialistRuns          uint32  `json:"specialist_runs"`
-	SpecialistOpenProposals uint32  `json:"specialist_open_proposals"`
+	SpecialistRuns          uint32  `json:"-"`
+	SpecialistOpenProposals uint32  `json:"-"`
 	Revision                Decimal `json:"revision"`
 }
 

@@ -1239,7 +1239,7 @@ func validSnapshot(snapshot DashboardSnapshot) bool {
 		return false
 	}
 	for _, project := range snapshot.Projects {
-		if !validID(project.ID) || !validText(project.Name, 1, 128) || project.RunBudgetLimit != 0 && project.RunsUsed > project.RunBudgetLimit || project.MaxRunSeconds > 86400 || project.Revision == 0 {
+		if !validID(project.ID) || !validText(project.Name, 1, 128) || project.MaxRunSeconds > 86400 || project.Revision == 0 {
 			return false
 		}
 	}

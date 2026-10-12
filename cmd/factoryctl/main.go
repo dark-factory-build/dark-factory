@@ -298,10 +298,8 @@ type attemptCommand struct {
 	capacity            uint16
 	maxBytes            uint32
 	maxRunSeconds       uint32
+<<<<<<< HEAD
 	seconds             uint32
-	tokenBudget         *uint64
-	specialistRuns      *uint32
-	openProposals       *uint32
 	wakeOn              string
 	priority            int64
 	prioritySet         bool
@@ -1678,7 +1676,7 @@ func parseOperator(args []string) (attemptCommand, bool, bool) {
 	case "project create":
 		command.kind, names = commandProjectCreate, []string{"--name", "--root"}
 	case "project limits":
-		command.kind, names = commandProjectLimits, []string{"--project", "--revision", "--run-budget", "--token-budget", "--max-run-seconds", "--specialist-runs", "--specialist-open-proposals"}
+		command.kind, names = commandProjectLimits, []string{"--project", "--revision", "--max-run-seconds"}
 	case "agent create":
 		command.kind, names = commandAgentCreate, []string{"--project", "--name", "--role", "--provider", "--model", "--reasoning-effort", "--account", "--tool-budget"}
 	case "agent idle-policy":
@@ -1719,14 +1717,6 @@ func parseOperator(args []string) (attemptCommand, bool, bool) {
 			command.repository = value
 		case name == "--revision" && (command.kind == commandProjectLimits || command.kind == commandAgentIdlePolicy || command.kind == commandAgentSelectAccount || command.kind == commandAgentSelectModel || command.kind == commandOverseerAgentUpdate || command.kind == commandTaskRead) && isCount && count > 0:
 			command.expectedRevision = count
-		case name == "--run-budget" && command.kind == commandProjectLimits && isCount:
-			command.toolBudget = count
-		case name == "--token-budget" && command.kind == commandProjectLimits && isCount:
-			command.tokenBudget = &count
-		case name == "--specialist-runs" && command.kind == commandProjectLimits && isCount && count <= kernel.MaxSpecialistRuns:
-			command.specialistRuns = &[]uint32{uint32(count)}[0]
-		case name == "--specialist-open-proposals" && command.kind == commandProjectLimits && isCount && count <= kernel.MaxSpecialistOpenProposals:
-			command.openProposals = &[]uint32{uint32(count)}[0]
 		case name == "--wake-on" && command.kind == commandAgentIdlePolicy:
 			command.wakeOn = value
 		case name == "--max-run-seconds" && command.kind == commandProjectLimits && isCount && count <= 86400:
@@ -2482,7 +2472,7 @@ func runOperator(ctx context.Context, command attemptCommand, getenv func(string
 			Revision uint64 `json:"revision"`
 		}{ID: id, Head: result.Head, Revision: result.Revision})
 	case commandProjectLimits:
-		result, callErr := client.SetProjectLimits(callContext, api.ProjectLimitsInput{ProjectID: command.project, ExpectedRevision: command.expectedRevision, RunBudget: command.toolBudget, MaxRunSeconds: command.maxRunSeconds, TokenBudget: command.tokenBudget, SpecialistRuns: command.specialistRuns, SpecialistOpenProposals: command.openProposals})
+		result, callErr := client.SetProjectLimits(callContext, api.ProjectLimitsInput{ProjectID: command.project, ExpectedRevision: command.expectedRevision, MaxRunSeconds: command.maxRunSeconds})
 		if callErr != nil {
 			return writeWebFailure(stderr, "project limits", callErr)
 		}

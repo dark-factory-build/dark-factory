@@ -7,12 +7,6 @@ import (
 
 const maxProjectRunSeconds = 86400
 
-// The schema's bounds on a project's specialist limits.
-const (
-	MaxSpecialistRuns          = 16
-	MaxSpecialistOpenProposals = 32
-)
-
 // MaxOverseerRunSeconds bounds one non-shell overseer run even when the
 // project ceiling is disabled or longer. An overseer must checkpoint and exit
 // when only an external event remains (#1096); this backstop stops one that
@@ -20,21 +14,19 @@ const (
 // pending, so the next wake resumes from durable state.
 const MaxOverseerRunSeconds = 1800
 
-// SetProjectLimits replaces a project's future run allowance and per-run
-// wall-clock ceiling. An allowance is additional to the lifetime count already
-// recorded; zero disables the count ceiling without erasing that history.
+// SetProjectLimits replaces a project's per-run wall-clock ceiling.
 func (store *Store) SetProjectLimits(ctx context.Context, id ProjectID, expected Revision, allowance uint64, maxRunSeconds uint32, at UnixMillis) (Project, error) {
 	return store.SetProjectLimitsWithTokens(ctx, id, expected, allowance, maxRunSeconds, nil, nil, nil, at)
 }
 
-// SetProjectLimitsWithTokens also replaces the token allowance when one is
-// given, in the same transaction and under the same revision check, so an
-// operator edit lands whole or not at all. Like the run allowance it is
-// additional to recorded spend, and zero removes the ceiling. The specialist
-// limits likewise replace the stored value only when given.
+// SetProjectLimitsWithTokens retains its historical call shape for retained
+// callers; obsolete budget arguments are ignored.
 func (store *Store) SetProjectLimitsWithTokens(ctx context.Context, id ProjectID, expected Revision, allowance uint64, maxRunSeconds uint32, tokenAllowance *uint64, specialistRuns, openProposals *uint32, at UnixMillis) (Project, error) {
-	if id.zero() || expected.Int64() < 1 || allowance > uint64(^uint64(0)>>1) || maxRunSeconds > maxProjectRunSeconds || tokenAllowance != nil && *tokenAllowance > maxProjectTokens ||
-		specialistRuns != nil && *specialistRuns > MaxSpecialistRuns || openProposals != nil && *openProposals > MaxSpecialistOpenProposals {
+	_ = allowance
+	_ = tokenAllowance
+	_ = specialistRuns
+	_ = openProposals
+	if id.zero() || expected.Int64() < 1 || maxRunSeconds > maxProjectRunSeconds {
 		return Project{}, fmt.Errorf("%w: project limits", ErrInvalidValue)
 	}
 	tx, err := store.beginValidatedWrite(ctx)
@@ -52,28 +44,9 @@ func (store *Store) SetProjectLimitsWithTokens(ctx context.Context, id ProjectID
 	if project.Revision != expected || at.Int64() < project.UpdatedAt.Int64() {
 		return Project{}, tx.Rollback(ErrRevisionConflict)
 	}
-	limit := uint64(0)
-	if allowance != 0 {
-		if project.RunsUsed > uint64(^uint64(0)>>1)-allowance {
-			return Project{}, tx.Rollback(ErrInvalidValue)
-		}
-		limit = project.RunsUsed + allowance
-	}
-	if specialistRuns == nil {
-		specialistRuns = &project.SpecialistRuns
-	}
-	if openProposals == nil {
-		openProposals = &project.SpecialistOpenProposals
-	}
-	updated, err := tx.connection.ExecContext(ctx, `UPDATE projects SET run_budget_limit = ?, max_run_seconds = ?, specialist_runs = ?, specialist_open_proposals = ?, revision = revision + 1, updated_at_ms = ? WHERE id = ? AND revision = ?`, int64(limit), int64(maxRunSeconds), int64(*specialistRuns), int64(*openProposals), at.Int64(), id.Bytes(), expected.Int64())
+	updated, err := tx.connection.ExecContext(ctx, `UPDATE projects SET max_run_seconds = ?, revision = revision + 1, updated_at_ms = ? WHERE id = ? AND revision = ?`, int64(maxRunSeconds), at.Int64(), id.Bytes(), expected.Int64())
 	if err := requireOneRow(updated, err); err != nil {
 		return Project{}, tx.Rollback(err)
-	}
-	if tokenAllowance != nil {
-		if _, err := tx.connection.ExecContext(ctx, `INSERT INTO project_tokens(project_id, token_limit, tokens_used) VALUES(?1, ?2, 0)
-			ON CONFLICT(project_id) DO UPDATE SET token_limit = CASE WHEN ?2 = 0 THEN 0 ELSE MIN(tokens_used + ?2, 9223372036854775807) END`, id.Bytes(), int64(*tokenAllowance)); err != nil {
-			return Project{}, tx.Rollback(err)
-		}
 	}
 	if err := appendInvalidations(ctx, tx.connection, at, []pendingInvalidation{{kind: EntityProject, id: id.Bytes(), revision: expected.Int64() + 1}}); err != nil {
 		return Project{}, tx.Rollback(err)

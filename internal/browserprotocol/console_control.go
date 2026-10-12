@@ -62,12 +62,10 @@ type AgentUpdateResult struct {
 	Revision Decimal `json:"revision"`
 }
 
-// ProjectLimits replaces the future run allowance and per-run ceiling. A zero
-// allowance or duration explicitly means unlimited.
+// ProjectLimits replaces the per-run wall-clock ceiling.
 type ProjectLimits struct {
 	ProjectID        string  `json:"project_id"`
 	ExpectedRevision Decimal `json:"expected_revision"`
-	RunBudget        Decimal `json:"run_budget"`
 	MaxRunSeconds    uint32  `json:"max_run_seconds"`
 }
 
@@ -640,7 +638,7 @@ func validConsoleControl(kind MessageType, body any) error {
 			return bad()
 		}
 	case ProjectLimits:
-		if validateDynamicID(value.ProjectID) != nil || value.ExpectedRevision == 0 || uint64(value.RunBudget) > MaxSQLiteInteger || value.MaxRunSeconds > 86400 {
+		if validateDynamicID(value.ProjectID) != nil || value.ExpectedRevision == 0 || value.MaxRunSeconds > 86400 {
 			return bad()
 		}
 	case ProjectLimitsResult:

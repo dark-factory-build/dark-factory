@@ -491,7 +491,7 @@ func (backend *browserBackend) SetProjectLimits(ctx context.Context, rawClient [
 	if err != nil {
 		return browserprotocol.ProjectLimitsResult{}, err
 	}
-	project, err := backend.store.SetProjectLimits(ctx, projectID, expected, uint64(request.RunBudget), request.MaxRunSeconds, at)
+	project, err := backend.store.SetProjectLimits(ctx, projectID, expected, 0, request.MaxRunSeconds, at)
 	if err != nil {
 		return browserprotocol.ProjectLimitsResult{}, consoleUpdateError(err)
 	}

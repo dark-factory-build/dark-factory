@@ -656,14 +656,14 @@ type FactorySummary struct {
 type ProjectSummary struct {
 	ID                      string `json:"id"`
 	Name                    string `json:"name"`
-	RunBudgetLimit          uint64 `json:"run_budget_limit"`
+	RunBudgetLimit          uint64 `json:"-"`
 	RunsUsed                uint64 `json:"runs_used"`
 	MaxRunSeconds           uint32 `json:"max_run_seconds"`
-	TokenLimit              uint64 `json:"token_limit"`
+	TokenLimit              uint64 `json:"-"`
 	TokensUsed              uint64 `json:"tokens_used"`
 	Revision                uint64 `json:"revision"`
-	SpecialistRuns          uint32 `json:"specialist_runs"`
-	SpecialistOpenProposals uint32 `json:"specialist_open_proposals"`
+	SpecialistRuns          uint32 `json:"-"`
+	SpecialistOpenProposals uint32 `json:"-"`
 }
 
 type AgentSummary struct {
@@ -1001,7 +1001,7 @@ type AgentIdlePolicyInput struct {
 	Policy           string `json:"policy"`
 	AfterSeconds     uint32 `json:"after_seconds"`
 	Instruction      string `json:"instruction"`
-	RunBudget        uint64 `json:"run_budget"`
+	RunBudget        uint64 `json:"-"`
 	// WakeOn is a specialist's event classes; empty is none.
 	WakeOn string `json:"wake_on,omitempty"`
 }
@@ -1107,10 +1107,10 @@ type ProjectLimitsInput struct {
 	MaxRunSeconds    uint32 `json:"max_run_seconds"`
 	// TokenBudget permits this many more provider tokens than are already
 	// recorded; zero removes the ceiling and absent leaves it as it is.
-	TokenBudget *uint64 `json:"token_budget,omitempty"`
+	TokenBudget *uint64 `json:"-"`
 	// The specialist limits; absent leaves each as it is.
-	SpecialistRuns          *uint32 `json:"specialist_runs,omitempty"`
-	SpecialistOpenProposals *uint32 `json:"specialist_open_proposals,omitempty"`
+	SpecialistRuns          *uint32 `json:"-"`
+	SpecialistOpenProposals *uint32 `json:"-"`
 }
 
 type CreateAgentInput struct {

@@ -390,9 +390,9 @@ export class BrowserSession {
   }
 
   /** Edit one project's future allowance and per-run duration. */
-  setProjectLimits(request: { projectId: string; expectedRevision: bigint; runBudget: bigint; maxRunSeconds: number }): Promise<ProjectLimitsResult> {
-    const body: ProjectLimitsBody = { project_id: request.projectId, expected_revision: request.expectedRevision, run_budget: request.runBudget, max_run_seconds: request.maxRunSeconds };
-    if (request.runBudget < 0n || request.runBudget > MAX_SQLITE_INTEGER || !Number.isSafeInteger(request.maxRunSeconds) || request.maxRunSeconds < 0 || request.maxRunSeconds > 86400) return Promise.reject(new SessionError("invalid_request"));
+  setProjectLimits(request: { projectId: string; expectedRevision: bigint; maxRunSeconds: number }): Promise<ProjectLimitsResult> {
+    const body: ProjectLimitsBody = { project_id: request.projectId, expected_revision: request.expectedRevision, max_run_seconds: request.maxRunSeconds };
+    if (!Number.isSafeInteger(request.maxRunSeconds) || request.maxRunSeconds < 0 || request.maxRunSeconds > 86400) return Promise.reject(new SessionError("invalid_request"));
     if ((this.#capabilities & CAPABILITIES.administration) === 0) return Promise.reject(new SessionError("unauthorized"));
     return this.#consoleRequest("PROJECT_LIMITS_RESULT", request.projectId, request.expectedRevision, "project-limits", (id) => encodeClientControl({ type: "PROJECT_LIMITS", id, body }));
   }

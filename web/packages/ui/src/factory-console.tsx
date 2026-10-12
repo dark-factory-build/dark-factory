@@ -37,7 +37,7 @@ export type FactoryConsoleProps = FactoryAppSnapshot & {
   appearanceAgentId?: string;
   onEditAppearance?: (agent: AgentItem) => void;
   onCloseAppearance?: () => void;
-  onSaveProjectLimits?: (project: Pick<ProjectItem, "id" | "revision">, limits: { runBudget: bigint; maxRunSeconds: number }) => void;
+  onSaveProjectLimits?: (project: Pick<ProjectItem, "id" | "revision">, limits: { maxRunSeconds: number }) => void;
   onEditTask?: (task: TaskItem, change: TaskEdit) => Promise<boolean>;
   onAddTask?: AddTask;
   onLoadTaskDetail?: (task: TaskItem, peerOffset?: bigint, expectedHead?: bigint) => Promise<TaskBrief>;

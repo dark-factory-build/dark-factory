@@ -67,7 +67,7 @@ func scanProject(scanner rowScanner) (Project, bool, error) {
 		return Project{}, false, fmt.Errorf("scan project: %w", err)
 	}
 	id, err := ProjectIDFromBytes(rawID)
-	if err != nil || byteLen(name) < 1 || byteLen(name) > 128 || !validAbsolutePath(root) || runBudget < 0 || runsUsed < 0 || (runBudget != 0 && runsUsed > runBudget) || maxRunSeconds < 0 || maxRunSeconds > 86400 || updatedAt < createdAt || specialistRuns < 0 || specialistRuns > MaxSpecialistRuns || openProposals < 0 || openProposals > MaxSpecialistOpenProposals {
+	if err != nil || byteLen(name) < 1 || byteLen(name) > 128 || !validAbsolutePath(root) || runBudget < 0 || runsUsed < 0 || maxRunSeconds < 0 || maxRunSeconds > 86400 || updatedAt < createdAt {
 		return Project{}, false, fmt.Errorf("%w: invalid project row", ErrCorruptState)
 	}
 	rev, err := NewRevision(revision)

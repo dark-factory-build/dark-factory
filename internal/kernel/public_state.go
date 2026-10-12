@@ -220,7 +220,7 @@ func readPublicProjects(ctx context.Context, connection *sql.Conn) ([]ProjectSum
 		}
 		id, idErr := ProjectIDFromBytes(rawID)
 		revision, revisionErr := NewRevision(rawRevision)
-		if idErr != nil || revisionErr != nil || byteLen(name) < 1 || byteLen(name) > 128 || runBudget < 0 || runsUsed < 0 || maxRunSeconds < 0 || maxRunSeconds > maxProjectRunSeconds || runBudget != 0 && runsUsed > runBudget {
+		if idErr != nil || revisionErr != nil || byteLen(name) < 1 || byteLen(name) > 128 || runBudget < 0 || runsUsed < 0 || maxRunSeconds < 0 || maxRunSeconds > maxProjectRunSeconds {
 			return nil, fmt.Errorf("%w: invalid public project", ErrCorruptState)
 		}
 		result = append(result, ProjectSummary{ID: id, Name: name, RunBudgetLimit: uint64(runBudget), RunsUsed: uint64(runsUsed), MaxRunSeconds: uint32(maxRunSeconds), SpecialistRuns: uint32(specialistRuns), SpecialistOpenProposals: uint32(openProposals), Revision: revision})
