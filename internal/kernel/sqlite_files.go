@@ -35,6 +35,10 @@ var sqliteActivationHook func(string) error
 // Production activation has no hook.
 var sqlitePostPoolHook func(string) error
 
+// sqliteOpenableSnapshotHook is package-local deterministic fault
+// instrumentation for the one fresh-snapshot retry during inspection.
+var sqliteOpenableSnapshotHook func() error
+
 // OpenOperational validates and activates one canonical absolute database
 // path bound to the supplied retained home and main-database descriptors. It
 // takes ownership of both descriptors and retains the exact path/file
@@ -61,6 +65,22 @@ func InspectOperational(ctx context.Context, absolutePath string, home, database
 	}
 	defer func() { resultErr = errors.Join(resultErr, files.Close()) }()
 	return inspectOperationalSnapshot(ctx, absolutePath, files)
+}
+
+// CheckpointOperational flushes an existing WAL before the slower read-only
+// operational inspection. It deliberately does not validate the database.
+func CheckpointOperational(ctx context.Context, absolutePath string, home, database *os.File) (resultErr error) {
+	files, err := openBoundDatabaseFiles(absolutePath, home, database)
+	if err != nil {
+		return err
+	}
+	store := newStore()
+	store.pathBinding = files
+	defer func() { resultErr = errors.Join(resultErr, store.Close()) }()
+	if err := openFixedPools(ctx, store, absolutePath, files.recheckActivationBindings); err != nil {
+		return err
+	}
+	return store.CheckpointWAL(ctx, "TRUNCATE")
 }
 
 func openExistingFiles(ctx context.Context, absolutePath string, files *databaseFiles) (*Store, error) {
@@ -114,7 +134,7 @@ func openExistingFiles(ctx context.Context, absolutePath string, files *database
 	// Flush recovery WAL frames before validating the durable snapshot. A
 	// concurrent reader can keep truncation busy; validation must still run.
 	_ = store.CheckpointWAL(ctx, "TRUNCATE")
-	if err := store.validateOpen(ctx); err != nil {
+	if err := store.validateOpenWithRetry(ctx); err != nil {
 		return closeRejectedOpen(store, files, err)
 	}
 	if sqliteActivationHook != nil {
@@ -173,7 +193,27 @@ func inspectOperationalSnapshot(ctx context.Context, path string, files *databas
 	if err := tx.connection.QueryRowContext(inspectionCtx, "PRAGMA user_version").Scan(&schemaVersion); err != nil {
 		return errors.Join(fmt.Errorf("pin operational SQLite snapshot: %w", err), tx.Close())
 	}
-	if err := validateOpenableSnapshot(inspectionCtx, tx.connection); err != nil {
+	if err := validateOperationalSnapshot(inspectionCtx, tx.connection); err != nil {
+		if errors.Is(err, ErrCorruptState) {
+			_ = tx.Close()
+			connection, err = pool.Conn(inspectionCtx)
+			if err != nil {
+				return fmt.Errorf("refresh operational SQLite inspection: %w", err)
+			}
+			tx, err = beginPinnedRead(inspectionCtx, connection)
+			if err != nil {
+				return err
+			}
+			if err = validateOperationalSnapshot(inspectionCtx, tx.connection); err == nil {
+				if err := tx.Close(); err != nil {
+					return err
+				}
+				if err := files.recheckPaths(); err != nil {
+					return err
+				}
+				return nil
+			}
+		}
 		return errors.Join(fmt.Errorf("validate operational SQLite snapshot: %w", err), tx.Close())
 	}
 	if err := tx.Close(); err != nil {
@@ -183,6 +223,15 @@ func inspectOperationalSnapshot(ctx context.Context, path string, files *databas
 		return err
 	}
 	return nil
+}
+
+func validateOperationalSnapshot(ctx context.Context, connection *sql.Conn) error {
+	if sqliteOpenableSnapshotHook != nil {
+		if err := sqliteOpenableSnapshotHook(); err != nil {
+			return err
+		}
+	}
+	return validateOpenableSnapshot(ctx, connection)
 }
 
 func closeRejectedOpen(store *Store, files *databaseFiles, cause error) (*Store, error) {

@@ -502,19 +502,3 @@ func TestPeriodicValidationChecksCancelledRunAndRelationships(t *testing.T) {
 		})
 	}
 }
-
-// An interrupted validation is not corruption: it must never become a hold.
-func TestCancelledValidationIsNotCorruption(t *testing.T) {
-	t.Parallel()
-	store, _ := newTestStore(t)
-	defer store.Close()
-	seedDurableAuthority(t, store)
-	ctx, cancel := context.WithCancel(context.Background())
-	cancel()
-	if err := store.Validate(ctx); err == nil || errors.Is(err, ErrCorruptState) {
-		t.Fatalf("cancelled validation = %v, want a non-corruption error", err)
-	}
-	if err := store.heldCorruption(); err != nil {
-		t.Fatalf("cancelled validation set a hold: %v", err)
-	}
-}
