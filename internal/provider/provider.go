@@ -934,7 +934,13 @@ func claudeConfinement(grants []grant, allow []string, hooks map[string]any, ext
 	// Claude names files by their resolved path, and a Change is reached
 	// through a link, so each grant is allowed under both spellings.
 	for _, given := range slices.Clone(grants) {
-		if resolved, err := filepath.EvalSymlinks(given.path); err == nil && resolved != given.path {
+		resolved, err := filepath.EvalSymlinks(given.path)
+		if err != nil {
+			if parent, parentErr := filepath.EvalSymlinks(filepath.Dir(given.path)); parentErr == nil {
+				resolved = filepath.Join(parent, filepath.Base(given.path))
+			}
+		}
+		if resolved != "" && resolved != given.path {
 			grants = append(grants, grant{resolved, given.write})
 		}
 	}

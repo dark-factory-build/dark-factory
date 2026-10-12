@@ -82,8 +82,22 @@ func TestRunReviewConfinesClaudeFileReads(t *testing.T) {
 		t.Fatal(err)
 	}
 	filesystem, allow := settings.Sandbox.Filesystem, settings.Permissions.Allow
-	if !slices.Contains(filesystem.DenyRead, "//Users") || !slices.Contains(filesystem.AllowRead, "/"+checkout) || len(filesystem.AllowWrite) != 2 {
+	wantWrites := []string{"/" + filepath.Join(root, ".review-home"), "/" + filepath.Join(root, ".review-tmp")}
+	for _, path := range []string{filepath.Join(root, ".review-home"), filepath.Join(root, ".review-tmp")} {
+		if resolved, err := filepath.EvalSymlinks(filepath.Dir(path)); err == nil {
+			resolved = filepath.Join(resolved, filepath.Base(path))
+			if resolved != path {
+				wantWrites = append(wantWrites, "/"+resolved)
+			}
+		}
+	}
+	if !slices.Contains(filesystem.DenyRead, "//Users") || !slices.Contains(filesystem.AllowRead, "/"+checkout) || len(filesystem.AllowWrite) != len(wantWrites) {
 		t.Fatalf("read boundary = %+v", filesystem)
+	}
+	for _, path := range wantWrites {
+		if !slices.Contains(filesystem.AllowWrite, path) {
+			t.Fatalf("missing write grant for %s: %+v", path, filesystem.AllowWrite)
+		}
 	}
 	cargoHome := filepath.Join(operatorHome, ".cargo")
 	for _, path := range []string{checkout, "/opt/toolchain", goModuleCachePath(operatorHome), pnpmStorePath(operatorHome), filepath.Join(operatorHome, ".rustup"), filepath.Join(cargoHome, "registry"), filepath.Join(cargoHome, "git")} {
