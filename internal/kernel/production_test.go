@@ -153,7 +153,8 @@ func TestCorrectedProductionHeadReviewClaimRecovers(t *testing.T) {
 	}
 	operationID := "corrected-review"
 	// A claim persisted as gating, before the pre-review gate was removed, recovers like a running one.
-	operation := map[string]any{"id": operationID, "state": "gating", "request": map[string]any{"repository": "example/factory", "head": newHead}}
+	inherited := "1970-01-01T00:00:00.02Z"
+	operation := map[string]any{"id": operationID, "state": "gating", "updated_at": inherited, "request": map[string]any{"repository": "example/factory", "head": newHead}}
 	corrected := ProductionObservation{Repository: "example/factory", ObservedAt: 20, PullRequests: []ProductionPullRequest{{Number: 7, Title: "A machine", Head: newHead, State: "open"}}}
 	if err := errors.Join(store.RecordProductionObservation(ctx, project.ID, corrected, mustTime(t, 20)), store.RecordReviewOperation(ctx, project.ID, "example/factory", operationID, operation, mustTime(t, 20))); err != nil {
 		store.Close()
@@ -174,7 +175,7 @@ func TestCorrectedProductionHeadReviewClaimRecovers(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	var foundHead, foundState string
+	var foundHead, foundState, foundUpdated string
 	for _, record := range page.Records {
 		switch record.Kind {
 		case "pull_request":
@@ -189,10 +190,13 @@ func TestCorrectedProductionHeadReviewClaimRecovers(t *testing.T) {
 				t.Fatal(err)
 			}
 			foundState, _ = claim["state"].(string)
+			foundUpdated, _ = claim["updated_at"].(string)
 		}
 	}
-	if foundHead != newHead || foundState != "running" { // no verdict yet: relaunched at startup
-		t.Fatalf("corrected head/review after restart = %q/%q", foundHead, foundState)
+	// No verdict yet: relaunched at startup, which knows it as the previous
+	// daemon's by its unchanged updated_at (#1830).
+	if foundHead != newHead || foundState != "running" || foundUpdated != inherited {
+		t.Fatalf("corrected head/review/updated_at after restart = %q/%q/%q", foundHead, foundState, foundUpdated)
 	}
 }
 
