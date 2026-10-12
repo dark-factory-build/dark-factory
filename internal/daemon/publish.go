@@ -337,12 +337,12 @@ func (daemon *Daemon) publishPull(ctx context.Context, c kernel.PublishableChang
 				}
 			}
 			if err == nil && !done {
-				footer, text := "Refs", result
+				footer, text := "Closes", result
 				for _, pull := range current.PullRequests {
 					text += "\n" + pull.Body
 				}
-				if closesIssue(text, issue, files) {
-					footer = "Closes"
+				if !closesIssue(text, issue, files) {
+					footer, body = "Refs", referencing(body, issue)
 				}
 				_, err = call(ctx, "update_pull_request_body", map[string]any{"repository": repo, "operation_id": operation(step), "pull_number": c.Pull, "body": fmt.Sprintf("%s\n\n%s #%d", body, footer, issue)})
 			}
@@ -375,9 +375,13 @@ func (daemon *Daemon) publishPull(ctx context.Context, c kernel.PublishableChang
 		step += "-" + base
 		done, err = completed(step, &pull)
 	}
+	closes := closesIssue(result, issue, files)
+	if !closes {
+		body = referencing(body, issue)
+	}
 	if err == nil && !done {
 		arguments := map[string]any{"repository": repo, "operation_id": operation(step), "head": branch, "head_sha": head, "base": "main", "base_sha": base, "title": message, "body": body, "draft": false,
-			"issue_number": issue, "close_on_merge": closesIssue(result, issue, files)} // the source issue is in repo itself
+			"issue_number": issue, "close_on_merge": closes} // the source issue is in repo itself
 		var response json.RawMessage
 		if response, err = call(ctx, "create_pull_request", arguments); err == nil {
 			err = json.Unmarshal(response, &pull)
@@ -397,6 +401,13 @@ func (daemon *Daemon) publishPull(ctx context.Context, c kernel.PublishableChang
 // form) instead, leaves it open: merging never closes an unfinished issue.
 func closesIssue(text string, issue uint64, files int) bool {
 	return files > 0 && !regexp.MustCompile(fmt.Sprintf(`(?i)\brefs #%d\b`, issue)).MatchString(text)
+}
+
+// referencing turns each GitHub closing keyword aimed at the issue (#N,
+// owner/repo#N or its URL) into Refs, so a reference-only body cannot close
+// it on merge through the worker's own words.
+func referencing(body string, issue uint64) string {
+	return regexp.MustCompile(fmt.Sprintf(`(?i)\b(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?):?(\s+\S*(?:#|/issues/)%d)\b`, issue)).ReplaceAllString(body, "Refs${1}")
 }
 
 // publicationTitle is the accepted title on one line, within the App's

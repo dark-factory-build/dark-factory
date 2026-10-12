@@ -592,11 +592,11 @@ func TestDisabledAcceptedRepositoryEscalatesOnce(t *testing.T) {
 // result says it is partial (Refs #N) publishes as a reference (#1795).
 func TestAPartialIntakeChangeReferencesItsIssue(t *testing.T) {
 	fixture, c, source, app, checkout := publishFixture(t, 1, false)
-	c.Task.Result = "Refs #9, partial: items 1 and 5."
+	c.Task.Result = "Refs #9, partial: items 1 and 5. Fixes #9 once item 2 lands."
 	if err := fixture.daemon.publishChange(context.Background(), c, "team/repo", source, app.call, checkout); err != nil {
 		t.Fatal(err)
 	}
-	if pull := app.writes[len(app.writes)-1]["arguments"].(map[string]any); pull["close_on_merge"] != false || pull["issue_number"] != uint64(9) {
+	if pull := app.writes[len(app.writes)-1]["arguments"].(map[string]any); pull["close_on_merge"] != false || pull["issue_number"] != uint64(9) || strings.Contains(pull["body"].(string), "Fixes #9") {
 		t.Fatalf("pull request = %+v", pull)
 	}
 }
@@ -620,7 +620,7 @@ func TestACorrectionNeverTurnsAnUnfinishedIntakeIntoAClose(t *testing.T) {
 				supervisorGit(t, git, "-C", root, "-c", "user.name=fixture", "-c", "user.email=fixture@example.invalid", "commit", "-q", "-am", "correct")
 			}
 			c.Head = strings.TrimSpace(supervisorGitOutput(t, git, "-C", root, "rev-parse", "HEAD"))
-			c.Task.Result = "Answered the review."
+			c.Task.Result = "Answered the review.\n\nCloses #9"
 			withTip := func(ctx context.Context, ref, head string) (string, func(), error) {
 				gitDir, cleanup, err := checkout(ctx, ref, head)
 				if err == nil {
@@ -632,7 +632,8 @@ func TestACorrectionNeverTurnsAnUnfinishedIntakeIntoAClose(t *testing.T) {
 				t.Fatal(err)
 			}
 			body := app.writes[len(app.writes)-1]
-			if text, _ := body["arguments"].(map[string]any)["body"].(string); body["name"] != "update_pull_request_body" || !strings.HasSuffix(text, "\n\nRefs #9") {
+			if text, _ := body["arguments"].(map[string]any)["body"].(string); body["name"] != "update_pull_request_body" || !strings.HasPrefix(text, "Answered the review.\n\nRefs #9\n\nPublished by factoryd") ||
+				!strings.HasSuffix(text, "The merge queue runs the gate.\n\nRefs #9") || strings.Contains(strings.ToLower(text), "closes") {
 				t.Fatalf("writes = %+v", app.writes)
 			}
 		})
@@ -648,5 +649,12 @@ func TestClosesIssueOnlyForACompletingChange(t *testing.T) {
 		if got := closesIssue(tc.text, 9, tc.files); got != tc.want {
 			t.Errorf("closesIssue(%q, 9, %d) = %v", tc.text, tc.files, got)
 		}
+	}
+}
+
+func TestReferencingDisarmsEveryClosingKeywordForTheIssue(t *testing.T) {
+	in := "Closes #9\nfixed: team/repo#9, Resolves https://github.com/team/repo/issues/9 and closes #90."
+	if got, want := referencing(in, 9), "Refs #9\nRefs team/repo#9, Refs https://github.com/team/repo/issues/9 and closes #90."; got != want {
+		t.Fatalf("referencing = %q, want %q", got, want)
 	}
 }
