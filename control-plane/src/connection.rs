@@ -166,6 +166,7 @@ fn tool_write(name: &str) -> Option<bool> {
         | "update_pull_request_body"
         | "submit_pull_request_review"
         | "publish_commit"
+        | "publish_pack"
         | "enqueue_pull_request" => Some(true),
         _ => None,
     }

@@ -3,9 +3,13 @@ package daemon
 import (
 	"context"
 	"crypto/sha1"
+	"crypto/sha256"
 	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"math/rand/v2"
 	"os"
 	"path/filepath"
 	"strings"
@@ -657,5 +661,176 @@ func TestReferencingDisarmsEveryClosingKeywordForTheIssue(t *testing.T) {
 	in := "Closes #9\nfixed: team/repo#9, Resolves https://github.com/team/repo/issues/9 and closes #90."
 	if got, want := referencing(in, 9), "Refs #9\nRefs team/repo#9, Refs https://github.com/team/repo/issues/9 and closes #90."; got != want {
 		t.Fatalf("referencing = %q, want %q", got, want)
+	}
+}
+
+// packMaintainer is publish_pack's side of the Maintainer and GitHub: it holds
+// chunks in order, binds every one to the first one's fields, and on the last
+// checks the digest, the branch precondition and the objects' connectivity in
+// a bare repository standing in for GitHub.
+type packMaintainer struct {
+	t        *testing.T
+	bare     string // GitHub's repository
+	branch   string // the factory branch's head, "" while absent
+	fields   string
+	chunks   []string
+	pushes   int
+	loseNext bool            // the push lands but its response is lost
+	result   json.RawMessage // the completed operation's journaled result
+}
+
+func (m *packMaintainer) call(_ context.Context, name string, arguments map[string]any) (json.RawMessage, error) {
+	// The request factoryd's attempt client and API bound at 512 KiB.
+	envelope, _ := json.Marshal(map[string]any{"jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": map[string]any{"name": name, "arguments": arguments}})
+	if name != "publish_pack" || len(envelope) > 512<<10 {
+		m.t.Fatalf("%s request of %d bytes", name, len(envelope))
+	}
+	identity := map[string]any{}
+	for key, value := range arguments {
+		identity[key] = value
+	}
+	chunk, index := identity["chunk_base64"].(string), identity["chunk_index"].(int)
+	delete(identity, "chunk_base64")
+	delete(identity, "chunk_index")
+	fields, _ := json.Marshal(identity)
+	if m.fields == "" {
+		m.fields = string(fields)
+	}
+	// As the journal does, a completed operation answers only its own request.
+	if m.result != nil && string(fields) == m.fields {
+		return m.result, nil
+	}
+	switch {
+	case string(fields) != m.fields || index > len(m.chunks) || index < len(m.chunks) && m.chunks[index] != chunk:
+		return nil, maintainerRejection("conflict: chunk is not this operation's next or held chunk")
+	case index == len(m.chunks):
+		m.chunks = append(m.chunks, chunk)
+	}
+	size := identity["pack_bytes"].(int)
+	if len(m.chunks)*packChunkBytes < size {
+		return json.Marshal(map[string]any{"branch": identity["branch"], "received_chunks": len(m.chunks), "commit_sha": nil})
+	}
+	var pack []byte
+	for _, chunk := range m.chunks {
+		decoded, err := base64.StdEncoding.DecodeString(chunk)
+		if err != nil {
+			m.t.Fatal(err)
+		}
+		pack = append(pack, decoded...)
+	}
+	if sum := sha256.Sum256(pack); len(pack) != size || hex.EncodeToString(sum[:]) != identity["pack_sha256"] {
+		return nil, maintainerRejection("conflict: assembled pack does not match its digest")
+	}
+	expected, _ := identity["expected_head_sha"].(string)
+	if expected != m.branch {
+		return nil, maintainerRejection("conflict: branch is at " + m.branch)
+	}
+	file := filepath.Join(m.bare, "objects", "pack", fmt.Sprintf("pack-%d.pack", m.pushes))
+	if err := os.WriteFile(file, pack, 0o644); err != nil {
+		m.t.Fatal(err)
+	}
+	head := identity["head_sha"].(string)
+	supervisorGit(m.t, change.TrustedGitExecutable, "--git-dir", m.bare, "index-pack", file)
+	supervisorGit(m.t, change.TrustedGitExecutable, "--git-dir", m.bare, "rev-list", "--objects", head)
+	m.branch, m.pushes = head, m.pushes+1
+	m.result, _ = json.Marshal(map[string]any{"branch": identity["branch"], "received_chunks": len(m.chunks), "commit_sha": head})
+	if m.loseNext {
+		m.loseNext = false
+		return nil, maintainer.ErrUnavailable
+	}
+	return m.result, nil
+}
+
+// Exact publication end to end: two worker commits over 512 KiB travel in
+// ordered chunks within the attempt envelope, a lost push response is replayed
+// to the journaled result without a second push, GitHub ends up holding the
+// worker's own commit bytes, a stale precondition is refused, and a head that
+// changes review authority is never sent.
+func TestPublishPackSendsExactObjectsInReplaySafeChunks(t *testing.T) {
+	git := change.TrustedGitExecutable
+	source := filepath.Join(t.TempDir(), "source")
+	run := func(args ...string) string {
+		return strings.TrimSpace(supervisorGitOutput(t, git, append([]string{"-C", source, "-c", "user.name=fixture", "-c", "user.email=fixture@example.invalid"}, args...)...))
+	}
+	write := func(name string, content []byte) {
+		if err := os.MkdirAll(filepath.Dir(filepath.Join(source, name)), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(source, name), content, 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	supervisorGit(t, git, "init", "-q", "-b", "main", source)
+	write("keep.txt", []byte("base\n"))
+	run("add", ".")
+	run("commit", "-q", "-m", "base")
+	base := run("rev-parse", "HEAD")
+	bare := filepath.Join(t.TempDir(), "github.git")
+	supervisorGit(t, git, "clone", "-q", "--bare", source, bare)
+	noise := make([]byte, 700<<10) // incompressible, so the pack spans chunks
+	_, _ = rand.NewChaCha8([32]byte{7}).Read(noise)
+	write("noise.bin", noise)
+	run("add", ".")
+	run("commit", "-q", "-m", "first")
+	write("keep.txt", []byte("worker\n"))
+	run("commit", "-q", "-am", "second\n\nwith an exact body")
+	head := run("rev-parse", "HEAD")
+	gitDir := filepath.Join(source, ".git")
+	ctx := context.Background()
+
+	m := &packMaintainer{t: t, bare: bare, loseNext: true}
+	operation := uuid5("dark-factory:pack-test")
+	if err := publishPack(ctx, m.call, gitDir, "team/repo", operation, "factory/d2fe80c351a5", "", base, head); !errors.Is(err, maintainer.ErrUnavailable) {
+		t.Fatalf("lost push response = %v", err)
+	}
+	// Git may repack between attempts; the replay must still be the same
+	// pack, or its digest is another request and the journal refuses it.
+	run("-c", "pack.compression=1", "repack", "-q", "-a", "-d", "-f", "--window=2", "--depth=1")
+	if err := publishPack(ctx, m.call, gitDir, "team/repo", operation, "factory/d2fe80c351a5", "", base, head); err != nil {
+		t.Fatal(err)
+	}
+	if m.pushes != 1 || len(m.chunks) < 3 || m.branch != head {
+		t.Fatalf("pushes=%d chunks=%d branch=%s", m.pushes, len(m.chunks), m.branch)
+	}
+	for _, commit := range []string{head, head + "^"} {
+		if got, want := supervisorGitOutput(t, git, "--git-dir", bare, "cat-file", "commit", commit), run("cat-file", "commit", commit)+"\n"; got != want {
+			t.Fatalf("GitHub holds %q for %s, the worker made %q", got, commit, want)
+		}
+	}
+
+	write("other.txt", []byte("race\n"))
+	run("add", ".")
+	run("commit", "-q", "-m", "raced")
+	raced := run("rev-parse", "HEAD")
+	m.result, m.chunks, m.fields = nil, nil, ""
+	if err := publishPack(ctx, m.call, gitDir, "team/repo", uuid5("dark-factory:pack-race"), "factory/d2fe80c351a5", base, base, raced); err == nil || !strings.Contains(err.Error(), "branch is at "+head) {
+		t.Fatalf("stale precondition = %v", err)
+	}
+	if m.branch != head || m.pushes != 1 {
+		t.Fatalf("a refused push moved the branch to %s", m.branch)
+	}
+
+	// Each path publish_commit refuses, including a blob replacing the
+	// .github tree, is refused before anything is sent.
+	write(".github/workflows/ci.yml", []byte("on: push\n"))
+	run("add", ".")
+	run("commit", "-q", "-m", "workflow")
+	workflow := run("rev-parse", "HEAD")
+	for _, change := range []struct{ path, name string }{{".github/CODEOWNERS", ".github/CODEOWNERS"}, {"docs/CODEOWNERS", "docs/CODEOWNERS"}, {".github", ".github"}, {".GitHub", ".GitHub"}} {
+		run("checkout", "-q", "--detach", workflow)
+		if strings.EqualFold(change.path, ".github") {
+			run("rm", "-rq", ".github")
+		}
+		write(change.path, []byte("* @someone\n"))
+		run("add", ".")
+		run("commit", "-q", "-m", "authority")
+		m.result, m.chunks, m.fields = nil, nil, ""
+		if err := publishPack(ctx, m.call, gitDir, "team/repo", uuid5("dark-factory:pack-authority"), "factory/d2fe80c351a5", head, workflow, run("rev-parse", "HEAD")); err == nil || !strings.HasSuffix(err.Error(), "review authority: "+change.name) || m.fields != "" {
+			t.Fatalf("%s = %v, sent %q", change.path, err, m.fields)
+		}
+	}
+	// A workflow is not review authority.
+	if err := publishPack(ctx, m.call, gitDir, "team/repo", uuid5("dark-factory:pack-workflow"), "factory/d2fe80c351a5", head, head, workflow); err != nil {
+		t.Fatal(err)
 	}
 }

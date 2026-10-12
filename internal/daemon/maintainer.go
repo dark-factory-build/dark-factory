@@ -61,8 +61,9 @@ func (daemon *Daemon) attemptMaintainer(ctx context.Context, call api.Call) api.
 			return failure("invalid")
 		}
 		// factoryd is the one verdict authority: it reviews and
-		// enqueues every published head itself.
-		if params.Name == "submit_pull_request_review" || params.Name == "enqueue_pull_request" {
+		// enqueues every published head itself, and alone pushes exact
+		// packs, whose review-authority paths it checks before sending.
+		if params.Name == "submit_pull_request_review" || params.Name == "enqueue_pull_request" || params.Name == "publish_pack" {
 			return failure("denied")
 		}
 		request.Params = encoded

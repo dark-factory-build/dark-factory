@@ -10,8 +10,8 @@ use zeroize::{Zeroize as _, Zeroizing};
 
 #[cfg(any(target_arch = "wasm32", test))]
 use crate::journal::Operation;
-#[cfg(target_arch = "wasm32")]
-use crate::journal::{DeliveryJournal, OperationRecord, OperationTransition};
+#[cfg(any(target_arch = "wasm32", all(test, feature = "development-sqlite")))]
+use crate::journal::{Chunk, ChunkRecord, DeliveryJournal, OperationRecord, OperationTransition};
 use crate::maintainer::MAX_EXACT_INTEGER;
 
 pub(crate) const PRIVATE_KEY_BINDING: &str = "DARK_FACTORY_MAINTAINER_PRIVATE_KEY_PKCS8";
@@ -26,6 +26,14 @@ pub(crate) const MAX_GITHUB_RESPONSE_BYTES: usize = 8 * 1024 * 1024;
 /// bulk upload channel, and the Worker must hold every blob in memory.
 const MAX_COMMIT_FILES: usize = 50;
 const MAX_COMMIT_FILE_BYTES: usize = 1_000_000;
+/// One `publish_pack` chunk, so its base64 and JSON-RPC envelope fit
+/// factoryd's 512 KiB attempt envelope, and at most 8 MiB in all. The last
+/// chunk holds the whole pack about eight times over at once -- the journal's
+/// base64 JSON reply and its JavaScript copy, the parsed chunks, the decoded
+/// pack, the push body and its `Uint8Array` -- so 8 MiB keeps that near 64 MiB
+/// of the isolate's 128 MB, which counts JavaScript and WebAssembly alike.
+const PACK_CHUNK_BYTES: u64 = 256 * 1024;
+const MAX_PACK_CHUNKS: u64 = 32;
 const MAX_ISSUE_LABELS: usize = 100;
 const MAX_ISSUE_LABEL_BYTES: usize = 50;
 
@@ -663,6 +671,30 @@ pub(crate) struct PublishCommit {
     pub(crate) changes: Vec<FileChange>,
 }
 
+/// Move one `factory/` branch to an exact commit by uploading the Git pack
+/// that carries its objects, in ordered chunks. The operation's digest covers
+/// every field but the chunk itself, so each chunk is bound to the pack's
+/// SHA-256 and size; the last one pushes the pack with `expected_head_sha` as
+/// the ref's compare-and-swap old value, so the objects GitHub stores are the
+/// caller's bytes and a moved branch is refused, never overwritten.
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct PublishPack {
+    pub(crate) repository: String,
+    pub(crate) operation_id: String,
+    pub(crate) branch: String,
+    /// The branch head the push replaces; absent, the branch must not exist.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) expected_head_sha: Option<String>,
+    pub(crate) head_sha: String,
+    pub(crate) pack_sha256: String,
+    pub(crate) pack_bytes: u64,
+    #[serde(skip_serializing)]
+    pub(crate) chunk_index: u32,
+    #[serde(skip_serializing)]
+    pub(crate) chunk_base64: String,
+}
+
 /// Add one pull request to the merge queue for its base branch.
 ///
 /// This is the only merge path: the base branch's active repository ruleset
@@ -688,6 +720,14 @@ pub(crate) struct EnqueuePullRequest {
     /// checked immediately before enqueue. GitHub atomically binds only the
     /// head; a body edit can race with that write.
     pub(crate) reviewed_body_digest: String,
+}
+
+/// `commit_sha` is null until the last chunk has moved the branch to it.
+#[derive(Debug, Deserialize, Serialize)]
+pub(crate) struct PackResult {
+    pub(crate) branch: String,
+    pub(crate) received_chunks: u64,
+    pub(crate) commit_sha: Option<String>,
 }
 
 #[derive(Debug, Deserialize, Serialize)]
@@ -1496,6 +1536,32 @@ impl AppAuthority {
         }
     }
 
+    #[cfg(target_arch = "wasm32")]
+    pub(crate) async fn publish_pack(
+        &self,
+        journal: &DeliveryJournal,
+        request: PublishPack,
+    ) -> Result<PackResult, OperationError> {
+        publish_exact_pack(journal, request, |repository| async move {
+            let token = self
+                .0
+                .installation_token(
+                    repository,
+                    BTreeMap::from([
+                        ("contents", "write"),
+                        ("metadata", "read"),
+                        ("workflows", "write"),
+                    ]),
+                )
+                .await?;
+            Ok(GitHubPack {
+                authority: &self.0,
+                token,
+            })
+        })
+        .await
+    }
+
     /// Ensure one exact head is in its base's merge queue. It journals
     /// nothing: GitHub's queue is the state, so an entry already present at
     /// this head is success, and every call re-reads it before writing.
@@ -1989,6 +2055,239 @@ impl PublishCommit {
     }
 }
 
+impl PublishPack {
+    fn chunks(&self) -> u64 {
+        self.pack_bytes.div_ceil(PACK_CHUNK_BYTES)
+    }
+
+    /// Every chunk but the last is exactly `PACK_CHUNK_BYTES`, so the index
+    /// fixes the length and no chunk can be missing or extra in the sum.
+    fn validate(&mut self) -> Result<(), OperationError> {
+        canonical_operation_id(&mut self.operation_id)?;
+        valid_ref(&self.branch)?;
+        valid_sha(&self.head_sha)?;
+        if let Some(expected) = self.expected_head_sha.as_deref() {
+            valid_sha(expected)?;
+        }
+        let chunks = self.chunks();
+        let index = u64::from(self.chunk_index);
+        let length = if index + 1 == chunks {
+            self.pack_bytes - index * PACK_CHUNK_BYTES
+        } else {
+            PACK_CHUNK_BYTES
+        };
+        let decoded = general_purpose::STANDARD
+            .decode(&self.chunk_base64)
+            .map_err(|_| OperationError::InvalidInput)?;
+        (self.branch.starts_with("factory/")
+            && self.expected_head_sha.as_ref() != Some(&self.head_sha)
+            && self.pack_sha256.len() == 64
+            && self
+                .pack_sha256
+                .bytes()
+                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+            && (1..=MAX_PACK_CHUNKS).contains(&chunks)
+            && index < chunks
+            && decoded.len() as u64 == length)
+            .then_some(())
+            .ok_or(OperationError::InvalidInput)
+    }
+
+    #[cfg(any(target_arch = "wasm32", all(test, feature = "development-sqlite")))]
+    fn operation(&self, kind: &str) -> Result<Operation, OperationError> {
+        operation(kind, &self.operation_id, self)
+    }
+
+    fn result(&self, received_chunks: u64, commit_sha: Option<String>) -> PackResult {
+        PackResult {
+            branch: self.branch.clone(),
+            received_chunks,
+            commit_sha,
+        }
+    }
+}
+
+/// The smart-HTTP push endpoint. The credential travels only in the request's
+/// Authorization header, never in this URL.
+#[cfg(any(target_arch = "wasm32", test))]
+fn receive_pack_url(repository: &RepositoryName) -> String {
+    format!(
+        "https://github.com/{}/{}.git/git-receive-pack",
+        repository.owner, repository.name
+    )
+}
+
+/// One ref command, `expected_head_sha` (zeros: the ref must not exist) to
+/// `head_sha`, asking only for `report-status`, then the pack byte for byte.
+#[cfg(any(target_arch = "wasm32", test))]
+fn receive_pack_body(request: &PublishPack, pack: &[u8]) -> Vec<u8> {
+    let command = format!(
+        "{} {} refs/heads/{}\0report-status\n",
+        request
+            .expected_head_sha
+            .as_deref()
+            .unwrap_or("0000000000000000000000000000000000000000"),
+        request.head_sha,
+        request.branch
+    );
+    let mut body = format!("{:04x}{command}0000", command.len() + 4).into_bytes();
+    body.extend_from_slice(pack);
+    body
+}
+
+/// GitHub's report-status. `unpack ok` with `ok <ref>` is the only success;
+/// a failed unpack or `ng <ref>` (a moved head, a missing object, a rule) is a
+/// determinate refusal; anything else is no answer at all.
+#[cfg(any(target_arch = "wasm32", test))]
+fn receive_pack_outcome(report: &[u8], branch: &str) -> Result<(), OperationError> {
+    let mut lines = Vec::new();
+    let mut rest = report;
+    while let Some(length) = rest
+        .get(..4)
+        .and_then(|length| std::str::from_utf8(length).ok())
+        .and_then(|length| usize::from_str_radix(length, 16).ok())
+    {
+        if length == 0 {
+            break;
+        }
+        let line = rest.get(4..length).ok_or(OperationError::Indeterminate)?;
+        lines.push(
+            String::from_utf8_lossy(line)
+                .trim_end_matches('\n')
+                .to_owned(),
+        );
+        rest = &rest[length..];
+    }
+    let reference = format!("refs/heads/{branch}");
+    let refused = lines
+        .iter()
+        .any(|line| line.starts_with(&format!("ng {reference} ")));
+    match lines.first().map(String::as_str) {
+        Some("unpack ok") if !refused && lines.contains(&format!("ok {reference}")) => Ok(()),
+        Some(unpack) if unpack.starts_with("unpack ") && (refused || unpack != "unpack ok") => {
+            Err(OperationError::Conflict)
+        }
+        _ => Err(OperationError::Indeterminate),
+    }
+}
+
+#[cfg(any(target_arch = "wasm32", all(test, feature = "development-sqlite")))]
+/// GitHub as `publish_pack` needs it once a pack is assembled: the branch head
+/// and one push returning its report. It holds the installation token, which
+/// never reaches the handler, the journal or a result.
+trait PackRemote {
+    async fn head(&self, branch: &str) -> Result<Option<String>, OperationError>;
+    async fn push(&self, body: Vec<u8>) -> Result<Vec<u8>, OperationError>;
+}
+
+/// Hold one chunk of an exact pack; the last pushes it. A replay after a lost
+/// response resends the same chunk: the journal returns a completed push,
+/// holds an identical chunk once, and a push of unknown outcome is reconciled
+/// from the branch and otherwise retried, which the ref's compare-and-swap
+/// makes safe. `connect` mints the remote only once the pack is whole.
+#[cfg(any(target_arch = "wasm32", all(test, feature = "development-sqlite")))]
+async fn publish_exact_pack<
+    R: PackRemote,
+    F: std::future::Future<Output = Result<R, OperationError>>,
+>(
+    journal: &DeliveryJournal,
+    mut request: PublishPack,
+    connect: impl FnOnce(RepositoryName) -> F,
+) -> Result<PackResult, OperationError> {
+    request.validate()?;
+    let repository = RepositoryName::requested(&mut request.repository)?;
+    let operation = request.operation("publish_pack")?;
+    let state = journal
+        .begin_operation(&operation)
+        .await
+        .map_err(|_| OperationError::Unavailable)?;
+    if let Some(result) = completed_or_conflict::<PackResult>(&state)? {
+        return Ok(result);
+    }
+    let chunk = Chunk {
+        operation: operation.clone(),
+        index: request.chunk_index,
+        count: request.chunks() as u32,
+        content: std::mem::take(&mut request.chunk_base64),
+    };
+    let chunks = match journal
+        .append_chunk(chunk)
+        .await
+        .map_err(|_| OperationError::Unavailable)?
+    {
+        ChunkRecord::Received(held) => return Ok(request.result(held.into(), None)),
+        ChunkRecord::Conflict => return Err(OperationError::Conflict),
+        ChunkRecord::Assembled(chunks) => chunks,
+    };
+    let mut pack = Vec::with_capacity(request.pack_bytes as usize);
+    for chunk in chunks {
+        pack.extend(
+            general_purpose::STANDARD
+                .decode(chunk)
+                .map_err(|_| OperationError::Unavailable)?,
+        );
+    }
+    if hex::encode(Sha256::digest(&pack)) != request.pack_sha256 {
+        return Err(OperationError::Conflict);
+    }
+    let remote = connect(repository).await?;
+    let published = |head: Option<String>| {
+        (head.as_ref() == Some(&request.head_sha))
+            .then(|| request.result(request.chunks(), Some(request.head_sha.clone())))
+    };
+    let head = remote.head(&request.branch).await?;
+    if head != request.expected_head_sha {
+        return match published(head) {
+            Some(result) => complete(journal, &operation, result).await,
+            None => Err(OperationError::Conflict),
+        };
+    }
+    if let OperationRecord::Completed(result) = journal
+        .mark_operation(&operation, OperationTransition::Executing)
+        .await
+        .map_err(|_| OperationError::Unavailable)?
+    {
+        return serde_json::from_str(&result).map_err(|_| OperationError::Unavailable);
+    }
+    let pushed = remote
+        .push(receive_pack_body(&request, &pack))
+        .await
+        .and_then(|report| receive_pack_outcome(&report, &request.branch));
+    if let Some(result) = published(remote.head(&request.branch).await?) {
+        return complete(journal, &operation, result).await;
+    }
+    let (transition, error) = match pushed {
+        Err(OperationError::Conflict) => (OperationTransition::Refused, OperationError::Conflict),
+        _ => (
+            OperationTransition::Indeterminate,
+            OperationError::Indeterminate,
+        ),
+    };
+    let _ = journal.mark_operation(&operation, transition).await;
+    Err(error)
+}
+
+#[cfg(target_arch = "wasm32")]
+struct GitHubPack<'a> {
+    authority: &'a Authority,
+    token: RepositoryToken,
+}
+
+#[cfg(target_arch = "wasm32")]
+impl PackRemote for GitHubPack<'_> {
+    async fn head(&self, branch: &str) -> Result<Option<String>, OperationError> {
+        Ok(self
+            .authority
+            .read_ref_optional(&self.token, branch)
+            .await?
+            .map(|head| head.object.sha))
+    }
+
+    async fn push(&self, body: Vec<u8>) -> Result<Vec<u8>, OperationError> {
+        self.authority.receive_pack(&self.token, body).await
+    }
+}
+
 impl EnqueuePullRequest {
     fn validate(&self) -> Result<(), OperationError> {
         valid_exact_integer(self.pull_number)?;
@@ -2387,7 +2686,7 @@ fn valid_github_timestamp(value: &str) -> Result<(), OperationError> {
     .ok_or(OperationError::InvalidInput)
 }
 
-#[cfg(target_arch = "wasm32")]
+#[cfg(any(target_arch = "wasm32", all(test, feature = "development-sqlite")))]
 fn operation<T: Serialize>(
     kind: &str,
     operation_id: &str,
@@ -2437,7 +2736,7 @@ fn request_digest<T: Serialize>(request: &T) -> Result<String, OperationError> {
     Ok(hex::encode(Sha256::digest(canonical)))
 }
 
-#[cfg(target_arch = "wasm32")]
+#[cfg(any(target_arch = "wasm32", all(test, feature = "development-sqlite")))]
 fn completed_or_conflict<T: serde::de::DeserializeOwned>(
     state: &OperationRecord,
 ) -> Result<Option<T>, OperationError> {
@@ -2450,7 +2749,7 @@ fn completed_or_conflict<T: serde::de::DeserializeOwned>(
     }
 }
 
-#[cfg(target_arch = "wasm32")]
+#[cfg(any(target_arch = "wasm32", all(test, feature = "development-sqlite")))]
 async fn complete<T: Serialize + serde::de::DeserializeOwned>(
     journal: &DeliveryJournal,
     operation: &Operation,
@@ -3158,6 +3457,49 @@ impl Authority {
                 parent_sha: request.expected_head_sha.clone(),
             })
             .ok_or(OperationError::Indeterminate)
+    }
+
+    async fn receive_pack(
+        &self,
+        token: &RepositoryToken,
+        body: Vec<u8>,
+    ) -> Result<Vec<u8>, OperationError> {
+        use worker::{Fetch, Headers, Method, Request, RequestInit, RequestRedirect};
+
+        let headers = Headers::new();
+        let credential = Zeroizing::new(format!("x-access-token:{}", token.as_str()));
+        let authorization = Zeroizing::new(format!(
+            "Basic {}",
+            general_purpose::STANDARD.encode(credential.as_bytes())
+        ));
+        headers
+            .set("authorization", authorization.as_str())
+            .map_err(|_| OperationError::Unavailable)?;
+        for (name, value) in [
+            ("accept", "application/x-git-receive-pack-result"),
+            ("content-type", "application/x-git-receive-pack-request"),
+            ("user-agent", "dark-factory-control-plane/0.1"),
+        ] {
+            headers
+                .set(name, value)
+                .map_err(|_| OperationError::Unavailable)?;
+        }
+        let body = js_sys::Uint8Array::from(body.as_slice());
+        let mut init = RequestInit::new();
+        init.with_method(Method::Post)
+            .with_redirect(RequestRedirect::Manual)
+            .with_headers(headers)
+            .with_body(Some(body.into()));
+        let url = receive_pack_url(&token.repository);
+        let http = Request::new_with_init(&url, &init).map_err(|_| OperationError::Unavailable)?;
+        // Diagnosis only: never log credentials, headers, or bodies.
+        let response = Fetch::Request(http).send().await.map_err(|error| {
+            worker::console_error!("github push failed: {url}: {error:?}");
+            OperationError::Indeterminate
+        })?;
+        read_github_response(response, &url, 64 * 1024)
+            .await
+            .map_err(|_| OperationError::Indeterminate)
     }
 
     /// Create the content-addressed tree for one request. Repeating these blob
@@ -5690,6 +6032,398 @@ mod tests {
         mixed.validate().unwrap();
         RepositoryName::requested(&mut mixed.repository).unwrap();
         assert_eq!(runtime, request_digest(&mixed).unwrap());
+    }
+
+    fn pack_chunk(pack: &[u8], index: u32) -> PublishPack {
+        let start = index as usize * PACK_CHUNK_BYTES as usize;
+        let end = pack.len().min(start + PACK_CHUNK_BYTES as usize);
+        PublishPack {
+            repository: "team/shared".into(),
+            operation_id: "7d1f0f8e-7f1f-11f0-952e-acde48001122".into(),
+            branch: "factory/d2fe80c351a5".into(),
+            expected_head_sha: Some("a".repeat(40)),
+            head_sha: "b".repeat(40),
+            pack_sha256: hex::encode(Sha256::digest(pack)),
+            pack_bytes: pack.len() as u64,
+            chunk_index: index,
+            chunk_base64: general_purpose::STANDARD.encode(&pack[start.min(end)..end]),
+        }
+    }
+
+    #[test]
+    fn an_exact_pack_is_chunked_in_order_bound_to_its_digest_and_factory_scoped() {
+        let pack: Vec<u8> = (0..2 * PACK_CHUNK_BYTES + 5).map(|i| i as u8).collect();
+        for index in 0..3 {
+            assert!(pack_chunk(&pack, index).validate().is_ok(), "chunk {index}");
+        }
+        // The index fixes each length, so a short, long or extra chunk is
+        // refused before it can reach the journal.
+        let mut extra = pack_chunk(&pack, 3);
+        extra.chunk_base64 = general_purpose::STANDARD.encode([0]);
+        let mut short = pack_chunk(&pack, 0);
+        short.chunk_base64 = general_purpose::STANDARD.encode(&pack[..5]);
+        let mut long = pack_chunk(&pack, 2);
+        long.chunk_base64 = general_purpose::STANDARD.encode(&pack[..6]);
+        let mut oversized = pack_chunk(&pack, 0);
+        oversized.pack_bytes = MAX_PACK_CHUNKS * PACK_CHUNK_BYTES + 1;
+        let mut empty = pack_chunk(&[], 0);
+        empty.chunk_base64 = general_purpose::STANDARD.encode([0]);
+        let mut unchanged = pack_chunk(&pack, 0);
+        unchanged.head_sha = "a".repeat(40);
+        let mut digest = pack_chunk(&pack, 0);
+        digest.pack_sha256 = digest.pack_sha256.to_ascii_uppercase();
+        let mut refused = vec![extra, short, long, oversized, empty, unchanged, digest];
+        for branch in [
+            "main",
+            "feature/x",
+            "factory/../main",
+            "refs/heads/factory/x",
+        ] {
+            let mut request = pack_chunk(&pack, 0);
+            request.branch = branch.into();
+            refused.push(request);
+        }
+        for mut request in refused {
+            assert_eq!(
+                request.validate().err(),
+                Some(OperationError::InvalidInput),
+                "{} chunk {} of {} bytes",
+                request.branch,
+                request.chunk_index,
+                request.pack_bytes
+            );
+        }
+        let mut created = pack_chunk(&pack, 0);
+        created.expected_head_sha = None;
+        assert!(created.validate().is_ok());
+
+        // Every chunk of one pack is one request; any other pack, head,
+        // precondition, branch or repository is another.
+        let identity = request_digest(&pack_chunk(&pack, 0)).unwrap();
+        assert_eq!(identity, request_digest(&pack_chunk(&pack, 2)).unwrap());
+        let mut other = pack.clone();
+        other[0] ^= 1;
+        let mut variants = vec![pack_chunk(&other, 0), created];
+        for change in [
+            |r: &mut PublishPack| r.head_sha = "c".repeat(40),
+            |r: &mut PublishPack| r.branch = "factory/other".into(),
+            |r: &mut PublishPack| r.repository = "team/other".into(),
+        ] {
+            let mut request = pack_chunk(&pack, 0);
+            change(&mut request);
+            variants.push(request);
+        }
+        for request in variants {
+            assert_ne!(identity, request_digest(&request).unwrap());
+        }
+
+        // The largest chunk's base64 is the bound the schema and the journal
+        // migration state.
+        assert_eq!(
+            general_purpose::STANDARD
+                .encode(vec![0; PACK_CHUNK_BYTES as usize])
+                .len(),
+            349_528
+        );
+        assert!(include_str!("../migrations/0006_operation_chunks.sql").contains("349528"));
+        assert!(include_str!("mcp.rs").contains(r#""maxLength": 349528"#));
+        // So do the pack and index bounds.
+        assert!(include_str!("mcp.rs").contains(&format!(
+            r#""pack_bytes": {{"type": "integer", "minimum": 1, "maximum": {}}}"#,
+            MAX_PACK_CHUNKS * PACK_CHUNK_BYTES
+        )));
+        assert!(include_str!("mcp.rs").contains(&format!(
+            r#""chunk_index": {{"type": "integer", "minimum": 0, "maximum": {}}}"#,
+            MAX_PACK_CHUNKS - 1
+        )));
+        assert!(
+            include_str!("../migrations/0006_operation_chunks.sql").contains(&format!(
+                "chunk_index BETWEEN 0 AND {}",
+                MAX_PACK_CHUNKS - 1
+            ))
+        );
+    }
+
+    #[test]
+    fn a_pack_push_is_one_compare_and_swap_that_never_carries_the_credential() {
+        let token = granted("team/shared");
+        let pack = b"PACK\0\0\0\x02\0\0\0\0exact bytes";
+        let request = pack_chunk(pack, 0);
+        let body = receive_pack_body(&request, pack);
+        let command = format!(
+            "{} {} refs/heads/factory/d2fe80c351a5\0report-status\n",
+            "a".repeat(40),
+            "b".repeat(40)
+        );
+        assert_eq!(
+            body,
+            [
+                format!("{:04x}{command}0000", command.len() + 4).as_bytes(),
+                pack
+            ]
+            .concat()
+        );
+        let mut created = request.clone();
+        created.expected_head_sha = None;
+        assert!(
+            receive_pack_body(&created, pack)
+                .starts_with(format!("{:04x}{}", command.len() + 4, "0".repeat(40)).as_bytes())
+        );
+        let url = receive_pack_url(&token.repository);
+        assert_eq!(url, "https://github.com/team/shared.git/git-receive-pack");
+        let result = serde_json::to_string(&request.result(1, Some("b".repeat(40)))).unwrap();
+        for disclosed in [&url, &String::from_utf8_lossy(&body).into_owned(), &result] {
+            assert!(!disclosed.contains(token.as_str()) && !disclosed.contains('@'));
+        }
+        assert_eq!(
+            result,
+            format!(
+                r#"{{"branch":"factory/d2fe80c351a5","received_chunks":1,"commit_sha":"{}"}}"#,
+                "b".repeat(40)
+            )
+        );
+
+        let report = |lines: &[&str]| {
+            let mut report = String::new();
+            for line in lines {
+                report += &format!("{:04x}{line}\n", line.len() + 5);
+            }
+            report + "0000"
+        };
+        let branch = "factory/d2fe80c351a5";
+        let ok = report(&["unpack ok", "ok refs/heads/factory/d2fe80c351a5"]);
+        assert_eq!(receive_pack_outcome(ok.as_bytes(), branch), Ok(()));
+        for refused in [
+            report(&["unpack ok", "ng refs/heads/factory/d2fe80c351a5 stale info"]),
+            report(&[
+                "unpack ok",
+                "ng refs/heads/factory/d2fe80c351a5 missing necessary objects",
+            ]),
+            report(&[
+                "unpack index-pack failed",
+                "ng refs/heads/factory/d2fe80c351a5 unpacker error",
+            ]),
+        ] {
+            assert_eq!(
+                receive_pack_outcome(refused.as_bytes(), branch),
+                Err(OperationError::Conflict),
+                "{refused}"
+            );
+        }
+        for unknown in [
+            String::new(),
+            "<html>".into(),
+            report(&["unpack ok"]),
+            report(&["unpack ok", "ok refs/heads/factory/other"]),
+            ok[..20].to_owned(),
+        ] {
+            assert_eq!(
+                receive_pack_outcome(unknown.as_bytes(), branch),
+                Err(OperationError::Indeterminate),
+                "{unknown}"
+            );
+        }
+    }
+
+    /// GitHub behind `publish_exact_pack`: a branch moved only by a push whose
+    /// old value matches, a token the handler never sees, and faults placed
+    /// around the push.
+    #[cfg(feature = "development-sqlite")]
+    #[derive(Default)]
+    struct FakeRemote {
+        head: std::cell::RefCell<Option<String>>,
+        pushes: std::cell::RefCell<Vec<Vec<u8>>>,
+        connects: std::cell::Cell<u32>,
+        moved_by_another: std::cell::RefCell<Option<String>>, // before the push lands
+        lose_response: std::cell::Cell<bool>,                 // after it lands
+        fail_before_landing: std::cell::Cell<bool>,
+    }
+
+    #[cfg(feature = "development-sqlite")]
+    const FAKE_TOKEN: &str = "ghs_fake-installation-token-never-disclosed";
+
+    #[cfg(feature = "development-sqlite")]
+    impl PackRemote for &FakeRemote {
+        async fn head(&self, _branch: &str) -> Result<Option<String>, OperationError> {
+            Ok(self.head.borrow().clone())
+        }
+
+        async fn push(&self, body: Vec<u8>) -> Result<Vec<u8>, OperationError> {
+            assert!(!String::from_utf8_lossy(&body).contains(FAKE_TOKEN));
+            self.pushes.borrow_mut().push(body.clone());
+            if self.fail_before_landing.replace(false) {
+                return Err(OperationError::Indeterminate);
+            }
+            if let Some(other) = self.moved_by_another.borrow_mut().take() {
+                *self.head.borrow_mut() = Some(other);
+            }
+            let command = String::from_utf8_lossy(&body[4..85]).into_owned();
+            let (old, new) = command.split_once(' ').unwrap();
+            let zero = "0".repeat(40);
+            let current = self.head.borrow().clone().unwrap_or(zero);
+            let line = if old == current {
+                *self.head.borrow_mut() = Some(new.to_owned());
+                "ok refs/heads/factory/d2fe80c351a5"
+            } else {
+                "ng refs/heads/factory/d2fe80c351a5 stale info"
+            };
+            if self.lose_response.replace(false) {
+                return Err(OperationError::Indeterminate);
+            }
+            Ok(format!("000eunpack ok\n{:04x}{line}\n0000", line.len() + 5).into_bytes())
+        }
+    }
+
+    #[cfg(feature = "development-sqlite")]
+    async fn send_pack(
+        journal: &DeliveryJournal,
+        remote: &FakeRemote,
+        request: PublishPack,
+    ) -> Result<PackResult, OperationError> {
+        publish_exact_pack(journal, request, |repository| async move {
+            assert_eq!(repository.full_name, "team/shared");
+            remote.connects.set(remote.connects.get() + 1);
+            Ok(remote)
+        })
+        .await
+    }
+
+    /// The production handler, its journal and its reconciliation, with only
+    /// GitHub's transport substituted.
+    #[cfg(feature = "development-sqlite")]
+    #[tokio::test]
+    async fn the_pack_handler_replays_reconciles_and_refuses_races_from_its_journal() {
+        let directory = tempfile::tempdir().unwrap();
+        let database = directory.path().join("journal.db");
+        let root = DeliveryJournal::open_development(&database).unwrap();
+        let journal = root.for_connection(&"a".repeat(64), "github:2").unwrap();
+        let pack: Vec<u8> = (0..2 * PACK_CHUNK_BYTES + 9)
+            .map(|i| (i * 7) as u8)
+            .collect();
+        let a = "a".repeat(40);
+        let b = "b".repeat(40);
+        let remote = FakeRemote::default();
+        *remote.head.borrow_mut() = Some(a.clone());
+
+        // Chunks are held in order and replay; nothing reaches GitHub yet.
+        for (index, held) in [(0, 1), (1, 2), (1, 2)] {
+            let result = send_pack(&journal, &remote, pack_chunk(&pack, index))
+                .await
+                .unwrap();
+            assert_eq!((result.received_chunks, result.commit_sha), (held, None));
+        }
+        let mut changed = pack_chunk(&pack, 1);
+        changed.chunk_base64 = general_purpose::STANDARD.encode(vec![1; PACK_CHUNK_BYTES as usize]);
+        assert_eq!(
+            send_pack(&journal, &remote, changed).await.err(),
+            Some(OperationError::Conflict)
+        );
+        // Another repository's connection cannot add to or finish this upload.
+        let other = root.for_connection(&"a".repeat(64), "github:3").unwrap();
+        assert_eq!(
+            send_pack(&other, &remote, pack_chunk(&pack, 2)).await.err(),
+            Some(OperationError::Conflict)
+        );
+        assert_eq!(remote.connects.get(), 0);
+
+        // The push lands but its response is lost: the branch reconciles it.
+        remote.lose_response.set(true);
+        let published = send_pack(&journal, &remote, pack_chunk(&pack, 2))
+            .await
+            .unwrap();
+        assert_eq!(published.commit_sha.as_deref(), Some(b.as_str()));
+        assert_eq!(remote.pushes.borrow().len(), 1);
+        assert_eq!(
+            remote.pushes.borrow()[0],
+            receive_pack_body(&pack_chunk(&pack, 0), &pack),
+            "GitHub receives the caller's pack byte for byte under one compare-and-swap"
+        );
+        // Every later replay is the journaled result, with no GitHub call.
+        for index in 0..3 {
+            let replay = send_pack(&journal, &remote, pack_chunk(&pack, index))
+                .await
+                .unwrap();
+            assert_eq!(replay.commit_sha.as_deref(), Some(b.as_str()));
+        }
+        assert_eq!(
+            (remote.connects.get(), remote.pushes.borrow().len()),
+            (1, 1)
+        );
+        let stored = journal
+            .observe_operation("7d1f0f8e-7f1f-11f0-952e-acde48001122")
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(stored.state, "completed");
+        assert!(!stored.result_json.unwrap().contains(FAKE_TOKEN));
+
+        // A push of unknown outcome that did not land stays indeterminate and
+        // its replay pushes again.
+        let next = |id: &str, expected: &str, head: &str| {
+            let mut request = pack_chunk(&pack, 0);
+            request.operation_id = id.into();
+            request.expected_head_sha = Some(expected.into());
+            request.head_sha = head.into();
+            request.pack_bytes = 9;
+            request.chunk_base64 = general_purpose::STANDARD.encode(&pack[..9]);
+            request.pack_sha256 = hex::encode(Sha256::digest(&pack[..9]));
+            request
+        };
+        let c = "c".repeat(40);
+        let retried = next("8d1f0f8e-7f1f-11f0-952e-acde48001122", &b, &c);
+        remote.fail_before_landing.set(true);
+        assert_eq!(
+            send_pack(&journal, &remote, retried.clone()).await.err(),
+            Some(OperationError::Indeterminate)
+        );
+        assert_eq!(remote.head.borrow().as_deref(), Some(b.as_str()));
+        let landed = send_pack(&journal, &remote, retried).await.unwrap();
+        assert_eq!(landed.commit_sha.as_deref(), Some(c.as_str()));
+        assert_eq!(remote.pushes.borrow().len(), 3);
+
+        // A stale precondition is refused before any push.
+        let pushes = remote.pushes.borrow().len();
+        assert_eq!(
+            send_pack(
+                &journal,
+                &remote,
+                next("9d1f0f8e-7f1f-11f0-952e-acde48001122", &a, &"d".repeat(40))
+            )
+            .await
+            .err(),
+            Some(OperationError::Conflict)
+        );
+        assert_eq!(remote.pushes.borrow().len(), pushes);
+        // A branch moved between the check and the push is refused by the
+        // compare-and-swap, never overwritten, and the claim and chunks are
+        // released for a fresh upload.
+        let e = "e".repeat(40);
+        *remote.moved_by_another.borrow_mut() = Some(e.clone());
+        let raced = next("ad1f0f8e-7f1f-11f0-952e-acde48001122", &c, &"f".repeat(40));
+        assert_eq!(
+            send_pack(&journal, &remote, raced.clone()).await.err(),
+            Some(OperationError::Conflict)
+        );
+        assert_eq!(remote.head.borrow().as_deref(), Some(e.as_str()));
+        assert_eq!(
+            journal
+                .observe_operation(&raced.operation_id)
+                .await
+                .unwrap()
+                .unwrap()
+                .state,
+            "planned"
+        );
+
+        // A pack that does not match its digest never reaches GitHub.
+        let mut forged = next("bd1f0f8e-7f1f-11f0-952e-acde48001122", &e, &a);
+        forged.pack_sha256 = hex::encode(Sha256::digest(b"another pack"));
+        let connects = remote.connects.get();
+        assert_eq!(
+            send_pack(&journal, &remote, forged).await.err(),
+            Some(OperationError::Conflict)
+        );
+        assert_eq!(remote.connects.get(), connects);
     }
 
     /// `valid_ref` is the only guard on the string that reaches

@@ -67,6 +67,16 @@ Access policy, or App configuration is live.
   Publication refuses `.github` itself, the three
   CODEOWNERS locations and the dependabot config, and every
   write is bound to a stated head commit and to a durable operation ID.
+  `publish_pack` moves one `factory/` branch to an exact commit by pushing
+  the caller's Git pack through `git-receive-pack`, with the stated branch
+  head as the ref's compare-and-swap old value. Its chunks (256 KiB, at most
+  32, so each fits factoryd's 512 KiB attempt envelope and the whole pack,
+  held several times over while it is pushed, fits the isolate's memory)
+  are held in order in
+  `maintainer_operation_chunks`, bound to the operation's request digest and
+  the pack's SHA-256, and released when the operation completes or is
+  refused. The pack is opaque to the Worker, so factoryd refuses
+  review-authority paths before sending one and offers the tool to no agent.
   There is no generic GitHub proxy, arbitrary URL, shell, caller-selected merge,
   arbitrary ref/workflow mutation, or credential-returning tool. Operations name
   the repository they act on, and reach only repositories this App is installed

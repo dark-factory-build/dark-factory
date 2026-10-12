@@ -272,6 +272,11 @@ fn declared_output_schemas_name_the_fields_the_results_carry() {
             &["branch", "commit_sha", "parent_sha"][..],
         ),
         (
+            "publish_pack",
+            "PackResult",
+            &["branch", "received_chunks", "commit_sha"][..],
+        ),
+        (
             "create_pull_request",
             "PullRequestResult",
             &["number", "url", "head_sha"][..],
@@ -505,6 +510,7 @@ fn every_repository_tool_requires_the_repository_it_acts_on() {
         "list_deployments",
         "observe_pull_request_merge",
         "publish_commit",
+        "publish_pack",
         "enqueue_pull_request",
     ] {
         let input = tool_input(tool);
@@ -595,6 +601,7 @@ fn mcp_surface_is_installation_bound_and_typed() {
         "list_deployments",
         "observe_pull_request_merge",
         "publish_commit",
+        "publish_pack",
         "enqueue_pull_request",
     ] {
         assert!(mcp.contains(tool), "missing typed MCP tool: {tool}");
