@@ -689,7 +689,8 @@ func (f *attemptFixture) finishAndAck(expectOuterSuccess ...bool) *TerminalRecor
 	var err error
 	for {
 		event, err = f.controller.Next(6 * time.Second)
-		if err != nil || event.Kind != AttemptTerminalFrame {
+		// A pre-exec refusal is forwarded ahead of the result it explains.
+		if err != nil || event.Kind != AttemptTerminalFrame && event.Kind != AttemptProviderExecError {
 			break
 		}
 	}
