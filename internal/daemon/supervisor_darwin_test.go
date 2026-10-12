@@ -1697,8 +1697,9 @@ func TestSupervisorRecordsPreExecRefusalAsProviderExitCause(t *testing.T) {
 	if _, statErr := os.Stat(fixture.witness); !errors.Is(statErr, os.ErrNotExist) {
 		t.Fatalf("provider ran after refusal: %v", statErr)
 	}
-	// The worker's own stderr is the PTY, so its exit line is retained.
-	if diagnostics, found, err := fixture.store.TerminalDiagnostics(context.Background(), run.ID); err != nil || !found || !bytes.Contains(diagnostics.Payload, []byte("Change worker failed")) {
+	// The worker's own stderr is the PTY, so its exit line (this test
+	// binary's TestMain helper line) is retained.
+	if diagnostics, found, err := fixture.store.TerminalDiagnostics(context.Background(), run.ID); err != nil || !found || !bytes.Contains(diagnostics.Payload, []byte("supervisor helper failed")) {
 		t.Fatalf("refusal diagnostics found=%v err=%v", found, err)
 	}
 	fresh, err := fixture.store.LatestTaskRunProviderExit(context.Background(), run.TaskID, run.TaskIncarnationID)
