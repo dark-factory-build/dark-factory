@@ -1626,16 +1626,22 @@ func TestSupervisorRecordsPreExecRefusalAsProviderExitCause(t *testing.T) {
 		if err != nil || len(recoverable) != 1 {
 			return fmt.Errorf("recoverable runs = %d, err = %v", len(recoverable), err)
 		}
-		// The worker's post-release authority check refuses a token whose mode
-		// changed, so it exits before provider exec as a failing gate would.
-		return os.Chmod(filepath.Join(fixture.runtimeParentPath, recoverable[0].Run.ID.String(), changeworker.AttemptTokenName), 0o400)
+		// The worker's post-release recheck refuses a Change branch that moved
+		// before the provider ran, so it exits before exec as a failing gate would.
+		published := filepath.Join(fixture.changeParent, recoverable[0].Run.ChangeID.String())
+		command := exec.Command(fixture.spec.GitExecutable, "-C", published, "commit", "-q", "--allow-empty", "-m", "moved before provider")
+		command.Env = []string{"PATH=/usr/bin:/bin", "HOME=" + fixture.root, "GIT_CONFIG_NOSYSTEM=1", "GIT_CONFIG_GLOBAL=/dev/null", "GIT_TERMINAL_PROMPT=0"}
+		if body, err := command.CombinedOutput(); err != nil {
+			return fmt.Errorf("move Change branch: %v: %s", err, body)
+		}
+		return nil
 	}
 	run, err := fixture.daemon.RunNext(context.Background(), fixture.spec)
 	if err != nil {
 		t.Fatalf("RunNext: %v", err)
 	}
 	fixture.assertTerminal(t, run, kernel.OutcomeFailed)
-	if run.Terminal.Code() != kernel.FailureProviderExit || !strings.Contains(run.Terminal.Detail(), "provider exec refused: runtime authority verification") {
+	if run.Terminal.Code() != kernel.FailureProviderExit || !strings.Contains(run.Terminal.Detail(), "provider exec refused: Change worker failed; Change worktree moved before the provider ran") {
 		t.Fatalf("terminal = %s %q, want the worker's refusal", run.Terminal.Code(), run.Terminal.Detail())
 	}
 	if _, statErr := os.Stat(fixture.witness); !errors.Is(statErr, os.ErrNotExist) {
