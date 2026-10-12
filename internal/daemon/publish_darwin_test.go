@@ -21,16 +21,19 @@ import (
 // fakePublishMaintainer is the App's journal: one result per operation id,
 // a replay of a completed id answered from it.
 type fakePublishMaintainer struct {
-	main           string
-	tip            string // the pull request branch's head
-	journal        map[string]json.RawMessage
-	planned        map[string]bool  // ids a write stopped before GitHub
-	writes         []map[string]any // every write sent
-	refuse         string           // a path publish_commit refuses
-	externalRefuse bool             // the Maintainer refuses before the App can apply it
-	unavailable    bool             // the Maintainer authority is temporarily unavailable
-	loseNext       bool             // the next write lands but its response is lost
-	body           string           // the open pull request's stored body
+	main                    string
+	tip                     string // the pull request branch's head
+	journal                 map[string]json.RawMessage
+	planned                 map[string]bool  // ids a write stopped before GitHub
+	indeterminate           map[string]bool  // ids whose first response was unavailable
+	writes                  []map[string]any // every write sent
+	refuse                  string           // a path publish_commit refuses
+	externalRefuse          bool             // the Maintainer refuses before the App can apply it
+	unavailable             bool             // the Maintainer authority is temporarily unavailable
+	indeterminateAgain      bool             // the fresh operation is also indeterminate
+	landCreateIndeterminate bool             // create_pull_request lands before losing its response
+	loseNext                bool             // the next write lands but its response is lost
+	body                    string           // the open pull request's stored body
 }
 
 func TestRepairPublicationUsesTaskTitle(t *testing.T) {
@@ -49,6 +52,9 @@ func (f *fakePublishMaintainer) call(_ context.Context, name string, arguments m
 		}
 		return json.Marshal(map[string]any{"branch": "main", "head_sha": f.main})
 	case "observe_operation":
+		if f.indeterminate[id] {
+			return json.Marshal(map[string]any{"operation_id": id, "state": "indeterminate"})
+		}
 		if result, ok := f.journal[id]; ok {
 			return json.Marshal(map[string]any{"operation_id": id, "state": "completed", "result": result})
 		}
@@ -57,14 +63,26 @@ func (f *fakePublishMaintainer) call(_ context.Context, name string, arguments m
 		}
 		return json.Marshal(map[string]any{"operation_id": id, "state": "missing"})
 	case "list_pull_requests":
-		return json.Marshal(map[string]any{"pull_requests": []any{map[string]any{"number": arguments["pull_number"], "head_sha": f.tip, "body": f.body}}})
+		number := arguments["pull_number"]
+		if number == nil {
+			number = uint64(31)
+		}
+		return json.Marshal(map[string]any{"pull_requests": []any{map[string]any{"number": number, "url": "https://github.com/team/repo/pull/31", "head_sha": f.tip, "base_sha": f.main, "base_ref": "main", "state": "open", "mergeable": true, "merge_state_status": "clean", "body": f.body}}})
+	case "observe_pull_request_merge":
+		return json.Marshal(map[string]any{"pull_number": arguments["pull_number"], "head_sha": f.tip, "base": "main", "state": "INACTIVE", "queue_state": nil, "merge_commit_sha": nil, "merge_group": nil})
 	}
 	if _, replay := f.journal[id]; replay || f.planned[id] {
 		return nil, fmt.Errorf("conflict: operation %s replayed", id)
 	}
+	priorWrites := len(f.writes)
 	f.writes = append(f.writes, map[string]any{"name": name, "arguments": arguments})
-	if f.unavailable {
-		return nil, maintainerRejection("unavailable: Maintainer authority is unavailable.")
+	landCreate := f.landCreateIndeterminate && name == "create_pull_request"
+	if f.unavailable || landCreate || (f.indeterminateAgain && priorWrites > 0) {
+		f.unavailable = false
+		f.indeterminate[id] = true
+		if !landCreate {
+			return nil, maintainerRejection("unavailable: Maintainer authority is unavailable.")
+		}
 	}
 	var result json.RawMessage
 	switch name {
@@ -90,6 +108,10 @@ func (f *fakePublishMaintainer) call(_ context.Context, name string, arguments m
 		return nil, fmt.Errorf("unexpected tool %s", name)
 	}
 	f.journal[id] = result
+	if landCreate {
+		f.landCreateIndeterminate = false
+		return nil, maintainerRejection("unavailable: Maintainer authority is unavailable.")
+	}
 	if f.loseNext {
 		f.loseNext = false
 		return nil, maintainer.ErrUnavailable
@@ -170,7 +192,7 @@ func publishFixture(t *testing.T, files int, workflow bool) (*dispatchFixture, k
 		supervisorGit(t, git, "clone", "-q", "--shared", registered, clone)
 		return filepath.Join(clone, ".git"), func() {}, nil
 	}
-	return fixture, candidate, filepath.Join(root, ".git"), &fakePublishMaintainer{main: base, journal: map[string]json.RawMessage{}}, checkout
+	return fixture, candidate, filepath.Join(root, ".git"), &fakePublishMaintainer{main: base, journal: map[string]json.RawMessage{}, indeterminate: map[string]bool{}}, checkout
 }
 
 // First publication end to end, with the first commit's response lost: the
@@ -525,6 +547,52 @@ func TestUnavailablePublicationRetriesWhenServiceRecovers(t *testing.T) {
 	}
 	if len(app.writes) != 3 {
 		t.Fatalf("writes after service recovery = %d, want 3", len(app.writes))
+	}
+	if first, second := app.writes[0]["arguments"].(map[string]any)["operation_id"], app.writes[1]["arguments"].(map[string]any)["operation_id"]; first == second {
+		t.Fatalf("fresh operation ids = %v, %v", first, second)
+	}
+}
+
+func TestIndeterminatePublicationEscalatesOnceAfterFreshOperation(t *testing.T) {
+	fixture, c, source, app, checkout := publishFixture(t, 1, false)
+	app.unavailable, app.indeterminateAgain = true, true
+	if err := fixture.daemon.publishChange(context.Background(), c, "team/repo", source, app.call, checkout); err != nil {
+		t.Fatal(err)
+	}
+	document, found, err := fixture.store.ReviewOperation(context.Background(), c.Task.ProjectID, kernel.PublishFailureID(c.Change, c.Revision))
+	var op review.Operation
+	if err != nil || !found || json.Unmarshal(document, &op) != nil || op.Escalation == "" {
+		t.Fatalf("indeterminate failure = %s %v %v", document, found, err)
+	}
+	if err := fixture.daemon.publishChange(context.Background(), c, "team/repo", source, app.call, checkout); err != nil {
+		t.Fatal(err)
+	}
+	if len(app.writes) != 2 {
+		t.Fatalf("indeterminate writes = %d, want one original and one fresh", len(app.writes))
+	}
+	if err := fixture.daemon.publishChange(context.Background(), c, "team/repo", source, app.call, checkout); err != nil {
+		t.Fatal(err)
+	}
+	document, _, err = fixture.store.ReviewOperation(context.Background(), c.Task.ProjectID, kernel.PublishFailureID(c.Change, c.Revision))
+	if err != nil || strings.Count(string(document), "factoryd cannot publish change") != 0 {
+		t.Fatalf("repeat escalation = %s %v", document, err)
+	}
+}
+
+func TestIndeterminateCreateThatLandedIsRecorded(t *testing.T) {
+	fixture, c, source, app, checkout := publishFixture(t, 1, false)
+	app.landCreateIndeterminate = true
+	if err := fixture.daemon.publishChange(context.Background(), c, "team/repo", source, app.call, checkout); err != nil {
+		t.Fatal(err)
+	}
+	if err := fixture.daemon.publishChange(context.Background(), c, "team/repo", source, app.call, checkout); err != nil {
+		t.Fatal(err)
+	}
+	if len(app.writes) != 2 || app.writes[1]["name"] != "create_pull_request" {
+		t.Fatalf("landed create writes = %+v", app.writes)
+	}
+	if open, err := fixture.store.OpenPulls(context.Background()); err != nil || len(open) != 1 {
+		t.Fatalf("landed create was not recorded: %+v %v", open, err)
 	}
 }
 

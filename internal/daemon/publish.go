@@ -46,6 +46,7 @@ type observedPull struct {
 	Body       string `json:"body"`
 	Mergeable  *bool  `json:"mergeable"`
 	MergeState string `json:"merge_state_status"`
+	MergeQueue string
 }
 
 type observedPublication struct {
@@ -268,6 +269,22 @@ func (daemon *Daemon) publishPull(ctx context.Context, c kernel.PublishableChang
 				break
 			}
 		}
+		if observed.pull != nil && observed.pull.State == "open" {
+			response, err := call(ctx, "observe_pull_request_merge", map[string]any{"repository": repo, "pull_number": observed.pull.Number, "head_sha": observed.pull.Head, "base": "main"})
+			if err != nil {
+				return observed, err
+			}
+			var merge struct {
+				Head  string `json:"head_sha"`
+				State string `json:"state"`
+			}
+			if err := json.Unmarshal(response, &merge); err != nil || merge.Head != observed.pull.Head {
+				return observed, errors.New("publication: invalid pull merge observation")
+			}
+			if merge.State == "ACTIVE_QUEUE" {
+				observed.pull.MergeQueue = "active"
+			}
+		}
 		return observed, nil
 	}
 	recover := func(step, expected string, pull uint64, expectPull bool) (observedPublication, string, bool, error) {
@@ -302,9 +319,6 @@ func (daemon *Daemon) publishPull(ctx context.Context, c kernel.PublishableChang
 		err = errors.New("main has no head")
 	}
 	done, ref := false, ""
-	if err == nil {
-		done, err = completed(prefix+"1", &first)
-	}
 	checked, tip := main, "" // the branch head before these commits, if any
 	if err == nil {
 		tip, err = refHead(branch)
@@ -314,6 +328,23 @@ func (daemon *Daemon) publishPull(ctx context.Context, c kernel.PublishableChang
 	}
 	if tip != "" {
 		checked, ref = tip, "refs/heads/"+branch
+	}
+	if err == nil {
+		done, err = completed(prefix+"1", &first)
+		if indeterminate, ok := err.(publishIndeterminate); ok {
+			_, retry, landed, observeErr := recover(indeterminate.step, checked, c.Pull, false)
+			if observeErr != nil {
+				return observeErr
+			}
+			if landed {
+				first.Parent, done, err = checked, true, nil
+			} else {
+				done, err = completed(retry, &first)
+			}
+		}
+	}
+	if err != nil {
+		return err
 	}
 	if done {
 		tip = first.Parent
@@ -421,6 +452,9 @@ func (daemon *Daemon) publishPull(ctx context.Context, c kernel.PublishableChang
 					return observeErr
 				}
 				retryStep, varObserved, done, err = retry, observed.pull, false, nil
+				if varObserved == nil {
+					done, err = completed(retryStep, new(json.RawMessage))
+				}
 			}
 			var current struct {
 				PullRequests []struct {
@@ -466,6 +500,7 @@ func (daemon *Daemon) publishPull(ctx context.Context, c kernel.PublishableChang
 		Head   string `json:"head_sha"`
 		Base   string `json:"base_sha"`
 	}
+	var observedPullState *observedPull
 	step, base := "pr-"+c.Head[:8], ""
 	done, err = completed(step, &pull)
 	if indeterminate, ok := err.(publishIndeterminate); ok {
@@ -474,6 +509,7 @@ func (daemon *Daemon) publishPull(ctx context.Context, c kernel.PublishableChang
 			return observeErr
 		}
 		if landed && observed.pull != nil {
+			observedPullState = observed.pull
 			pull.Number, pull.URL, pull.Head, pull.Base = observed.pull.Number, observed.pull.URL, observed.pull.Head, observed.pull.Base
 			done, err = true, nil
 		} else {
@@ -489,6 +525,19 @@ func (daemon *Daemon) publishPull(ctx context.Context, c kernel.PublishableChang
 	if err == nil && !done && state == "planned" {
 		step += "-" + base
 		done, err = completed(step, &pull)
+		if indeterminate, ok := err.(publishIndeterminate); ok {
+			observed, retry, landed, observeErr := recover(indeterminate.step, head, 0, true)
+			if observeErr != nil {
+				return observeErr
+			}
+			if landed && observed.pull != nil {
+				pull.Number, pull.URL, pull.Head, pull.Base = observed.pull.Number, observed.pull.URL, observed.pull.Head, observed.pull.Base
+				done, err = true, nil
+			} else {
+				step, done, err = retry, false, nil
+				done, err = completed(step, &pull)
+			}
+		}
 	}
 	closes := closesIssue(c.Task.Result, issue, files)
 	if !closes {
@@ -508,7 +557,11 @@ func (daemon *Daemon) publishPull(ctx context.Context, c kernel.PublishableChang
 	if err != nil {
 		return err
 	}
-	return daemon.recordPublishedPull(ctx, c.Task.ProjectID, c.Task.ID, repo, kernel.ProductionPullRequest{Number: pull.Number, Title: message, URL: pull.URL, Head: pull.Head, HeadRepository: repo, Branch: branch, Base: "main", State: "open", Review: kernel.ProductionReview{Head: pull.Head, State: "unknown"}}, body, pull.Base)
+	state, mergeable, mergeState, mergeQueue := "open", (*bool)(nil), "", ""
+	if observedPullState != nil {
+		state, mergeable, mergeState, mergeQueue = observedPullState.State, observedPullState.Mergeable, observedPullState.MergeState, observedPullState.MergeQueue
+	}
+	return daemon.recordPublishedPull(ctx, c.Task.ProjectID, c.Task.ID, repo, kernel.ProductionPullRequest{Number: pull.Number, Title: message, URL: pull.URL, Head: pull.Head, HeadRepository: repo, Branch: branch, Base: "main", State: state, MergeState: mergeState, MergeQueue: mergeQueue, Mergeable: mergeable, Review: kernel.ProductionReview{Head: pull.Head, State: "unknown"}}, body, pull.Base)
 }
 
 // closesIssue is whether a publication completes its intake issue. One that
