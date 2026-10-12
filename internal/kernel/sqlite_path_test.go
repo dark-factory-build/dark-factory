@@ -98,20 +98,46 @@ func TestOperationalOpenCancellationOwnsPhysicalConnectContext(t *testing.T) {
 }
 
 func TestOperationalOpenRetriesCorruptSnapshotOnce(t *testing.T) {
-	path, _ := walSnapshotFixture(t, "")
-	calls := 0
-	sqliteOpenableSnapshotHook = func() error {
-		calls++
-		if calls == 1 {
-			return fmt.Errorf("%w: transient inspection fault", ErrCorruptState)
-		}
-		return nil
-	}
-	defer func() { sqliteOpenableSnapshotHook = nil }()
-
-	store, err := Open(context.Background(), path)
+	store, path, project, agent := newAdmissionStore(t, RoleWorker, 1)
+	_, err := store.EnqueueTask(context.Background(), NewTask{ID: taskID(t, 210), ProjectID: project.ID, AssignedAgentID: agent.ID, IncarnationID: incarnationID(t, 211), Title: "startup"}, mustTime(t, 5))
 	if err != nil {
-		t.Fatalf("open after transient corrupt snapshot = %v", err)
+		store.Close()
+		t.Fatal(err)
+	}
+	candidate := changeID(t, 212)
+	admission, err := store.AdmitNext(context.Background(), admissionKeys(t, 213, &candidate), mustTime(t, 10))
+	if err != nil || !admission.Admitted() {
+		store.Close()
+		t.Fatalf("admission = %+v, %v", admission, err)
+	}
+	changeID := *admission.Run.ChangeID
+	if _, err := store.writer.Exec(`UPDATE changes SET phase = 'abandoned', settled_run_id = ?, revision = revision + 1, updated_at_ms = 70 WHERE id = ?`, admission.Run.ID.Bytes(), changeID.Bytes()); err != nil {
+		store.Close()
+		t.Fatal(err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+	calls := 0
+	sqliteOpenableValidationHook = func(validationErr error) {
+		calls++
+		if calls == 1 && errors.Is(validationErr, ErrCorruptState) {
+			repair, err := sql.Open(driverName, configuredDataSource(path))
+			if err != nil {
+				t.Error(err)
+				return
+			}
+			defer repair.Close()
+			if _, err := repair.Exec(`UPDATE changes SET phase = 'reserved', settled_run_id = NULL, revision = revision - 1, updated_at_ms = 10 WHERE id = ?`, changeID.Bytes()); err != nil {
+				t.Error(err)
+			}
+		}
+	}
+	defer func() { sqliteOpenableValidationHook = nil }()
+
+	store, err = Open(context.Background(), path)
+	if err != nil {
+		t.Fatalf("open after transient database corruption = %v", err)
 	}
 	if calls != 2 {
 		t.Fatalf("openable snapshot validations = %d, want 2", calls)

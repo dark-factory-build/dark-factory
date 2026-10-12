@@ -407,8 +407,18 @@ func ownedReservedChange(t *testing.T) (*Store, Change) {
 }
 
 func TestInterruptedWorkerChangeOwnershipIsNotCorruption(t *testing.T) {
-	store, _, _ := admittedWorkerRun(t)
+	failed, _ := NewFailureProposal(FailureInternal, "cleanup")
+	store, finalizing := finalizingReleasedRun(t, RoleWorker, failed)
 	defer store.Close()
+	change, found, err := store.Change(context.Background(), *finalizing.ChangeID)
+	if err != nil || !found {
+		t.Fatalf("read available Change = %+v, %v", change, err)
+	}
+	settlement, _ := NewRetainedChangeSettlement(change.Revision, change.HeadCommit)
+	terminal, err := store.FinalizeWorkerRun(context.Background(), finalizing.ID, finalizing.Revision, settlement, mustTime(t, 80))
+	if err != nil || terminal.Phase != RunTerminal {
+		t.Fatalf("terminal settlement = %+v, %v", terminal, err)
+	}
 	ctx, cancel := context.WithCancel(context.Background())
 	sqliteWorkerChangeProvenanceHook = cancel
 	defer func() { sqliteWorkerChangeProvenanceHook = nil }()

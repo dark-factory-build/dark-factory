@@ -35,9 +35,9 @@ var sqliteActivationHook func(string) error
 // Production activation has no hook.
 var sqlitePostPoolHook func(string) error
 
-// sqliteOpenableSnapshotHook is package-local deterministic fault
-// instrumentation for the one fresh-snapshot retry during inspection.
-var sqliteOpenableSnapshotHook func() error
+// sqliteOpenableValidationHook is package-local deterministic fault
+// instrumentation after one real inspection validation.
+var sqliteOpenableValidationHook func(error)
 
 // sqliteValidationHook is package-local deterministic fault instrumentation
 // after one complete validation snapshot has closed.
@@ -230,12 +230,11 @@ func inspectOperationalSnapshot(ctx context.Context, path string, files *databas
 }
 
 func validateOperationalSnapshot(ctx context.Context, connection *sql.Conn) error {
-	if sqliteOpenableSnapshotHook != nil {
-		if err := sqliteOpenableSnapshotHook(); err != nil {
-			return err
-		}
+	err := validateOpenableSnapshot(ctx, connection)
+	if sqliteOpenableValidationHook != nil {
+		sqliteOpenableValidationHook(err)
 	}
-	return validateOpenableSnapshot(ctx, connection)
+	return err
 }
 
 func closeRejectedOpen(store *Store, files *databaseFiles, cause error) (*Store, error) {
