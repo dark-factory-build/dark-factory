@@ -129,6 +129,15 @@ completed, including the stored request digest and typed result. If an
 executing or indeterminate operation cannot be reconciled, it is never blindly
 submitted again.
 
+### Publication baseline and legacy recovery
+
+The review base for the large-publication work (`4b9b6f1`) contains the original
+50-file publication loop and per-file blob requests. Inline tree content,
+100-file publication, and legacy receipt reconciliation/suffix recovery are
+introduced by this Change; they are not pre-change defects. Reviews and release
+notes should keep that baseline distinction and identify intermediate recovery
+heads when describing regressions.
+
 GitHub App installation tokens are minted only inside the Worker, scoped to the
 one repository the operation names, and downscoped per operation. They are held
 in zeroizing memory and are never returned or journalled. The permanent App may
