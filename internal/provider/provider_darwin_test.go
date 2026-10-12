@@ -311,7 +311,7 @@ func TestBuildOrchestratorClaudeIsGivenTheMaintainer(t *testing.T) {
 		t.Fatal(err)
 	}
 	wantWorkerArgv := append([]string{"/usr/bin/true", "--permission-mode", "dontAsk", "--setting-sources", ""}, wantClaudeWorkerSessionFlag(t, workerRequest)...)
-	wantWorkerArgv = append(wantWorkerArgv, "--strict-mcp-config", "--settings", wantClaudeSettings(t, workerRequest, "factory_attempt"), "--mcp-config", wantClaudeServers(t, workerRequest, nil), "--", bootstrapPromptFor(workerRequest, "factory_attempt"))
+	wantWorkerArgv = append(wantWorkerArgv, "--strict-mcp-config", "--agents", claudeSweepAgent, "--settings", wantClaudeSettings(t, workerRequest, "factory_attempt"), "--mcp-config", wantClaudeServers(t, workerRequest, nil), "--", bootstrapPromptFor(workerRequest, "factory_attempt"))
 	if !reflect.DeepEqual(worker.Argv(), wantWorkerArgv) {
 		t.Fatalf("worker argv = %q, want %q", worker.Argv(), wantWorkerArgv)
 	}
@@ -498,7 +498,7 @@ func TestBuildNativeReturnsExactArgvEnvironmentAndSafeStartupTask(t *testing.T) 
 	}{
 		{
 			kind: kernel.ProviderClaudeCode, model: "claude-model", effort: "max", wantDelivery: TaskDeliveryAttemptAPI,
-			wantArgv: []string{"/usr/bin/true", "--permission-mode", "dontAsk", "--setting-sources", "", "--model", "claude-model", "--effort", "max", "--strict-mcp-config"},
+			wantArgv: []string{"/usr/bin/true", "--permission-mode", "dontAsk", "--setting-sources", "", "--model", "claude-model", "--effort", "max", "--strict-mcp-config", "--agents", claudeSweepAgent},
 		},
 		{kind: kernel.ProviderCodex, model: "codex-model", effort: "xhigh", wantDelivery: TaskDeliveryAttemptAPI,
 			wantArgv: []string{"/usr/bin/true", "-c", `hooks.Stop=[{hooks=[{type="command",command="<factoryctl>"}]}]`, "--strict-config", "--dangerously-bypass-hook-trust", "--no-alt-screen", "-c", `tui.resume_cwd="current"`, "-c", "check_for_update_on_startup=false", "-c", "tool_output_token_limit=32768", "-c", "projects=<working-directory>", "--model", "codex-model", "-c", `model_reasoning_effort="xhigh"`, bootstrapPrompt},
@@ -2048,7 +2048,17 @@ func TestClaudeSettingsConfineTheRunToItsGrants(t *testing.T) {
 			t.Fatalf("%s is readable inside the sandbox", private)
 		}
 	}
-	for _, rule := range []string{"Edit(" + change + "/**)", "mcp__factory_browser"} {
+	// A worker may delegate reading to its one sweep sub-agent: a cheaper
+	// model with only the read tools, so no Bash or edit tool can write.
+	var agents map[string]struct {
+		Tools []string
+		Model string
+	}
+	if err := json.Unmarshal([]byte(claudeSweepAgent), &agents); err != nil || len(agents) != 1 || agents["sweep"].Model != "haiku" ||
+		slices.ContainsFunc(agents["sweep"].Tools, func(tool string) bool { return tool != "Read" && tool != "Grep" && tool != "Glob" }) {
+		t.Fatalf("sweep agent = %+v, %v", agents, err)
+	}
+	for _, rule := range []string{"Edit(" + change + "/**)", "mcp__factory_browser", "Agent(sweep)"} {
 		if !slices.Contains(settings.Permissions.Allow, rule) {
 			t.Fatalf("allow rules lack %s: %q", rule, settings.Permissions.Allow)
 		}

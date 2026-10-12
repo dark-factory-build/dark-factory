@@ -30,6 +30,9 @@ func TestRunTokensCountsOnlyThisRunsWorkInItsDirectory(t *testing.T) {
 not json
 {"timestamp":"2026-09-20T12:02:00Z","message":{"id":"m2","usage":{"input_tokens":30,"output_tokens":0}}}
 `)
+		write(filepath.Join(claudeConfigHome(runtime), "projects", escapeClaudeProjectPath(cwd), "a", "subagents", "agent-1.jsonl"),
+			`{"timestamp":"2026-09-20T12:01:30Z","message":{"id":"s1","usage":{"input_tokens":100,"output_tokens":20}}}
+`)
 		write(filepath.Join(codexConfigHome(runtime), "sessions", "2026", "09", "20", "rollout-x.jsonl"),
 			`{"timestamp":"2026-09-20T11:00:00Z","type":"session_meta","payload":{"id":"s","cwd":"/work/earlier"}}
 {"timestamp":"2026-09-20T11:30:00Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"total_tokens":1000,"input_tokens":900,"cached_input_tokens":700,"output_tokens":100}}}}
@@ -40,7 +43,7 @@ not json
 {"timestamp":"2026-09-20T12:04:00Z","type":"turn_context","payload":{"cwd":"/work/other"}}
 {"timestamp":"2026-09-20T12:05:00Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"total_tokens":9000,"input_tokens":8900,"cached_input_tokens":700,"output_tokens":100}}}}
 `)
-		want := map[kernel.Provider]uint64{kernel.ProviderClaudeCode: 46, kernel.ProviderCodex: 40}[kind]
+		want := map[kernel.Provider]uint64{kernel.ProviderClaudeCode: 166, kernel.ProviderCodex: 40}[kind]
 		if got := RunTokens(kind, runtime.accountHome, runtime.accountConfig, cwd, since); got != want {
 			t.Fatalf("%s tokens = %d, want %d", kind, got, want)
 		}

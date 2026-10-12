@@ -81,11 +81,11 @@ type specialistPrior struct {
 
 // specialistSchedule is the one rule for when a specialist reviews next. With
 // no carrier it is due now (initial); otherwise after its cadence, doubled for
-// each of its newest settled carriers (at most three) that contributed
-// nothing (scheduled), or a quarter cadence after the last one settled when
-// its wake_on classes saw an event since that carrier was created (events).
-// It returns the event lines a wake names. The same rule schedules the wake
-// and serves the console's projection.
+// each of its newest finished carriers (at most three, blocked ones skipped)
+// that made no proposal or amendment (scheduled), or a quarter cadence after
+// the last one settled when its wake_on classes saw an event since that
+// carrier was created (events). It returns the event lines a wake names. The
+// same rule schedules the wake and serves the console's projection.
 func specialistSchedule(ctx context.Context, c *sql.Conn, agent Agent) (SpecialistState, specialistPrior, []string, error) {
 	var state SpecialistState
 	var prior specialistPrior
@@ -116,9 +116,9 @@ func specialistSchedule(ctx context.Context, c *sql.Conn, agent Agent) (Speciali
 			return state, prior, nil, err
 		}
 		prior.task, state.LastReviewTaskID = id.String(), id.String()
-		rows, err := c.QueryContext(ctx, `SELECT EXISTS (SELECT 1 FROM runs AS r JOIN project_content_revisions AS p ON p.author GLOB 'run:' || lower(hex(r.id)) || ' *' WHERE r.task_id = t.id)
-			OR EXISTS (SELECT 1 FROM peer_questions WHERE source_task_id = t.id)
-			FROM tasks AS t WHERE t.assigned_agent_id = ? AND t.title = ? AND t.status NOT IN ('queued', 'running') ORDER BY t.created_at_ms DESC, t.id DESC LIMIT 3`,
+		rows, err := c.QueryContext(ctx, `SELECT EXISTS (SELECT 1 FROM runs AS r JOIN project_content_revisions AS p ON p.author GLOB 'run:' || lower(hex(r.id)) || ' *'
+			WHERE r.task_id = t.id AND json_extract(`+metaP+`, '$.record_type') IN ('proposal', 'amendment'))
+			FROM tasks AS t WHERE t.assigned_agent_id = ? AND t.title = ? AND t.status NOT IN ('queued', 'running', 'blocked') ORDER BY t.created_at_ms DESC, t.id DESC LIMIT 3`,
 			agent.ID.Bytes(), overseerWakeTitle)
 		if err != nil {
 			return state, prior, nil, err

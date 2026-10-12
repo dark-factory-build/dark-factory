@@ -123,6 +123,13 @@ a regular file, executable by its owner and writable by nobody else, and an
 orchestrator launch is refused, naming which, when it is missing or fails
 that. Claude workers still have the provider's existing local-command
 authority; this MCP boundary does not create a hostile same-user sandbox.
+Since #1760 a Claude worker may also start one sub-agent type, `sweep`
+(`--agents`, allowed as `Agent(sweep)`), for bounded read-only sweeps on
+Haiku. It is read-only by its tool list, Read, Grep and Glob, with no Bash,
+edit tool or MCP server, so it has no write path even inside the worker's
+writable sandbox. The worker runs commands itself and hands it their output.
+Its transcript (`<session>/subagents/`) counts toward the run's tokens, and
+its accepted and finished calls show on the floor as companions while it runs.
 Every Codex launch receives the same `factory_attempt` server, and a Codex
 orchestrator receives the Maintainer server beside it.
 
