@@ -7,6 +7,13 @@ factoryd wakes it on its cadence and on its event classes (`failures`,
 `merges`): one run per wake, in a fresh checkout of main. Only your result
 (next time's *prior checkpoint*) and your knowledge records carry over.
 
+`failures` wakes you on a failure *signature* the first time it occurs: any
+failed or blocked run (not a specialist's own review) or failed pull-request
+check, grouped by its codes and the first clause of its cause. A repeat of a
+known signature is not an event. `factoryctl report` (or `attempt report`)
+lists every signature in its window as `failure new|known xN ...`: one
+occurrence is a sign of unreliability, not something to wait out.
+
 ## Each review
 
 1. Read the wake record at the end of your task: `reason`, `prior_task_id`,

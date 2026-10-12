@@ -177,8 +177,9 @@ func specialistSchedule(ctx context.Context, c *sql.Conn, agent Agent) (Speciali
 }
 
 // specialistEvents is what happened since a specialist's last carrier was
-// created, in its wake_on classes: a worker task (not a specialist's carrier)
-// that failed or blocked (failures); a pull request merged (merges). A review
+// created, in its wake_on classes: a failure signature first seen since then
+// (failures, from failureLedger: one occurrence is enough); a pull request
+// merged (merges). A review
 // escalation is the overseer's item, not an event. Carriers, knowledge, proposals, decisions and
 // peer questions are never events, so specialists cannot wake each other.
 func specialistEvents(ctx context.Context, c *sql.Conn, agent Agent, since int64) ([]string, error) {
@@ -186,19 +187,28 @@ func specialistEvents(ctx context.Context, c *sql.Conn, agent Agent, since int64
 	if !failures && !merges {
 		return nil, nil
 	}
-	rows, err := c.QueryContext(ctx, `SELECT line FROM (
-		SELECT printf('- task %s "%s" %s: %s', lower(hex(t.id)), replace(substr(t.title, 1, 60), char(10), ' '), t.status,
-			replace(substr(COALESCE(t.blocked_reason, (SELECT terminal_detail FROM runs WHERE task_id = t.id ORDER BY admitted_at_ms DESC LIMIT 1), ''), 1, 120), char(10), ' ')) AS line, t.updated_at_ms AS at
-		FROM tasks AS t JOIN agents AS a ON a.id = t.assigned_agent_id
-		WHERE ?3 AND t.project_id = ?1 AND a.role = 'worker' AND t.status IN ('failed', 'blocked') AND t.updated_at_ms > ?2 AND NOT `+specialistCarrierSQL+`
-		UNION ALL SELECT printf('- PR #%s merged: %s', identity, replace(substr(COALESCE(json_extract(document, '$.title'), ''), 1, 80), char(10), ' ')), observed_at_ms
-		FROM production_records WHERE ?4 AND project_id = ?1 AND kind = 'pull_request' AND json_extract(document, '$.state') = 'merged'
+	var lines []string
+	if failures {
+		ledger, err := failureLedger(ctx, c, agent.ProjectID.Bytes(), since)
+		if err != nil {
+			return nil, err
+		}
+		for _, entry := range ledger {
+			if entry.first >= since && len(lines) < 8 {
+				lines = append(lines, fmt.Sprintf("- new failure x%d %s: %s", entry.count, entry.signature, entry.example))
+			}
+		}
+	}
+	if !merges {
+		return lines, nil
+	}
+	rows, err := c.QueryContext(ctx, `SELECT printf('- PR #%s merged: %s', identity, replace(substr(COALESCE(json_extract(document, '$.title'), ''), 1, 80), char(10), ' '))
+		FROM production_records WHERE project_id = ?1 AND kind = 'pull_request' AND json_extract(document, '$.state') = 'merged'
 		  AND COALESCE(unixepoch(json_extract(document, '$.merged_at')) * 1000, observed_at_ms) > ?2
-	) ORDER BY at DESC LIMIT 16`, agent.ProjectID.Bytes(), since, failures, merges)
+		ORDER BY COALESCE(unixepoch(json_extract(document, '$.merged_at')) * 1000, observed_at_ms) DESC LIMIT 16`, agent.ProjectID.Bytes(), since)
 	if err != nil {
 		return nil, err
 	}
-	var lines []string
 	for rows.Next() {
 		var line string
 		if err := rows.Scan(&line); err != nil {
