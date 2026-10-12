@@ -266,8 +266,9 @@ func TestStartupCancellationIsCleanAtEveryStartupPhase(t *testing.T) {
 }
 
 // Review recovery reconciles every open pull request over GitHub, so the
-// local API answers while it is still running (#1830).
-func TestLocalAPIAnswersWhileReviewRecoveryIsBlocked(t *testing.T) {
+// local API is already answering when it starts (#1830). The daemon's
+// TestAPIAnswersWhileStartupReviewReconcileIsBlocked holds a real reconcile.
+func TestLocalAPIAnswersBeforeReviewRecoveryStarts(t *testing.T) {
 	home := initializedHome(t)
 	blocked, release := make(chan struct{}), make(chan struct{})
 	startupPhaseHook = func(observed string) {

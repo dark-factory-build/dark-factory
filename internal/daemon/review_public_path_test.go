@@ -852,6 +852,64 @@ func TestMergeStageRunsOnlyOnTheCustomerPath(t *testing.T) {
 	}
 }
 
+// blockedObserveBackend holds the next ObservePull open until release, as a
+// slow GitHub read holds one pull request's reconcile.
+type blockedObserveBackend struct {
+	*publicReviewBackend
+	armed            atomic.Bool
+	entered, release chan struct{}
+}
+
+func (b *blockedObserveBackend) ObservePull(ctx context.Context, operation review.Operation) (review.Pull, error) {
+	if b.armed.CompareAndSwap(true, false) {
+		close(b.entered)
+		<-b.release
+	}
+	return b.publicReviewBackend.ObservePull(ctx, operation)
+}
+
+// factoryd's listener opens before startup review recovery (#1830), so an API
+// call is answered while recovery's reconcile of an open pull request is
+// still blocked on GitHub.
+func TestAPIAnswersWhileStartupReviewReconcileIsBlocked(t *testing.T) {
+	fixture, project, _, settle := publishedTask(t)
+	settle()
+	ctx := context.Background()
+	backend := &blockedObserveBackend{publicReviewBackend: &publicReviewBackend{}, entered: make(chan struct{}), release: make(chan struct{})}
+	fixture.daemon.reviewBackend = func(string, uint64) review.Backend { return backend }
+	if _, err := reviewNow(ctx, fixture.daemon, project, publishedReviewRequest()); err != nil {
+		t.Fatal(err)
+	}
+	waitForMergePipeline(t, fixture.daemon)
+	customerMode(t, fixture)
+	backend.armed.Store(true)
+	recovered := make(chan error, 1)
+	go func() {
+		_, err := fixture.daemon.RecoverReviewOperations(ctx)
+		recovered <- err
+	}()
+	select {
+	case <-backend.entered:
+	case <-time.After(5 * time.Second):
+		t.Fatal("startup review recovery never reconciled the open pull request")
+	}
+
+	client, err := api.NewOperatorClient(fixture.socket, fixture.operator)
+	if err != nil {
+		t.Fatal(err)
+	}
+	done := fixture.serve(t)
+	_, err = client.Snapshot(ctx)
+	close(backend.release)
+	waitDispatch(t, done)
+	if err != nil {
+		t.Fatalf("snapshot while review reconcile is blocked = %v", err)
+	}
+	if err := <-recovered; err != nil {
+		t.Fatal(err)
+	}
+}
+
 // A failed review never stalls its pull request silently: the tick retries a
 // retryable failure once, and escalates a failure nothing will retry once,
 // including one whose retry cannot start.
