@@ -18,7 +18,7 @@ func TestConsoleControlBounds(t *testing.T) {
 		// Every mutable member is optional; only the identity and the observed
 		// revision are required.
 		`{"type":"AGENT_UPDATE","id":"x","body":{"agent_id":"` + agent + `","expected_revision":"7"}}`,
-		`{"type":"PROJECT_LIMITS","id":"x","body":{"project_id":"` + agent + `","expected_revision":"7","run_budget":"12","max_run_seconds":900}}`,
+		`{"type":"PROJECT_LIMITS","id":"x","body":{"project_id":"` + agent + `","expected_revision":"7","max_run_seconds":900}}`,
 		`{"type":"TASK_UPDATE","id":"x","body":{"task_id":"` + task + `","expected_revision":"7"}}`,
 		`{"type":"TASK_UPDATE","id":"x","body":{"task_id":"` + task + `","expected_revision":"7","status":"queued"}}`,
 	} {
@@ -28,8 +28,7 @@ func TestConsoleControlBounds(t *testing.T) {
 	}
 	for _, frame := range []string{
 		`{"type":"AGENT_UPDATE","id":"x","body":{"agent_id":"` + agent + `","expected_revision":"0"}}`,
-		`{"type":"PROJECT_LIMITS","id":"x","body":{"project_id":"` + agent + `","expected_revision":"7","run_budget":"12","max_run_seconds":86401}}`,
-		`{"type":"PROJECT_LIMITS","id":"x","body":{"project_id":"` + agent + `","expected_revision":"7","run_budget":"9223372036854775808","max_run_seconds":900}}`,
+		`{"type":"PROJECT_LIMITS","id":"x","body":{"project_id":"` + agent + `","expected_revision":"7","max_run_seconds":86401}}`,
 		`{"type":"AGENT_UPDATE","id":"x","body":{"agent_id":"` + agent + `","expected_revision":"7","model":"` + strings.Repeat("m", MaxAgentModelBytes+1) + `"}}`,
 		`{"type":"AGENT_UPDATE","id":"x","body":{"agent_id":"` + agent + `","expected_revision":"7","reasoning_effort":"` + strings.Repeat("e", MaxAgentModelBytes+1) + `"}}`,
 		// Cancellation is the only status transition the console may ask for.
@@ -139,11 +138,8 @@ func TestRunPathsBounds(t *testing.T) {
 func TestProjectLimitsRequireExplicitValues(t *testing.T) {
 	const prefix = `{"type":"PROJECT_LIMITS","id":"x","body":{"project_id":"02020202020202020202020202020202","expected_revision":"7"`
 	for name, fields := range map[string]string{
-		"both omitted":     "",
-		"budget omitted":   `,"max_run_seconds":900`,
-		"duration omitted": `,"run_budget":"12"`,
-		"budget null":      `,"run_budget":null,"max_run_seconds":900`,
-		"duration null":    `,"run_budget":"12","max_run_seconds":null`,
+		"duration omitted": "",
+		"duration null":    `,"max_run_seconds":null`,
 	} {
 		t.Run(name, func(t *testing.T) {
 			if _, err := DecodeClientControl([]byte(prefix + fields + `}}`)); err != ErrMalformed {
@@ -151,7 +147,7 @@ func TestProjectLimitsRequireExplicitValues(t *testing.T) {
 			}
 		})
 	}
-	if _, err := DecodeClientControl([]byte(prefix + `,"run_budget":"0","max_run_seconds":0}}`)); err != nil {
+	if _, err := DecodeClientControl([]byte(prefix + `,"max_run_seconds":0}}`)); err != nil {
 		t.Fatalf("explicit unlimited refused: %v", err)
 	}
 }
