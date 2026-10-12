@@ -1250,6 +1250,11 @@ func validateChanges(ctx context.Context, connection *sql.Conn) error {
 			return err
 		}
 		ownership, ownershipErr := classifyWorkerChangeOwnership(ctx, connection, run, change)
+		// An interrupted or timed-out read is not corruption: report it as
+		// itself, or a cancelled validation becomes a corruption hold.
+		if ownershipErr != nil && !errors.Is(ownershipErr, ErrCorruptState) {
+			return ownershipErr
+		}
 		lateRebase := run.TerminalAt != nil && change.AvailableAt != nil && change.AvailableAt.Int64() <= run.TerminalAt.Int64() && change.HeadCommit != nil && change.Selection != nil && !change.HeadCommit.equal(change.Selection.commit)
 		if run.Phase != RunTerminal || ownershipErr != nil || !ownership.settled() || run.TerminalAt == nil || change.UpdatedAt.Int64() > run.TerminalAt.Int64() && !lateRebase {
 			return fmt.Errorf("%w: invalid Change settlement authority", ErrCorruptState)

@@ -531,12 +531,13 @@ func openProcess(ctx context.Context, configuration config) (_ *process, resultE
 	var err error
 	startupValidationStarted := time.Now()
 	owner.home, err = install.OpenOperationalHome(ownedContext, configuration.home)
-	daemon.LogFactoryd(recoveryLog, "factoryd: startup operational home validation took %s\n", time.Since(startupValidationStarted))
 	if err != nil {
+		daemon.LogFactoryd(recoveryLog, "factoryd: startup validation failed after %s\n", time.Since(startupValidationStarted))
 		return nil, err
 	}
 	startupPhase("home")
 	store, err := owner.home.OpenStore(ownedContext)
+	daemon.LogFactoryd(recoveryLog, "factoryd: startup validation (home inspection and store open) took %s\n", time.Since(startupValidationStarted))
 	if err != nil {
 		return nil, err
 	}
