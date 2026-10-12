@@ -453,6 +453,9 @@ func NewSnapshotReply(snapshot DashboardSnapshot) (Reply, error) {
 	tasks := make([]TaskSummary, len(snapshot.Tasks))
 	copy(tasks, snapshot.Tasks)
 	snapshot.Tasks = tasks
+	sharedTasks := make([]TaskSummary, len(snapshot.SharedTasks))
+	copy(sharedTasks, snapshot.SharedTasks)
+	snapshot.SharedTasks = sharedTasks
 	return Reply{kind: replySnapshot, snapshot: snapshot}, nil
 }
 

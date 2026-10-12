@@ -780,8 +780,8 @@ type DashboardSnapshot struct {
 	Agents        []AgentSummary     `json:"agents"`
 	Tasks         []TaskSummary      `json:"tasks"`
 	SharedTasks   []TaskSummary      `json:"shared_tasks,omitempty"`
-	HumanRequests []HumanRequestItem `json:"human_requests"`
-	Accounts      []AccountSummary   `json:"accounts"`
+	HumanRequests []HumanRequestItem `json:"human_requests,omitempty"`
+	Accounts      []AccountSummary   `json:"accounts,omitempty"`
 	PeerQuestions []PeerQuestion     `json:"peer_questions,omitempty"`
 }
 
