@@ -170,28 +170,12 @@ learning is inferred from either test.
 
 ## Operator human requests
 
-With the existing operator socket and token-file environment configured,
-`factoryctl human list` shows open, delivering, and delivery-unknown requests,
-including overseer questions. Answer an open request with:
-
-```sh
-factoryctl human reply --operation-id HEX32 --request ID --revision REVISION --reply "Answer"
-```
-
-Use the listed request revision and a fresh 32-character hexadecimal operation
-ID. Inspect the returned `human_reply.state`; `delivery_unknown` means input
-may have been delivered and must not be replayed. Operator credentials are
-required; a worker attempt token does not grant this authority.
-
-Cancel a settled or unwanted open request without resuming its run:
-
-```sh
-factoryctl human cancel --request ID --revision REVISION --run-revision RUN_REVISION
-```
-
-Both revisions come from `human list`. This is the browser card's cancel: a
-live run is cancelled and revoked, a yielded overseer's continuation is
-dropped. A stale or repeated cancel is refused with a revision conflict.
+[Answer a worker's question](../install.md#answer-a-workers-question) covers
+`factoryctl human list`, `human reply` and `human cancel`. They need operator
+credentials; a worker attempt token does not grant this authority. A cancel is
+the browser card's cancel: a live run is cancelled and revoked, a yielded
+overseer's continuation is dropped, and a stale or repeated cancel is refused
+with a revision conflict.
 
 For CLI supervision, `factoryctl status` includes agent model, reasoning,
 standing-instruction policy and counters, and tool-budget counters. Read a

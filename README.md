@@ -85,6 +85,11 @@ factoryctl status
 factoryctl task read --task TASK_ID --revision REVISION
 ```
 
+A task can stay `running` while its worker waits for your decision. List open
+questions with `factoryctl human list` and answer one with `factoryctl human
+reply`, or answer it under **Needs You** in the console; see [answer a worker's
+question](docs/install.md#answer-a-workers-question).
+
 The `outcome` is the worker's report. Its commits are on a `factory/…` branch
 in a private Git directory inside your checkout's `.git`, never on your own
 branches; [inspecting a result](docs/install.md#inspect-a-result) shows how to

@@ -225,6 +225,26 @@ commit tree GitHub cannot return whole, or a local failure caused by the
 Change is final for that Change revision: send the task back so a corrected
 revision can publish.
 
+`factoryctl why --task TASK_ID` says whom a task waits on;
+`factoryctl task history --task TASK_ID` lists the interventions recorded on it.
+
+## Answer a worker's question
+
+A worker that needs a decision asks it and its task stays `running` until the
+question is answered. `factoryctl human list` shows open, delivering and
+delivery-unknown requests, overseer questions included. Answer one with its
+listed revision and a fresh 32-character hexadecimal operation ID:
+
+```sh
+factoryctl human reply --operation-id HEX32 --request ID --revision REVISION --reply "Answer"
+```
+
+If the returned `human_reply.state` is `delivery_unknown`, the answer may have
+reached the worker: do not send it again. Cancel an unwanted request, which
+cancels its live run, with `factoryctl human cancel --request ID --revision
+REVISION --run-revision RUN_REVISION`; both revisions come from `human list`.
+The console's **Needs You** list answers and cancels the same requests.
+
 ## Try a task without a model
 
 The `shell` provider runs the task body as a `/bin/sh` script in the Change
