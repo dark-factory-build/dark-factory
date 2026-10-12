@@ -109,14 +109,6 @@ func TestSchedulerCheckpointsAnOversizedWAL(t *testing.T) {
 	if err := readTx.Rollback(); err != nil {
 		t.Fatal(err)
 	}
-	base := time.Now()
-	var clockCalls atomic.Int64
-	daemon.now = func() time.Time {
-		if clockCalls.Add(1) == 1 {
-			return base
-		}
-		return base.Add(walCheckpointInterval)
-	}
 	polls := make(chan time.Time, 1)
 	done := make(chan error, 1)
 	go func() {
@@ -125,7 +117,7 @@ func TestSchedulerCheckpointsAnOversizedWAL(t *testing.T) {
 			return kernel.Run{}, fmt.Errorf("%w: empty", kernel.ErrConflict)
 		}})
 	}()
-	polls <- base
+	polls <- time.Now()
 	deadline := time.Now().Add(3 * time.Second)
 	for daemon.store.WALSize() >= walCheckpointLimit && time.Now().Before(deadline) {
 		time.Sleep(time.Millisecond)
