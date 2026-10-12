@@ -121,6 +121,33 @@ func TestOperationalOpenRetriesCorruptSnapshotOnce(t *testing.T) {
 	}
 }
 
+func TestCheckpointOperationalShrinksRetainedWAL(t *testing.T) {
+	path, _ := walSnapshotFixture(t, "")
+	before, err := os.Stat(path + "-wal")
+	if err != nil {
+		t.Fatal(err)
+	}
+	home, err := os.Open(filepath.Dir(path))
+	if err != nil {
+		t.Fatal(err)
+	}
+	database, err := os.Open(path)
+	if err != nil {
+		_ = home.Close()
+		t.Fatal(err)
+	}
+	if err := CheckpointOperational(context.Background(), path, home, database); err != nil {
+		t.Fatal(err)
+	}
+	after, err := os.Stat(path + "-wal")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if after.Size() >= before.Size() {
+		t.Fatalf("checkpoint WAL size = %d, before %d", after.Size(), before.Size())
+	}
+}
+
 func TestOpenRequiresCanonicalOwnerOnlyDatabaseParent(t *testing.T) {
 	image, err := NewDatabaseImage(context.Background(), FactoryConfig{}, mustTime(t, 1))
 	if err != nil {

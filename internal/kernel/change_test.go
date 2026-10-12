@@ -406,6 +406,26 @@ func ownedReservedChange(t *testing.T) (*Store, Change) {
 	return store, change
 }
 
+func TestInterruptedWorkerChangeOwnershipIsNotCorruption(t *testing.T) {
+	store, run, _ := admittedWorkerRun(t)
+	defer store.Close()
+	change, found, err := store.Change(context.Background(), *run.ChangeID)
+	if err != nil || !found {
+		t.Fatalf("read admitted Change = %+v, %v", change, err)
+	}
+	connection, err := store.readerConnection(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer connection.Close()
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	_, err = classifyWorkerChangeOwnership(ctx, connection, run, change)
+	if err == nil || errors.Is(err, ErrCorruptState) {
+		t.Fatalf("interrupted ownership validation = %v", err)
+	}
+}
+
 // The kernel half of the reclaim rule: which retained Changes may lose their
 // worktree, from a failed task's Change settled at 33 with an empty diff.
 func TestReclaimableChangesFollowTheRule(t *testing.T) {
