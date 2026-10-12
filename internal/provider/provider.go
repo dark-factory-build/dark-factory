@@ -1323,7 +1323,7 @@ func (runtime RuntimePaths) PrepareWebDependencies(ctx context.Context, workingD
 	}
 	store := pnpmStorePath(runtime.accountHome)
 	modules := filepath.Join(web, "node_modules")
-	command := exec.CommandContext(ctx, filepath.Join(toolPath, "node"), filepath.Join(toolPath, "corepack"), "pnpm", "install", "--offline", "--frozen-lockfile", "--ignore-scripts", "--config.ignorePnpmfile=true", "--config.storeDir="+store, "--config.modulesDir="+modules, "--config.virtualStoreDir="+filepath.Join(modules, ".pnpm"), "--config.stateDir="+filepath.Join(runtime.home, ".cache", "pnpm-state"))
+	command := exec.CommandContext(ctx, filepath.Join(toolPath, "node"), filepath.Join(toolPath, "corepack"), "pnpm", "install", "--offline", "--frozen-lockfile", "--ignore-scripts", "--config.ignorePnpmfile=true", "--config.confirmModulesPurge=false", "--config.storeDir="+store, "--config.modulesDir="+modules, "--config.virtualStoreDir="+filepath.Join(modules, ".pnpm"), "--config.stateDir="+filepath.Join(runtime.home, ".cache", "pnpm-state"))
 	command.Dir = web
 	command.Env = runtime.environmentForRole(kernel.ProviderCodex, kernel.RoleWorker)
 	if output, err := command.CombinedOutput(); err != nil {
