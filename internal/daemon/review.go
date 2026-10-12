@@ -268,6 +268,16 @@ func (daemon *Daemon) reconcilePull(ctx context.Context, open kernel.OpenPull, u
 		if action, note = review.Decide(pull, ops, answered); working && (action == review.Rebase || action == review.SendBack) {
 			action = review.Wait // its task's next head decides
 		}
+		if answered && (action == review.Escalate || action == review.Review) {
+			// Settled work whose tree the pull request lacks is no answer (#1800).
+			var settled string
+			if settled, err = daemon.unpublishedHead(ctx, coordinator.Backend, open, op.Request); err != nil || settled != "" {
+				action, note = review.Wait, ""
+			}
+			if settled != "" {
+				LogFactoryd(daemon.log, "factoryd: reconcile %s#%d: its task settled head %s, whose tree head %s lacks: waiting for its publication\n", open.Repository, open.Pull.Number, settled, op.Request.Head)
+			}
+		}
 		switch action {
 		case review.Escalate:
 			op.Escalate(note)
@@ -363,6 +373,39 @@ func (daemon *Daemon) sendBackPull(ctx context.Context, open kernel.OpenPull, ta
 		err = nil
 	}
 	return err
+}
+
+// unpublishedHead is the head of the retained Change published on the pull
+// request when its tree differs from that of the pull request's head, read
+// from a checkout of request; "" when they match or no Change is published.
+func (daemon *Daemon) unpublishedHead(ctx context.Context, backend review.Backend, open kernel.OpenPull, request review.Request) (string, error) {
+	changeID, found, err := daemon.store.PublishedChangeID(ctx, open.Project, open.Repository, open.Pull.Number)
+	if err != nil || !found {
+		return "", err
+	}
+	state, found, err := daemon.store.Change(ctx, changeID)
+	if err != nil || !found || state.Phase != kernel.ChangeRetained || state.HeadCommit == nil {
+		return "", err
+	}
+	parent := daemon.changeParent.Load()
+	if parent == nil || *parent == "" {
+		return "", errPublishLater
+	}
+	head := hex.EncodeToString(state.HeadCommit.Bytes())
+	checkout, cleanup, err := backend.CloneReadOnly(ctx, request)
+	if err != nil {
+		return "", err
+	}
+	defer cleanup()
+	settled := reviewGit(ctx, filepath.Join(*parent, changeID.String()), "rev-parse", head+"^{tree}")
+	published := reviewGit(ctx, checkout, "rev-parse", request.Head+"^{tree}")
+	if len(settled) != 1 || len(published) != 1 {
+		return "", errors.New("the trees of its Change head " + head + " and pull request head " + request.Head + " are unreadable")
+	}
+	if strings.TrimSpace(settled[0]) == strings.TrimSpace(published[0]) {
+		return "", nil
+	}
+	return head, nil
 }
 
 // rebaseChange brings the retained Change published on the pull request up to

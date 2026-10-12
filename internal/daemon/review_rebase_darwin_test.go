@@ -12,6 +12,7 @@ import (
 
 	"github.com/dark-factory-build/dark-factory/internal/change"
 	"github.com/dark-factory-build/dark-factory/internal/kernel"
+	"github.com/dark-factory-build/dark-factory/internal/review"
 	"github.com/dark-factory-build/dark-factory/internal/runner"
 )
 
@@ -122,4 +123,24 @@ func TestConflictRepairRebasesAnAppPublishedPullsChangeOnce(t *testing.T) {
 	if moved, err := fixture.daemon.rebaseChange(ctx, open); err != nil || moved || retainedHead() != head {
 		t.Fatalf("a Change already on main rebased=%v err=%v head=%s, want %s", moved, err, retainedHead(), head)
 	}
+
+	// #1800: the App's commit of the rebased head is no new work; a pull
+	// request still at the old tree lacks the settled head.
+	for _, c := range []struct{ tree, want string }{{head, ""}, {local, head}} {
+		app := strings.TrimSpace(settlementGit(t, git, path, "commit-tree", c.tree+"^{tree}", "-p", main, "-m", "app"))
+		backend := &checkoutReviewBackend{dir: path}
+		if settled, err := fixture.daemon.unpublishedHead(ctx, backend, open, review.Request{Head: app}); err != nil || settled != c.want {
+			t.Fatalf("pull request at the tree of %s: unpublished head %q err=%v, want %q", c.tree, settled, err, c.want)
+		}
+	}
+}
+
+// checkoutReviewBackend checks every pull request out at dir.
+type checkoutReviewBackend struct {
+	publicReviewBackend
+	dir string
+}
+
+func (b *checkoutReviewBackend) CloneReadOnly(context.Context, review.Request) (string, func(), error) {
+	return b.dir, func() {}, nil
 }

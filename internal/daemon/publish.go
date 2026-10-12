@@ -7,7 +7,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"os"
 	"os/exec"
 	"path/filepath"
 	"strconv"
@@ -46,12 +45,14 @@ func (daemon *Daemon) publishSettledChanges(ctx context.Context) {
 		candidates, err = daemon.store.PublishableChanges(ctx, at)
 	}
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "factoryd: publishable changes: %v\n", err)
+		LogFactoryd(daemon.log, "factoryd: publishable changes: %v\n", err)
 	}
 	for _, candidate := range candidates {
+		outcome := "published"
 		if err := daemon.publishSettledChange(ctx, candidate); err != nil {
-			fmt.Fprintf(os.Stderr, "factoryd: publish change %s: %v\n", candidate.Change, err)
+			outcome = err.Error()
 		}
+		LogFactoryd(daemon.log, "factoryd: publish change %s at %s for task %s onto #%d: %s\n", candidate.Change, candidate.Head, candidate.Task.ID, candidate.Pull, outcome)
 	}
 }
 
