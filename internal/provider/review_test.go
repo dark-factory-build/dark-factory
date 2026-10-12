@@ -85,6 +85,12 @@ func TestRunReviewConfinesClaudeFileReads(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
+	if err := os.Mkdir(filepath.Join(checkout, "web"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(checkout, "web", "package.json"), []byte(`{"packageManager":"pnpm@`+pnpmVersion+`"}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
 	for _, tool := range []string{"claude", "codex"} {
 		if err := os.WriteFile(filepath.Join(bin, tool), []byte("#!/bin/sh\nprintf '%s\\n%s' \"$CLAUDE_CODE_TMPDIR\" \"$CARGO_HOME\" > \"$HOME/review-tmp\"\nprintf '%s\\0' \"$@\"\n"), 0o700); err != nil {
 			t.Fatal(err)

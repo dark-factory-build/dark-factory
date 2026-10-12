@@ -68,7 +68,11 @@ func RunReview(ctx context.Context, kind kernel.Provider, toolPath, toolchainRoo
 	readable = append(readable, filepath.SplitList(toolchainRoots)...)
 	readable = append(readable, "/System/Library/OpenSSL/openssl.cnf")
 	if operatorHome != "" {
-		if err := prepareCorepackPnpm(operatorHome, home); err != nil {
+		if _, err := os.Stat(filepath.Join(checkout, "web", "package.json")); err == nil {
+			if err := prepareCorepackPnpm(operatorHome, home); err != nil {
+				return ReviewResult{}, err
+			}
+		} else if !errors.Is(err, os.ErrNotExist) {
 			return ReviewResult{}, err
 		}
 		cargoHome := filepath.Join(operatorHome, ".cargo")
