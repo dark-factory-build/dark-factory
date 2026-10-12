@@ -277,6 +277,8 @@ func (daemon *Daemon) publishPull(ctx context.Context, c kernel.PublishableChang
 	}
 	if strings.TrimSpace(issueBody) == "" {
 		issueBody = c.Task.Result
+	} else if c.Pull != 0 && strings.TrimSpace(c.Task.Result) != "" {
+		issueBody = c.Task.Result + "\n\n" + issueBody
 	}
 	issueBody = string(redactTerminalText([]byte(issueBody)))
 	issueBody = strings.ToValidUTF8(issueBody[:min(len(issueBody), 24000)], "")

@@ -435,11 +435,13 @@ func TestAnEvidenceOnlyCorrectionReplacesOnlyTheBody(t *testing.T) {
 	fixture, c, source, app, checkout := publishFixture(t, 1, false)
 	ctx := context.Background()
 	app.tip, c.Pull = c.Head, 31 // the branch already is the worker's head
+	app.issueBody = "Current operator scope"
 	c.Task.Result = "Premise not reproduced: the cited line already guards it."
 	if err := fixture.daemon.publishChange(ctx, c, "team/repo", source, app.call, checkout); err != nil {
 		t.Fatal(err)
 	}
-	if len(app.writes) != 1 || app.writes[0]["name"] != "update_pull_request_body" || !strings.Contains(app.writes[0]["arguments"].(map[string]any)["body"].(string), "Premise not reproduced") {
+	body := app.writes[0]["arguments"].(map[string]any)["body"].(string)
+	if len(app.writes) != 1 || app.writes[0]["name"] != "update_pull_request_body" || !strings.Contains(body, "Premise not reproduced") || !strings.Contains(body, "Current operator scope") {
 		t.Fatalf("writes = %+v", app.writes)
 	}
 }
