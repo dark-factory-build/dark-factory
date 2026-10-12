@@ -13,7 +13,8 @@ use crate::{
         AppAuthority, CreateIssue, CreatePullRequest, EnqueuePullRequest, ListDeployments,
         ListIssues, ListPullRequests, ObserveFile, ObserveIssue, ObservePullRequestChecks,
         ObservePullRequestMerge, ObserveRef, ObserveRepository, ObserveTree, OperationError,
-        PublishCommit, SubmitPullRequestReview, UpdatePullRequestBody, canonical_operation_id,
+        PublishCommit, PublishPack, SubmitPullRequestReview, UpdatePullRequestBody,
+        canonical_operation_id,
     },
     journal::DeliveryJournal,
 };
@@ -680,6 +681,37 @@ fn tools() -> Value {
         },
         "annotations": {"readOnlyHint": false, "destructiveHint": false, "idempotentHint": true, "openWorldHint": true}
     }, {
+        "name": "publish_pack",
+        "title": "Publish an exact Git pack to a factory branch",
+        "description": "Move one factory/ branch from expected_head_sha (absent: the branch must not exist) to head_sha by pushing a Git pack whose objects GitHub stores byte for byte. Send the pack in order as chunks of exactly 262144 bytes, the last one shorter, at most 128; every call repeats the same fields but chunk_index and chunk_base64, which bind each chunk to pack_sha256. The last chunk pushes the pack with the expected head as the ref's precondition, so a moved branch is refused. It applies no path policy: factoryd refuses review-authority paths before sending, and offers this tool to no agent. Resending a chunk with the same operation UUID is a replay.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "repository": {"type": "string", "pattern": "^[A-Za-z0-9-]{1,39}/[A-Za-z0-9._-]{1,100}$"},
+                "operation_id": {"type": "string", "pattern": "^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$"},
+                "branch": {"type": "string", "pattern": "^factory/", "maxLength": 240},
+                "expected_head_sha": {"type": "string", "pattern": "^[0-9a-f]{40}$"},
+                "head_sha": {"type": "string", "pattern": "^[0-9a-f]{40}$"},
+                "pack_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+                "pack_bytes": {"type": "integer", "minimum": 1, "maximum": 33554432},
+                "chunk_index": {"type": "integer", "minimum": 0, "maximum": 127},
+                "chunk_base64": {"type": "string", "minLength": 4, "maxLength": 349528}
+            },
+            "required": ["repository", "operation_id", "branch", "head_sha", "pack_sha256", "pack_bytes", "chunk_index", "chunk_base64"],
+            "additionalProperties": false
+        },
+        "outputSchema": {
+            "type": "object",
+            "properties": {
+                "branch": {"type": "string"},
+                "received_chunks": {"type": "integer"},
+                "commit_sha": {"type": ["string", "null"]}
+            },
+            "required": ["branch", "received_chunks", "commit_sha"],
+            "additionalProperties": false
+        },
+        "annotations": {"readOnlyHint": false, "destructiveHint": false, "idempotentHint": true, "openWorldHint": true}
+    }, {
         "name": "enqueue_pull_request",
         "title": "Add a pull request to its base branch's merge queue at an exact head",
         "description": "Enqueue one pull request only while its head is still the stated commit and its base is still the stated branch. GitHub tests the entry against the queue's latest base and merges it. A base with no merge queue instead squash-merges the exact head once every check run at it has passed (commit statuses are not read), and entry_id is the merge commit. It is idempotent: a head already queued is success, and a refusal names its typed reason.",
@@ -903,6 +935,17 @@ async fn call_tool(id: Value, request: &Map<String, Value>, mcp: &McpState) -> R
             };
             match mcp.app.publish_commit(&mcp.journal, arguments).await {
                 Ok(result) => serialized_tool_result(id, &result, "Commit is durably published."),
+                Err(error) => operation_error(id, error),
+            }
+        }
+        Some("publish_pack") => {
+            let Ok(arguments) = serde_json::from_value::<PublishPack>(arguments) else {
+                return json_rpc_error(id, -32602, "Invalid params");
+            };
+            match mcp.app.publish_pack(&mcp.journal, arguments).await {
+                Ok(result) => {
+                    serialized_tool_result(id, &result, "Pack chunk is durably recorded.")
+                }
                 Err(error) => operation_error(id, error),
             }
         }

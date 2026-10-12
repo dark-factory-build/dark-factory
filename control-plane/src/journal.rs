@@ -37,6 +37,8 @@ const OPERATION_LEGACY_TABLES: [&str; 2] =
 #[cfg(any(target_arch = "wasm32", feature = "development-sqlite"))]
 const AUTHORITY_MIGRATION_SQL: &str = include_str!("../migrations/0005_operation_authorities.sql");
 #[cfg(any(target_arch = "wasm32", feature = "development-sqlite"))]
+const CHUNK_MIGRATION_SQL: &str = include_str!("../migrations/0006_operation_chunks.sql");
+#[cfg(any(target_arch = "wasm32", feature = "development-sqlite"))]
 const MIGRATION_TABLE_SQL: &str = "CREATE TABLE IF NOT EXISTS control_plane_migrations (
     component TEXT PRIMARY KEY,
     revision TEXT NOT NULL,
@@ -137,6 +139,45 @@ pub(crate) enum OperationRecord {
     Indeterminate,
     Conflict,
 }
+
+/// One ordered piece of an operation's upload: canonical base64 of at most
+/// 256 KiB, bound to the operation's request digest, `index` of `count`.
+#[cfg(any(target_arch = "wasm32", feature = "development-sqlite"))]
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub(crate) struct Chunk {
+    pub(crate) operation: Operation,
+    pub(crate) index: u32,
+    pub(crate) count: u32,
+    pub(crate) content: String,
+}
+
+#[cfg(any(target_arch = "wasm32", feature = "development-sqlite"))]
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum ChunkRecord {
+    /// How many leading chunks the journal holds.
+    Received(u32),
+    /// Every chunk, in order, once the last one is held.
+    Assembled(Vec<String>),
+    /// Another operation's, out of order, different from the held one, or the
+    /// operation is no longer open.
+    Conflict,
+}
+
+#[cfg(any(target_arch = "wasm32", feature = "development-sqlite"))]
+const CHUNK_HELD: &str =
+    "SELECT content FROM maintainer_operation_chunks WHERE operation_id = ? AND chunk_index = ?";
+#[cfg(any(target_arch = "wasm32", feature = "development-sqlite"))]
+const CHUNK_COUNT: &str =
+    "SELECT count(*) AS held FROM maintainer_operation_chunks WHERE operation_id = ?";
+#[cfg(any(target_arch = "wasm32", feature = "development-sqlite"))]
+const CHUNK_INSERT: &str =
+    "INSERT INTO maintainer_operation_chunks (operation_id, chunk_index, content) VALUES (?, ?, ?)";
+#[cfg(any(target_arch = "wasm32", feature = "development-sqlite"))]
+const CHUNKS: &str =
+    "SELECT content FROM maintainer_operation_chunks WHERE operation_id = ? ORDER BY chunk_index";
+#[cfg(any(target_arch = "wasm32", feature = "development-sqlite"))]
+const CHUNKS_DELETE: &str = "DELETE FROM maintainer_operation_chunks WHERE operation_id = ?";
 
 #[cfg(any(target_arch = "wasm32", feature = "development-sqlite"))]
 #[derive(Debug, Deserialize)]
@@ -339,6 +380,24 @@ impl DeliveryJournal {
             Self::Unavailable => Err(Error::InvalidSchema),
         }
     }
+
+    /// Hold the next chunk of an open operation's upload. A chunk already held
+    /// replays only with identical content, and chunks arrive in order, so the
+    /// assembled upload is exactly what was sent, once.
+    #[cfg(any(target_arch = "wasm32", feature = "development-sqlite"))]
+    pub(crate) async fn append_chunk(&self, chunk: Chunk) -> Result<ChunkRecord, Error> {
+        match self {
+            #[cfg(target_arch = "wasm32")]
+            Self::Cloudflare(journal) => journal.append_chunk(&chunk).await,
+            #[cfg(feature = "development-sqlite")]
+            Self::Sqlite(journal) => {
+                let journal = journal.clone();
+                tokio::task::spawn_blocking(move || journal.append_chunk(&chunk)).await?
+            }
+            #[cfg(all(not(target_arch = "wasm32"), not(feature = "development-sqlite")))]
+            Self::Unavailable => Err(Error::InvalidSchema),
+        }
+    }
 }
 
 #[cfg(any(target_arch = "wasm32", feature = "development-sqlite"))]
@@ -454,6 +513,32 @@ impl CloudflareJournal {
             .into(),
         ));
         let request = Request::new_with_init("https://journal.internal/operation/observe", &init)?;
+        let mut response = stub.fetch_with_request(request).await?;
+        if response.status_code() != 200 {
+            return Err(Error::InvalidSchema);
+        }
+        Ok(response.json().await?)
+    }
+
+    async fn append_chunk(&self, chunk: &Chunk) -> Result<ChunkRecord, Error> {
+        #[derive(Serialize)]
+        struct Message<'a> {
+            chunk: &'a Chunk,
+            scope: &'a OperationScope,
+        }
+        let stub = self.namespace.get_by_name(&operation_shard_name(
+            self.app_id,
+            &chunk.operation.operation_id,
+        ))?;
+        let mut init = RequestInit::new();
+        init.with_method(Method::Post).with_body(Some(
+            serde_json::to_string(&Message {
+                chunk,
+                scope: &self.scope,
+            })?
+            .into(),
+        ));
+        let request = Request::new_with_init("https://journal.internal/operation/chunk", &init)?;
         let mut response = stub.fetch_with_request(request).await?;
         if response.status_code() != 200 {
             return Err(Error::InvalidSchema);
@@ -607,6 +692,22 @@ impl DurableObject for MaintainerDeliveryJournal {
                 match result {
                     Ok(true) => Response::from_json(&OperationRecord::New),
                     Ok(false) => Response::from_json(&OperationRecord::Conflict),
+                    Err(_) => Response::error("journal unavailable", 503),
+                }
+            }
+            (Method::Post, "/operation/chunk") => {
+                #[derive(Deserialize)]
+                struct Message {
+                    chunk: Chunk,
+                    scope: OperationScope,
+                }
+                let result = async {
+                    let message: Message = request.json().await?;
+                    append_chunk_cloudflare(&self.sql, &message.chunk, &message.scope)
+                }
+                .await;
+                match result {
+                    Ok(record) => Response::from_json(&record),
                     Err(_) => Response::error("journal unavailable", 503),
                 }
             }
@@ -816,6 +917,7 @@ fn initialize_cloudflare_schema(sql: &SqlStorage) -> Result<(), Error> {
     migrate_operations(sql)?;
     sql.exec(OPERATION_MIGRATION_SQL, None)?;
     sql.exec(AUTHORITY_MIGRATION_SQL, None)?;
+    sql.exec(CHUNK_MIGRATION_SQL, None)?;
     sql.exec(
         "INSERT INTO control_plane_migrations (component, revision, digest)
          VALUES (?, ?, ?) ON CONFLICT(component) DO NOTHING",
@@ -887,7 +989,10 @@ fn audit_cloudflare_schema(sql: &SqlStorage) -> Result<(), Error> {
         )?
         .to_array::<MigrationRow>()?;
     let authority_schema = sql.exec("SELECT sql FROM sqlite_schema WHERE type = 'table' AND name = 'maintainer_operation_authorities'", None)?.to_array::<SchemaRow>()?;
+    let chunk_schema = sql.exec("SELECT sql FROM sqlite_schema WHERE type = 'table' AND name = 'maintainer_operation_chunks'", None)?.to_array::<SchemaRow>()?;
     let exact = authority_schema.len() == 1
+        && chunk_schema.len() == 1
+        && normalized_sql(&chunk_schema[0].sql) == expected_stored_sql(CHUNK_MIGRATION_SQL)
         && normalized_sql(&authority_schema[0].sql) == expected_stored_sql(AUTHORITY_MIGRATION_SQL)
         && delivery_schema.len() == 1
         && normalized_sql(&delivery_schema[0].sql) == expected_stored_sql(DELIVERY_MIGRATION_SQL)
@@ -1031,10 +1136,74 @@ fn mark_operation_cloudflare(
     if update.rows_written() != 1 {
         return stored_operation_cloudflare(sql, operation);
     }
+    if matches!(
+        transition,
+        OperationTransition::Completed(_) | OperationTransition::Refused
+    ) {
+        sql.exec(CHUNKS_DELETE, vec![operation.operation_id.as_str().into()])?;
+    }
     if matches!(transition, OperationTransition::Executing) {
         return Ok(OperationRecord::Claimed);
     }
     stored_operation_cloudflare(sql, operation)
+}
+
+#[cfg(target_arch = "wasm32")]
+fn append_chunk_cloudflare(
+    sql: &SqlStorage,
+    chunk: &Chunk,
+    scope: &OperationScope,
+) -> Result<ChunkRecord, Error> {
+    #[derive(Deserialize)]
+    struct Content {
+        content: String,
+    }
+    #[derive(Deserialize)]
+    struct Held {
+        held: u32,
+    }
+    let id = chunk.operation.operation_id.as_str();
+    if !authorize_operation_cloudflare(sql, id, scope, false)?
+        || !matches!(
+            stored_operation_cloudflare(sql, &chunk.operation)?,
+            OperationRecord::Planned | OperationRecord::Executing | OperationRecord::Indeterminate
+        )
+    {
+        return Ok(ChunkRecord::Conflict);
+    }
+    let held = || -> Result<u32, Error> {
+        let rows = sql.exec(CHUNK_COUNT, vec![id.into()])?.to_array::<Held>()?;
+        rows.first()
+            .map(|row| row.held)
+            .ok_or(Error::MissingConflict)
+    };
+    let index = chunk.index.to_string();
+    let stored = sql
+        .exec(CHUNK_HELD, vec![id.into(), index.as_str().into()])?
+        .to_array::<Content>()?;
+    match stored.as_slice() {
+        [stored] if stored.content != chunk.content => return Ok(ChunkRecord::Conflict),
+        [_] => {}
+        _ if held()? != chunk.index => return Ok(ChunkRecord::Conflict),
+        _ => {
+            sql.exec(
+                CHUNK_INSERT,
+                vec![
+                    id.into(),
+                    index.as_str().into(),
+                    chunk.content.as_str().into(),
+                ],
+            )?;
+        }
+    }
+    let held = held()?;
+    if held < chunk.count {
+        return Ok(ChunkRecord::Received(held));
+    }
+    let chunks = sql.exec(CHUNKS, vec![id.into()])?.to_array::<Content>()?;
+    Ok(ChunkRecord::Assembled(
+        chunks.into_iter().map(|chunk| chunk.content).collect(),
+    ))
 }
 
 #[cfg(any(target_arch = "wasm32", feature = "development-sqlite"))]
@@ -1087,6 +1256,7 @@ impl SqliteJournal {
         migrate_operations_sqlite(&connection)?;
         connection.execute_batch(OPERATION_MIGRATION_SQL)?;
         connection.execute_batch(AUTHORITY_MIGRATION_SQL)?;
+        connection.execute_batch(CHUNK_MIGRATION_SQL)?;
         connection.execute(
             "INSERT INTO control_plane_migrations (component, revision, digest)
              VALUES (?1, ?2, ?3) ON CONFLICT(component) DO NOTHING",
@@ -1211,6 +1381,14 @@ impl SqliteJournal {
                 operation.request_digest
             ],
         )?;
+        if changed == 1
+            && matches!(
+                transition,
+                OperationTransition::Completed(_) | OperationTransition::Refused
+            )
+        {
+            transaction.execute(CHUNKS_DELETE, [&operation.operation_id])?;
+        }
         let record = if changed == 1 && matches!(transition, OperationTransition::Executing) {
             OperationRecord::Claimed
         } else {
@@ -1227,6 +1405,47 @@ impl SqliteJournal {
             return Ok(None);
         }
         observe_operation_sqlite(&connection, operation_id)
+    }
+
+    fn append_chunk(&self, chunk: &Chunk) -> Result<ChunkRecord, Error> {
+        let mut connection = self.connection()?;
+        audit_sqlite_schema(&connection)?;
+        let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let id = chunk.operation.operation_id.as_str();
+        if !authorize_operation_sqlite(&transaction, id, &self.scope, false)?
+            || !matches!(
+                stored_operation_sqlite(&transaction, &chunk.operation)?,
+                OperationRecord::Planned
+                    | OperationRecord::Executing
+                    | OperationRecord::Indeterminate
+            )
+        {
+            return Ok(ChunkRecord::Conflict);
+        }
+        let held = || transaction.query_row(CHUNK_COUNT, [id], |row| row.get::<_, u32>(0));
+        let stored: Option<String> = transaction
+            .query_row(CHUNK_HELD, params![id, chunk.index], |row| row.get(0))
+            .optional()?;
+        match stored {
+            Some(stored) if stored != chunk.content => return Ok(ChunkRecord::Conflict),
+            Some(_) => {}
+            None if held()? != chunk.index => return Ok(ChunkRecord::Conflict),
+            None => {
+                transaction.execute(CHUNK_INSERT, params![id, chunk.index, chunk.content])?;
+            }
+        }
+        let held = held()?;
+        let record = if held < chunk.count {
+            ChunkRecord::Received(held)
+        } else {
+            let mut statement = transaction.prepare(CHUNKS)?;
+            let chunks = statement
+                .query_map([id], |row| row.get(0))?
+                .collect::<Result<_, _>>()?;
+            ChunkRecord::Assembled(chunks)
+        };
+        transaction.commit()?;
+        Ok(record)
     }
 
     fn connection(&self) -> Result<Connection, rusqlite::Error> {
@@ -1355,6 +1574,8 @@ fn audit_sqlite_schema(connection: &Connection) -> Result<(), Error> {
         .optional()?;
     let exact = schema("maintainer_operation_authorities")?
         .is_some_and(|sql| normalized_sql(&sql) == expected_stored_sql(AUTHORITY_MIGRATION_SQL))
+        && schema("maintainer_operation_chunks")?
+            .is_some_and(|sql| normalized_sql(&sql) == expected_stored_sql(CHUNK_MIGRATION_SQL))
         && schema("maintainer_deliveries")?
             .is_some_and(|sql| normalized_sql(&sql) == expected_stored_sql(DELIVERY_MIGRATION_SQL))
         && schema("maintainer_operations")?.is_some_and(|sql| {
@@ -1807,6 +2028,135 @@ mod operation_tests {
         assert!(matches!(
             journal.begin_operation(&conflict).await.unwrap(),
             OperationRecord::Conflict
+        ));
+    }
+
+    #[tokio::test]
+    async fn chunks_are_ordered_replay_safe_scoped_and_released_with_their_operation() {
+        let directory = tempfile::tempdir().unwrap();
+        let database = directory.path().join("journal.db");
+        let legacy = DeliveryJournal::open_development(&database).unwrap();
+        let alice = legacy
+            .for_connection(&"a".repeat(64), "team/shared")
+            .unwrap();
+        let other_repo = legacy
+            .for_connection(&"a".repeat(64), "team/other")
+            .unwrap();
+        let operation = Operation {
+            operation_id: "5c8a5c44-7f1f-11f0-952e-acde48001122".into(),
+            kind: "publish_pack".into(),
+            request_digest: "e".repeat(64),
+        };
+        let chunk = |operation: &Operation, index: u32, content: &str| Chunk {
+            operation: operation.clone(),
+            index,
+            count: 3,
+            content: content.into(),
+        };
+        // No chunk before its operation is open.
+        assert!(matches!(
+            alice
+                .append_chunk(chunk(&operation, 0, "AAAA"))
+                .await
+                .unwrap(),
+            ChunkRecord::Conflict
+        ));
+        assert!(matches!(
+            alice.begin_operation(&operation).await.unwrap(),
+            OperationRecord::New
+        ));
+        let other_request = Operation {
+            request_digest: "f".repeat(64),
+            ..operation.clone()
+        };
+        for (journal, refused) in [
+            (&alice, chunk(&operation, 1, "BBBB")),      // missing chunk 0
+            (&other_repo, chunk(&operation, 0, "AAAA")), // another repository
+            (&legacy, chunk(&operation, 0, "AAAA")),     // another owner
+            (&alice, chunk(&other_request, 0, "AAAA")),  // another request
+        ] {
+            assert!(matches!(
+                journal.append_chunk(refused).await.unwrap(),
+                ChunkRecord::Conflict
+            ));
+        }
+        for _ in 0..2 {
+            assert!(matches!(
+                alice
+                    .append_chunk(chunk(&operation, 0, "AAAA"))
+                    .await
+                    .unwrap(),
+                ChunkRecord::Received(1)
+            ));
+        }
+        assert!(matches!(
+            alice
+                .append_chunk(chunk(&operation, 0, "AAAB"))
+                .await
+                .unwrap(),
+            ChunkRecord::Conflict
+        ));
+        assert!(matches!(
+            alice
+                .append_chunk(chunk(&operation, 1, "BBBB"))
+                .await
+                .unwrap(),
+            ChunkRecord::Received(2)
+        ));
+        // An ambiguous push leaves the chunks for its replay.
+        alice
+            .mark_operation(&operation, OperationTransition::Executing)
+            .await
+            .unwrap();
+        alice
+            .mark_operation(&operation, OperationTransition::Indeterminate)
+            .await
+            .unwrap();
+        for _ in 0..2 {
+            assert!(
+                matches!(alice.append_chunk(chunk(&operation, 2, "CC==")).await.unwrap(), ChunkRecord::Assembled(chunks) if chunks == ["AAAA", "BBBB", "CC=="])
+            );
+        }
+        let held = || {
+            Connection::open(&database)
+                .unwrap()
+                .query_row(
+                    "SELECT count(*) FROM maintainer_operation_chunks",
+                    [],
+                    |row| row.get::<_, i64>(0),
+                )
+                .unwrap()
+        };
+        assert_eq!(held(), 3);
+        // A determinate refusal releases the claim and the chunks, so the
+        // same operation uploads again from its first chunk.
+        alice
+            .mark_operation(&operation, OperationTransition::Refused)
+            .await
+            .unwrap();
+        assert_eq!(held(), 0);
+        assert!(matches!(
+            alice
+                .append_chunk(chunk(&operation, 1, "BBBB"))
+                .await
+                .unwrap(),
+            ChunkRecord::Conflict
+        ));
+        alice
+            .append_chunk(chunk(&operation, 0, "AAAA"))
+            .await
+            .unwrap();
+        alice
+            .mark_operation(&operation, OperationTransition::Completed("{}".into()))
+            .await
+            .unwrap();
+        assert_eq!(held(), 0);
+        assert!(matches!(
+            alice
+                .append_chunk(chunk(&operation, 0, "AAAA"))
+                .await
+                .unwrap(),
+            ChunkRecord::Conflict
         ));
     }
 
