@@ -624,7 +624,7 @@ func TestCodexAttemptMCPNamesAreBoundToRuntimeHome(t *testing.T) {
 		{name: firstName, argv: first.Argv()},
 		{name: secondName, argv: second.Argv()},
 	} {
-		if !strings.Contains(strings.Join(test.argv, "\n"), test.name+".factory tool") {
+		if !strings.Contains(strings.Join(test.argv, "\n"), "mcp__"+test.name+"__factory tool") {
 			t.Fatalf("bootstrap prompt does not name its configured server %q: %q", test.name, test.argv)
 		}
 	}
@@ -1920,7 +1920,7 @@ func TestNativeProvidersShareTheBootstrapPrompt(t *testing.T) {
 			argv := launch.Argv()
 			prompt := argv[len(argv)-1]
 			if kind == kernel.ProviderCodex {
-				prompt = strings.Replace(prompt, codexAttemptServerName(runtime)+".factory", "factory_attempt.factory", 1)
+				prompt = strings.ReplaceAll(prompt, "mcp__"+codexAttemptServerName(runtime)+"__factory", "mcp__factory_attempt__factory")
 			} else if argv[len(argv)-2] != "--" {
 				t.Fatalf("Claude prompt is not separated from variadic options: %q", argv)
 			}
