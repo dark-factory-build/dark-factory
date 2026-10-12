@@ -340,12 +340,13 @@ func TestOverseerWakeSummarisesTasks(t *testing.T) {
 		t.Fatal(err)
 	}
 	head := hex.EncodeToString(moved.Bytes())
-	pr := ProductionPullRequest{Number: 7, Title: "Ship", URL: "https://github.com/example/factory/pull/7", Head: head, Branch: "factory/" + change.ID.String()[:12], Base: "main", State: "open", Review: ProductionReview{Head: head, State: "unknown"}}
+	mergeable := false
+	pr := ProductionPullRequest{Number: 7, Title: "Ship", URL: "https://github.com/example/factory/pull/7", Head: head, Branch: "factory/" + change.ID.String()[:12], Base: "main", State: "open", Mergeable: &mergeable, MergeState: "clean", Review: ProductionReview{Head: head, State: "unknown"}}
 	if err := store.RecordPublication(ctx, finalizing.ProjectID, finalizing.TaskID, "example/factory", pr, mustTime(t, 84)); err != nil {
 		t.Fatal(err)
 	}
 	bodies := wakeBodies(t, store, 80+overseerWakeSettle.Milliseconds())
-	want := "Supervise.\n\nFactory causal wake: mode=full; prior_task_id=; worker tasks queued=1 running=0; open factory PRs conflicting=0 failing=0 approved-not-queued=0. mode=full requires fixed-head reconciliation.\n- " +
+	want := "Supervise.\n\nFactory causal wake: mode=full; prior_task_id=; worker tasks queued=1 running=0; open factory PRs conflicting=1 failing=0 approved-not-queued=0. mode=full requires fixed-head reconciliation.\n- " +
 		finalizing.TaskID.String() + ` "verify" blocked rev=1 change=` + change.ID.String()[:12] + `@` + strings.Repeat("d2", 20) + ` PR #7 open/unknown: needs a decision`
 	if len(bodies) != 1 || bodies[0] != want {
 		t.Fatalf("wake = %q\nwant %q", bodies, want)
@@ -428,12 +429,11 @@ func TestOverseerWakeSkipsPublishedIntakeSuccess(t *testing.T) {
 	}
 }
 
-// An item's re-wakes are counted per item: targeted wakes about other items do
-// not use them up, while a bare instruction (the causal record overflowed) or
-// a full wake counts for every item. Each wake here ran.
+// An unchanged escalation is not re-woken, even when later targeted or full
+// wakes run for other items.
 func TestOverseerRewakesCountPerItem(t *testing.T) {
 	t.Parallel()
-	for other, due := range map[string]bool{"Factory causal wake: mode=targeted; \nEscalated: stuck 8": true, "Supervise.": false} {
+	for other := range map[string]bool{"Factory causal wake: mode=targeted; \nEscalated: stuck 8": true, "Supervise.": false} {
 		ctx := context.Background()
 		store, worker, overseer := wakeFixture(t)
 		head := strings.Repeat("a", 40)
@@ -456,8 +456,8 @@ func TestOverseerRewakesCountPerItem(t *testing.T) {
 			at += 20
 		}
 		bodies := wakeBodies(t, store, at+OverseerRewakeAfter.Milliseconds())
-		if got := len(bodies) == 1 && strings.Contains(bodies[0], "Escalated: stuck 7"); got != due {
-			t.Fatalf("after four %q wakes: wake = %q, want due=%v", other, bodies, due)
+		if got := len(bodies) == 1 && strings.Contains(bodies[0], "Escalated: stuck 7"); got {
+			t.Fatalf("unchanged escalation re-woke after %q: %q", other, bodies)
 		}
 	}
 }
@@ -514,8 +514,9 @@ func TestOverseerNeverStartedWakeLeavesItemDue(t *testing.T) {
 		if bodies := wakeBodies(t, store, 2+overseerWakeSettle.Milliseconds()); len(bodies) != 0 {
 			t.Fatalf("detail %q: woken again within the half hour = %q", detail, bodies)
 		}
-		if bodies := wakeBodies(t, store, 4+OverseerRewakeAfter.Milliseconds()); len(bodies) != 1 || !strings.Contains(bodies[0], "Escalated: stuck 7") {
-			t.Fatalf("detail %q: wake after the half hour = %q", detail, bodies)
+		bodies := wakeBodies(t, store, 4+OverseerRewakeAfter.Milliseconds())
+		if want := detail == NeverStartedRunDetail; (len(bodies) == 1 && strings.Contains(bodies[0], "Escalated: stuck 7")) != want {
+			t.Fatalf("detail %q: wake after the half hour = %q, want=%v", detail, bodies, want)
 		}
 	}
 }
@@ -559,11 +560,8 @@ func settleCarrier(t *testing.T, store *Store, at int64, seed byte, detail strin
 	}
 }
 
-// Re-wakes are counted per item, and only for wakes whose run started: wakes
-// naming other items, or that never started, leave an item its re-wakes. Any
-// wake that named an item, started or not, holds its next one off for
-// OverseerRewakeAfter. An item past its re-wakes becomes one NEEDS YOU card,
-// raised once, whose reply resumes the last carrier with the question.
+// An escalation is delivered once per head and reason, then becomes one NEEDS
+// YOU card. A wake that never started remains eligible for its one delivery.
 func TestOverseerRewakesCountPerItemAndStartedOnly(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
@@ -677,8 +675,8 @@ func TestCancelledStalledCardStaysCancelled(t *testing.T) {
 	}
 }
 
-// stalledCard drives escalation 7 through one never-started wake, wakes about
-// other items, and its four counted wakes to its NEEDS YOU card, raised once.
+// stalledCard drives escalation 7 through one never-started wake, one started
+// wake, and wakes about other items to its NEEDS YOU card, raised once.
 func stalledCard(t *testing.T) (*Store, Agent, Task, OperatorHumanRequest, int64, func() byte) {
 	t.Helper()
 	head := strings.Repeat("a", 40)
@@ -705,29 +703,13 @@ func stalledCard(t *testing.T) (*Store, Agent, Task, OperatorHumanRequest, int64
 		t.Fatalf("never-started wake re-woke at once = %q", bodies)
 	}
 	at += rewake
-	wake("Escalated: stuck 7")
+	tasks, err := store.EnqueueOverseerWakeups(context.Background(), mustTime(t, at))
+	if err != nil || len(tasks) != 1 || !strings.Contains(tasks[0].Body, "Escalated: stuck 7") {
+		t.Fatalf("started wake = %+v, %v", tasks, err)
+	}
+	last := tasks[0]
 	settleCarrier(t, store, at+1, next(), "ran")
-	// Wakes about another item do not use up item 7's re-wakes.
-	for round := range 4 {
-		escalate(t, store, worker.ProjectID, fmt.Sprint(20+round), "open", head, head, at+10)
-		at += 10 + overseerWakeMaxDelay.Milliseconds()
-		bodies := wakeBodies(t, store, at)
-		if len(bodies) != 1 || strings.Contains(bodies[0], "stuck 7") {
-			t.Fatalf("round %d wake = %q", round, bodies)
-		}
-		settleCarrier(t, store, at+1, next(), "ran")
-	}
-	var last Task
-	for rewakes := 1; rewakes <= 3; rewakes++ {
-		at += rewake
-		tasks, err := store.EnqueueOverseerWakeups(context.Background(), mustTime(t, at))
-		if err != nil || len(tasks) != 1 || !strings.Contains(tasks[0].Body, "Escalated: stuck 7") {
-			t.Fatalf("re-wake %d = %+v, %v", rewakes, tasks, err)
-		}
-		last = tasks[0]
-		settleCarrier(t, store, at+1, next(), "ran")
-	}
-	// Stalled: no fifth wake, and one card however often the poll runs.
+	// Stalled: no second wake for item 7, and one card however often the poll runs.
 	at += 10 * rewake
 	for range 2 {
 		if bodies := wakeBodies(t, store, at); len(bodies) != 0 {
@@ -789,13 +771,10 @@ func TestOverseerItemsShowStalledAndDue(t *testing.T) {
 	head := strings.Repeat("a", 40)
 	escalate(t, store, worker.ProjectID, "30", "open", head, head, at)
 	items, err := store.OverseerItems(context.Background(), worker.ProjectID, mustTime(t, at+overseerWakeMaxDelay.Milliseconds()))
-	if err != nil || len(items) != 6 || !items[0].Due || items[0].Line != "Escalated: stuck 30 [reviewer:op30]" {
+	if err != nil || len(items) != 2 || !items[0].Due || items[0].Line != "Escalated: stuck 30 [reviewer:op30]" {
 		t.Fatalf("items = %+v, %v", items, err)
 	}
-	for index, item := range items[1:] {
-		want := fmt.Sprintf("Escalated: stuck %d [reviewer:op%[1]d]", map[bool]int{true: 7, false: 19 + index}[index == 0])
-		if item.Due || item.Line != want || !bytes.Equal(item.Carrier, last.ID.Bytes()) {
-			t.Fatalf("stalled item %d = %+v, want %q", index, item, want)
-		}
+	if items[1].Due || items[1].Line != "Escalated: stuck 7 [reviewer:op7]" || !bytes.Equal(items[1].Carrier, last.ID.Bytes()) {
+		t.Fatalf("stalled item = %+v", items[1])
 	}
 }

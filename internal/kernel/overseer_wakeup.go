@@ -92,7 +92,7 @@ item AS (
 	JOIN intake_acceptances AS i ON i.id = b.acceptance_id
 	JOIN agents AS o ON o.id = i.overseer_agent_id
 	WHERE t.project_id = ?1 AND o.id = ?4 AND ` + taskEndedAutomatically + ` AND NOT ` + taskIssueWithdrawn + `
-	UNION ALL SELECT NULL, e.observed_at_ms, CASE WHEN json_extract(e.document, '$.owner_approval') THEN 0 ELSE 3 END,
+	UNION ALL SELECT NULL, e.observed_at_ms, 0,
 	  'Escalated: ' || json_extract(e.document, '$.escalation'), '[reviewer:' || e.identity || ']' FROM production_records AS e
 	JOIN production_records AS p ON p.project_id = e.project_id AND p.repository = e.repository AND p.kind = 'pull_request'
 	  AND p.identity = CAST(json_extract(e.document, '$.request.PullNumber') AS TEXT)
@@ -525,7 +525,7 @@ const overseerWakeCounts = `WITH open_pr AS (SELECT p.repository, CAST(json_extr
 		  AND json_extract(c.document, '$.conclusion') IN ('failure', 'timed_out', 'action_required', 'cancelled', 'startup_failure')) AS failing
 	FROM open_pr)
 SELECT printf('worker tasks queued=%d running=%d; open factory PRs conflicting=%d failing=%d approved-not-queued=%d', COALESCE(SUM(t.status = 'queued'), 0), COALESCE(SUM(t.status = 'running'), 0),
-	(SELECT COALESCE(SUM(merge_state = 'dirty' OR COALESCE(mergeable = 0, 0)), 0) FROM classified),
+	(SELECT COALESCE(SUM(mergeable = 0), 0) FROM classified),
 	(SELECT COALESCE(SUM(failing), 0) FROM classified),
 	(SELECT COALESCE(SUM(review = 'allow' AND NOT failing AND merge_state <> 'dirty' AND COALESCE(mergeable, 1) <> 0 AND merge_queue = 'none'), 0) FROM classified))
 FROM tasks AS t LEFT JOIN agents AS a ON a.id = t.assigned_agent_id
@@ -571,6 +571,9 @@ func overseerWakeInstruction(provider Provider, instruction, counts string, line
 			mode = "full"
 		}
 		body := instruction + "\n\nFactory causal wake: mode=" + mode + "; prior_task_id=" + priorID + "; " + counts + ". mode=full requires fixed-head reconciliation."
+		if len(escalations) != 0 {
+			body += "\nFactoryd escalations are first-party facts; do not re-verify them. Reproduce claims from other agents."
+		}
 		for _, line := range slices.Concat(lines, escalations) {
 			body += "\n" + line
 		}
