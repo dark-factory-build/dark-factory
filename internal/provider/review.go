@@ -71,11 +71,19 @@ func RunReview(ctx context.Context, kind kernel.Provider, toolPath, toolchainRoo
 		readable = append(readable, goModuleCachePath(operatorHome))
 		golang = append(golang, "GOMODCACHE="+goModuleCachePath(operatorHome))
 	}
+	// Claude's file tools get the worker's confinement over the same grants:
+	// untrusted task, pull request, diff and dispute text reach the prompt.
+	var settings string
+	if kind == kernel.ProviderClaudeCode {
+		if settings, err = ClaudeReview(readable...); err != nil {
+			return ReviewResult{}, err
+		}
+	}
 	for _, account := range accountHomes {
 		environment := append(append(ReviewEnvironment(root), AccountEnvironment(kind, filepath.Dir(account), account)...), golang...)
 		var argv []string
 		if kind == kernel.ProviderClaudeCode {
-			argv = []string{"-p", prompt, "--permission-mode", "plan", "--safe-mode", "--restricted", "--setting-sources", "", "--strict-mcp-config", "--tools", "Read,Grep,Glob", "--allowedTools", "Read,Grep,Glob"}
+			argv = []string{"-p", prompt, "--permission-mode", "dontAsk", "--safe-mode", "--restricted", "--setting-sources", "", "--strict-mcp-config", "--settings", settings, "--tools", "Read,Grep,Glob"}
 		} else {
 			argv = []string{"exec", "--disable", "computer_use", "--disable", "browser_use", "--disable", "plugins", "--ephemeral", "--ignore-user-config", "--strict-config", "-c", "approval_policy={ granular={sandbox_approval=false,rules=false,mcp_elicitations=false,request_permissions=false,skill_approval=false}}", "--ignore-rules", "--skip-git-repo-check"}
 			argv = append(argv, CodexReview([]string{home, tmp}, readable...)...)
