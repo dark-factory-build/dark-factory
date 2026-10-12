@@ -140,6 +140,25 @@ func TestReportIncludesMainCheckWithoutPullRequest(t *testing.T) {
 	}
 }
 
+func TestRepeatedCompletedCheckIsNotNewAgain(t *testing.T) {
+	t.Parallel()
+	store, _, project, _ := newAdmissionStore(t, RoleOrchestrator, 1)
+	defer store.Close()
+	check := ProductionCheck{ID: "main:13", Name: "main", Revision: strings.Repeat("a", 40), Scope: "main", State: "completed", Conclusion: "failure", URL: "https://github.com/o/r/actions/runs/13"}
+	observation := ProductionObservation{Repository: "example/factory", ObservedAt: 10, Checks: []ProductionCheck{check}}
+	if err := store.RecordProductionObservation(context.Background(), project.ID, observation, mustTime(t, 10)); err != nil {
+		t.Fatal(err)
+	}
+	observation.ObservedAt = 20
+	if err := store.RecordProductionObservation(context.Background(), project.ID, observation, mustTime(t, 20)); err != nil {
+		t.Fatal(err)
+	}
+	lines, err := store.Report(context.Background(), &project.ID, 15, 1)
+	if err != nil || strings.Contains(strings.Join(lines, "\n"), "failure ") {
+		t.Fatalf("repeated failure report = %q, %v", lines, err)
+	}
+}
+
 func TestReportLessonCountersUseLatestRevision(t *testing.T) {
 	t.Parallel()
 	// The lesson counters are new report behavior; this guards their stated

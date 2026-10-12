@@ -59,21 +59,7 @@ func (daemon *Daemon) refreshProduction(ctx context.Context, project kernel.Proj
 		}
 		var observation kernel.ProductionObservation
 		if err == nil {
-			observation, err = pullRequestObservation(ctx, daemon.github.MCP, identity.PublicationRepository, githubID, known, settled, daemon.noteMaintainerFault)
-			if err == nil {
-				var mainChecks []maintainerMainCheck
-				mainChecks, mainErr := readMaintainerMainChecks(ctx, daemon.github.MCP, identity.PublicationRepository, githubID)
-				if mainErr != nil {
-					observation.Unavailable = "main_checks"
-				} else if len(mainChecks) > 0 {
-					converted := mainChecksToProduction(mainChecks, mainChecks[0].Revision)
-					if len(observation.Checks)+len(converted) > kernel.MaxObservationChecks {
-						observation.Unavailable = "checks"
-					} else {
-						observation.Checks = append(observation.Checks, converted...)
-					}
-				}
-			}
+			observation, err = productionObservation(ctx, daemon.github.MCP, identity.PublicationRepository, githubID, known, settled, daemon.noteMaintainerFault)
 		}
 		if err != nil {
 			LogFactoryd(daemon.log, "factoryd: refresh %s: %v\n", identity.PublicationRepository, err)
@@ -98,6 +84,27 @@ func (daemon *Daemon) refreshProduction(ctx context.Context, project kernel.Proj
 		recordCIObservations(daemon.runtimeStore(), repository.ID.String(), observation, at.Int64())
 	}
 	return nil
+}
+
+func productionObservation(ctx context.Context, call maintainerMCP, repository string, githubID uint64, known []kernel.ProductionPullRequest, settled map[kernel.ProductionHead]bool, fault func(error)) (kernel.ProductionObservation, error) {
+	observation, err := pullRequestObservation(ctx, call, repository, githubID, known, settled, fault)
+	if err != nil {
+		return observation, err
+	}
+	mainChecks, mainErr := readMaintainerMainChecks(ctx, call, repository, githubID)
+	if mainErr != nil {
+		observation.Unavailable = "main_checks"
+		return observation, nil
+	}
+	if len(mainChecks) > 0 {
+		converted := mainChecksToProduction(mainChecks, mainChecks[0].Revision)
+		if len(observation.Checks)+len(converted) > kernel.MaxObservationChecks {
+			observation.Unavailable = "checks"
+		} else {
+			observation.Checks = append(observation.Checks, converted...)
+		}
+	}
+	return observation, nil
 }
 
 // refreshProductionDetached serves the browser's Production read, whose 3s

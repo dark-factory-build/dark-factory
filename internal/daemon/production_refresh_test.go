@@ -3,6 +3,7 @@ package daemon
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strings"
 	"testing"
@@ -131,14 +132,22 @@ func TestRefreshProjectsMergeGroupAndMainChecks(t *testing.T) {
 			return nil, nil
 		}
 	}
-	got, err := pullRequestObservation(context.Background(), call, "o/r", 1, nil, nil, func(error) {})
-	main, mainErr := readMaintainerMainChecks(context.Background(), call, "o/r", 1)
-	got.Checks = append(got.Checks, mainChecksToProduction(main, main[0].Revision)...)
-	if err != nil || mainErr != nil || len(got.Checks) != 2 {
+	got, err := productionObservation(context.Background(), call, "o/r", 1, nil, nil, func(error) {})
+	if err != nil || len(got.Checks) != 2 {
 		t.Fatalf("observation = %+v, %v", got, err)
 	}
 	if got.Checks[0].Scope != "merge_group" || got.Checks[0].Jobs[0].Annotations[0] != "--- FAIL: TestQueue" || got.Checks[1].Scope != "main" || got.Checks[1].Revision != base {
 		t.Fatalf("projected checks = %+v", got.Checks)
+	}
+	withoutMain := func(ctx context.Context, request json.RawMessage, repositories map[string]uint64) (json.RawMessage, error) {
+		if strings.Contains(string(request), "observe_repository_checks") {
+			return nil, errors.New("main checks unavailable")
+		}
+		return call(ctx, request, repositories)
+	}
+	retained, err := productionObservation(context.Background(), withoutMain, "o/r", 1, nil, nil, func(error) {})
+	if err != nil || retained.Unavailable != "main_checks" || len(retained.Checks) != 1 || retained.Checks[0].Scope != "merge_group" {
+		t.Fatalf("retained observation = %+v, %v", retained, err)
 	}
 }
 

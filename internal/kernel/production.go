@@ -173,7 +173,7 @@ func productionRecordOnConnection(ctx context.Context, c *sql.Conn, project Proj
 	}
 	id, body = item.ID, item.Document
 	_, err = c.ExecContext(ctx, `INSERT INTO production_records (project_id, repository, kind, identity, visual_id, document, observed_at_ms) VALUES (?, ?, ?, ?, ?, ?, ?)
-        ON CONFLICT(project_id, repository, kind, identity) DO UPDATE SET document = excluded.document, observed_at_ms = excluded.observed_at_ms
+		ON CONFLICT(project_id, repository, kind, identity) DO UPDATE SET document = excluded.document, observed_at_ms = CASE WHEN production_records.kind = 'check' AND production_records.document = excluded.document THEN production_records.observed_at_ms ELSE excluded.observed_at_ms END
         WHERE excluded.observed_at_ms >= production_records.observed_at_ms`, project.Bytes(), repo, kind, id, visual, string(body), at)
 	return err
 }
