@@ -56,6 +56,21 @@ func projectSnapshot(snapshot kernel.DashboardSnapshot) api.DashboardSnapshot {
 	return result
 }
 
+func (daemon *Daemon) projectSnapshot(snapshot kernel.DashboardSnapshot) api.DashboardSnapshot {
+	result := projectSnapshot(snapshot)
+	homes := make(map[kernel.AccountID]string, len(snapshot.Accounts))
+	for _, account := range snapshot.Accounts {
+		homes[account.ID] = account.Home
+	}
+	for index, agent := range snapshot.Agents {
+		model, effort, source := resolveAgentControls(agent, homes[agent.AccountID], daemon.providerAccountDefaults)
+		result.Agents[index].EffectiveModel = model
+		result.Agents[index].EffectiveReasoningEffort = effort
+		result.Agents[index].ModelSource = source
+	}
+	return result
+}
+
 // projectOverseerSnapshot carries each settled Change's identities. Where
 // to read one comes only from an explicit attempt source request.
 func projectOverseerSnapshot(snapshot kernel.OverseerSnapshot) (api.OverseerSnapshot, error) {

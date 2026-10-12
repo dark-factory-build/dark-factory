@@ -2126,6 +2126,9 @@ func TestDaemonSpecialistOperatorReadsStayInItsProject(t *testing.T) {
 		}
 		call(func() error {
 			snapshot, err := client.Snapshot(ctx)
+			if client == reader && (len(snapshot.Accounts) != 0 || len(snapshot.PeerQuestions) != 0 || len(snapshot.HumanRequests) != 0) {
+				t.Fatalf("scoped snapshot leaked factory collections: accounts=%d peer_questions=%d human_requests=%d", len(snapshot.Accounts), len(snapshot.PeerQuestions), len(snapshot.HumanRequests))
+			}
 			for _, project := range snapshot.Projects {
 				seen["project "+project.ID] = true
 			}

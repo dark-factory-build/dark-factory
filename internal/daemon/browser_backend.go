@@ -1403,17 +1403,7 @@ func projectProject(item kernel.ProjectSummary) browserprotocol.ProjectItem {
 // the one that account will actually launch with; empty means the operator's
 // own login, which is what the daemon falls back to.
 func projectAgentForClient(item kernel.AgentSummary, configHome string, providerDefaults func(string, string) (string, string, string), administration bool) browserprotocol.AgentItem {
-	defaultModel, defaultEffort, source := providerDefaults(item.Provider, configHome)
-	effectiveModel, effectiveEffort := item.Model, item.ReasoningEffort
-	if effectiveModel == "" {
-		effectiveModel = defaultModel
-	}
-	if effectiveEffort == "" {
-		effectiveEffort = defaultEffort
-	}
-	if item.Model != "" {
-		source = "agent"
-	}
+	effectiveModel, effectiveEffort, source := resolveAgentControls(item, configHome, providerDefaults)
 	if !administration {
 		source = ""
 	}
@@ -1427,6 +1417,21 @@ func projectAgentForClient(item kernel.AgentSummary, configHome string, provider
 			QuietReviews: uint8(state.QuietReviews), OpenProposals: uint16(state.OpenProposals), OpenProposalLimit: uint16(state.OpenProposalLimit), LastReviewTaskID: state.LastReviewTaskID}
 	}
 	return projected
+}
+
+func resolveAgentControls(item kernel.AgentSummary, configHome string, providerDefaults func(string, string) (string, string, string)) (string, string, string) {
+	defaultModel, defaultEffort, source := providerDefaults(item.Provider, configHome)
+	effectiveModel, effectiveEffort := item.Model, item.ReasoningEffort
+	if effectiveModel == "" {
+		effectiveModel = defaultModel
+	}
+	if effectiveEffort == "" {
+		effectiveEffort = defaultEffort
+	}
+	if item.Model != "" {
+		source = "agent"
+	}
+	return effectiveModel, effectiveEffort, source
 }
 
 func projectTask(item kernel.TaskSummary) browserprotocol.TaskItem {

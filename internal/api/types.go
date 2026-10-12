@@ -138,6 +138,7 @@ type AgentPaths struct {
 }
 
 type RunTelemetry struct {
+	Tokens       uint64  `json:"tokens,omitempty"`
 	TokensIn     uint64  `json:"tokens_in"`
 	TokensOut    uint64  `json:"tokens_out"`
 	CostMicroUSD uint64  `json:"cost_micro_usd"`

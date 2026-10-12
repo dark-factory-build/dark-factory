@@ -46,6 +46,9 @@ func TestProjectTokenCeilingStopsAdmissionUntilTheAllowanceIsRaised(t *testing.T
 			t.Fatal(err)
 		}
 	}
+	if got, found, err := store.RunTokens(ctx, first.Run.ID); err != nil || !found || got != 100 {
+		t.Fatalf("durable run tokens = %d, found=%v, err=%v", got, found, err)
+	}
 	if got, err := store.ProjectTokens(ctx, project.ID); err != nil || got != (ProjectTokens{TokenLimit: 100, TokensUsed: 100}) {
 		t.Fatalf("tokens = %+v, %v", got, err)
 	}
