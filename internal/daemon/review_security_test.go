@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"strconv"
 	"strings"
 	"syscall"
@@ -339,15 +340,24 @@ func TestCodexReviewerReadsOnlyItsCheckout(t *testing.T) {
 	joined := strings.Join(argv, "\n")
 	root := filepath.Dir(checkout)
 	profile := "\n" + `permissions.dark-factory-review={filesystem={":root"="deny",":minimal"="read","/private/tmp"="deny","/private/var/tmp"="deny",` + strconv.Quote(filepath.Join(root, ".review-home")) + `="write",`
-	if strings.Contains(joined, "--sandbox") || strings.Contains(joined, "sandbox_mode") || strings.Count(joined, `"write"`) != 2 || !strings.Contains(joined, strconv.Quote(filepath.Join(root, ".review-tmp"))+`="write"`) || !strings.Contains(joined, strconv.Quote(checkout)+`="read"`) || !strings.Contains(joined, "\ndefault_permissions=\"dark-factory-review\"\n") || !strings.Contains(joined, profile) || !strings.Contains(joined, strconv.Quote(filepath.Join(registered, ".git", "objects"))+`="read"`) || !strings.Contains(joined, "},network={enabled=false}}\n") {
+	// Each path is granted under its resolved spelling as well (TMPDIR is
+	// a symlink on macOS), so writes are checked by name, not counted.
+	for _, write := range regexp.MustCompile(`"([^"]*)"="write"`).FindAllStringSubmatch(joined, -1) {
+		if name := filepath.Base(write[1]); name != ".review-home" && name != ".review-tmp" {
+			t.Fatalf("reviewer may write %q", write[1])
+		}
+	}
+	if strings.Contains(joined, "--sandbox") || strings.Contains(joined, "sandbox_mode") || !strings.Contains(joined, strconv.Quote(filepath.Join(root, ".review-tmp"))+`="write"`) || !strings.Contains(joined, strconv.Quote(checkout)+`="read"`) || !strings.Contains(joined, "\ndefault_permissions=\"dark-factory-review\"\n") || !strings.Contains(joined, profile) || !strings.Contains(joined, strconv.Quote(filepath.Join(registered, ".git", "objects"))+`="read"`) || !strings.Contains(joined, "},network={enabled=false}}\n") {
 		t.Fatalf("reviewer argv = %q, want the deny-root read-only profile and no --sandbox", argv)
 	}
 }
 
 // A review is given what its change must answer to beyond its diff (#1775):
 // the publishing task's goal, the base commits that touched its paths, and
-// the current, never the tentative, Library lessons about them.
-func TestReviewContextSuppliesGoalHistoryAndCurrentLessons(t *testing.T) {
+// the current, never the tentative, Library decisions about them. Decisions,
+// unlike lessons, need no verification command, so the fixture is the same
+// before and after #1778.
+func TestReviewContextSuppliesGoalHistoryAndCurrentKnowledge(t *testing.T) {
 	backend, _ := reviewerFixture(t)
 	ctx := context.Background()
 	checkout := t.TempDir()
@@ -381,17 +391,17 @@ func TestReviewContextSuppliesGoalHistoryAndCurrentLessons(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if _, err := backend.daemon.store.CreateContent(ctx, kernel.NewContent{ID: id, ProjectID: backend.project, RepositoryID: repository, Kind: kernel.ContentLesson, Title: status + " lesson about changed.go", Author: "operator:local", SourceReferences: `{"status":"` + status + `","evidence":["fixture"]}`, ObjectFormat: "sha1", Commit: strings.Repeat("ab", 20), Path: ".dark-factory/content/lesson.md", RepositoryDevice: 1, RepositoryInode: 2}, mustKernelTime(t, int64(1100+i))); err != nil {
+		if _, err := backend.daemon.store.CreateContent(ctx, kernel.NewContent{ID: id, ProjectID: backend.project, RepositoryID: repository, Kind: kernel.ContentDecision, Title: status + " decision about changed.go", Author: "operator:local", SourceReferences: `{"status":"` + status + `","evidence":["fixture"]}`, ObjectFormat: "sha1", Commit: strings.Repeat("ab", 20), Path: ".dark-factory/content/decision.md", RepositoryDevice: 1, RepositoryInode: 2}, mustKernelTime(t, int64(1100+i))); err != nil {
 			t.Fatal(err)
 		}
 	}
 	context := backend.reviewContext(ctx, checkout, request)
-	for _, want := range []string{"the author's goal", "Earlier fix of changed.go (#7)", "current lesson about changed.go"} {
+	for _, want := range []string{"the author's goal", "Earlier fix of changed.go (#7)", "current decision about changed.go"} {
 		if !strings.Contains(context, want) {
 			t.Fatalf("review context lacks %q:\n%s", want, context)
 		}
 	}
-	for _, unwanted := range []string{"unrelated", "tentative lesson"} {
+	for _, unwanted := range []string{"unrelated", "tentative decision"} {
 		if strings.Contains(context, unwanted) {
 			t.Fatalf("review context has %q:\n%s", unwanted, context)
 		}
