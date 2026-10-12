@@ -217,17 +217,36 @@ func (daemon *Daemon) publishPull(ctx context.Context, c kernel.PublishableChang
 		}
 		return ref.Head, err // "" when the branch does not exist
 	}
-	prefix := "publish-" + c.Head[:8] + "-"
+	legacyPrefix := "publish-" + c.Head[:8] + "-"
+	prefix := "publish-v2-" + c.Head[:8] + "-"
 	var first struct {
 		Parent string `json:"parent_sha"`
+	}
+	// Before the 100-file boundary, step 1 meant exactly the first 50
+	// changes. A completed old receipt must keep that meaning on replay; new
+	// publications use a versioned operation namespace and the 100-file unit.
+	var legacyFirst struct {
+		Parent string `json:"parent_sha"`
+	}
+	legacyDone, err := completed(legacyPrefix+"1", &legacyFirst)
+	legacy := err == nil && state != "" && state != "missing"
+	if err != nil {
+		return err
+	}
+	batchSize := 100
+	done := false
+	if legacy {
+		prefix, batchSize, done, first = legacyPrefix, 50, legacyDone, legacyFirst
 	}
 	main, err := refHead("main")
 	if err == nil && main == "" {
 		err = errors.New("main has no head")
 	}
-	done, ref := false, ""
+	ref := ""
 	if err == nil {
-		done, err = completed(prefix+"1", &first)
+		if !legacy {
+			done, err = completed(prefix+"1", &first)
+		}
 	}
 	checked, tip := main, "" // the branch head before these commits, if any
 	if err == nil {
@@ -277,7 +296,7 @@ func (daemon *Daemon) publishPull(ctx context.Context, c kernel.PublishableChang
 		return errors.New("nothing to publish: its head " + c.Head + " changes no file from " + diffFrom)
 	}
 	message := publicationMessage(c)
-	for i := 0; i*100 < len(changes); i++ {
+	for i := 0; i*batchSize < len(changes); i++ {
 		step := prefix + strconv.Itoa(i+1)
 		var commit struct {
 			SHA string `json:"commit_sha"`
@@ -285,7 +304,7 @@ func (daemon *Daemon) publishPull(ctx context.Context, c kernel.PublishableChang
 		done, err := completed(step, &commit)
 		if err == nil && !done {
 			var response json.RawMessage
-			arguments := map[string]any{"repository": repo, "operation_id": operation(step), "branch": branch, "expected_head_sha": head, "message": message, "changes": changes[i*100 : min(len(changes), i*100+100)]}
+			arguments := map[string]any{"repository": repo, "operation_id": operation(step), "branch": branch, "expected_head_sha": head, "message": message, "changes": changes[i*batchSize : min(len(changes), i*batchSize+batchSize)]}
 			if i == 0 && mergeParent != "" {
 				arguments["merge_parent_sha"] = mergeParent
 			}

@@ -50,7 +50,7 @@ fn body_limits_are_scoped_to_their_routes() {
         "axum::routing::post(mcp::receive).layer(DefaultBodyLimit::max(mcp::MAX_BODY_BYTES))"
     ));
     assert!(!lib.contains(".layer(DefaultBodyLimit::max(MAX_BODY_BYTES))"));
-    assert!(mcp.contains("pub(crate) const MAX_BODY_BYTES: usize = 52 * 1024 * 1024;"));
+    assert!(mcp.contains("pub(crate) const MAX_BODY_BYTES: usize = 104 * 1024 * 1024;"));
 }
 
 /// Workers' `Request` constructor accepts only `follow` and `manual` and throws on

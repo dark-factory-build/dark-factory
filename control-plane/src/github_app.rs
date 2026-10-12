@@ -4220,7 +4220,10 @@ mod publish_tree {
         mode: &'static str,
         #[serde(rename = "type")]
         kind: &'static str,
-        sha: Option<String>,
+        // Omit SHA for inline content, send null only for an explicit delete,
+        // and send a string for a pre-created binary blob.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        sha: Option<Option<String>>,
         #[serde(skip_serializing_if = "Option::is_none")]
         content: Option<String>,
     }
@@ -4278,12 +4281,17 @@ mod publish_tree {
                     Some(_) => return Err(OperationError::InvalidInput),
                     None => existing.unwrap_or("100644"),
                 };
+                let blob_sha = (*sha).as_ref();
                 Ok(Entry {
                     path: change.path.clone(),
                     mode,
                     kind: "blob",
-                    sha: sha.clone(),
-                    content: match (change.content_base64.as_deref(), sha) {
+                    sha: match (change.content_base64.as_deref(), blob_sha) {
+                        (Some(_), None) => None,
+                        (None, None) => Some(None),
+                        (_, Some(value)) => Some(Some(value.clone())),
+                    },
+                    content: match (change.content_base64.as_deref(), blob_sha) {
                         (Some(encoded), None) => Some(
                             String::from_utf8(
                                 super::general_purpose::STANDARD
@@ -6900,10 +6908,10 @@ mod tests {
                 "base_tree": "base-tree",
                 "tree": [
                     {"path": "bin/tool", "mode": "100755", "type": "blob", "sha": "a".repeat(40)},
-                    {"path": "notes.txt", "mode": "100644", "type": "blob", "sha": null, "content": "hello"},
+                    {"path": "notes.txt", "mode": "100644", "type": "blob", "content": "hello"},
                     {"path": "nested/tool", "mode": "100755", "type": "blob", "sha": "b".repeat(40)},
-                    {"path": "new.txt", "mode": "100644", "type": "blob", "sha": null, "content": "hello"},
-                    {"path": "new/directory/file.txt", "mode": "100644", "type": "blob", "sha": null, "content": "hello"}
+                    {"path": "new.txt", "mode": "100644", "type": "blob", "content": "hello"},
+                    {"path": "new/directory/file.txt", "mode": "100644", "type": "blob", "content": "hello"}
                 ]
             })
         );
@@ -6927,9 +6935,9 @@ mod tests {
             serde_json::json!({
                 "base_tree": "base-tree",
                 "tree": [
-                    {"path": "new/gate.sh", "mode": "100755", "type": "blob", "sha": null, "content": "hello"},
+                    {"path": "new/gate.sh", "mode": "100755", "type": "blob", "content": "hello"},
                     // Unstated still inherits, so the old behaviour is intact.
-                    {"path": "bin/tool", "mode": "100755", "type": "blob", "sha": null, "content": "hello"}
+                    {"path": "bin/tool", "mode": "100755", "type": "blob", "content": "hello"}
                 ]
             })
         );

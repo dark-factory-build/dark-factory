@@ -191,7 +191,7 @@ func TestFactorydPublishesASettledIntakeChange(t *testing.T) {
 		t.Fatal(err)
 	}
 	first, pull := app.writes[0]["arguments"].(map[string]any), app.writes[1]["arguments"].(map[string]any)
-	if len(app.writes) != 2 || first["operation_id"] != uuid5("dark-factory:"+c.Change.String()+":publish-"+c.Head[:8]+"-1") || pull["operation_id"] != uuid5("dark-factory:"+c.Change.String()+":pr-"+c.Head[:8]) {
+	if len(app.writes) != 2 || first["operation_id"] != uuid5("dark-factory:"+c.Change.String()+":publish-v2-"+c.Head[:8]+"-1") || pull["operation_id"] != uuid5("dark-factory:"+c.Change.String()+":pr-"+c.Head[:8]) {
 		t.Fatalf("writes = %+v", app.writes)
 	}
 	firstCommit := fmt.Sprintf("%x", sha1.Sum([]byte(first["operation_id"].(string))))
@@ -217,6 +217,27 @@ func TestFactorydPublishesASettledIntakeChange(t *testing.T) {
 	}
 	if op := waitForDurableReview(t, fixture.store, c.Task.ProjectID, func(op review.Operation) bool { return op.State == "enqueued" }); op.State != "enqueued" || op.Request.PullNumber != 31 || op.Request.Head != firstCommit {
 		t.Fatalf("review = %+v", op)
+	}
+}
+
+func TestFactorydPreservesLegacyFiftyFilePublicationReceipts(t *testing.T) {
+	fixture, c, source, app, checkout := publishFixture(t, 99, false)
+	firstOperation := uuid5("dark-factory:" + c.Change.String() + ":publish-" + c.Head[:8] + "-1")
+	firstCommit := strings.Repeat("a", 40)
+	app.tip = firstCommit
+	app.journal[firstOperation], _ = json.Marshal(map[string]any{
+		"branch": "factory/" + c.Change.String()[:12], "commit_sha": firstCommit, "parent_sha": c.Base,
+	})
+	if err := fixture.daemon.publishChange(context.Background(), c, "team/repo", source, app.call, checkout); err != nil {
+		t.Fatal(err)
+	}
+	if len(app.writes) != 2 {
+		t.Fatalf("writes = %+v", app.writes)
+	}
+	commit := app.writes[0]["arguments"].(map[string]any)
+	changes := commit["changes"].([]map[string]any)
+	if commit["operation_id"] != uuid5("dark-factory:"+c.Change.String()+":publish-"+c.Head[:8]+"-2") || len(changes) != 50 || changes[0]["path"] != "f50.txt" {
+		t.Fatalf("legacy second batch = %+v", commit)
 	}
 }
 
@@ -249,7 +270,7 @@ func TestFirstPublicationOfAChangedHeadBuildsOnItsBranch(t *testing.T) {
 	}
 	commit, pull := app.writes[0]["arguments"].(map[string]any), app.writes[1]["arguments"].(map[string]any)
 	changes := commit["changes"].([]map[string]any)
-	if commit["operation_id"] != uuid5("dark-factory:"+c.Change.String()+":publish-"+c.Head[:8]+"-1") || commit["expected_head_sha"] != stale || len(changes) != 1 || changes[0]["path"] != "f00.txt" ||
+	if commit["operation_id"] != uuid5("dark-factory:"+c.Change.String()+":publish-v2-"+c.Head[:8]+"-1") || commit["expected_head_sha"] != stale || len(changes) != 1 || changes[0]["path"] != "f00.txt" ||
 		pull["operation_id"] != uuid5("dark-factory:"+c.Change.String()+":pr-"+c.Head[:8]) || pull["head_sha"] != app.tip {
 		t.Fatalf("commit = %+v pull = %+v", commit, pull)
 	}
@@ -348,7 +369,7 @@ func TestFactorydPublishesACorrectionOnItsPullRequest(t *testing.T) {
 	}
 	commit, body := app.writes[0]["arguments"].(map[string]any), app.writes[1]["arguments"].(map[string]any)
 	changes := commit["changes"].([]map[string]any)
-	if commit["operation_id"] != uuid5("dark-factory:"+c.Change.String()+":publish-"+c.Head[:8]+"-1") || commit["expected_head_sha"] != tip || commit["merge_parent_sha"] != nil ||
+	if commit["operation_id"] != uuid5("dark-factory:"+c.Change.String()+":publish-v2-"+c.Head[:8]+"-1") || commit["expected_head_sha"] != tip || commit["merge_parent_sha"] != nil ||
 		commit["branch"] != "factory/"+c.Change.String()[:12] || len(changes) != 1 || changes[0]["path"] != "f00.txt" {
 		t.Fatalf("correction commit = %+v", commit)
 	}

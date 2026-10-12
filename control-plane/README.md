@@ -34,7 +34,7 @@ Access policy, or App configuration is live.
   and returns 422. No payload can create a task, message, prompt, provider run,
   or GitHub mutation.
 - `POST /mcp` is a stateless Streamable HTTP MCP JSON-RPC endpoint. It is
-  installed only with the complete operation authority. Its 52 MiB envelope
+  installed only with the complete operation authority. Its 104 MiB envelope
   ceiling is derived above the largest request the typed publication schema
   permits (100 files with 1,000,000 encoded characters each), rather than
   reusing the webhook's unrelated 64 KiB limit or adding a lower aggregate

@@ -22,7 +22,7 @@ pub(crate) const PATH: &str = "/mcp";
 // `publish_commit` permits 100 files with one million encoded characters each.
 // Leave room for their paths and the JSON-RPC envelope without accepting an
 // unbounded allocation before typed validation.
-pub(crate) const MAX_BODY_BYTES: usize = 52 * 1024 * 1024;
+pub(crate) const MAX_BODY_BYTES: usize = 104 * 1024 * 1024;
 const PROTOCOL_VERSION: &str = "2025-06-18";
 
 #[derive(serde::Deserialize)]
@@ -652,7 +652,7 @@ fn tools() -> Value {
                 "changes": {
                     "type": "array",
                     "minItems": 1,
-                    "maxItems": 50,
+                    "maxItems": 100,
                     "items": {
                         "type": "object",
                         "properties": {
