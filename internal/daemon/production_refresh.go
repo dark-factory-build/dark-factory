@@ -370,7 +370,7 @@ func mainChecksToProduction(checks []maintainerMainCheck, revision string) []ker
 		if check.Status != "completed" {
 			continue
 		}
-		key := sha256.Sum256([]byte(strings.ToLower(revision) + "\x00" + check.Name))
+		key := sha256.Sum256([]byte(strings.ToLower(revision) + "\x00main\x00" + check.Name))
 		conclusion := ""
 		if check.Conclusion != nil {
 			conclusion = *check.Conclusion

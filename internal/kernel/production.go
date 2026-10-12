@@ -294,7 +294,7 @@ func (store *Store) recordProductionObservation(ctx context.Context, c *sql.Conn
 				return ErrInvalidValue
 			}
 			for _, annotation := range job.Annotations {
-				if !validOutcomeText(annotation, 240) {
+				if !validOutcomeText(annotation, 960) {
 					return ErrInvalidValue
 				}
 			}

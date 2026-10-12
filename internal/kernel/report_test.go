@@ -140,6 +140,33 @@ func TestReportIncludesMainCheckWithoutPullRequest(t *testing.T) {
 	}
 }
 
+func TestHeadAndMainChecksWithSameRevisionRemainDistinct(t *testing.T) {
+	t.Parallel()
+	store, _, project, _ := newAdmissionStore(t, RoleOrchestrator, 1)
+	defer store.Close()
+	revision := strings.Repeat("a", 40)
+	checks := []ProductionCheck{
+		{ID: "head:13", Name: "build", Revision: revision, Scope: "head", State: "completed", Conclusion: "failure", URL: "https://github.com/o/r/actions/runs/13", PullRequests: []uint64{7}},
+		{ID: "main:13", Name: "build", Revision: revision, Scope: "main", State: "completed", Conclusion: "failure", URL: "https://github.com/o/r/actions/runs/14"},
+	}
+	if err := store.RecordProductionObservation(context.Background(), project.ID, ProductionObservation{Repository: "example/factory", ObservedAt: 10, Checks: checks}, mustTime(t, 10)); err != nil {
+		t.Fatal(err)
+	}
+	page, err := store.Production(context.Background(), project.ID, 0, 8, UnixMillis{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	count := 0
+	for _, record := range page.Records {
+		if record.Kind == "check" {
+			count++
+		}
+	}
+	if count != 2 {
+		t.Fatalf("stored checks = %d, records = %+v", count, page.Records)
+	}
+}
+
 func TestRepeatedCompletedCheckIsNotNewAgain(t *testing.T) {
 	t.Parallel()
 	store, _, project, _ := newAdmissionStore(t, RoleOrchestrator, 1)
