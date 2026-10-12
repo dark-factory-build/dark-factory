@@ -298,7 +298,6 @@ type attemptCommand struct {
 	capacity            uint16
 	maxBytes            uint32
 	maxRunSeconds       uint32
-<<<<<<< HEAD
 	seconds             uint32
 	wakeOn              string
 	priority            int64
