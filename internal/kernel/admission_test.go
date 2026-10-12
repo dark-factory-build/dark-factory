@@ -186,10 +186,33 @@ func TestWhyCapacityFollowsTheTasksRole(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for id, want := range map[TaskID]string{shared.ID: "waits on: capacity: every worker slot is in use", overseerTask.ID: "waits on: worker: its task is queued for the next admission"} {
+	for id, want := range map[TaskID]string{shared.ID: "waits on: agent: worker has a run in progress", overseerTask.ID: "waits on: worker: its task is queued for the next admission"} {
 		if lines, err := store.Why(ctx, nil, 0, id); err != nil || lines[len(lines)-1] != want {
 			t.Fatalf("why %s = %q, %v", id, lines, err)
 		}
+	}
+}
+
+// Shared work waits on every worker that would take it, as AdmitNext does.
+func TestWhySharedTaskNamesItsPausedWorker(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	store, _, project, worker := newAdmissionStore(t, RoleWorker, 2)
+	defer store.Close()
+	shared, err := store.EnqueueTask(ctx, NewTask{ID: taskID(t, 216), ProjectID: project.ID, IncarnationID: incarnationID(t, 217), Title: "shared"}, mustTime(t, 4))
+	if err != nil {
+		t.Fatal(err)
+	}
+	worker = pauseAgent(t, store, worker, true, 5)
+	if admitted, err := store.AdmitNext(ctx, admissionKeys(t, 220, nil), mustTime(t, 6)); err != nil || admitted.Admitted() {
+		t.Fatalf("admission = %+v, %v", admitted, err)
+	}
+	if lines, err := store.Why(ctx, nil, 0, shared.ID); err != nil || lines[len(lines)-1] != "waits on: agent: a is paused" {
+		t.Fatalf("why = %q, %v", lines, err)
+	}
+	pauseAgent(t, store, worker, false, 7)
+	if lines, err := store.Why(ctx, nil, 0, shared.ID); err != nil || lines[len(lines)-1] != "waits on: worker: its task is queued for the next admission" {
+		t.Fatalf("why = %q, %v", lines, err)
 	}
 }
 

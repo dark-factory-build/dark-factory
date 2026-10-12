@@ -329,8 +329,11 @@ func whyTaskWaits(ctx context.Context, c *sql.Conn, task Task) (string, error) {
 				FROM task_conflict_paths AS mine JOIN task_conflict_paths AS theirs ON theirs.path = mine.path JOIN tasks AS a ON a.id = theirs.task_id AND a.project_id = t.project_id AND a.status = 'running'
 				JOIN task_repository_bindings AS mr ON mr.task_id = t.id JOIN task_repository_bindings AS ar ON ar.task_id = a.id AND ar.repository_id = mr.repository_id
 				WHERE mine.task_id = t.id),
-			(SELECT 'agent: ' || g.name || CASE WHEN g.archived THEN ' is archived' WHEN g.paused THEN ' is paused' WHEN g.role <> 'orchestrator' AND g.tool_calls_used >= g.tool_budget_limit THEN ' has spent its tool budget' ELSE ' has a run in progress' END
-				FROM agents AS g WHERE g.id = t.assigned_agent_id AND (g.archived OR g.paused OR g.role <> 'orchestrator' AND g.tool_calls_used >= g.tool_budget_limit OR EXISTS (SELECT 1 FROM runs AS r WHERE r.agent_id = g.id AND r.phase <> 'terminal'))),
+			(SELECT CASE WHEN COUNT(g.id) = 0 THEN 'agent: its project has no worker that takes shared work'
+				WHEN COUNT(g.id) > 1 THEN 'agent: every worker that takes shared work is archived, paused, out of tool budget or running'
+				ELSE 'agent: ' || g.name || CASE WHEN g.archived THEN ' is archived' WHEN g.paused THEN ' is paused' WHEN g.role <> 'orchestrator' AND g.tool_calls_used >= g.tool_budget_limit THEN ' has spent its tool budget' ELSE ' has a run in progress' END END
+				FROM tasks AS c LEFT JOIN agents AS g ON g.project_id = c.project_id AND (g.id = c.assigned_agent_id OR c.assigned_agent_id IS NULL AND g.role = 'worker' AND g.idle_policy = 'wait')
+				WHERE c.id = t.id HAVING COUNT(g.id) = COUNT(CASE WHEN g.archived OR g.paused OR g.role <> 'orchestrator' AND g.tool_calls_used >= g.tool_budget_limit OR EXISTS (SELECT 1 FROM runs AS r WHERE r.agent_id = g.id AND r.phase <> 'terminal') THEN 1 END)),
 			(SELECT 'account limit: its project has spent its run budget' FROM projects AS p WHERE p.id = t.project_id AND p.run_budget_limit > 0 AND p.runs_used >= p.run_budget_limit),
 			(SELECT 'account limit: its project has spent its token limit' FROM project_tokens AS k WHERE k.project_id = t.project_id AND k.token_limit > 0 AND k.tokens_used >= k.token_limit),
 			(SELECT CASE WHEN a.role = 'orchestrator' THEN 'capacity: its project has an overseer run in progress'
