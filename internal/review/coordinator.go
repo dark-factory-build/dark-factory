@@ -44,7 +44,8 @@ type Operation struct {
 	Observation   string    `json:"observation,omitempty"` // the pull request the last pass observed
 	Rebased       bool      `json:"rebased,omitempty"`     // its Change was brought up to main once at this head
 	OwnerApproval bool      `json:"owner_approval,omitempty"`
-	LastAction    string    `json:"last_action,omitempty"` // the reconciler's last action at this head and why, for factoryctl why
+	Conversation  string    `json:"conversation,omitempty"` // GitHub refused to queue it over these unresolved review threads
+	LastAction    string    `json:"last_action,omitempty"`  // the reconciler's last action at this head and why, for factoryctl why
 	CreatedAt     time.Time `json:"created_at"`
 	UpdatedAt     time.Time `json:"updated_at"`
 }
@@ -141,6 +142,10 @@ func (g *GroupRun) note(head string) string {
 // ErrOwnerApproval and ErrPermanent mark an enqueue refusal no retry passes:
 // it waits, escalated at once, for the pull request to change.
 var ErrOwnerApproval = errors.New("the merge queue requires CODEOWNERS owner approval")
+
+// ErrConversation marks an enqueue refused while a review thread is
+// unresolved: no retry passes it, so the head goes back to its task once.
+var ErrConversation = errors.New("a review conversation must be resolved")
 
 // ErrPermanent marks a failure the same request meets again; others retry.
 var ErrPermanent = errors.New("the same request fails the same way, so factoryd will not repeat it; a new head is reviewed afresh")
@@ -296,6 +301,8 @@ func Decide(pull Pull, ops []Operation, answered bool) (Action, string) {
 		if op.Request.Answer != "" {
 			note += "\n\nIt read your answer to the block before it and upheld that block:\n\n" + op.Request.Answer
 		}
+	case op.Conversation != "":
+		action, note = SendBack, op.Conversation
 	case pull.Queued:
 		action = Wait
 	case op.Enqueues >= 2:

@@ -768,6 +768,34 @@ func TestRefusedEnqueueBecomesAnOverseerItem(t *testing.T) {
 	}
 }
 
+// An enqueue refused over an unresolved review thread is not retried: its
+// task is sent back once with the thread (#1857).
+func TestUnresolvedConversationRefusalSendsTheThreadBack(t *testing.T) {
+	fixture, project, task, settle := publishedTask(t)
+	settle()
+	customerMode(t, fixture)
+	ctx := context.Background()
+	backend := &publicReviewBackend{enqueueRefusal: "UNPROCESSABLE: Pull request A conversation must be resolved before this pull request can be merged.\nUnresolved review threads:\n- cmd/factoryctl/main.go:719 by github-advanced-security: Incorrect conversion between integer types"}
+	fixture.daemon.reviewBackend = func(string, uint64) review.Backend { return backend }
+	if _, err := reviewNow(ctx, fixture.daemon, project, publishedReviewRequest()); err != nil {
+		t.Fatal(err)
+	}
+	waitForMergePipeline(t, fixture.daemon)
+	for range 3 {
+		if _, err := fixture.daemon.advanceReviewOperations(ctx, false); err != nil {
+			t.Fatal(err)
+		}
+	}
+	current, _, err := fixture.store.Task(ctx, task.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	op := lastDurableReview(t, fixture.store, project)
+	if backend.enqueues != 1 || op.Failures != 0 || op.Escalation != "" || current.WorkRevision.Int64() != 2 || !strings.Contains(kernel.TaskFeedback(current), "cmd/factoryctl/main.go:719 by github-advanced-security: Incorrect conversion") {
+		t.Fatalf("conversation refusal operation=%+v enqueues=%d task revision %d feedback %q", op, backend.enqueues, current.WorkRevision.Int64(), kernel.TaskFeedback(current))
+	}
+}
+
 func TestCodeownersRefusalEscalatesAndRecoversAfterApproval(t *testing.T) {
 	fixture, project, _, settle := publishedTask(t)
 	settle()

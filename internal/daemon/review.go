@@ -313,6 +313,14 @@ func (daemon *Daemon) reconcilePull(ctx context.Context, open kernel.OpenPull, u
 		case review.Enqueue:
 			if err = coordinator.Backend.Enqueue(ctx, op); err == nil {
 				op.Enqueues++
+			} else if errors.Is(err, review.ErrConversation) {
+				// Not retried (#1857): the threads go back once, and its next head
+				// closes what it fixes.
+				op.Conversation = "GitHub will not queue exact head " + op.Request.Head + " while a review conversation on it is unresolved. Fix what each thread names; answer a human reviewer's thread on the thread itself.\n\n" + err.Error()
+				if err = nil; !working {
+					action, note = review.SendBack, op.Conversation
+					err = daemon.sendBackPull(ctx, open, task, op, note)
+				}
 			}
 		}
 	}
@@ -946,11 +954,13 @@ func (r maintainerRejection) Error() string {
 // Is classifies the rejection once for every caller. Only invalid input or a
 // tree GitHub cannot return whole is permanent; a refusal (not RATE_LIMITED)
 // for a CODEOWNERS approval (GitHub's "Waiting on code owner review") waits
-// for the owner. Any other refusal can come to hold (#1531) and is retried.
+// for the owner, and one over an unresolved conversation goes back to its
+// task (#1857). Any other refusal can come to hold (#1531) and is retried.
 func (r maintainerRejection) Is(target error) bool {
 	why, refused := string(r), strings.HasPrefix(string(r), "refused:") && !strings.Contains(string(r), "RATE_LIMITED")
 	return target == review.ErrPermanent && (strings.HasPrefix(why, "invalid_input:") || strings.Contains(why, "too large for GitHub to return whole")) ||
-		target == review.ErrOwnerApproval && refused && (strings.Contains(strings.ToLower(why), "required codeowners approval") || strings.Contains(strings.ToLower(why), "waiting on code owner review") || strings.Contains(why, "CODEOWNERS_APPROVAL"))
+		target == review.ErrOwnerApproval && refused && (strings.Contains(strings.ToLower(why), "required codeowners approval") || strings.Contains(strings.ToLower(why), "waiting on code owner review") || strings.Contains(why, "CODEOWNERS_APPROVAL")) ||
+		target == review.ErrConversation && refused && strings.Contains(strings.ToLower(why), "conversation must be resolved")
 }
 
 func reviewedBodyDigest(operation review.Operation) string {
@@ -1113,7 +1123,7 @@ func reviewResponseStructuredContent(request maintainerRequest, response json.Ra
 		// The broker's reason is what an operator needs to act on.
 		reason := ""
 		if len(value.Result.Content) > 0 {
-			reason = strings.ToValidUTF8(value.Result.Content[0].Text[:min(len(value.Result.Content[0].Text), 300)], "")
+			reason = strings.ToValidUTF8(value.Result.Content[0].Text[:min(len(value.Result.Content[0].Text), 6000)], "")
 		}
 		return nil, maintainerRejection(reason)
 	}
