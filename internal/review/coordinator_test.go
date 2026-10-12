@@ -228,7 +228,7 @@ func (b *pollingBackend) ObservePull(_ context.Context, op Operation) (Pull, err
 func TestReviewWaitsForTheHeadsRequiredChecks(t *testing.T) {
 	checksPoll = time.Millisecond
 	defer func() { checksPoll = time.Minute }()
-	conflicting, failed := false, Pull{Failing: []string{"required"}, Tests: strings.Split("--- FAIL: TestA (0.01s),1,2,3,4,5,6,7,8,9,10", ",")}
+	conflicting, failed := false, Pull{Failing: []string{"required"}, Tests: append([]string{"--- FAIL: TestA (0.01s)"}, strings.Split(strings.Repeat("x,", 39)+"40", ",")...)}
 	for _, test := range []struct {
 		name    string
 		pulls   []Pull
@@ -250,8 +250,8 @@ func TestReviewWaitsForTheHeadsRequiredChecks(t *testing.T) {
 		if err != nil || op.State != test.state || backend.reviews != test.reviews || !strings.Contains(op.Detail, test.detail) {
 			t.Fatalf("%s: operation=%+v err=%v reviews=%d", test.name, op, err, backend.reviews)
 		}
-		if strings.Contains(op.Detail, "\n- 10") {
-			t.Fatalf("%s: more than ten failing tests: %q", test.name, op.Detail)
+		if strings.Contains(op.Detail, "\n- 40") {
+			t.Fatalf("%s: more than 40 failure lines: %q", test.name, op.Detail)
 		}
 	}
 }

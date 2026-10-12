@@ -1088,7 +1088,7 @@ func TestReviewBindsTheStoredBody(t *testing.T) {
 
 // Only the checks the base branch's rules require gate the merge: an optional
 // check that fails (CodeQL), is cancelled or never finishes decides nothing,
-// though a failed shard's annotations name the failing tests.
+// though a failed shard's failure lines name the failing tests, redacted.
 func TestOnlyRequiredChecksGateTheMerge(t *testing.T) {
 	var pull review.Pull
 	err := requiredChecks(json.RawMessage(`{"checks":[
@@ -1102,10 +1102,10 @@ func TestOnlyRequiredChecksGateTheMerge(t *testing.T) {
 	}
 	pull = review.Pull{}
 	err = requiredChecks(json.RawMessage(`{"checks":[
-		{"name":"checks (source)","conclusion":"failure","required":false,"annotations":["--- FAIL: TestX (0.01s)"]},
+		{"name":"checks (source)","conclusion":"failure","required":false,"annotations":["--- FAIL: TestX (0.01s)","x_test.go:3: token=ghs_live"]},
 		{"name":"checks","conclusion":"failure","required":true},
 		{"name":"ui","conclusion":null,"required":true}]}`), &pull)
-	if err != nil || strings.Join(pull.Failing, ",") != "checks" || !pull.Pending || strings.Join(pull.Checks, ",") != "checks=failure,ui=pending" || strings.Join(pull.Tests, ",") != "--- FAIL: TestX (0.01s)" {
+	if err != nil || strings.Join(pull.Failing, ",") != "checks" || !pull.Pending || strings.Join(pull.Checks, ",") != "checks=failure,ui=pending" || strings.Join(pull.Tests, ",") != "--- FAIL: TestX (0.01s),x_test.go:3: **************" {
 		t.Fatalf("required checks ignored: %+v err=%v", pull, err)
 	}
 }

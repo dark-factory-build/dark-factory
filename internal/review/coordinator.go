@@ -102,7 +102,7 @@ type Pull struct {
 	Failing          []string  // required checks at the head that finished unsuccessfully
 	Pending          bool      // a required check at the head has not finished
 	Checks           []string  // stable name=conclusion values for every observed required check
-	Tests            []string  // failure annotations of the head's failed checks: the failing tests CI names
+	Tests            []string  // failure lines of the head's failed checks: the failing steps and tests CI names
 	Group            *GroupRun // the newest completed merge-group run that built the head
 }
 
@@ -363,11 +363,12 @@ func (op Operation) conflict() string {
 	return fmt.Sprintf("Exact head %s conflicts with %s. Rebase this Change onto origin/%s and resolve the conflict.", op.Request.Head, op.Request.BaseRef, op.Request.BaseRef)
 }
 
-// failing names the failed required checks at the head and the first ten
-// failing tests CI annotated, as the premise a sandbox rerun cannot overturn.
+// failing names the failed required checks at the head and the first 40
+// failure lines CI wrote (failing steps and tests with their file:line), as
+// the premise a sandbox rerun cannot overturn.
 func (p Pull) failing() string {
 	note := fmt.Sprintf("Exact head %s cannot merge. Failing checks: %s. CI reproduced this failure on the exact head, so it is the premise: if your rerun passes, report what differs (environment, which tests you ran) and work from these lines; \"premise not reproduced\" is not a valid ending.", p.Head, strings.Join(p.Failing, ", "))
-	for _, line := range p.Tests[:min(len(p.Tests), 10)] {
+	for _, line := range p.Tests[:min(len(p.Tests), 40)] {
 		note += "\n- " + line
 	}
 	return note
