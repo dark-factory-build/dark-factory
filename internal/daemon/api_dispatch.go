@@ -944,7 +944,9 @@ func (daemon *Daemon) attemptTask(ctx context.Context, call api.Call) api.Reply 
 	if err != nil {
 		return newErrorReply(api.RemoteInternal)
 	}
-	if err = daemon.store.RecordSuppliedContentForAttempt(ctx, kDigest, suppliedKnowledge, at); err != nil {
+	err = daemon.store.RecordSuppliedContentForAttempt(ctx, kDigest, suppliedKnowledge, at)
+	mark("record")
+	if err != nil {
 		return newErrorReply(remoteErrorCode(err))
 	}
 	return reply
