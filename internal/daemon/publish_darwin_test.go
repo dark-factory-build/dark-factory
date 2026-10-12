@@ -276,7 +276,7 @@ func TestFactorydRecoversAnIndeterminateLegacyPublication(t *testing.T) {
 		t.Fatalf("writes = %+v", app.writes)
 	}
 	commit := app.writes[1]["arguments"].(map[string]any)
-	if commit["operation_id"] != uuid5("dark-factory:"+c.Change.String()+":publish-v2-"+c.Head[:8]+"-1") || len(commit["changes"].([]map[string]any)) != 50 {
+	if commit["operation_id"] != uuid5("dark-factory:"+c.Change.String()+":publish-v2-"+c.Head[:8]+"-1") || commit["merge_parent_sha"] != nil || len(commit["changes"].([]map[string]any)) != 50 {
 		t.Fatalf("recovered publication = %+v", commit)
 	}
 }

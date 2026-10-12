@@ -242,6 +242,16 @@ test('two principals: callback, pagination, refresh, replay, grants and revocati
     assert.equal(largeResult.result.isError, false, JSON.stringify(largeResult));
     assert.equal(publishedCommits.length, 3, '100 UTF-8 files publish in one commit');
     assert.equal(blobCreates, 0, 'UTF-8 tree content does not create per-file blobs');
+    const stalledPublication = { ...publication, operation_id: '7d1f0f8e-7f1f-11f0-952e-acde48001125', changes: [{ path: 'binary.bin', content_base64: 'AP8=' }] };
+    unavailable = '/repos/team/shared/git/blobs';
+    const failedPublication = await (await call(alice, 'publish_commit', stalledPublication)).json();
+    assert.equal(failedPublication.result.isError, true, 'a GitHub failure is recorded as indeterminate');
+    unavailable = '';
+    const stalledReplay = await (await call(alice, 'publish_commit', stalledPublication)).json();
+    assert.equal(stalledReplay.result.isError, true, 'the indeterminate operation is not retried under its old id');
+    const recoveredPublication = await (await call(alice, 'publish_commit', { ...stalledPublication, operation_id: '7d1f0f8e-7f1f-11f0-952e-acde48001126' })).json();
+    assert.equal(recoveredPublication.result.isError, false, JSON.stringify(recoveredPublication));
+    assert.equal(publishedCommits.length, 4, 'a new operation recovers the failed publication');
     aliceLogin = 'alice';
     const id = '6d1f0f8e-7f1f-11f0-952e-acde48001122';
     const args = { repository: 'team/shared', operation_id: id, title: 'private fixture', body: 'accepted bytes' };

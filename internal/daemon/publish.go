@@ -322,7 +322,7 @@ func (daemon *Daemon) publishPull(ctx context.Context, c kernel.PublishableChang
 				if previous == "" {
 					return errors.New("legacy publication has no completed parent")
 				}
-				prefix, batchSize, head = "publish-v2-"+c.Head[:8]+"-", 100, previous
+				prefix, batchSize, head, mergeParent = "publish-v2-"+c.Head[:8]+"-", 100, previous, ""
 				changes = changes[offset:]
 				break
 			}
