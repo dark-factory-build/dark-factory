@@ -866,6 +866,17 @@ func inspectOperationalDatabase(ctx context.Context, path string, home *os.File,
 	if walPresent != shmPresent {
 		return fmt.Errorf("%w: operational SQLite WAL sidecars are incomplete", ErrInvalidHome)
 	}
+	if walPresent {
+		database, _, err := openMember(home, databaseName)
+		if err != nil {
+			return err
+		}
+		boundHome, err := duplicateOperationalFile(home, "sqlite checkpoint home")
+		if err != nil {
+			return errors.Join(err, database.Close())
+		}
+		_ = kernel.CheckpointOperational(ctx, filepath.Join(path, databaseName), boundHome, database)
+	}
 	database, _, err := openMember(home, databaseName)
 	if err != nil {
 		return err

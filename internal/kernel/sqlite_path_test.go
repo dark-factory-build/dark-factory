@@ -97,6 +97,111 @@ func TestOperationalOpenCancellationOwnsPhysicalConnectContext(t *testing.T) {
 	}
 }
 
+func TestOperationalOpenRetriesCorruptSnapshotOnce(t *testing.T) {
+	store, path, project, agent := newAdmissionStore(t, RoleWorker, 1)
+	_, err := store.EnqueueTask(context.Background(), NewTask{ID: taskID(t, 210), ProjectID: project.ID, AssignedAgentID: agent.ID, IncarnationID: incarnationID(t, 211), Title: "startup"}, mustTime(t, 5))
+	if err != nil {
+		store.Close()
+		t.Fatal(err)
+	}
+	candidate := changeID(t, 212)
+	admission, err := store.AdmitNext(context.Background(), admissionKeys(t, 213, &candidate), mustTime(t, 10))
+	if err != nil || !admission.Admitted() {
+		store.Close()
+		t.Fatalf("admission = %+v, %v", admission, err)
+	}
+	changeID := *admission.Run.ChangeID
+	if _, err := store.writer.Exec(`UPDATE changes SET phase = 'abandoned', settled_run_id = ?, revision = revision + 1, updated_at_ms = 70 WHERE id = ?`, admission.Run.ID.Bytes(), changeID.Bytes()); err != nil {
+		store.Close()
+		t.Fatal(err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+	calls := 0
+	sqliteOpenableValidationHook = func(validationErr error) {
+		calls++
+		if calls == 1 && errors.Is(validationErr, ErrCorruptState) {
+			repair, err := sql.Open(driverName, configuredDataSource(path))
+			if err != nil {
+				t.Error(err)
+				return
+			}
+			defer repair.Close()
+			if _, err := repair.Exec(`UPDATE changes SET phase = 'reserved', settled_run_id = NULL, revision = revision - 1, updated_at_ms = 10 WHERE id = ?`, changeID.Bytes()); err != nil {
+				t.Error(err)
+			}
+		}
+	}
+	defer func() { sqliteOpenableValidationHook = nil }()
+
+	store, err = Open(context.Background(), path)
+	if err != nil {
+		t.Fatalf("open after transient database corruption = %v", err)
+	}
+	if calls != 2 {
+		t.Fatalf("openable snapshot validations = %d, want 2", calls)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatalf("close = %v", err)
+	}
+}
+
+func TestCheckpointOperationalShrinksRetainedWAL(t *testing.T) {
+	path, _ := walSnapshotFixture(t, "")
+	before, err := os.Stat(path + "-wal")
+	if err != nil {
+		t.Fatal(err)
+	}
+	home, err := os.Open(filepath.Dir(path))
+	if err != nil {
+		t.Fatal(err)
+	}
+	database, err := os.Open(path)
+	if err != nil {
+		_ = home.Close()
+		t.Fatal(err)
+	}
+	if err := CheckpointOperational(context.Background(), path, home, database); err != nil {
+		t.Fatal(err)
+	}
+	after, err := os.Stat(path + "-wal")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if after.Size() >= before.Size() {
+		t.Fatalf("checkpoint WAL size = %d, before %d", after.Size(), before.Size())
+	}
+}
+
+func TestStoreValidationRetriesDatabaseCorruptionOnFreshSnapshot(t *testing.T) {
+	store, run, _ := admittedWorkerRun(t)
+	defer store.Close()
+	change, found, err := store.Change(context.Background(), *run.ChangeID)
+	if err != nil || !found {
+		t.Fatalf("read admitted Change = %+v, %v", change, err)
+	}
+	if _, err := store.writer.Exec(`UPDATE changes SET phase = 'abandoned', settled_run_id = ?, revision = revision + 1, updated_at_ms = 70 WHERE id = ?`, run.ID.Bytes(), change.ID.Bytes()); err != nil {
+		t.Fatal(err)
+	}
+	calls := 0
+	sqliteValidationHook = func(validationErr error) {
+		if calls == 0 && errors.Is(validationErr, ErrCorruptState) {
+			if _, err := store.writer.Exec(`UPDATE changes SET phase = 'reserved', settled_run_id = NULL, revision = revision - 1, updated_at_ms = 10 WHERE id = ?`, change.ID.Bytes()); err != nil {
+				t.Error(err)
+			}
+		}
+		calls++
+	}
+	defer func() { sqliteValidationHook = nil }()
+	if err := store.Validate(context.Background()); err != nil {
+		t.Fatalf("validation after transient database corruption = %v", err)
+	}
+	if calls != 2 {
+		t.Fatalf("validation snapshots = %d, want 2", calls)
+	}
+}
+
 func TestOpenRequiresCanonicalOwnerOnlyDatabaseParent(t *testing.T) {
 	image, err := NewDatabaseImage(context.Background(), FactoryConfig{}, mustTime(t, 1))
 	if err != nil {
