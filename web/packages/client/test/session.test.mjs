@@ -17,6 +17,7 @@ import {
   decodeServerControl,
   encodeServerControl,
 } from "../dist/src/index.js";
+import { settle } from "./remote-fake.mjs";
 import { encodeAgentControlResult, encodeAuthResult, encodeHello, encodeHumanRequestCancelRunResult, encodeHumanRequestDetail, encodeHumanRequestReplyResult, encodePairResult, encodeProjectCreateResult, encodeRemoteInviteResult, encodeRepositories, encodeRepositoryMutateResult, encodeServerError, encodeStateChanged, encodeStateSnapshot, encodeTaskDetail, encodeTaskEnqueueResult, encodeTaskHistory, encodeTerminalAttached, encodeTerminalExit, encodeTerminalReset, encodeTerminalTarget } from "./server-frames.mjs";
 
 const challenge = "11".repeat(32);
@@ -95,7 +96,7 @@ async function openControlledStateSession(options = {}) {
     challenge, keyStore: new MemoryKeys(), socketFactory: () => { socket = new Socket(server); return socket; }, ...options,
   });
   await session.connect();
-  await new Promise((resolve) => setTimeout(resolve, 10));
+  await settle();
   assert.equal(session.status, "ready");
   automatic = false;
   return { session, socket };
@@ -128,7 +129,7 @@ async function openHumanSession(onError, capabilities) {
     onError,
   });
   await session.connect();
-  await new Promise((resolve) => setTimeout(resolve, 10));
+  await settle();
   return { session, socket };
 }
 
@@ -159,7 +160,7 @@ test("pairing signs through WebCrypto, persists the key, reads one snapshot, and
     onState: (state) => states.push(state),
   });
   await session.connect();
-  await new Promise((resolve) => setTimeout(resolve, 10));
+  await settle();
   assert.equal(session.status, "ready");
   assert.equal(session.clientId, clientID);
   assert.equal(store.value.key.extractable, false);
@@ -203,7 +204,7 @@ test("authenticated HumanRequest methods emit exact frames and correlate results
     socketFactory: () => { socket = new Socket(serverFor); return socket; },
   });
   await session.connect();
-  await new Promise((resolve) => setTimeout(resolve, 10));
+  await settle();
   assert.equal("humanRequests" in session, false);
 
   const requestId = "77".repeat(16);
@@ -655,7 +656,7 @@ test("remote invitation correlates its own result and needs bounded human-action
     },
   });
   await remote.connect();
-  await new Promise((resolve) => setTimeout(resolve, 10));
+  await settle();
   const sent = remoteSocket.sent.length;
   await assert.rejects(remote.inviteRemote(), (error) => error instanceof SessionError && error.code === "unauthorized");
   assert.equal(remoteSocket.sent.length, sent);
@@ -735,7 +736,7 @@ test("task enqueue requires bounded human-actions authority before sending", asy
     },
   });
   await session.connect();
-  await new Promise((resolve) => setTimeout(resolve, 10));
+  await settle();
   const sent = socket.sent.length;
   await assert.rejects(
     session.enqueueAgentTask({ agentId: "7a".repeat(16), expectedAgentRevision: 1n, instruction: "No authority" }),
@@ -1070,7 +1071,7 @@ test("old-socket snapshot and change frames cannot overwrite a reconnected sessi
   staleSocket.readyState = 1;
   staleSocket.onmessage?.({ data: encodeStateChanged(staleWatch.id, { head: 99n }) });
   staleSocket.onmessage?.({ data: encodeStateSnapshot(staleSnapshot.id, snapshotBody(99n)) });
-  await new Promise((resolve) => setTimeout(resolve, 10));
+  await settle();
 
   assert.equal(states.length, published, "an old socket published into the reconnected session");
   assert.equal(client.state.head, 1n);
@@ -1122,7 +1123,7 @@ test("stale saved authorization repairs once through the still-held pairing chal
   const store = new MemoryKeys();
   const seed = new BrowserSession({ url: "ws://127.0.0.1/browser", host: "127.0.0.1", origin: "https://preview.example", challenge, keyStore: store, socketFactory: () => new Socket(serverFor) });
   await seed.connect();
-  await new Promise((resolve) => setTimeout(resolve, 10));
+  await settle();
   seed.close();
   const sockets = [];
   const client = new BrowserClient({
@@ -1133,7 +1134,7 @@ test("stale saved authorization repairs once through the still-held pairing chal
     }); sockets.push(socket); return socket; },
   });
   await client.connect();
-  await new Promise((resolve) => setTimeout(resolve, 10));
+  await settle();
   assert.equal(sockets.length, 2);
   assert.equal(decodeClientControl(sockets[0].sent[0]).type, "AUTH_PROVE");
   assert.equal(decodeClientControl(sockets[1].sent[0]).type, "PAIR_PROVE");
@@ -1170,7 +1171,7 @@ test("closing while repair persistence is pending does not replay pairing", asyn
   const seedStore = new MemoryKeys();
   const seed = new BrowserSession({ url: "ws://127.0.0.1/browser", host: "127.0.0.1", origin: "https://preview.example", challenge, keyStore: seedStore, socketFactory: () => new Socket(serverFor) });
   await seed.connect();
-  await new Promise((resolve) => setTimeout(resolve, 10));
+  await settle();
   seed.close();
   let releaseSave;
   let saveStarted;
@@ -1188,9 +1189,9 @@ test("closing while repair persistence is pending does not replay pairing", asyn
   assert.equal(sockets.length, 2);
   assert.equal(sockets[1].sent.filter((wire) => decodeClientControl(wire).type === "PAIR_PROVE").length, 1);
   releaseSave();
-  await new Promise((resolve) => setTimeout(resolve, 10));
+  await settle();
   await client.connect();
-  await new Promise((resolve) => setTimeout(resolve, 10));
+  await settle();
   assert.equal(sockets.length, 3);
   assert.equal(decodeClientControl(sockets[2].sent[0]).type, "AUTH_PROVE");
   client.close();
@@ -1200,7 +1201,7 @@ test("a persisted repair clears the challenge before a rejected manual reconnect
   const seedStore = new MemoryKeys();
   const seed = new BrowserSession({ url: "ws://127.0.0.1/browser", host: "127.0.0.1", origin: "https://preview.example", challenge, keyStore: seedStore, socketFactory: () => new Socket(serverFor) });
   await seed.connect();
-  await new Promise((resolve) => setTimeout(resolve, 10));
+  await settle();
   seed.close();
   let client;
   let persisted;
@@ -1228,7 +1229,7 @@ test("a persisted repair clears the challenge before a rejected manual reconnect
   });
   await assert.rejects(client.connect(), (error) => error instanceof SessionError && error.code === "closed");
   await assert.rejects(client.connect(), (error) => error instanceof SessionError && error.code === "unauthorized");
-  await new Promise((resolve) => setTimeout(resolve, 10));
+  await settle();
   assert.equal(sockets.length, 3);
   assert.equal(decodeClientControl(sockets[2].sent[0]).type, "AUTH_PROVE");
   assert.equal(sockets[2].sent.filter((wire) => decodeClientControl(wire).type === "PAIR_PROVE").length, 0);
@@ -1242,7 +1243,7 @@ test("a pairing authorization error never replays the one-shot challenge", async
     socketFactory: () => { const socket = new Socket((_current, frame) => { if (frame.type === "PAIR_PROVE") socket.reply(encodeServerError({ code: "unauthorized", retryable: false })); }); sockets.push(socket); return socket; },
   });
   await assert.rejects(client.connect(), (error) => error instanceof SessionError && error.code === "unauthorized");
-  await new Promise((resolve) => setTimeout(resolve, 10));
+  await settle();
   assert.equal(sockets.length, 1);
   assert.equal(decodeClientControl(sockets[0].sent[0]).type, "PAIR_PROVE");
   client.close();
@@ -1252,7 +1253,7 @@ test("closing from stale authorization error fences the pending repair", async (
   const store = new MemoryKeys();
   const seed = new BrowserSession({ url: "ws://127.0.0.1/browser", host: "127.0.0.1", origin: "https://preview.example", challenge, keyStore: store, socketFactory: () => new Socket(serverFor) });
   await seed.connect();
-  await new Promise((resolve) => setTimeout(resolve, 10));
+  await settle();
   seed.close();
   const sockets = [];
   let client;
@@ -1262,7 +1263,7 @@ test("closing from stale authorization error fences the pending repair", async (
     socketFactory: () => { const server = sockets.length === 0 ? ((_current, frame) => { if (frame.type === "AUTH_PROVE") _current.reply(encodeServerError({ code: "unauthorized", retryable: false })); }) : serverFor; const socket = new Socket(server); sockets.push(socket); return socket; },
   });
   await assert.rejects(client.connect(), (error) => error instanceof SessionError && error.code === "unauthorized");
-  await new Promise((resolve) => setTimeout(resolve, 10));
+  await settle();
   assert.equal(sockets.length, 1);
   assert.equal(sockets[0].sent.filter((wire) => ["PAIR_PROVE", "STATE_GET"].includes(decodeClientControl(wire).type)).length, 0);
 });
@@ -1271,7 +1272,7 @@ test("a newer generation started by the auth error fences the old repair", async
   const store = new MemoryKeys();
   const seed = new BrowserSession({ url: "ws://127.0.0.1/browser", host: "127.0.0.1", origin: "https://preview.example", challenge, keyStore: store, socketFactory: () => new Socket(serverFor) });
   await seed.connect();
-  await new Promise((resolve) => setTimeout(resolve, 10));
+  await settle();
   seed.close();
   const sockets = [];
   let client;
@@ -1284,7 +1285,7 @@ test("a newer generation started by the auth error fences the old repair", async
     socketFactory: () => { const server = sockets.length === 0 ? ((_current, frame) => { if (frame.type === "AUTH_PROVE") _current.reply(encodeServerError({ code: "unauthorized", retryable: false })); }) : serverFor; const socket = new Socket(server); sockets.push(socket); return socket; },
   });
   await assert.rejects(client.connect(), (error) => error instanceof SessionError && error.code === "unauthorized");
-  await new Promise((resolve) => setTimeout(resolve, 10));
+  await settle();
   assert.equal(sockets.length, 2);
   assert.equal(sockets.flatMap((socket) => socket.sent).filter((wire) => decodeClientControl(wire).type === "PAIR_PROVE").length, 0);
   client.close();
@@ -1298,12 +1299,12 @@ test("authorization repair requires a fresh challenge and only exact nonretryabl
     const store = new MemoryKeys();
     const seed = new BrowserSession({ url: "ws://127.0.0.1/browser", host: "127.0.0.1", origin: "https://preview.example", challenge, keyStore: store, socketFactory: () => new Socket(serverFor) });
     await seed.connect();
-    await new Promise((resolve) => setTimeout(resolve, 10));
+    await settle();
     seed.close();
     let sockets = 0;
-    const client = new BrowserClient({ url: "ws://127.0.0.1/browser", host: "127.0.0.1", origin: "https://preview.example", keyStore: store, challenge: error.retryable ? challenge : undefined, socketFactory: () => { sockets += 1; return new Socket((_current, frame) => { if (frame.type === "AUTH_PROVE") _current.reply(encodeServerError(error)); }); } });
+    const client = new BrowserClient({ url: "ws://127.0.0.1/browser", host: "127.0.0.1", origin: "https://preview.example", keyStore: store, challenge: error.retryable ? challenge : undefined, timer: new VirtualTimer(), socketFactory: () => { sockets += 1; return new Socket((_current, frame) => { if (frame.type === "AUTH_PROVE") _current.reply(encodeServerError(error)); }); } });
     await assert.rejects(client.connect(), (actual) => actual instanceof SessionError && actual.code === "unauthorized");
-    await new Promise((resolve) => setTimeout(resolve, 10));
+    await settle();
     assert.equal(sockets, 1);
     client.close();
   }
@@ -1313,12 +1314,12 @@ test("valid saved authorization with a fresh challenge does not duplicate the cl
   const store = new MemoryKeys();
   const seed = new BrowserSession({ url: "ws://127.0.0.1/browser", host: "127.0.0.1", origin: "https://preview.example", challenge, keyStore: store, socketFactory: () => new Socket(serverFor) });
   await seed.connect();
-  await new Promise((resolve) => setTimeout(resolve, 10));
+  await settle();
   seed.close();
   let sockets = 0;
   const client = new BrowserClient({ url: "ws://127.0.0.1/browser", host: "127.0.0.1", origin: "https://preview.example", challenge, keyStore: store, socketFactory: () => { sockets += 1; return new Socket(serverFor); } });
   await client.connect();
-  await new Promise((resolve) => setTimeout(resolve, 10));
+  await settle();
   assert.equal(sockets, 1);
   client.close();
 });
@@ -1404,7 +1405,7 @@ test("consumer callback exceptions cannot escape cleanup or stop a later state l
   const states = [];
   const session = new BrowserSession({ url: "ws://127.0.0.1/browser", host: "127.0.0.1", origin: "https://preview.example", challenge, keyStore: new MemoryKeys(), socketFactory: () => new Socket(serverFor), onState: (state) => { states.push(state); throw new Error("onState"); }, onStatus: () => { throw new Error("onStatus"); } });
   await session.connect();
-  await new Promise((resolve) => setTimeout(resolve, 10));
+  await settle();
   assert.equal(session.status, "ready");
   assert.ok(states.length > 0);
   session.close();
@@ -1414,7 +1415,7 @@ test("unavailable daemon reconnects use bounded exponential virtual time", async
   const pairingStore = new MemoryKeys();
   const pairing = new BrowserSession({ url: "ws://127.0.0.1/browser", host: "127.0.0.1", origin: "https://preview.example", challenge, keyStore: pairingStore, socketFactory: () => new Socket(serverFor) });
   await pairing.connect();
-  await new Promise((resolve) => setTimeout(resolve, 10));
+  await settle();
   pairing.close();
   const timer = new VirtualTimer();
   let attempts = 0;
@@ -1437,7 +1438,7 @@ test("close clears a pending reconnect timer and manual connect can schedule a n
   const pairingStore = new MemoryKeys();
   const pairing = new BrowserSession({ url: "ws://127.0.0.1/browser", host: "127.0.0.1", origin: "https://preview.example", challenge, keyStore: pairingStore, socketFactory: () => new Socket(serverFor) });
   await pairing.connect();
-  await new Promise((resolve) => setTimeout(resolve, 10));
+  await settle();
   pairing.close();
   const timer = new VirtualTimer();
   let available = false;
@@ -1450,7 +1451,7 @@ test("close clears a pending reconnect timer and manual connect can schedule a n
   assert.equal(attempts, 1);
   available = true;
   await client.connect();
-  await new Promise((resolve) => setTimeout(resolve, 10));
+  await settle();
   assert.equal(client.status, "ready");
   assert.equal(attempts, 2);
   client.close();
@@ -1480,7 +1481,7 @@ test("close fences deferred load, sign, and pairing persistence completions", as
   const sourceStore = new MemoryKeys();
   const source = new BrowserSession({ url: "ws://127.0.0.1/browser", host: "127.0.0.1", origin: "https://preview.example", challenge, keyStore: sourceStore, socketFactory: () => new Socket(serverFor) });
   await source.connect();
-  await new Promise((resolve) => setTimeout(resolve, 10));
+  await settle();
   source.close();
   let releaseSign;
   let signStarted;
@@ -1600,7 +1601,7 @@ test("BrowserClient does not replay a one-shot proof while PairResult save is de
   assert.equal(client.status, "closed");
   assert.equal(sockets[0].sent.filter((wire) => decodeClientControl(wire).type === "STATE_GET").length, 0);
   await client.connect();
-  await new Promise((resolve) => setTimeout(resolve, 10));
+  await settle();
   assert.equal(sockets.length, 2);
   assert.equal(decodeClientControl(sockets[1].sent[0]).type, "AUTH_PROVE");
   assert.equal(sockets[1].sent.filter((wire) => decodeClientControl(wire).type === "PAIR_PROVE").length, 0);
@@ -1674,7 +1675,7 @@ test("agent terminal discovery mints an opaque generation-bound target for openT
     challenge, keyStore: store, socketFactory: () => { socket = new Socket(targetServer); return socket; },
   });
   await session.connect();
-  await new Promise((resolve) => setTimeout(resolve, 10));
+  await settle();
   const pending = session.resolveAgentTerminal({ agentId, expectedAgentRevision: 9n, expectedHead: 12n });
   const targetGet = decodeClientControl(socket.sent.at(-1));
   assert.equal(targetGet.type, "TERMINAL_TARGET_GET");
@@ -1780,7 +1781,7 @@ test("terminal target discovery is bounded, exact-correlated, and null is explic
     challenge, keyStore: store, socketFactory: () => { socket = new Socket(serverFor); return socket; },
   });
   await session.connect();
-  await new Promise((resolve) => setTimeout(resolve, 10));
+  await settle();
   const pending = Array.from({ length: MAX_OUTSTANDING_REQUESTS }, () => session.resolveAgentTerminal({ agentId, expectedAgentRevision: 1n, expectedHead: 1n }));
   await assert.rejects(session.resolveAgentTerminal({ agentId, expectedAgentRevision: 1n, expectedHead: 1n }), (error) => error instanceof SessionError && error.code === "rate_limited");
   const first = decodeClientControl(socket.sent.find((wire) => decodeClientControl(wire).type === "TERMINAL_TARGET_GET"));
@@ -1797,7 +1798,7 @@ test("terminal target discovery is bounded, exact-correlated, and null is explic
     challenge, keyStore: new MemoryKeys(), socketFactory: () => { malformedSocket = new Socket(serverFor); return malformedSocket; },
   });
   await malformed.connect();
-  await new Promise((resolve) => setTimeout(resolve, 10));
+  await settle();
   const bad = malformed.resolveAgentTerminal({ agentId, expectedAgentRevision: 2n, expectedHead: 4n });
   const badFrame = decodeClientControl(malformedSocket.sent.at(-1));
   malformedSocket.reply(encodeTerminalTarget(badFrame.id, { agent_id: agentId, agent_revision: 3n, head: 4n, target: null }));
@@ -1824,7 +1825,7 @@ test("EXIT closes the old handle and routes its duplicate away from a replacemen
     challenge, keyStore: new MemoryKeys(), socketFactory: () => { socket = new Socket(targetServer); return socket; },
   });
   await session.connect();
-  await new Promise((resolve) => setTimeout(resolve, 10));
+  await settle();
   const targetPending = session.resolveAgentTerminal({ agentId, expectedAgentRevision: 1n, expectedHead: 1n });
   const target = await targetPending;
   const terminal = session.openTerminal(target);
@@ -1834,7 +1835,7 @@ test("EXIT closes the old handle and routes its duplicate away from a replacemen
   await attach;
   const exit = { session_id: terminalSessionId, exit_code: 0, exit_signal: 0, aborted: false };
   socket.reply(encodeTerminalExit(attachFrame.id, exit));
-  await new Promise((resolve) => setTimeout(resolve, 10));
+  await settle();
   assert.equal(terminal.closed, true);
   const before = socket.sent.length;
   for (const effect of [
@@ -1854,7 +1855,7 @@ test("EXIT closes the old handle and routes its duplicate away from a replacemen
   socket.reply(encodeTerminalAttached(replacementFrame.id, { session_id: terminalSessionId, floor: 0n, head: 0n, acknowledged_sequence: 0n, max_unacked_bytes: 65536n }));
   await replacementAttach;
   socket.reply(encodeTerminalExit(attachFrame.id, exit));
-  await new Promise((resolve) => setTimeout(resolve, 10));
+  await settle();
   assert.equal(replacement.closed, false);
   session.close();
 });
@@ -1878,7 +1879,7 @@ test("RESET closes the old handle and a replacement may select a fresh after-seq
     challenge, keyStore: new MemoryKeys(), socketFactory: () => { socket = new Socket(targetServer); return socket; },
   });
   await session.connect();
-  await new Promise((resolve) => setTimeout(resolve, 10));
+  await settle();
   const targetPending = session.resolveAgentTerminal({ agentId, expectedAgentRevision: 1n, expectedHead: 1n });
   const target = await targetPending;
   const terminal = session.openTerminal(target);
@@ -1888,7 +1889,7 @@ test("RESET closes the old handle and a replacement may select a fresh after-seq
   await attach;
   const reset = { session_id: terminalSessionId, floor: 4n, head: 8n };
   socket.reply(encodeTerminalReset(attachFrame.id, reset));
-  await new Promise((resolve) => setTimeout(resolve, 10));
+  await settle();
   assert.equal(terminal.closed, true);
   const before = socket.sent.length;
   for (const effect of [
@@ -1908,7 +1909,7 @@ test("RESET closes the old handle and a replacement may select a fresh after-seq
   socket.reply(encodeTerminalAttached(replacementFrame.id, { session_id: terminalSessionId, floor: 4n, head: 8n, acknowledged_sequence: 6n, max_unacked_bytes: 65536n }));
   await replacementAttach;
   socket.reply(encodeTerminalReset(attachFrame.id, reset));
-  await new Promise((resolve) => setTimeout(resolve, 10));
+  await settle();
   assert.equal(replacement.closed, false);
   session.close();
 });
@@ -1934,7 +1935,7 @@ test("terminal replacement retains only the previous closed handle and fences ev
     onError: (error) => errors.push(error),
   });
   await session.connect();
-  await new Promise((resolve) => setTimeout(resolve, 10));
+  await settle();
   const target = await session.resolveAgentTerminal({ agentId, expectedAgentRevision: 1n, expectedHead: 1n });
   const attachFrames = [];
   let live;
@@ -1985,7 +1986,7 @@ test("a pairing survives the versionless transcript domain", async () => {
   const store = new MemoryKeys();
   const pairing = new BrowserSession({ url: "ws://127.0.0.1/browser", host: "127.0.0.1", origin: "https://preview.example", challenge, keyStore: store, socketFactory: () => new Socket(serverFor) });
   await pairing.connect();
-  await new Promise((resolve) => setTimeout(resolve, 10));
+  await settle();
   pairing.close();
   const paired = store.value;
   assert.equal(paired.clientId, clientID);
@@ -1997,7 +1998,7 @@ test("a pairing survives the versionless transcript domain", async () => {
     keyStore: store, socketFactory: () => { socket = new Socket(serverFor); return socket; },
   });
   await client.connect();
-  await new Promise((resolve) => setTimeout(resolve, 10));
+  await settle();
   assert.equal(client.session.status, "ready");
   // The stored record is untouched by reconnecting: the same client id and the
   // same non-exportable key object.
@@ -2103,7 +2104,7 @@ test("without administration the account verbs are refused before anything is se
     },
   });
   await session.connect();
-  await new Promise((resolve) => setTimeout(resolve, 10));
+  await settle();
   assert.equal(session.status, "ready");
   const sent = socket.sent.length;
   const agentId = "7c".repeat(16);

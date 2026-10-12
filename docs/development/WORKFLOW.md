@@ -19,8 +19,9 @@ implementation, run the focused tests for the changed package.
 
 factoryd reviews a published head only once its required pull-request check
 passes; a red head goes back to its author naming the failing tests, unreviewed.
-The protected merge queue's required CI is the full gate on the combined tree,
-and a queue ejection also comes back naming the failing checks. Run the full
+The protected merge queue's required CI runs the full gate's `daemon` and
+`packages` shards on the combined tree, which the pull-request check does not;
+a queue ejection also comes back naming the failing checks. Run the full
 local gate yourself when broad local integration proof is needed:
 
 ```sh
