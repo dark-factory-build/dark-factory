@@ -193,6 +193,9 @@ func TestReleaseBuildsDrainsBacksUpAndSwapsThenRestarts(t *testing.T) {
 	fixture, settle, events := releaseFixture(t)
 	settle()
 	releaseWorker = func(_ context.Context, _ *Daemon, _, _, sha string, _ func(*exec.Cmd) ([]byte, error)) error {
+		if fixture.daemon.releaseHold.Load() {
+			t.Fatal("Worker deployment kept admission held")
+		}
 		events <- "worker " + sha
 		return nil
 	}

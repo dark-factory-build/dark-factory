@@ -373,7 +373,12 @@ func (daemon *Daemon) release(project kernel.ProjectID, root string, source chan
 		fail("worker: " + err.Error())
 		return
 	}
+	// Worker deployment runs the release checkout's slow release.sh. Admission
+	// can continue while that independent control-plane change is being rolled
+	// out; keep the hold for the remaining factoryd staging steps.
+	daemon.releaseHold.Store(false)
 	err = releaseWorker(ctx, daemon, filepath.Join(directory, "tree"), live, delivery.Revision, run)
+	daemon.releaseHold.Store(true)
 	worker.State = "verified"
 	if err != nil {
 		worker.State, worker.Reason = "failed", err.Error()
