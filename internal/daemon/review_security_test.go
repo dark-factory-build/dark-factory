@@ -93,6 +93,17 @@ func TestPriorAllowedOperationAllowsRebasedBase(t *testing.T) {
 	}
 }
 
+func TestPriorAllowedOperationRejectsApprovalFollowedByBlock(t *testing.T) {
+	request := review.Request{Head: strings.Repeat("c", 40), BaseRef: "main"}
+	open := kernel.OpenPull{History: []json.RawMessage{
+		mustJSON(t, review.Operation{ID: "prior", Request: review.Request{Head: strings.Repeat("a", 40), BaseRef: "main"}, Verdict: "allow", DiffID: "same-diff"}),
+		mustJSON(t, review.Operation{Request: request, Verdict: "request_changes", Detail: "still blocked"}),
+	}}
+	if prior, ok := priorAllowedOperation(open, request); ok || prior.ID != "" {
+		t.Fatalf("blocked approval remained reusable: %+v, %v", prior, ok)
+	}
+}
+
 func TestPriorBlockingFindingsAreBoundedAndIncludeSameHead(t *testing.T) {
 	var history []json.RawMessage
 	for i := range 17 {
