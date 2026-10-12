@@ -932,7 +932,9 @@ func ClaudeReview(writable []string, readable ...string) (string, error) {
 func claudeConfinement(grants []grant, allow []string, hooks map[string]any, extraDenyWrites ...string) (string, error) {
 	read, write, denyWrite := []string{}, []string{}, []string{}
 	// Claude names files by their resolved path, and a Change is reached
-	// through a link, so each grant is allowed under both spellings.
+	// through a link. Writable roots need both spellings; read-only roots keep
+	// one read grant and deny writes under both spellings to stay within the
+	// launch argument limit.
 	for _, given := range slices.Clone(grants) {
 		resolved, err := filepath.EvalSymlinks(given.path)
 		if err != nil {
@@ -941,7 +943,11 @@ func claudeConfinement(grants []grant, allow []string, hooks map[string]any, ext
 			}
 		}
 		if resolved != "" && resolved != given.path {
-			grants = append(grants, grant{resolved, given.write})
+			if given.write {
+				grants = append(grants, grant{resolved, true})
+			} else {
+				denyWrite = append(denyWrite, "/"+resolved)
+			}
 		}
 	}
 	for _, path := range extraDenyWrites {
