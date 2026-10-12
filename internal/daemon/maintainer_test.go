@@ -204,6 +204,17 @@ func TestAcceptedIssueObservationReturnsCurrentIssue(t *testing.T) {
 	}
 }
 
+func TestLiveIntakeInstructionPreservesCorrectionFeedback(t *testing.T) {
+	accepted := kernel.IntakeAcceptance{SourceRepository: "feed/original", Snapshot: kernel.IntakeIssueSnapshot{IssueNumber: 9, Title: "Current title", Body: "Current scope"}}
+	feedback := "\n\n## Sent back for work revision 2\n\nKeep the cited finding."
+	offset := int64(len("Old scope"))
+	task := kernel.Task{Title: "Current title", Body: "Old scope" + feedback, SentBackInstructionBytes: &offset}
+	instruction, _ := kernel.TaskBodyWithInstruction(task, kernel.IntakeTaskBody(accepted, accepted.Snapshot.Title, accepted.Snapshot.Body))
+	if !strings.HasPrefix(instruction, "Current scope\n\nSource: ") || !strings.HasSuffix(instruction, feedback) || strings.Contains(instruction, "Old scope") {
+		t.Fatalf("live intake instruction = %q", instruction)
+	}
+}
+
 func TestMaintainerTransportRejectsAmbiguousRepositoryArguments(t *testing.T) {
 	ctx := context.Background()
 	duplicate := json.RawMessage(`{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"observe_issue","arguments":{"repository":"feed/original","repository":"foreign/private","issue_number":9}}}`)

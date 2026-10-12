@@ -38,6 +38,7 @@ type fakePublishMaintainer struct {
 	unavailable    bool             // the Maintainer authority is temporarily unavailable
 	loseNext       bool             // the next write lands but its response is lost
 	body           string           // the open pull request's stored body
+	issueBody      string           // the current source issue body
 }
 
 func TestRepairPublicationUsesTaskTitle(t *testing.T) {
@@ -65,6 +66,8 @@ func (f *fakePublishMaintainer) call(_ context.Context, name string, arguments m
 		return json.Marshal(map[string]any{"operation_id": id, "state": "missing"})
 	case "list_pull_requests":
 		return json.Marshal(map[string]any{"pull_requests": []any{map[string]any{"number": arguments["pull_number"], "head_sha": f.tip, "body": f.body}}})
+	case "observe_issue":
+		return json.Marshal(map[string]any{"result": map[string]any{"structuredContent": map[string]any{"number": arguments["issue_number"], "body": f.issueBody}}})
 	}
 	if _, replay := f.journal[id]; replay || f.planned[id] {
 		return nil, fmt.Errorf("conflict: operation %s replayed", id)
@@ -203,6 +206,7 @@ func publishedExactly(t *testing.T, app *fakePublishMaintainer, source, head str
 func TestFactorydPublishesASettledIntakeChange(t *testing.T) {
 	fixture, c, source, app, checkout := publishFixture(t, 51, false)
 	ctx := context.Background()
+	app.issueBody = "Current operator scope"
 	app.loseNext = true
 	if err := fixture.daemon.publishChange(ctx, c, "team/repo", source, app.call, checkout); err == nil {
 		t.Fatal("a lost response reported publication")
@@ -221,7 +225,7 @@ func TestFactorydPublishesASettledIntakeChange(t *testing.T) {
 	publishedExactly(t, app, source, c.Head)
 	body := pull["body"].(string)
 	if pull["head_sha"] != c.Head || pull["issue_number"] != uint64(9) || pull["source_repository"] != nil || pull["close_on_merge"] != false || pull["base_sha"] != c.Base ||
-		strings.Contains(body, "example.com") || strings.Contains(body, "/Users/") || !strings.Contains(body, "Implemented it") || !strings.Contains(body, c.Head) || !strings.Contains(body, "+51 -1 across 52 files") || !strings.HasSuffix(body, "The merge queue runs the gate.\n\nRefs #9") {
+		strings.Contains(body, "example.com") || strings.Contains(body, "/Users/") || !strings.Contains(body, "Current operator scope") || strings.Contains(body, "Implemented it") || !strings.Contains(body, c.Head) || !strings.Contains(body, "+51 -1 across 52 files") || !strings.HasSuffix(body, "The merge queue runs the gate.\n\nRefs #9") {
 		t.Fatalf("pull request = %+v", pull)
 	}
 	if pr := readProductionPull(t, fixture.store, c.Task.ProjectID, 31); pr.Head != c.Head || pr.Branch != "factory/"+c.Change.String()[:12] {

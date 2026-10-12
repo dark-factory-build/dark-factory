@@ -262,14 +262,29 @@ func (daemon *Daemon) publishPull(ctx context.Context, c kernel.PublishableChang
 			return err
 		}
 	}
+	issue := c.Accepted.Snapshot.IssueNumber
 	issueBody := c.Accepted.Snapshot.Body
+	if strings.EqualFold(c.Accepted.SourceRepository, repo) {
+		if response, observeErr := call(ctx, "observe_issue", map[string]any{"repository": repo, "issue_number": issue}); observeErr == nil {
+			var observed struct {
+				Result struct {
+					Issue struct {
+						Number uint64 `json:"number"`
+						Body   string `json:"body"`
+					} `json:"structuredContent"`
+				} `json:"result"`
+			}
+			if json.Unmarshal(response, &observed) == nil && observed.Result.Issue.Number == issue {
+				issueBody = observed.Result.Issue.Body
+			}
+		}
+	}
 	if strings.TrimSpace(issueBody) == "" {
 		issueBody = c.Task.Result
 	}
 	issueBody = string(redactTerminalText([]byte(issueBody)))
 	issueBody = strings.ToValidUTF8(issueBody[:min(len(issueBody), 24000)], "")
 	body := fmt.Sprintf("%s\n\nPublished by factoryd from Change %s at %s: +%d -%d across %d files from %s.\n\nThe merge queue runs the gate.", issueBody, c.Change, c.Head, added, deleted, files, from)
-	issue := c.Accepted.Snapshot.IssueNumber
 	if c.Pull != 0 {
 		// The corrected body keeps the issue referenced while the steward waits
 		// for live acceptance. One settlement's body is written once.

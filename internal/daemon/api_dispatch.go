@@ -943,7 +943,14 @@ func (daemon *Daemon) attemptTask(ctx context.Context, call api.Call) api.Reply 
 	instructionText := authority.Task()
 	if found && accepted.Snapshot.LinearTeamID == "" && daemon.github != nil && daemon.github.CustomerMode() {
 		if issue, liveErr := daemon.liveAcceptedIssue(ctx, accepted); liveErr == nil {
-			instructionText = kernel.IntakeTaskBody(accepted, issue.Title, issue.Body)
+			current, taskFound, taskErr := daemon.store.Task(ctx, authority.TaskID)
+			if taskErr != nil {
+				return newErrorReply(remoteErrorCode(taskErr))
+			}
+			if !taskFound {
+				return newErrorReply(api.RemoteInternal)
+			}
+			instructionText, _ = kernel.TaskBodyWithInstruction(current, kernel.IntakeTaskBody(accepted, issue.Title, issue.Body))
 		} else {
 			return newErrorReply(remoteErrorCode(liveErr))
 		}
