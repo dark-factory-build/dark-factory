@@ -738,7 +738,8 @@ type OverseerSnapshot struct {
 
 // FactorydHealth is the daemon's bounded, in-memory health view.
 type FactorydHealth struct {
-	Calls []FactorydCall `json:"calls"`
+	Calls    []FactorydCall `json:"calls"`
+	WALBytes int64          `json:"wal_bytes"`
 }
 
 type FactorydCall struct {
