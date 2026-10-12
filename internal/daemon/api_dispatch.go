@@ -655,16 +655,9 @@ func (daemon *Daemon) agentPaths(ctx context.Context, call api.Call) api.Reply {
 	}
 	var telemetry *api.RunTelemetry
 	if runID != (kernel.RunID{}) {
-		if value := daemon.runTelemetryView(runID); value != nil {
-			telemetry = &api.RunTelemetry{TokensIn: value.TokensIn, TokensOut: value.TokensOut, CostMicroUSD: value.CostMicroUSD, ToolCalls: value.ToolCalls, APIRequests: value.APIRequests, QuietSeconds: value.QuietSeconds}
-		}
-		if tokens, found, tokenErr := daemon.store.RunTokens(ctx, runID); tokenErr != nil {
-			return newErrorReply(remoteErrorCode(tokenErr))
-		} else if found {
-			if telemetry == nil {
-				telemetry = &api.RunTelemetry{}
-			}
-			telemetry.Tokens = tokens
+		telemetry, err = daemon.agentPathsTelemetry(ctx, runID)
+		if err != nil {
+			return newErrorReply(remoteErrorCode(err))
 		}
 	}
 	reply, err := api.NewAgentPathsReply(api.AgentPaths{AgentID: input.AgentID, RunID: run, SourcePath: sourcePath, RuntimePath: runtimePath, Paths: paths, Telemetry: telemetry})
@@ -672,6 +665,24 @@ func (daemon *Daemon) agentPaths(ctx context.Context, call api.Call) api.Reply {
 		return newErrorReply(api.RemoteInternal)
 	}
 	return reply
+}
+
+func (daemon *Daemon) agentPathsTelemetry(ctx context.Context, runID kernel.RunID) (*api.RunTelemetry, error) {
+	var telemetry *api.RunTelemetry
+	if value := daemon.runTelemetryView(runID); value != nil {
+		telemetry = &api.RunTelemetry{TokensIn: value.TokensIn, TokensOut: value.TokensOut, CostMicroUSD: value.CostMicroUSD, ToolCalls: value.ToolCalls, APIRequests: value.APIRequests, QuietSeconds: value.QuietSeconds}
+	}
+	tokens, found, err := daemon.store.RunTokens(ctx, runID)
+	if err != nil {
+		return nil, err
+	}
+	if found {
+		if telemetry == nil {
+			telemetry = &api.RunTelemetry{}
+		}
+		telemetry.Tokens = tokens
+	}
+	return telemetry, nil
 }
 
 func (daemon *Daemon) taskRead(ctx context.Context, call api.Call, scope *kernel.ProjectID) api.Reply {

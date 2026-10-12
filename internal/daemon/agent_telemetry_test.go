@@ -95,6 +95,10 @@ func TestAgentTelemetryCountsOnlyTheLiveRunsItNames(t *testing.T) {
 	if len(fixture.daemon.telemetry) != 1 {
 		t.Fatalf("an unlaunched run was counted: %d runs", len(fixture.daemon.telemetry))
 	}
+	projected, err := fixture.daemon.agentPathsTelemetry(ctx, run.ID)
+	if err != nil || projected == nil || projected.TokensIn != want.TokensIn || projected.TokensOut != want.TokensOut || projected.CostMicroUSD != want.CostMicroUSD || projected.ToolCalls != want.ToolCalls || projected.APIRequests != want.APIRequests || projected.QuietSeconds == nil || *projected.QuietSeconds != quiet {
+		t.Fatalf("agent paths telemetry %+v, %v; want %+v", projected, err, want)
+	}
 
 	// An ended run still takes its CLI's final flush, then ages out.
 	fixture.daemon.unregisterLiveAttempt(run.ID, owner)
