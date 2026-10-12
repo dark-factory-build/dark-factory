@@ -67,7 +67,7 @@ func (f *fakePublishMaintainer) call(_ context.Context, name string, arguments m
 	case "list_pull_requests":
 		return json.Marshal(map[string]any{"pull_requests": []any{map[string]any{"number": arguments["pull_number"], "head_sha": f.tip, "body": f.body}}})
 	case "observe_issue":
-		return json.Marshal(map[string]any{"result": map[string]any{"structuredContent": map[string]any{"number": arguments["issue_number"], "body": f.issueBody}}})
+		return json.Marshal(map[string]any{"number": arguments["issue_number"], "body": f.issueBody})
 	}
 	if _, replay := f.journal[id]; replay || f.planned[id] {
 		return nil, fmt.Errorf("conflict: operation %s replayed", id)

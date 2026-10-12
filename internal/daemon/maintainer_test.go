@@ -215,6 +215,21 @@ func TestLiveIntakeInstructionPreservesCorrectionFeedback(t *testing.T) {
 	}
 }
 
+func TestReviewCallResponseUnwrapsObservedIssue(t *testing.T) {
+	response := json.RawMessage(`{"jsonrpc":"2.0","id":1,"result":{"structuredContent":{"number":9,"body":"Current scope"},"isError":false}}`)
+	got, err := reviewResponseStructuredContent(maintainerRequest{JSONRPC: "2.0", ID: json.RawMessage(`1`)}, response)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var issue struct {
+		Number uint64 `json:"number"`
+		Body   string `json:"body"`
+	}
+	if err := json.Unmarshal(got, &issue); err != nil || issue.Number != 9 || issue.Body != "Current scope" {
+		t.Fatalf("unwrapped issue = %s (%v)", got, err)
+	}
+}
+
 func TestMaintainerTransportRejectsAmbiguousRepositoryArguments(t *testing.T) {
 	ctx := context.Background()
 	duplicate := json.RawMessage(`{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"observe_issue","arguments":{"repository":"feed/original","repository":"foreign/private","issue_number":9}}}`)

@@ -267,15 +267,11 @@ func (daemon *Daemon) publishPull(ctx context.Context, c kernel.PublishableChang
 	if strings.EqualFold(c.Accepted.SourceRepository, repo) {
 		if response, observeErr := call(ctx, "observe_issue", map[string]any{"repository": repo, "issue_number": issue}); observeErr == nil {
 			var observed struct {
-				Result struct {
-					Issue struct {
-						Number uint64 `json:"number"`
-						Body   string `json:"body"`
-					} `json:"structuredContent"`
-				} `json:"result"`
+				Number uint64 `json:"number"`
+				Body   string `json:"body"`
 			}
-			if json.Unmarshal(response, &observed) == nil && observed.Result.Issue.Number == issue {
-				issueBody = observed.Result.Issue.Body
+			if json.Unmarshal(response, &observed) == nil && observed.Number == issue {
+				issueBody = observed.Body
 			}
 		}
 	}
