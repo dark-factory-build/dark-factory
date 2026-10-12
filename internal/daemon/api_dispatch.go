@@ -1300,11 +1300,13 @@ func (daemon *Daemon) snapshot(ctx context.Context, scope *kernel.ProjectID) api
 		snapshot.Projects = slices.DeleteFunc(snapshot.Projects, func(project kernel.ProjectSummary) bool { return project.ID != *scope })
 		snapshot.Agents = slices.DeleteFunc(snapshot.Agents, func(agent kernel.AgentSummary) bool { return agent.ProjectID != *scope })
 		snapshot.Tasks = slices.DeleteFunc(snapshot.Tasks, func(task kernel.TaskSummary) bool { return task.ProjectID != *scope })
-		snapshot.Accounts = nil
-		snapshot.PeerQuestions = nil
-		snapshot.HumanRequests = nil
 	}
 	public := daemon.projectSnapshot(snapshot)
+	if scope != nil {
+		public.Accounts = nil
+		public.PeerQuestions = nil
+		public.HumanRequests = nil
+	}
 	reply, err := api.NewSnapshotReply(public)
 	if err != nil {
 		return newErrorReply(api.RemoteInternal)

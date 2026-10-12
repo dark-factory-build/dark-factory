@@ -458,6 +458,10 @@ func (store *Store) Snapshot(ctx context.Context) (DashboardSnapshot, error) {
 			agentRows.Close()
 			return DashboardSnapshot{}, fmt.Errorf("scan agent summary: %w", err)
 		}
+		if err := enrichSpecialistSummary(ctx, tx.connection, &summary); err != nil {
+			agentRows.Close()
+			return DashboardSnapshot{}, fmt.Errorf("read specialist schedule: %w", err)
+		}
 		count++
 		if count > SnapshotEntityLimit {
 			agentRows.Close()

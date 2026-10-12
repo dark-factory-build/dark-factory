@@ -118,6 +118,19 @@ func TestPublicSnapshotOfAnEmptyFactoryIsComplete(t *testing.T) {
 	}
 }
 
+func TestDashboardSnapshotIncludesSpecialistSchedule(t *testing.T) {
+	store, _, _, agent := newAdmissionStore(t, RoleWorker, 1)
+	defer store.Close()
+	makeSpecialist(t, store, agent, "", 10)
+	snapshot, err := store.Snapshot(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(snapshot.Agents) != 1 || snapshot.Agents[0].Specialist == nil || snapshot.Agents[0].Specialist.NextReason != "initial" {
+		t.Fatalf("dashboard specialist schedule = %+v", snapshot.Agents)
+	}
+}
+
 // The entity bound is exact and fails closed. At the limit the snapshot is
 // refused entirely; nothing partial or truncated is returned.
 func TestPublicSnapshotCountBoundFailsClosedWithoutTruncation(t *testing.T) {
