@@ -187,12 +187,23 @@ func (daemon *Daemon) publishFailed(ctx context.Context, c kernel.PublishableCha
 	why := err.Error()
 	why = strings.ToValidUTF8(why[:min(len(why), 1000)], "")
 	now, id := daemon.now(), kernel.PublishFailureID(c.Change, c.Revision)
-	_, repeat, readErr := daemon.store.ReviewOperation(ctx, c.Task.ProjectID, id)
+	document, repeat, readErr := daemon.store.ReviewOperation(ctx, c.Task.ProjectID, id)
 	if readErr != nil {
 		return errors.Join(err, readErr)
 	}
+	previous := review.Operation{}
+	if repeat {
+		_ = json.Unmarshal(document, &previous)
+	}
 	failed := review.Operation{ID: id, State: "publish_failed", Retryable: publicationFailureRetryable(err), Handled: true, Detail: why, CreatedAt: now, UpdatedAt: now}
-	if !repeat {
+	var indeterminate publishIndeterminate
+	if errors.As(err, &indeterminate) {
+		failed.Retryable = false
+		failed.Escalation = fmt.Sprintf("factoryd cannot publish change %s for task %s: %s", c.Change, c.Task.ID, why)
+		if strings.Contains(previous.Escalation, why) {
+			failed.Escalation = previous.Escalation
+		}
+	} else if !repeat {
 		failed.Escalation = fmt.Sprintf("factoryd cannot publish change %s for task %s: %s", c.Change, c.Task.ID, why)
 	}
 	LogFactoryd(daemon.log, "factoryd: publish change %s at %s for task %s: %s\n", c.Change, c.Head, c.Task.ID, why)
@@ -395,7 +406,7 @@ func (daemon *Daemon) publishPull(ctx context.Context, c kernel.PublishableChang
 	if err == nil {
 		done, err = completed(prefix+"1", &first)
 		if indeterminate, ok := err.(publishIndeterminate); ok {
-			observed, retry, landed, observeErr := recover(indeterminate.step, checked, c.Pull, false)
+			observed, retry, landed, observeErr := recover(indeterminate.step, tip, c.Pull, false)
 			if observeErr != nil {
 				return observeErr
 			}

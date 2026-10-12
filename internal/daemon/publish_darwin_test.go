@@ -40,6 +40,7 @@ type fakePublishMaintainer struct {
 	queued                  bool
 	closed                  bool
 	landSecondCommit        bool
+	landFirstCommit         bool
 	commitWrites            int
 	loseNext                bool   // the next write lands but its response is lost
 	body                    string // the open pull request's stored body
@@ -101,7 +102,7 @@ func (f *fakePublishMaintainer) call(_ context.Context, name string, arguments m
 	priorWrites := len(f.writes)
 	f.writes = append(f.writes, map[string]any{"name": name, "arguments": arguments})
 	landCreate := f.landCreateIndeterminate && name == "create_pull_request"
-	landCommit := f.landSecondCommit && name == "publish_commit"
+	landCommit := name == "publish_commit" && (f.landFirstCommit && f.commitWrites == 1 || f.landSecondCommit && f.commitWrites == 2)
 	if name == "publish_commit" {
 		f.commitWrites++
 	}
@@ -142,6 +143,7 @@ func (f *fakePublishMaintainer) call(_ context.Context, name string, arguments m
 	if landCreate || landCommit && f.commitWrites == 2 {
 		f.landCreateIndeterminate = false
 		f.landSecondCommit = false
+		f.landFirstCommit = false
 		return nil, maintainerRejection("unavailable: Maintainer authority is unavailable.")
 	}
 	if f.loseNext {
@@ -606,8 +608,19 @@ func TestIndeterminatePublicationEscalatesOnceAfterFreshOperation(t *testing.T) 
 		t.Fatal(err)
 	}
 	document, _, err = fixture.store.ReviewOperation(context.Background(), c.Task.ProjectID, kernel.PublishFailureID(c.Change, c.Revision))
-	if err != nil || strings.Count(string(document), "factoryd cannot publish change") != 0 {
+	if err != nil || strings.Count(string(document), "factoryd cannot publish change") != 1 || !strings.Contains(string(document), "observed-missing") {
 		t.Fatalf("repeat escalation = %s %v", document, err)
+	}
+}
+
+func TestIndeterminateLandedFirstCommitIsRecorded(t *testing.T) {
+	fixture, c, source, app, checkout := publishFixture(t, 1, false)
+	app.landFirstCommit = true
+	if err := fixture.daemon.publishChange(context.Background(), c, "team/repo", source, app.call, checkout); err != nil {
+		t.Fatal(err)
+	}
+	if len(app.writes) != 2 || app.writes[0]["name"] != "publish_commit" || app.writes[1]["name"] != "create_pull_request" {
+		t.Fatalf("landed first commit writes = %+v", app.writes)
 	}
 }
 
