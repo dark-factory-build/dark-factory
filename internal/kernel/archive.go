@@ -24,7 +24,7 @@ var archiveCopiedHook func() error
 var archiveSchema = []string{
 	`CREATE TABLE IF NOT EXISTS archive.batches (generation INTEGER PRIMARY KEY, rows INTEGER NOT NULL, digest BLOB NOT NULL, archived_at_ms INTEGER NOT NULL) STRICT`,
 	`CREATE TABLE IF NOT EXISTS archive.content_accesses (generation INTEGER NOT NULL, ` + archivedAccessDefinitions + `,
-    UNIQUE(run_id, content_id, content_revision, kind, byte_offset, byte_length)) STRICT`,
+    UNIQUE(generation, run_id, content_id, content_revision, kind, byte_offset, byte_length)) STRICT`,
 	`CREATE INDEX IF NOT EXISTS archive.content_accesses_generation ON content_accesses(generation)`,
 	`CREATE INDEX IF NOT EXISTS archive.content_accesses_content ON content_accesses(content_id, content_revision, created_at_ms DESC)`,
 }
@@ -135,10 +135,12 @@ func verifyArchive(ctx context.Context, connection *sql.Conn) error {
 // terminal before at - HistoryRetention into the archive and reports how
 // many it moved. The copy commits in the archive first and is proven against
 // the hot rows by digest; only then does one hot transaction delete them and
-// record the generation. A crash between the two leaves a generation the hot
-// database never committed, which readers ignore and the next pass discards
-// and copies again; a committed generation the archive lacks fails every
-// pass and every crossing read closed. Nothing else reads the archive.
+// record the generation. The archive only grows: a generation the hot
+// database does not record, from a crash between the two commits or one a
+// restored backup predates, is ignored by readers and never reused, and its
+// rows, still hot, are copied again under a new one. A recorded generation
+// the archive lacks fails every pass and every crossing read closed. Nothing
+// else reads the archive.
 func (store *Store) ArchiveHistory(ctx context.Context, at UnixMillis) (int, error) {
 	tx, err := store.beginValidatedWrite(ctx)
 	if err != nil {
@@ -179,14 +181,8 @@ func archiveBatch(ctx context.Context, tx *writeTx, cutoff, at int64) (int, erro
 		if err := verifyArchive(ctx, connection); err != nil {
 			return fmt.Errorf("%w: history archive: %w", ErrCorruptState, err)
 		}
-		if err := connection.QueryRowContext(ctx, `SELECT COALESCE(max(generation), 0) + 1 FROM main.archive_batches`).Scan(&generation); err != nil {
+		if err := connection.QueryRowContext(ctx, `SELECT max(COALESCE((SELECT max(generation) FROM main.archive_batches), 0), COALESCE((SELECT max(generation) FROM archive.content_accesses), 0), COALESCE((SELECT max(generation) FROM archive.batches), 0)) + 1`).Scan(&generation); err != nil {
 			return err
-		}
-		// Any later generation is an interrupted copy the hot database never committed.
-		for _, statement := range []string{`DELETE FROM archive.content_accesses WHERE generation >= ?`, `DELETE FROM archive.batches WHERE generation >= ?`} {
-			if _, err := connection.ExecContext(ctx, statement, generation); err != nil {
-				return err
-			}
 		}
 		var err error
 		if digest, rows, err = digestRows(ctx, connection, archiveSelection, cutoff); err != nil || rows == 0 {
