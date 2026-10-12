@@ -24,6 +24,7 @@ func (store *Store) Report(ctx context.Context, project *ProjectID, since, bucke
 	if since < 0 || bucket <= 0 {
 		return nil, ErrInvalidValue
 	}
+	walBytes := store.WALSize()
 	read, err := store.beginRead(ctx)
 	if err != nil {
 		return nil, err
@@ -109,6 +110,7 @@ func (store *Store) Report(ctx context.Context, project *ProjectID, since, bucke
 		return nil, err
 	}
 	lines = append(lines, fmt.Sprintf("lessons=%d reads=%d citations=%d stale=%d", lessons, reads, citations, stale))
+	lines = append(lines, fmt.Sprintf("wal_bytes=%d", walBytes))
 	return lines, nil
 }
 

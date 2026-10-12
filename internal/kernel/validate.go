@@ -8,6 +8,10 @@ import (
 	"path/filepath"
 )
 
+// sqliteWorkerChangeProvenanceHook is package-local deterministic fault
+// instrumentation immediately before the history query.
+var sqliteWorkerChangeProvenanceHook func()
+
 func validateDurableControls(ctx context.Context, connection *sql.Conn) error {
 	state, err := validateDurableEntityControls(ctx, connection)
 	if err != nil {
@@ -528,6 +532,9 @@ func classifyWorkerChangeOwnership(ctx context.Context, connection *sql.Conn, ru
 func workerChangeProvenanceForRun(ctx context.Context, connection *sql.Conn, run Run) (workerChangeProvenance, error) {
 	if run.AdmittedTaskWorkRevision.Int64() < 1 || run.AdmittedChangeRevision == nil || run.ChangeID == nil {
 		return 0, fmt.Errorf("%w: incomplete worker Change history", ErrCorruptState)
+	}
+	if sqliteWorkerChangeProvenanceHook != nil {
+		sqliteWorkerChangeProvenanceHook()
 	}
 	rows, err := connection.QueryContext(ctx, `SELECT `+runColumns+` FROM runs WHERE task_id = ? AND task_incarnation_id = ? AND admitted_task_work_revision <= ? ORDER BY admitted_task_work_revision`,
 		run.TaskID.Bytes(), run.TaskIncarnationID.Bytes(), run.AdmittedTaskWorkRevision.Int64())
@@ -1232,6 +1239,9 @@ func validateChanges(ctx context.Context, connection *sql.Conn) error {
 			}
 			ownership, ownershipErr := classifyWorkerChangeOwnership(ctx, connection, owner, change)
 			if ownershipErr != nil {
+				if !errors.Is(ownershipErr, ErrCorruptState) {
+					return ownershipErr
+				}
 				return fmt.Errorf("invalid unsettled Change authority: %w", ownershipErr)
 			}
 			if ownership.settled() {
@@ -1251,6 +1261,9 @@ func validateChanges(ctx context.Context, connection *sql.Conn) error {
 		}
 		ownership, ownershipErr := classifyWorkerChangeOwnership(ctx, connection, run, change)
 		lateRebase := run.TerminalAt != nil && change.AvailableAt != nil && change.AvailableAt.Int64() <= run.TerminalAt.Int64() && change.HeadCommit != nil && change.Selection != nil && !change.HeadCommit.equal(change.Selection.commit)
+		if ownershipErr != nil && !errors.Is(ownershipErr, ErrCorruptState) {
+			return ownershipErr
+		}
 		if run.Phase != RunTerminal || ownershipErr != nil || !ownership.settled() || run.TerminalAt == nil || change.UpdatedAt.Int64() > run.TerminalAt.Int64() && !lateRebase {
 			return fmt.Errorf("%w: invalid Change settlement authority", ErrCorruptState)
 		}

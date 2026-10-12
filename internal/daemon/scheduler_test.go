@@ -64,6 +64,73 @@ func TestSchedulerUsesOneUnobservedProbeAndJoinsAdmittedOwners(t *testing.T) {
 	}
 }
 
+func TestSchedulerCheckpointsAnOversizedWAL(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "kernel.sqlite")
+	store, err := createTestStore(context.Background(), path, kernel.FactoryConfig{DispatchEnabled: true, Capacity: 2}, schedulerTime(t, 1))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	daemon, err := newDaemon(store, time.Now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	projectID := schedulerProjectID(t, 40)
+	if _, err := daemon.store.CreateProject(ctx, kernel.NewProject{ID: projectID, Name: "wal", Root: "/wal"}, schedulerTime(t, 2)); err != nil {
+		t.Fatal(err)
+	}
+	reader, err := sql.Open("sqlite3", "file:"+path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer reader.Close()
+	readTx, err := reader.Begin()
+	if err != nil {
+		t.Fatal(err)
+	}
+	var factoryRows int
+	if err := readTx.QueryRow("SELECT COUNT(*) FROM factory").Scan(&factoryRows); err != nil {
+		_ = readTx.Rollback()
+		t.Fatal(err)
+	}
+	findings := strings.Repeat("f", 16000)
+	for pull := uint64(1); pull <= 1400; pull++ {
+		if err := daemon.store.RecordProductionReview(ctx, projectID, "example/wal", pull, kernel.ProductionReview{Head: strings.Repeat("a", 40), State: "allow", Findings: findings}, schedulerTime(t, int64(pull+2))); err != nil {
+			t.Fatal(err)
+		}
+	}
+	before := daemon.store.WALSize()
+	if before < walCheckpointLimit {
+		_ = readTx.Rollback()
+		t.Fatalf("test WAL size = %d, want at least %d", before, walCheckpointLimit)
+	}
+	if err := readTx.Rollback(); err != nil {
+		t.Fatal(err)
+	}
+	polls := make(chan time.Time, 1)
+	done := make(chan error, 1)
+	go func() {
+		done <- daemon.RunScheduler(ctx, SupervisorSpec{schedulerPoll: polls, scheduledAttempt: func(_ context.Context, spec SupervisorSpec) (kernel.Run, error) {
+			spec.admissionObserved(false)
+			return kernel.Run{}, fmt.Errorf("%w: empty", kernel.ErrConflict)
+		}})
+	}()
+	polls <- time.Now()
+	deadline := time.Now().Add(3 * time.Second)
+	for daemon.store.WALSize() >= walCheckpointLimit && time.Now().Before(deadline) {
+		time.Sleep(time.Millisecond)
+	}
+	if got := daemon.store.WALSize(); got >= walCheckpointLimit {
+		t.Fatalf("scheduler WAL size = %d, want below %d", got, walCheckpointLimit)
+	}
+	cancel()
+	if err := waitSchedulerDone(t, done); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestSchedulerWaitsAfterNoAdmissionAndWakesOnce(t *testing.T) {
 	daemon := newSchedulerTestDaemon(t)
 	ctx, cancel := context.WithCancel(context.Background())
