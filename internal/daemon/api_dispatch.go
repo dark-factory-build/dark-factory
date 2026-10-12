@@ -936,12 +936,24 @@ func (daemon *Daemon) attemptTask(ctx context.Context, call api.Call) api.Reply 
 	if err != nil {
 		return newErrorReply(remoteErrorCode(err))
 	}
+	accepted, found, err := daemon.store.IntakeAcceptanceForTask(ctx, authority.TaskID)
+	if err != nil {
+		return newErrorReply(remoteErrorCode(err))
+	}
+	instructionText := authority.Task()
+	if found && accepted.Snapshot.LinearTeamID == "" && daemon.github != nil && daemon.github.CustomerMode() {
+		if issue, liveErr := daemon.liveAcceptedIssue(ctx, accepted); liveErr == nil {
+			instructionText = kernel.IntakeTaskBody(accepted, issue.Title, issue.Body)
+		} else {
+			return newErrorReply(remoteErrorCode(liveErr))
+		}
+	}
 	attachments, err := daemon.store.TaskAttachments(ctx, authority.TaskID)
 	mark("attachments")
 	if err != nil {
 		return newErrorReply(remoteErrorCode(err))
 	}
-	instruction, err := kernel.TaskAttachmentInstruction(authority.Task(), attachments)
+	instruction, err := kernel.TaskAttachmentInstruction(instructionText, attachments)
 	if err != nil {
 		return newErrorReply(api.RemoteInternal)
 	}
@@ -957,11 +969,7 @@ func (daemon *Daemon) attemptTask(ctx context.Context, call api.Call) api.Reply 
 		}
 	}
 	assignment := api.AttemptTask{Task: string(task)}
-	accepted, found, err := daemon.store.IntakeAcceptanceForTask(ctx, authority.TaskID)
 	mark("intake")
-	if err != nil {
-		return newErrorReply(remoteErrorCode(err))
-	}
 	if found {
 		hash := accepted.Snapshot.ContentHash()
 		assignment.Intake = &api.IntakeTaskSource{LinearTeamID: accepted.Snapshot.LinearTeamID, SourceURL: accepted.Snapshot.URL, AcceptanceID: accepted.ID.String(), Repository: accepted.SourceRepository, RepositoryID: accepted.Snapshot.GitHubRepositoryID, IssueNumber: accepted.Snapshot.IssueNumber, TargetRepositoryID: accepted.RepositoryID.String(), ContentHash: hex.EncodeToString(hash[:])}

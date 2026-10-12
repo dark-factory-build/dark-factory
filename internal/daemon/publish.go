@@ -262,9 +262,13 @@ func (daemon *Daemon) publishPull(ctx context.Context, c kernel.PublishableChang
 			return err
 		}
 	}
-	result := string(redactTerminalText([]byte(c.Task.Result)))
-	result = strings.ToValidUTF8(result[:min(len(result), 24000)], "")
-	body := fmt.Sprintf("%s\n\nPublished by factoryd from Change %s at %s: +%d -%d across %d files from %s.\n\nThe merge queue runs the gate.", result, c.Change, c.Head, added, deleted, files, from)
+	issueBody := c.Accepted.Snapshot.Body
+	if strings.TrimSpace(issueBody) == "" {
+		issueBody = c.Task.Result
+	}
+	issueBody = string(redactTerminalText([]byte(issueBody)))
+	issueBody = strings.ToValidUTF8(issueBody[:min(len(issueBody), 24000)], "")
+	body := fmt.Sprintf("%s\n\nPublished by factoryd from Change %s at %s: +%d -%d across %d files from %s.\n\nThe merge queue runs the gate.", issueBody, c.Change, c.Head, added, deleted, files, from)
 	issue := c.Accepted.Snapshot.IssueNumber
 	if c.Pull != 0 {
 		// The corrected body keeps the issue referenced while the steward waits

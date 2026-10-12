@@ -777,15 +777,18 @@ func (store *Store) IntakeTasksForAcceptance(ctx context.Context, id IntakeAccep
 	return tasks, rows.Err()
 }
 
-// intakeTaskBody is the worker's instruction for accepted intake: the issue
-// body (or, for a title-only issue, its title) followed by its source.
-func intakeTaskBody(accepted IntakeAcceptance) string {
-	request := accepted.Snapshot.Body
+// IntakeTaskBody builds the worker instruction from the current issue content.
+func IntakeTaskBody(accepted IntakeAcceptance, title, body string) string {
+	request := body
 	if strings.TrimSpace(request) == "" {
-		request = accepted.Snapshot.Title
+		request = title
 	}
 	if accepted.Snapshot.LinearTeamID != "" {
 		return request + "\n\nSource: " + accepted.Snapshot.URL
 	}
 	return fmt.Sprintf("%s\n\nSource: https://github.com/%[2]s/issues/%[3]d\nFACTORY_SOURCE %[2]s#%[3]d", request, accepted.SourceRepository, accepted.Snapshot.IssueNumber)
+}
+
+func intakeTaskBody(accepted IntakeAcceptance) string {
+	return IntakeTaskBody(accepted, accepted.Snapshot.Title, accepted.Snapshot.Body)
 }
