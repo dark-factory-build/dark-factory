@@ -20,12 +20,8 @@ const specialistWakePriority = -100
 const specialistCarrierSQL = `(a.role = 'worker' AND a.idle_policy = 'standing_instruction' AND t.assigned_agent_id = a.id AND t.title = '` + overseerWakeTitle + `')`
 
 // specialistCarrierHeldSQL holds carrier t back while admitting it would take
-// the last free worker slot (?1 is the factory capacity), or exceed its
-// project's specialist_runs.
-const specialistCarrierHeldSQL = `((SELECT COUNT(*) FROM runs WHERE role = 'worker' AND phase <> 'terminal') + 1 >= ?1
-	OR (SELECT COUNT(*) FROM runs AS r JOIN agents AS s ON s.id = r.agent_id JOIN tasks AS c ON c.id = r.task_id
-		WHERE r.project_id = t.project_id AND r.phase <> 'terminal' AND s.role = 'worker' AND s.idle_policy = 'standing_instruction' AND c.title = '` + overseerWakeTitle + `')
-	>= (SELECT specialist_runs FROM projects WHERE id = t.project_id))`
+// the last free worker slot (?1 is the factory capacity).
+const specialistCarrierHeldSQL = `((SELECT COUNT(*) FROM runs WHERE role = 'worker' AND phase <> 'terminal') + 1 >= ?1)`
 
 // metaC, metaD and metaP are the knowledge metadata of content c, d and p, or '{}'
 // when it is not JSON.
@@ -89,11 +85,11 @@ type specialistPrior struct {
 func specialistSchedule(ctx context.Context, c *sql.Conn, agent Agent) (SpecialistState, specialistPrior, []string, error) {
 	var state SpecialistState
 	var prior specialistPrior
-	project, found, err := projectByID(ctx, c, agent.ProjectID)
+	_, found, err := projectByID(ctx, c, agent.ProjectID)
 	if err != nil || !found {
 		return state, prior, nil, errors.Join(err, ErrCorruptState)
 	}
-	state.OpenProposalLimit = int(project.SpecialistOpenProposals)
+	state.OpenProposalLimit = 0
 	if err := c.QueryRowContext(ctx, `SELECT count(*) FROM project_content_revisions AS c WHERE c.project_id = ? AND `+openProposalSQL+` AND `+authorAgentSQL+` = ?`,
 		agent.ProjectID.Bytes(), agent.ID.Bytes()).Scan(&state.OpenProposals); err != nil {
 		return state, prior, nil, err
@@ -157,8 +153,6 @@ func specialistSchedule(ctx context.Context, c *sql.Conn, agent Agent) (Speciali
 				state.Waiting = "capacity"
 			}
 		}
-	case agent.Idle.RunBudget > 0 && agent.Idle.RunsUsed >= agent.Idle.RunBudget:
-		state.Waiting = "budget"
 	case !carried:
 		state.NextReviewAt, state.NextReason = agent.UpdatedAt.Int64(), "initial"
 	default:
@@ -421,16 +415,15 @@ func validateSpecialistRecord(ctx context.Context, c *sql.Conn, spec NewContent,
 		if a == nil {
 			return nil
 		}
-		var mine, open, limit int
+		var mine, open int
 		if err := c.QueryRowContext(ctx, `SELECT
 			(SELECT count(DISTINCT c.id) FROM project_content_revisions AS c WHERE c.author GLOB 'run:' || ?3 || ' *' AND c.id <> ?2 AND `+latestProposalSQL+`),
-			(SELECT count(*) FROM project_content_revisions AS c WHERE c.project_id = ?1 AND c.id <> ?2 AND `+openProposalSQL+` AND `+authorAgentSQL+` = ?4),
-			(SELECT specialist_open_proposals FROM projects WHERE id = ?1)`,
-			spec.ProjectID.Bytes(), spec.ID.Bytes(), a.RunID.String(), a.AgentID.Bytes()).Scan(&mine, &open, &limit); err != nil {
+			(SELECT count(*) FROM project_content_revisions AS c WHERE c.project_id = ?1 AND c.id <> ?2 AND `+openProposalSQL+` AND `+authorAgentSQL+` = ?4)`,
+			spec.ProjectID.Bytes(), spec.ID.Bytes(), a.RunID.String(), a.AgentID.Bytes()).Scan(&mine, &open); err != nil {
 			return err
 		}
-		if mine != 0 || open >= limit {
-			return fmt.Errorf("%w: a run makes one proposal, and an agent keeps at most %d open", ErrConflict, limit)
+		if mine != 0 {
+			return fmt.Errorf("%w: a run makes one proposal", ErrConflict)
 		}
 	case m.RecordType == "proposal" && spec.Kind == ContentDecision:
 		if a != nil && a.Role != RoleOrchestrator {

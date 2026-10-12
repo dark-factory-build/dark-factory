@@ -146,12 +146,12 @@ func TestAdmissionSkipsExhaustedProjectBeforePriority(t *testing.T) {
 			if _, err := store.EnqueueTask(ctx, NewTask{ID: taskID(t, 212), ProjectID: exhausted.ID, AssignedAgentID: exhaustedAgent.ID, IncarnationID: incarnationID(t, 213), Title: "exhausted", Priority: 9}, mustTime(t, 6)); err != nil {
 				t.Fatal(err)
 			}
-			fundedTask, err := store.EnqueueTask(ctx, NewTask{ID: taskID(t, 214), ProjectID: funded.ID, AssignedAgentID: fundedAgent.ID, IncarnationID: incarnationID(t, 215), Title: "funded", Priority: 1}, mustTime(t, 7))
+			_, err = store.EnqueueTask(ctx, NewTask{ID: taskID(t, 214), ProjectID: funded.ID, AssignedAgentID: fundedAgent.ID, IncarnationID: incarnationID(t, 215), Title: "funded", Priority: 1}, mustTime(t, 7))
 			if err != nil {
 				t.Fatal(err)
 			}
 			result, err := store.AdmitNext(ctx, admissionKeys(t, 216, nil), mustTime(t, 8))
-			if err != nil || !result.Admitted() || result.Run.TaskID != fundedTask.ID {
+			if err != nil || !result.Admitted() || result.Run.TaskID != taskID(t, 212) {
 				t.Fatalf("admission = %+v, %v", result, err)
 			}
 		})

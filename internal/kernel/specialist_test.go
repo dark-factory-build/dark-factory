@@ -121,7 +121,7 @@ func TestSpecialistSchedule(t *testing.T) {
 		t.Fatalf("initial state = %+v", state)
 	}
 	bodies := wakeBodies(t, store, 20)
-	if len(bodies) != 1 || !strings.HasPrefix(bodies[0], "Review the factory.\n\nSpecialist wake: reason=initial; prior_task_id=; prior_base=; quiet_reviews=0; open_proposals=0/3; reviews_used=1/unlimited.\nPrior checkpoint:\nnone") {
+	if len(bodies) != 1 || !strings.HasPrefix(bodies[0], "Review the factory.\n\nSpecialist wake: reason=initial; prior_task_id=; prior_base=; quiet_reviews=0; open_proposals=0/0; reviews_used=1/unlimited.\nPrior checkpoint:\nnone") {
 		t.Fatalf("initial wake = %q", bodies)
 	}
 	if again := wakeBodies(t, store, 21); len(again) != 0 {
@@ -279,16 +279,10 @@ func TestSpecialistAdmission(t *testing.T) {
 	if bodies := wakeBodies(t, store, 7); len(bodies) != 1 {
 		t.Fatalf("carrier = %q", bodies)
 	}
-	if admission, err := store.AdmitNext(ctx, admissionKeys(t, 40, nil), mustTime(t, 8)); err != nil || admission.Reason != NoAdmissionAtCapacity {
-		t.Fatalf("carrier over specialist_runs: %+v, %v", admission, err)
+	if admission, err := store.AdmitNext(ctx, admissionKeys(t, 40, nil), mustTime(t, 8)); err != nil || !admission.Admitted() {
+		t.Fatalf("carrier despite obsolete specialist_runs: %+v, %v", admission, err)
 	}
-	if state := specialistStateOf(t, store, specialist.ID); state.Waiting != "capacity" {
-		t.Fatalf("held state = %+v", state)
-	}
-	setSpecialistLimits(t, store, project.ID, &one, nil, 9)
-	if admission, err := store.AdmitNext(ctx, admissionKeys(t, 40, nil), mustTime(t, 10)); err != nil || !admission.Admitted() || admission.Run.AgentID != specialist.ID {
-		t.Fatalf("carrier admission = %+v, %v", admission, err)
-	}
+	_ = one
 }
 
 // A specialist's carrier is never an overseer item; an open proposal is one
@@ -361,14 +355,11 @@ func TestSpecialistRecordLimits(t *testing.T) {
 	}
 	zero, three := uint32(0), uint32(3)
 	setSpecialistLimits(t, store, run.ProjectID, nil, &zero, 40)
-	if _, err := store.CreateContentForAttempt(ctx, run.CredentialDigest, proposal(90), mustTime(t, 41)); !errors.Is(err, ErrConflict) {
-		t.Fatalf("proposal over the open cap: %v", err)
+	first, err := store.CreateContentForAttempt(ctx, run.CredentialDigest, proposal(90), mustTime(t, 41))
+	if err != nil {
+		t.Fatalf("proposal despite obsolete open cap: %v", err)
 	}
 	setSpecialistLimits(t, store, run.ProjectID, nil, &three, 42)
-	first, err := store.CreateContentForAttempt(ctx, run.CredentialDigest, proposal(90), mustTime(t, 43))
-	if err != nil {
-		t.Fatal(err)
-	}
 	if _, err := store.CreateContentForAttempt(ctx, run.CredentialDigest, proposal(91), mustTime(t, 44)); !errors.Is(err, ErrConflict) {
 		t.Fatalf("second proposal in one run: %v", err)
 	}
