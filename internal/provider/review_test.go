@@ -45,7 +45,7 @@ func TestRunReviewConfinesClaudeFileReads(t *testing.T) {
 		}
 	}
 	for _, tool := range []string{"claude", "codex"} {
-		if err := os.WriteFile(filepath.Join(bin, tool), []byte("#!/bin/sh\nprintf '%s' \"$CLAUDE_CODE_TMPDIR\" > \"$HOME/review-tmp\"\nprintf '%s\\0' \"$@\"\n"), 0o700); err != nil {
+		if err := os.WriteFile(filepath.Join(bin, tool), []byte("#!/bin/sh\nprintf '%s\\n%s' \"$CLAUDE_CODE_TMPDIR\" \"$CARGO_HOME\" > \"$HOME/review-tmp\"\nprintf '%s\\0' \"$@\"\n"), 0o700); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -78,7 +78,8 @@ func TestRunReviewConfinesClaudeFileReads(t *testing.T) {
 	if !slices.Contains(filesystem.DenyRead, "//Users") || !slices.Contains(filesystem.AllowRead, "/"+checkout) || len(filesystem.AllowWrite) != 2 {
 		t.Fatalf("read boundary = %+v", filesystem)
 	}
-	for _, path := range []string{checkout, "/opt/toolchain", goModuleCachePath(operatorHome), pnpmStorePath(operatorHome), filepath.Join(operatorHome, ".rustup")} {
+	cargoHome := filepath.Join(operatorHome, ".cargo")
+	for _, path := range []string{checkout, "/opt/toolchain", goModuleCachePath(operatorHome), pnpmStorePath(operatorHome), filepath.Join(operatorHome, ".rustup"), filepath.Join(cargoHome, "registry"), filepath.Join(cargoHome, "git")} {
 		if !slices.Contains(filesystem.DenyWrite, "/"+path) {
 			t.Fatalf("missing deny-write grant for %s: %+v", path, filesystem.DenyWrite)
 		}
@@ -87,7 +88,7 @@ func TestRunReviewConfinesClaudeFileReads(t *testing.T) {
 	if !slices.Contains(filesystem.DenyWrite, "/"+defaultTemp) {
 		t.Fatalf("missing deny-write grant for Claude default temp: %+v", filesystem.DenyWrite)
 	}
-	if got, err := os.ReadFile(filepath.Join(filepath.Dir(account), "review-tmp")); err != nil || string(got) != filepath.Join(root, ".review-tmp") {
+	if got, err := os.ReadFile(filepath.Join(filepath.Dir(account), "review-tmp")); err != nil || string(got) != filepath.Join(root, ".review-tmp")+"\n"+cargoHome {
 		t.Fatalf("CLAUDE_CODE_TMPDIR = %q, err=%v", got, err)
 	}
 	for _, rule := range []string{"Bash", "Read(/" + checkout + "/**)", "Read(//opt/toolchain/**)", "Read(/" + goModuleCachePath(operatorHome) + "/**)", "Read(/" + pnpmStorePath(operatorHome) + "/**)", "Read(/" + filepath.Join(operatorHome, ".rustup") + "/**)"} {

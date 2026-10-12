@@ -67,8 +67,9 @@ func RunReview(ctx context.Context, kind kernel.Provider, toolPath, toolchainRoo
 	golang := []string{"PATH=" + toolPath, "GOENV=off", "GOCACHE=" + filepath.Join(home, "go-build"), "GOPATH=" + filepath.Join(home, "go"), "GOFLAGS=-mod=readonly", "GOPROXY=off", "GOSUMDB=off", "GOTOOLCHAIN=local", "CGO_ENABLED=0", "CARGO_HOME=" + filepath.Join(home, ".cargo"), "COREPACK_HOME=" + filepath.Join(home, ".cache", "corepack"), "COREPACK_ENABLE_NETWORK=0", "npm_config_cache=" + filepath.Join(home, ".cache", "npm"), "XDG_CACHE_HOME=" + filepath.Join(home, ".cache"), "CLAUDE_CODE_TMPDIR=" + tmp}
 	readable = append(readable, filepath.SplitList(toolchainRoots)...)
 	if operatorHome != "" {
-		readable = append(readable, goModuleCachePath(operatorHome), pnpmStorePath(operatorHome), filepath.Join(operatorHome, ".rustup"))
-		golang = append(golang, "GOMODCACHE="+goModuleCachePath(operatorHome), "RUSTUP_HOME="+filepath.Join(operatorHome, ".rustup"), "pnpm_config_store_dir="+pnpmStorePath(operatorHome))
+		cargoHome := filepath.Join(operatorHome, ".cargo")
+		readable = append(readable, goModuleCachePath(operatorHome), pnpmStorePath(operatorHome), filepath.Join(operatorHome, ".rustup"), filepath.Join(cargoHome, "registry"), filepath.Join(cargoHome, "git"))
+		golang = append(golang, "GOMODCACHE="+goModuleCachePath(operatorHome), "RUSTUP_HOME="+filepath.Join(operatorHome, ".rustup"), "CARGO_HOME="+cargoHome, "CARGO_NET_OFFLINE=true", "CARGO_TARGET_DIR="+tmp, "pnpm_config_store_dir="+pnpmStorePath(operatorHome))
 	}
 	// Claude's tools get the same grants:
 	// untrusted task, pull request, diff and dispute text reach the prompt.
