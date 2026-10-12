@@ -48,9 +48,9 @@ type Daemon struct {
 	// reviewBackend is a package-test seam; production always uses the
 	// Maintainer-backed daemonReviewBackend.
 	reviewBackend func(string, uint64) review.Backend
-	// The factory home and operator tool path (ConfigureHost) that releases
-	// and the reviewer run with.
-	home, toolPath string
+	// The factory home, operator tool path, toolchain read roots and operator
+	// home (ConfigureHost) that releases and the reviewer run with.
+	home, toolPath, toolchainRoots, operatorHome string
 	// releaseHold pauses admission in memory while a release drains; the
 	// durable dispatch switch is never written. releaseBusy is the one
 	// release this process runs.

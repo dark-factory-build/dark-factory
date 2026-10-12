@@ -450,9 +450,10 @@ func releaseDescends(ctx context.Context, root, tree, running, sha string) error
 	return nil
 }
 
-// ConfigureHost sets the factory home and the operator's tool path.
-func (daemon *Daemon) ConfigureHost(home, toolPath string) {
-	daemon.home, daemon.toolPath = home, toolPath
+// ConfigureHost sets the factory home and the operator's tool path,
+// toolchain read roots and home.
+func (daemon *Daemon) ConfigureHost(home, toolPath, toolchainRoots, operatorHome string) {
+	daemon.home, daemon.toolPath, daemon.toolchainRoots, daemon.operatorHome = home, toolPath, toolchainRoots, operatorHome
 }
 
 // ConfigureLog sets the process stderr boundary used by daemon-owned logs.
