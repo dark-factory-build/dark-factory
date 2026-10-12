@@ -10,8 +10,10 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync/atomic"
+	"syscall"
 	"testing"
 	"time"
 
@@ -20,6 +22,7 @@ import (
 	"github.com/dark-factory-build/dark-factory/internal/change"
 	"github.com/dark-factory-build/dark-factory/internal/install"
 	"github.com/dark-factory-build/dark-factory/internal/kernel"
+	"github.com/dark-factory-build/dark-factory/internal/runner"
 )
 
 // No other test in this package reaches GitHub: the shared window starts closed
@@ -402,6 +405,69 @@ func TestDeployWorkerRunsOnlyWhenTheControlPlaneChanged(t *testing.T) {
 	}
 }
 
+// buildRelease checks the merged commit out of the registered checkout and
+// runs every command of its build through the release's run, which records
+// each command's process group (#1854).
+func TestBuildReleaseRunsTheMergedCheckoutThroughRun(t *testing.T) {
+	root, err := os.MkdirTemp(runner.ShortTempDir(), "dark-factory-release-build-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(root) })
+	git := func(directory string, args ...string) string {
+		command := exec.Command(change.TrustedGitExecutable, append([]string{"-C", directory, "-c", "user.name=test", "-c", "user.email=test@example.invalid", "-c", "commit.gpgsign=false"}, args...)...)
+		command.Env = []string{"HOME=" + root, "TMPDIR=" + root, "GIT_CONFIG_NOSYSTEM=1", "GIT_CONFIG_GLOBAL=/dev/null"}
+		output, err := command.CombinedOutput()
+		if err != nil {
+			t.Fatalf("git %v: %v: %s", args, err, output)
+		}
+		return strings.TrimSpace(string(output))
+	}
+	origin, work, checkout := filepath.Join(root, "origin.git"), filepath.Join(root, "work"), filepath.Join(root, "checkout")
+	git(root, "init", "--quiet", "--bare", origin)
+	git(root, "init", "--quiet", "-b", "main", work)
+	for name, content := range map[string]string{"VERSION": "1.2.3\n", "go.mod": "module example\n\ngo 1.24\n\ntoolchain go1.27.0\n"} {
+		if err := os.WriteFile(filepath.Join(work, name), []byte(content), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	git(work, "add", "-A")
+	git(work, "commit", "--quiet", "-m", "release")
+	sha := git(work, "rev-parse", "HEAD")
+	git(work, "push", "--quiet", origin, "main")
+	git(root, "init", "--quiet", checkout)
+	git(checkout, "remote", "add", "origin", origin)
+	info, err := os.Lstat(checkout)
+	if err != nil {
+		t.Fatal(err)
+	}
+	stat := info.Sys().(*syscall.Stat_t)
+	identity, err := change.NewRepositoryIdentity(uint64(stat.Dev), stat.Ino)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.Background()
+	source, err := change.InspectRepositorySource(ctx, change.TrustedGitExecutable, checkout, "", identity)
+	if err != nil {
+		t.Fatal(err)
+	}
+	directory := filepath.Join(root, "release")
+	var ran []string
+	built, err := buildRelease(ctx, &Daemon{toolPath: "/usr/bin:/bin"}, checkout, source, sha, directory, func(command *exec.Cmd) ([]byte, error) {
+		relative, _ := filepath.Rel(directory, command.Dir)
+		ran = append(ran, relative+": "+strings.Join(command.Args[1:3], " ")+" "+filepath.Base(command.Args[len(command.Args)-1]))
+		if command.Args[1] == "go" {
+			output := command.Args[len(command.Args)-2]
+			return nil, errors.Join(os.MkdirAll(filepath.Dir(output), 0o700), os.WriteFile(output, nil, 0o600))
+		}
+		return nil, nil
+	})
+	want := []string{"tree/web: corepack pnpm --ignore-scripts", "tree/web: corepack pnpm console", "tree: go build factoryd", "tree: go build factoryctl", "tree: go build factory-runner"}
+	if expected, _ := buildinfo.Expected("1.2.3", sha, runtime.GOOS+"/"+runtime.GOARCH); err != nil || built != expected || strings.Join(ran, "\n") != strings.Join(want, "\n") {
+		t.Fatalf("buildRelease = %+v, %v; ran %q", built, err, ran)
+	}
+}
+
 func TestTickReleasesEachNewBaseTipOnce(t *testing.T) {
 	fixture, settle, events := releaseFixture(t)
 	settle()
@@ -493,15 +559,18 @@ func TestTickBatchesBaseTipsIntoOneRelease(t *testing.T) {
 	}
 }
 
-// #1854: a release a previous factoryd left running is failed at boot, its
-// build's process group stopped, and the next pass releases the tip at once.
+// #1854: a release a previous factoryd left running is failed by the next
+// factoryd's boot, its build's process group stopped, and that factoryd's
+// next pass releases the newer tip at once.
 func TestBootFailsTheInterruptedReleaseAndTheNextPassStartsIt(t *testing.T) {
 	fixture, settle, events := releaseFixture(t)
 	settle()
 	head, poll, batch := releaseHead, releasePoll, releaseBatch
 	t.Cleanup(func() { releaseHead, releasePoll, releaseBatch = head, poll, batch })
-	sha := strings.Repeat("7", 40)
-	releaseHead = func(context.Context, *Daemon, string) (string, error) { return sha, nil }
+	interrupted, newer := strings.Repeat("7", 40), strings.Repeat("8", 40)
+	var tip atomic.Value
+	tip.Store(interrupted)
+	releaseHead = func(context.Context, *Daemon, string) (string, error) { return tip.Load().(string), nil }
 	releasePoll, releaseBatch = 0, time.Hour
 	build, died := releaseBuild, make(chan error, 1)
 	var builds atomic.Int32
@@ -517,11 +586,11 @@ func TestBootFailsTheInterruptedReleaseAndTheNextPassStartsIt(t *testing.T) {
 		return buildinfo.Identity{}, ctx.Err()
 	}
 	ctx := context.Background()
-	if _, err := fixture.daemon.Release(ctx, sha, true); err != nil {
+	if _, err := fixture.daemon.Release(ctx, interrupted, true); err != nil {
 		t.Fatal(err)
 	}
 	for deadline := time.Now().Add(5 * time.Second); ; time.Sleep(5 * time.Millisecond) {
-		_, delivery, _, err := fixture.store.Delivery(ctx, "release:"+sha)
+		_, delivery, _, err := fixture.store.Delivery(ctx, "release:"+interrupted)
 		if err == nil && delivery.Group > 0 {
 			break
 		}
@@ -529,22 +598,28 @@ func TestBootFailsTheInterruptedReleaseAndTheNextPassStartsIt(t *testing.T) {
 			t.Fatalf("the build's process group was never recorded: %+v, %v", delivery, err)
 		}
 	}
-	// The next factoryd boots with only the durable record.
-	fixture.daemon.releaseBusy.Store(false)
-	if err := fixture.daemon.FailInterruptedRelease(ctx); err != nil {
+	// The next factoryd shares only the durable record, and main merged on.
+	next, err := NewDaemon(fixture.store)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = next.Close() })
+	next.ConfigureHost(fixture.daemon.home, "/usr/bin:/bin", "", "")
+	tip.Store(newer)
+	if err := next.FailInterruptedRelease(ctx); err != nil {
 		t.Fatal(err)
 	}
 	if err := <-died; err == nil || !strings.Contains(err.Error(), "killed") {
 		t.Fatalf("the interrupted build's group survived: %v", err)
 	}
-	if delivery, err := fixture.daemon.Release(ctx, sha, false); err != nil || delivery.State != "failed" || delivery.Reason != releaseInterrupted || delivery.Group != 0 {
+	if delivery, err := next.Release(ctx, interrupted, false); err != nil || delivery.State != "failed" || delivery.Reason != releaseInterrupted || delivery.Group != 0 {
 		t.Fatalf("interrupted release = %+v, %v", delivery, err)
 	}
-	fixture.daemon.tickRelease(ctx)
+	next.tickRelease(ctx)
 	if got := <-events; got != "build /self-repository" {
 		t.Fatalf("next pass: %q", got)
 	}
-	awaitRelease(t, fixture.daemon, sha, func(value kernel.ProductionDelivery) bool { return value.Phase == "trial" })
+	awaitRelease(t, next, newer, func(value kernel.ProductionDelivery) bool { return value.Phase == "trial" })
 }
 
 func TestSchedulerAdmitsNothingWhileAReleaseHoldsAdmission(t *testing.T) {
