@@ -138,6 +138,17 @@ func (client *OperatorClient) WebStatus(ctx context.Context) (WebStatus, error) 
 	return result, nil
 }
 
+func (client *OperatorClient) Profile(ctx context.Context, input ProfileInput) (ProfileResult, error) {
+	if !ValidProfileInput(input) {
+		return ProfileResult{}, ErrInvalidInput
+	}
+	var result ProfileResult
+	if err := client.client.call(ctx, "profile", input, &result); err != nil {
+		return ProfileResult{}, err
+	}
+	return result, nil
+}
+
 func (client *OperatorClient) TerminalObserve(ctx context.Context, input TerminalObserveInput) (TerminalObservation, error) {
 	if !validTerminalObservationInput(input) {
 		return TerminalObservation{}, ErrInvalidInput

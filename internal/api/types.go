@@ -140,6 +140,19 @@ type AgentPathsInput struct {
 	AgentID string `json:"agent_id"`
 }
 
+type ProfileInput struct {
+	Seconds uint32 `json:"seconds"`
+}
+
+type ProfileResult struct {
+	CPUPath       string `json:"cpu_path"`
+	HeapPath      string `json:"heap_path"`
+	GoroutinePath string `json:"goroutine_path"`
+	Seconds       uint32 `json:"seconds"`
+}
+
+func ValidProfileInput(value ProfileInput) bool { return value.Seconds > 0 && value.Seconds <= 300 }
+
 func validAgentPathsInput(value AgentPathsInput) bool { return validID(value.AgentID) }
 func validAgentPaths(value AgentPaths) bool {
 	if !validID(value.AgentID) || value.RunID != "" && !validID(value.RunID) || value.Paths == nil || len(value.Paths) > 16 || value.RunID == "" && (value.SourcePath != "" || value.RuntimePath != "") {

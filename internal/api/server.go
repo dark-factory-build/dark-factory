@@ -21,6 +21,7 @@ type CallKind uint8
 const (
 	CallHealth CallKind = iota + 1
 	CallSnapshot
+	CallProfile
 	CallCreateProject
 	CallProjectRepository
 	CallProjectLimits
@@ -135,6 +136,7 @@ type Call struct {
 	sendBack           SendBackInput
 	taskRead           TaskReadInput
 	projectContent     ProjectContentInput
+	profile            ProfileInput
 	overseerTask       OverseerTaskCreateInput
 	overseerSnapshot   OverseerSnapshotInput
 	overseerTaskEdit   OverseerTaskUpdateInput
@@ -343,6 +345,7 @@ func (call Call) TaskReadInput() (TaskReadInput, bool) {
 func (call Call) ProjectContentInput() (ProjectContentInput, bool) {
 	return call.projectContent, call.kind == CallProjectContent
 }
+func (call Call) ProfileInput() (ProfileInput, bool) { return call.profile, call.kind == CallProfile }
 
 func (call Call) WebClientRevocationInput() (WebClientRevocationInput, bool) {
 	return call.webClient, call.kind == CallWebRevokeClient
@@ -853,6 +856,10 @@ func decodeCall(domain byte, bearer credential, encoded []byte) (Call, RemoteErr
 		if err := decodeExact(request.Params, &struct{}{}); err != nil {
 			return Call{}, RemoteInvalidRequest
 		}
+	case CallProfile:
+		if err := decodeExact(request.Params, &call.profile); err != nil || !ValidProfileInput(call.profile) {
+			return Call{}, RemoteInvalidRequest
+		}
 	case CallAttemptTask:
 		var input struct {
 			Resumed bool `json:"resumed,omitempty"`
@@ -1137,6 +1144,8 @@ func methodKind(method string) (CallKind, byte) {
 		return CallHealth, operatorDomain
 	case "snapshot":
 		return CallSnapshot, operatorDomain
+	case "profile":
+		return CallProfile, operatorDomain
 	case "create_project":
 		return CallCreateProject, operatorDomain
 	case "project_repository":
@@ -1379,6 +1388,8 @@ func replyMatches(kind CallKind, reply replyKind) bool {
 		return reply == replyHumanRequests
 	case CallSnapshot:
 		return reply == replySnapshot
+	case CallProfile:
+		return reply == replyContent
 	case CallAgentPaths:
 		return reply == replyAgentPaths
 	case CallAccountsDiscover:
