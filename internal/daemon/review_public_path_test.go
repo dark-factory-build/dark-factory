@@ -899,6 +899,8 @@ func waitHeld(t *testing.T, b *heldBackend) {
 func TestStartupRecoveryDoesNotRelaunchAReviewThisDaemonAccepted(t *testing.T) {
 	fixture, project := reviewPublicFixture(t)
 	ctx := context.Background()
+	// This daemon booted at its fixture clock, before it accepted the review.
+	fixture.daemon.bootedAt = fixture.daemon.now()
 	backend := newHeldBackend("Review")
 	fixture.daemon.reviewBackend = func(string, uint64) review.Backend { return backend }
 	input := api.IntakeInput{Action: "review_pr", ProjectID: project.String(), ReviewRequest: &api.ReviewRequest{Repository: "team/repo", PullNumber: 7, Head: strings.Repeat("a", 40), Base: strings.Repeat("b", 40), BaseRef: "main", Provider: "codex"}}
