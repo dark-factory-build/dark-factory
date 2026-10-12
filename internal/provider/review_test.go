@@ -93,9 +93,59 @@ func TestClaudeConfinementPreservesReadOnlyAlias(t *testing.T) {
 	if err := json.Unmarshal([]byte(settings), &parsed); err != nil {
 		t.Fatal(err)
 	}
-	for _, path := range []string{"/" + link, "/" + resolvedTarget} {
-		if !slices.Contains(parsed.Sandbox.Filesystem.AllowRead, path) || !slices.Contains(parsed.Sandbox.Filesystem.DenyWrite, path) || !slices.Contains(parsed.Permissions.Allow, "Read("+path+"/**)") {
-			t.Fatalf("missing read-only alias %s: %+v %v", path, parsed.Sandbox.Filesystem, parsed.Permissions.Allow)
+	resolvedRule := "/" + resolvedTarget
+	if !slices.Contains(parsed.Sandbox.Filesystem.AllowRead, resolvedRule) || !slices.Contains(parsed.Sandbox.Filesystem.DenyWrite, resolvedRule) || !slices.Contains(parsed.Permissions.Allow, "Read("+resolvedRule+"/**)") {
+		t.Fatalf("missing resolved read-only alias %s: %+v %v", resolvedRule, parsed.Sandbox.Filesystem, parsed.Permissions.Allow)
+	}
+	for _, path := range []string{"/" + link, resolvedRule} {
+		if !slices.Contains(parsed.Sandbox.Filesystem.DenyWrite, path) {
+			t.Fatalf("missing read-only deny-write alias %s: %+v", path, parsed.Sandbox.Filesystem)
+		}
+	}
+}
+
+func TestClaudeConfinementCompactsReadOnlyAliasesWithResolvedReads(t *testing.T) {
+	root := t.TempDir()
+	for i := 0; i < 8; i++ {
+		root = filepath.Join(root, "long-review-root")
+		if err := os.Mkdir(root, 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	var grants []grant
+	var resolved []string
+	for i := 0; i < 6; i++ {
+		target := filepath.Join(root, strings.Repeat("target-", 12)+strconv.Itoa(i))
+		link := filepath.Join(root, strings.Repeat("link-", 12)+strconv.Itoa(i))
+		if err := os.Mkdir(target, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Symlink(target, link); err != nil {
+			t.Fatal(err)
+		}
+		resolvedTarget, err := filepath.EvalSymlinks(link)
+		if err != nil {
+			t.Fatal(err)
+		}
+		grants = append(grants, grant{link, false})
+		resolved = append(resolved, "/"+resolvedTarget)
+	}
+	settings, err := claudeConfinement(grants, nil, map[string]any{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var parsed struct {
+		Sandbox struct {
+			Filesystem struct{ AllowRead []string }
+		}
+		Permissions struct{ Allow []string }
+	}
+	if err := json.Unmarshal([]byte(settings), &parsed); err != nil {
+		t.Fatal(err)
+	}
+	for _, path := range resolved {
+		if !slices.Contains(parsed.Sandbox.Filesystem.AllowRead, path) || !slices.Contains(parsed.Permissions.Allow, "Read("+path+"/**)") {
+			t.Fatalf("missing compacted resolved read grant %s (settings=%d): %+v %v", path, len(settings), parsed.Sandbox.Filesystem.AllowRead, parsed.Permissions.Allow)
 		}
 	}
 }
@@ -105,7 +155,11 @@ func TestClaudeConfinementPreservesReadOnlyAlias(t *testing.T) {
 // denied, the checkout and toolchain are re-allowed, and nothing else is.
 // Codex keeps its own read-only profile.
 func TestRunReviewConfinesClaudeFileReads(t *testing.T) {
-	bin, root, account := t.TempDir(), t.TempDir(), t.TempDir()
+	bin, rootBase, account := t.TempDir(), t.TempDir(), t.TempDir()
+	root := filepath.Join(rootBase, strings.Repeat("review-root-", 8))
+	if err := os.Mkdir(root, 0o700); err != nil {
+		t.Fatal(err)
+	}
 	operatorHome := t.TempDir()
 	corepack := filepath.Join(operatorHome, "Library", "Caches", "dark-factory", "local-ci", "trusted", "corepack", "v1", "pnpm", pnpmVersion)
 	if err := os.MkdirAll(corepack, 0o700); err != nil {
@@ -157,30 +211,68 @@ func TestRunReviewConfinesClaudeFileReads(t *testing.T) {
 		t.Fatal(err)
 	}
 	filesystem, allow := settings.Sandbox.Filesystem, settings.Permissions.Allow
-	wantWrites := []string{"/" + filepath.Join(root, ".review-home"), "/" + filepath.Join(root, ".review-tmp")}
-	for _, path := range []string{filepath.Join(root, ".review-home"), filepath.Join(root, ".review-tmp")} {
-		if resolved, err := filepath.EvalSymlinks(filepath.Dir(path)); err == nil {
-			resolved = filepath.Join(resolved, filepath.Base(path))
-			if resolved != path {
-				wantWrites = append(wantWrites, "/"+resolved)
+	hasWriteGrant := func(path string) bool {
+		candidates := []string{"/" + path}
+		resolved, err := filepath.EvalSymlinks(path)
+		if err != nil {
+			if parent, parentErr := filepath.EvalSymlinks(filepath.Dir(path)); parentErr == nil {
+				resolved = filepath.Join(parent, filepath.Base(path))
 			}
 		}
+		if resolved != "" && resolved != path {
+			candidates = append(candidates, "/"+resolved)
+		}
+		for _, candidate := range candidates {
+			if slices.Contains(filesystem.AllowWrite, candidate) {
+				return true
+			}
+		}
+		return false
 	}
-	if !slices.Contains(filesystem.DenyRead, "//Users") || !slices.Contains(filesystem.AllowRead, "/"+checkout) || len(filesystem.AllowWrite) != len(wantWrites) {
+	checkoutReads := []string{"/" + checkout}
+	if resolved, err := filepath.EvalSymlinks(checkout); err == nil && resolved != checkout {
+		checkoutReads = append(checkoutReads, "/"+resolved)
+	}
+	checkoutReadable := false
+	for _, path := range checkoutReads {
+		checkoutReadable = checkoutReadable || slices.Contains(filesystem.AllowRead, path)
+	}
+	if !slices.Contains(filesystem.DenyRead, "//Users") || !checkoutReadable {
 		t.Fatalf("read boundary = %+v", filesystem)
 	}
-	for _, path := range wantWrites {
-		if !slices.Contains(filesystem.AllowWrite, path) {
+	for _, path := range []string{filepath.Join(root, ".review-home"), filepath.Join(root, ".review-tmp")} {
+		if !hasWriteGrant(path) {
 			t.Fatalf("missing write grant for %s: %+v", path, filesystem.AllowWrite)
 		}
 	}
 	cargoHome := filepath.Join(operatorHome, ".cargo")
+	hasDenyWrite := func(path string) bool {
+		candidates := []string{"/" + path}
+		resolved, err := filepath.EvalSymlinks(path)
+		if err != nil {
+			if parent, parentErr := filepath.EvalSymlinks(filepath.Dir(path)); parentErr == nil {
+				resolved = filepath.Join(parent, filepath.Base(path))
+			}
+		}
+		if resolved != "" && resolved != path {
+			candidates = append(candidates, "/"+resolved)
+		}
+		for _, candidate := range candidates {
+			if slices.Contains(filesystem.DenyWrite, candidate) {
+				return true
+			}
+		}
+		return false
+	}
 	for _, path := range []string{checkout, "/opt/toolchain", goModuleCachePath(operatorHome), pnpmStorePath(operatorHome), filepath.Join(operatorHome, ".rustup"), filepath.Join(cargoHome, "registry"), filepath.Join(cargoHome, "git")} {
-		if !slices.Contains(filesystem.DenyWrite, "/"+path) {
+		if !hasDenyWrite(path) {
 			t.Fatalf("missing deny-write grant for %s: %+v", path, filesystem.DenyWrite)
 		}
 	}
 	defaultTemp := "/private/tmp/claude-" + strconv.Itoa(os.Getuid())
+	if slices.Contains(filesystem.AllowRead, "/"+defaultTemp) {
+		t.Fatalf("reviewer can read shared Claude temp: %+v", filesystem)
+	}
 	if !slices.Contains(filesystem.DenyWrite, "/"+defaultTemp) {
 		t.Fatalf("missing deny-write grant for Claude default temp: %+v", filesystem.DenyWrite)
 	}
@@ -190,8 +282,21 @@ func TestRunReviewConfinesClaudeFileReads(t *testing.T) {
 	if _, err := os.Stat(filepath.Join(root, ".review-home", ".cache", "corepack", "v1", "pnpm", pnpmVersion, "package.json")); err != nil {
 		t.Fatalf("review Corepack cache was not prepared: %v", err)
 	}
+	readRulePresent := func(rule string) bool {
+		if slices.Contains(allow, rule) || !strings.HasPrefix(rule, "Read(") {
+			return slices.Contains(allow, rule)
+		}
+		path := strings.TrimSuffix(strings.TrimPrefix(rule, "Read("), "/**)")
+		resolved, err := filepath.EvalSymlinks(path)
+		if err != nil {
+			if parent, parentErr := filepath.EvalSymlinks(filepath.Dir(path)); parentErr == nil {
+				resolved = filepath.Join(parent, filepath.Base(path))
+			}
+		}
+		return resolved != "" && slices.Contains(allow, "Read(/"+resolved+"/**)")
+	}
 	for _, rule := range []string{"Bash", "Read(/" + checkout + "/**)", "Read(//opt/toolchain/**)", "Read(//System/Library/OpenSSL/openssl.cnf/**)", "Read(/" + goModuleCachePath(operatorHome) + "/**)", "Read(/" + pnpmStorePath(operatorHome) + "/**)", "Read(/" + filepath.Join(operatorHome, ".rustup") + "/**)"} {
-		if !slices.Contains(allow, rule) {
+		if !readRulePresent(rule) {
 			t.Fatalf("allow rules lack %s: %q", rule, allow)
 		}
 	}
