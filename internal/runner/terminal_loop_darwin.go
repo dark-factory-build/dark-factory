@@ -74,7 +74,8 @@ func runReleasedProviderWithHandover(child *OwnedChild, daemon, worker *os.File,
 	if err := loop.send(TerminalFrame{Kind: TerminalReady}); err != nil {
 		return false, err
 	}
-	return loop.serve()
+	daemonOpen, err := loop.serve()
+	return daemonOpen, errors.Join(loop.refusal, err)
 }
 
 type terminalOwner struct {
@@ -85,6 +86,8 @@ type terminalOwner struct {
 	daemonOpen bool
 	workerOpen bool
 	ptyOpen    bool
+	// refusal is the worker's forwarded pre-exec refusal, if any.
+	refusal error
 
 	daemonDecoder *attemptFrameDecoder
 	generation    uint64
@@ -214,8 +217,11 @@ func (o *terminalOwner) awaitProviderExec(stagePTY *ptyStageSink) error {
 			}
 			if validProviderErrorFrame(frame) {
 				// Forward the bounded refusal, as the stage checkpoints do, so the
-				// daemon records it as the run's failure cause.
-				return errors.Join(fmt.Errorf("runner: provider exec: %s", frame.Payload), o.writeDaemonFrame(frame))
+				// daemon records it as the run's failure cause, then serve the
+				// exited worker like a provider so its retained output reaches
+				// the daemon's diagnostics.
+				o.refusal = fmt.Errorf("runner: provider exec: %s", frame.Payload)
+				return o.writeDaemonFrame(frame)
 			}
 			if validProviderHandoffCheck(frame) {
 				// The worker has completed every provider check and is paused
@@ -287,6 +293,9 @@ func (o *terminalOwner) serve() (bool, error) {
 			// only then is PTY tail output drained. PTY EOF is emitted exclusively
 			// from an actual EOF/EIO read, never from child exit.
 			if _, err := o.child.FinishAfterExit(8 * time.Second); err != nil {
+				return o.daemonOpen, err
+			}
+			if err := o.awaitFirstCredit(); err != nil {
 				return o.daemonOpen, err
 			}
 			if err := o.drainPTY(); err != nil {
@@ -851,6 +860,43 @@ func (o *terminalOwner) consumePTY(data []byte, readErr error) error {
 		return nil
 	}
 	return readErr
+}
+
+// awaitFirstCredit gives the daemon a bounded chance to grant its first
+// output credit when the provider exits before it arrived: a refusal or an
+// early exit otherwise ends with its output unsent and its run's
+// diagnostics empty. Only credit is applied; the daemon reads no other
+// command's answer once the provider has exited.
+func (o *terminalOwner) awaitFirstCredit() error {
+	deadline := time.Now().Add(time.Second)
+	for o.credit == 0 && o.sent == 0 && o.daemonOpen && !o.detached && time.Now().Before(deadline) {
+		fds := []unix.PollFd{{Fd: int32(o.daemon.Fd()), Events: unix.POLLIN}}
+		if n, err := unix.Poll(fds, 50); n == 0 || errors.Is(err, unix.EINTR) {
+			continue
+		} else if err != nil {
+			return err
+		}
+		buf := make([]byte, 16<<10)
+		n, err := unix.Read(int(o.daemon.Fd()), buf)
+		if errors.Is(err, unix.EAGAIN) || errors.Is(err, unix.EINTR) {
+			continue
+		}
+		if n <= 0 {
+			return nil
+		}
+		frames, err := o.daemonDecoder.Feed(buf[:n])
+		if err != nil {
+			return err
+		}
+		for _, frame := range frames {
+			if command, err := terminalCommandFromFrame(frame); err == nil && command.Kind == TerminalCredit {
+				if err := o.command(frame); err != nil {
+					return err
+				}
+			}
+		}
+	}
+	return nil
 }
 
 func (o *terminalOwner) drainPTY() error {

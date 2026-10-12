@@ -253,6 +253,20 @@ func TestLiveAttemptRetainsPreExecRefusalAsProviderExitOutcome(t *testing.T) {
 	}
 }
 
+func TestLiveAttemptExitOutcomeNamesOutputTailWithoutRetainedProposal(t *testing.T) {
+	runID, sessionID := liveTestIDs(t, 11003)
+	attempt := newLiveAttempt(&Daemon{}, runID, sessionID, nil)
+	if _, ok := attempt.exitOutcome(); ok {
+		t.Fatal("silent exit named a cause")
+	}
+	output := []byte("\x1b[31merror:\x1b[0m config.toml: invalid key\r\n")
+	attempt.retainDiagnosticOutput(0, uint64(len(output)), output)
+	proposal, ok := attempt.exitOutcome()
+	if !ok || proposal.Code() != kernel.FailureProviderExit || proposal.Detail() != "provider exited before an attempt outcome; output tail: error: config.toml: invalid key" {
+		t.Fatalf("exit outcome = %v %s %q", ok, proposal.Code(), proposal.Detail())
+	}
+}
+
 func TestLiveAttemptRejectsExitBroadcastWithoutCommittedResult(t *testing.T) {
 	runID, sessionID := liveTestIDs(t, 11001)
 	attempt := newLiveAttempt(nil, runID, sessionID, nil)

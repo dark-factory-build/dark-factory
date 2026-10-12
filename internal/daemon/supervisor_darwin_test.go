@@ -322,6 +322,14 @@ func runSupervisorCodexFixture() error {
 			}
 		}
 	}
+	if directive == "exit-once" {
+		// The first launch leaves its rollout and exits without an outcome.
+		marker := filepath.Join(os.Getenv("CODEX_HOME"), "exit-once")
+		if _, err := os.Stat(marker); errors.Is(err, os.ErrNotExist) {
+			fmt.Print("codex fixture: early provider failure\r\n")
+			return os.WriteFile(marker, nil, 0o600)
+		}
+	}
 	_, err = client.Succeed(ctx, fmt.Sprintf("%s\nPTY=%dx%d", task.Task, size.Col, size.Row))
 	return err
 }
@@ -819,6 +827,48 @@ func TestSupervisorCodexOrchestratorResumesFromPreviousRunsWorkingDirectory(t *t
 	}
 	if !resumedSomething {
 		t.Fatalf("second orchestrator run did not resume the first run's session %q: %+v", firstSessionID, secondRollouts)
+	}
+	fixture.assertReleased(t, first)
+	fixture.assertReleased(t, second)
+}
+
+// A provider that exits without an outcome is failed with its output as the
+// cause, and the task's next attempt starts a fresh session instead of
+// resuming the one that exit left behind.
+func TestSupervisorCodexWorkerStartsFreshAfterProviderExit(t *testing.T) {
+	fixture := newSupervisorFixture(t, "exit-once")
+	if err := replaceSupervisorAgentLaunchControls(fixture.storePath, fixture.agentID, kernel.ProviderCodex, "", ""); err != nil {
+		t.Fatal(err)
+	}
+	tools := filepath.Join(fixture.root, "tools")
+	if err := os.Mkdir(tools, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	copySupervisorExecutable(t, supervisorTestExecutable(t), filepath.Join(tools, "codex"))
+	fixture.spec.ToolPath = tools + ":" + fixture.spec.ToolPath
+	sessionsRoot := filepath.Join(provider.ConfigHome(kernel.ProviderCodex, fixture.spec.AccountHome), "sessions")
+
+	first, err := fixture.daemon.RunNext(context.Background(), fixture.spec)
+	if err != nil {
+		t.Fatalf("first RunNext: %v", err)
+	}
+	fixture.assertTerminal(t, first, kernel.OutcomeFailed)
+	if first.Terminal.Code() != kernel.FailureProviderExit || !strings.Contains(first.Terminal.Detail(), "output tail: codex fixture: early provider failure") {
+		t.Fatalf("first terminal = %s %q, want the provider's output as its cause", first.Terminal.Code(), first.Terminal.Detail())
+	}
+	if diagnostics, found, err := fixture.store.TerminalDiagnostics(context.Background(), first.ID); err != nil || !found || !bytes.Contains(diagnostics.Payload, []byte("early provider failure")) {
+		t.Fatalf("first diagnostics found=%v err=%v", found, err)
+	}
+
+	queueSupervisorRetry(t, fixture, first)
+	second, err := fixture.daemon.RunNext(context.Background(), fixture.spec)
+	if err != nil {
+		t.Fatalf("second RunNext: %v", err)
+	}
+	fixture.assertTerminal(t, second, kernel.OutcomeSucceeded)
+	rollouts := codexRolloutSummaries(t, sessionsRoot)
+	if len(rollouts) != 2 || rollouts[0].ResumedFrom != "" || rollouts[1].ResumedFrom != "" {
+		t.Fatalf("rollouts = %+v, want two fresh sessions", rollouts)
 	}
 	fixture.assertReleased(t, first)
 	fixture.assertReleased(t, second)
@@ -1646,6 +1696,10 @@ func TestSupervisorRecordsPreExecRefusalAsProviderExitCause(t *testing.T) {
 	}
 	if _, statErr := os.Stat(fixture.witness); !errors.Is(statErr, os.ErrNotExist) {
 		t.Fatalf("provider ran after refusal: %v", statErr)
+	}
+	// The worker's own stderr is the PTY, so its exit line is retained.
+	if diagnostics, found, err := fixture.store.TerminalDiagnostics(context.Background(), run.ID); err != nil || !found || !bytes.Contains(diagnostics.Payload, []byte("Change worker failed")) {
+		t.Fatalf("refusal diagnostics found=%v err=%v", found, err)
 	}
 	fresh, err := fixture.store.LatestTaskRunProviderExit(context.Background(), run.TaskID, run.TaskIncarnationID)
 	if err != nil || !fresh {

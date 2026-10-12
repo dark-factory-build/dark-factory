@@ -677,6 +677,22 @@ func (attempt *liveAttempt) pendingOutcomeSnapshot() (kernel.Proposal, bool) {
 	return *attempt.pendingOutcome, true
 }
 
+// exitOutcome is the retained proposal, or else a provider_exit failure
+// naming the tail of the provider's retained output: the only cause a
+// provider that exits without an outcome leaves.
+func (attempt *liveAttempt) exitOutcome() (kernel.Proposal, bool) {
+	if pending, ok := attempt.pendingOutcomeSnapshot(); ok {
+		return pending, true
+	}
+	floor, _, payload := attempt.diagnosticSnapshot()
+	tail := terminalTextProjection(payload, floor != 0, 512)
+	if tail == "" {
+		return kernel.Proposal{}, false
+	}
+	proposal, err := kernel.NewFailureProposal(kernel.FailureProviderExit, "provider exited before an attempt outcome; output tail: "+tail)
+	return proposal, err == nil
+}
+
 func (attempt *liveAttempt) submit(ctx context.Context, command liveAttemptCommand) error {
 	if attempt == nil || ctx == nil {
 		return ErrTerminalClosed
