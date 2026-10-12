@@ -302,6 +302,7 @@ func (daemon *Daemon) publishPull(ctx context.Context, c kernel.PublishableChang
 		return errors.New("nothing to publish: its head " + c.Head + " changes no file from " + diffFrom)
 	}
 	message := publicationMessage(c)
+	batchOffset := 0
 	if legacy {
 		// A later old batch can be indeterminate even when batch 1 completed.
 		// Retain every completed old receipt, then publish only the unfinished
@@ -346,10 +347,11 @@ func (daemon *Daemon) publishPull(ctx context.Context, c kernel.PublishableChang
 		}
 		if !recovered && reconciledThrough != 0 {
 			changes = changes[reconciledThrough:]
+			batchOffset = reconciledThrough / 50
 		}
 	}
 	for i := 0; i*batchSize < len(changes); i++ {
-		step := prefix + strconv.Itoa(i+1)
+		step := prefix + strconv.Itoa(batchOffset+i+1)
 		var commit struct {
 			SHA string `json:"commit_sha"`
 		}

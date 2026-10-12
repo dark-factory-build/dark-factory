@@ -349,6 +349,42 @@ func TestFactorydReconcilesLandedIndeterminateLegacyPublication(t *testing.T) {
 	}
 }
 
+func TestFactorydPublishesUnfinishedLegacySuffixAfterReconciliation(t *testing.T) {
+	fixture, c, source, app, checkout := publishFixture(t, 149, false)
+	firstOperation := uuid5("dark-factory:" + c.Change.String() + ":publish-" + c.Head[:8] + "-1")
+	secondOperation := uuid5("dark-factory:" + c.Change.String() + ":publish-" + c.Head[:8] + "-2")
+	thirdOperation := uuid5("dark-factory:" + c.Change.String() + ":publish-" + c.Head[:8] + "-3")
+	firstCommit := strings.Repeat("a", 40)
+	app.tip = firstCommit
+	app.journal[firstOperation], _ = json.Marshal(map[string]any{
+		"branch": "factory/" + c.Change.String()[:12], "commit_sha": firstCommit, "parent_sha": c.Base,
+	})
+	app.indeterminate = map[string]bool{}
+	app.landBeforeUnavailable = true
+	app.indeterminateOnUnavailable = true
+	app.unavailable = true
+	if err := fixture.daemon.publishChange(context.Background(), c, "team/repo", source, app.call, checkout); err != nil {
+		t.Fatal(err)
+	}
+	landed := app.tip
+	app.unavailable = false
+	app.indeterminateOnUnavailable = false
+	if err := fixture.daemon.publishChange(context.Background(), c, "team/repo", source, app.call, checkout); err != nil {
+		t.Fatal(err)
+	}
+	if len(app.reconciliations) != 1 || app.reconciliations[0] != secondOperation || len(app.writes) != 3 {
+		t.Fatalf("suffix recovery writes = %+v, reconciliations = %+v", app.writes, app.reconciliations)
+	}
+	third := app.writes[1]["arguments"].(map[string]any)
+	if third["operation_id"] != thirdOperation || len(third["changes"].([]map[string]any)) != 50 || third["expected_head_sha"] != landed {
+		t.Fatalf("unfinished legacy suffix = %+v", third)
+	}
+	thirdCommit := fmt.Sprintf("%x", sha1.Sum([]byte(thirdOperation)))
+	if app.writes[2]["name"] != "create_pull_request" || app.writes[2]["arguments"].(map[string]any)["head_sha"] != thirdCommit {
+		t.Fatalf("suffix pull request = %+v", app.writes[2])
+	}
+}
+
 // A head that changes after commits reached the Change's branch but before
 // its pull request (a retried task) goes on that branch head under new
 // operation ids, carrying only what differs from it.
