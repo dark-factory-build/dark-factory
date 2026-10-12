@@ -689,8 +689,7 @@ func (f *attemptFixture) finishAndAck(expectOuterSuccess ...bool) *TerminalRecor
 	var err error
 	for {
 		event, err = f.controller.Next(6 * time.Second)
-		// A pre-exec refusal is forwarded ahead of the result it explains.
-		if err != nil || event.Kind != AttemptTerminalFrame && event.Kind != AttemptProviderExecError {
+		if err != nil || event.Kind != AttemptTerminalFrame {
 			break
 		}
 	}
@@ -2982,15 +2981,9 @@ func TestControllerAcceptsWorkerFailureOnlyWhileAwaitingCheckpoint(t *testing.T)
 			if err := writeControlFrame(peer, frame, maxFrameBytes); err != nil {
 				t.Fatal(err)
 			}
-			event, err := controller.Next(time.Second)
+			_, err = controller.Next(time.Second)
 			allowed := state == controllerSelectionReleased || state == controllerPreparationReleased || state == controllerPopulationReleased
-			if state == controllerProviderReleased {
-				// After release the refusal is the run's cause, and the attempt
-				// result still follows on the live capability.
-				if err != nil || event.Kind != AttemptProviderExecError || string(event.Payload) != "specific source refusal" || controller.Spent() {
-					t.Fatalf("released refusal = %+v err=%v", event, err)
-				}
-			} else if allowed {
+			if allowed {
 				if err == nil || !strings.Contains(err.Error(), "specific source refusal") || !controller.Spent() {
 					t.Fatalf("lost failure or live capability: %v", err)
 				}

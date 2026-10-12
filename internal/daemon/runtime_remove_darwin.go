@@ -199,7 +199,7 @@ func removeRecordedRuntime(ctx context.Context, parent *RuntimeParent, basename 
 
 func isRemovableRuntimeFile(name string) bool {
 	switch name {
-	case attemptTokenName,
+	case attemptTokenName, runner.AttemptDiagnosticsName,
 		runner.OuterActivationMarkerName, runner.InnerActivationMarkerName,
 		runner.GateConfigScratchName, runner.GateStdinScratchName,
 		runner.TerminalScratchName,

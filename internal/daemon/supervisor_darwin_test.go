@@ -1691,7 +1691,7 @@ func TestSupervisorRecordsPreExecRefusalAsProviderExitCause(t *testing.T) {
 		t.Fatalf("RunNext: %v", err)
 	}
 	fixture.assertTerminal(t, run, kernel.OutcomeFailed)
-	if run.Terminal.Code() != kernel.FailureProviderExit || !strings.Contains(run.Terminal.Detail(), "provider exec refused: Change worker failed; Change worktree moved before the provider ran") {
+	if run.Terminal.Code() != kernel.FailureProviderExit || !strings.Contains(run.Terminal.Detail(), "provider exited before an attempt outcome: runner: provider exec: Change worker failed Change worktree moved before the provider ran") {
 		t.Fatalf("terminal = %s %q, want the worker's refusal", run.Terminal.Code(), run.Terminal.Detail())
 	}
 	if _, statErr := os.Stat(fixture.witness); !errors.Is(statErr, os.ErrNotExist) {

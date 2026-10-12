@@ -240,29 +240,15 @@ func TestLiveAttemptShutdownReturnsFallbackToSupervisor(t *testing.T) {
 	}
 }
 
-func TestLiveAttemptRetainsPreExecRefusalAsProviderExitOutcome(t *testing.T) {
-	runID, sessionID := liveTestIDs(t, 11002)
-	attempt := newLiveAttempt(&Daemon{}, runID, sessionID, nil)
-	payload := []byte("runtime authority verification: Change worker failed\nsecond line")
-	if stop, err := attempt.handleRunnerEvent(runner.AttemptEvent{Kind: runner.AttemptProviderExecError, Payload: payload}); stop || err != nil {
-		t.Fatalf("refusal = stop %v err %v", stop, err)
-	}
-	proposal, ok := attempt.pendingOutcomeSnapshot()
-	if !ok || proposal.Code() != kernel.FailureProviderExit || proposal.Detail() != "provider exec refused: runtime authority verification: Change worker failed; second line" {
-		t.Fatalf("retained outcome = %v %s %q", ok, proposal.Code(), proposal.Detail())
-	}
-}
-
-func TestLiveAttemptExitOutcomeNamesOutputTailWithoutRetainedProposal(t *testing.T) {
+func TestLiveAttemptExitOutcomeNamesRecordedCauseWithoutRetainedProposal(t *testing.T) {
 	runID, sessionID := liveTestIDs(t, 11003)
 	attempt := newLiveAttempt(&Daemon{}, runID, sessionID, nil)
-	if _, ok := attempt.exitOutcome(); ok {
+	if _, ok := attempt.exitOutcome(runner.AttemptDiagnostics{}); ok {
 		t.Fatal("silent exit named a cause")
 	}
 	output := []byte("\x1b[31merror:\x1b[0m config.toml: invalid key\r\n")
-	attempt.retainDiagnosticOutput(0, uint64(len(output)), output)
-	proposal, ok := attempt.exitOutcome()
-	if !ok || proposal.Code() != kernel.FailureProviderExit || proposal.Detail() != "provider exited before an attempt outcome; output tail: error: config.toml: invalid key" {
+	proposal, ok := attempt.exitOutcome(runner.AttemptDiagnostics{Cause: "runner: provider exec: Change worker failed\nChange worktree moved", Head: uint64(len(output)), Output: output})
+	if !ok || proposal.Code() != kernel.FailureProviderExit || proposal.Detail() != "provider exited before an attempt outcome: runner: provider exec: Change worker failed Change worktree moved; output tail: error: config.toml: invalid key" {
 		t.Fatalf("exit outcome = %v %s %q", ok, proposal.Code(), proposal.Detail())
 	}
 }

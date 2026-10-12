@@ -356,6 +356,8 @@ func validRecoveredRuntimeFile(name string, stat unix.Stat_t, device uint64) boo
 		// The publish contract bounds the canonical result body at 1 KiB. A
 		// torn publish may be smaller; authentication rules the content.
 		return stat.Size >= 0 && stat.Size <= 1024
+	case runner.AttemptDiagnosticsName:
+		return stat.Size > 0 && stat.Size <= runner.MaxAttemptDiagnosticsBytes
 	case runner.TerminalSpoolName:
 		return stat.Size > 0 && stat.Size <= recoveredTerminalLimit
 	case runner.TerminalScratchName:

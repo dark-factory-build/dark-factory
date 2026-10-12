@@ -74,8 +74,7 @@ func runReleasedProviderWithHandover(child *OwnedChild, daemon, worker *os.File,
 	if err := loop.send(TerminalFrame{Kind: TerminalReady}); err != nil {
 		return false, err
 	}
-	daemonOpen, err := loop.serve()
-	return daemonOpen, errors.Join(loop.refusal, err)
+	return loop.serve()
 }
 
 type terminalOwner struct {
@@ -86,8 +85,6 @@ type terminalOwner struct {
 	daemonOpen bool
 	workerOpen bool
 	ptyOpen    bool
-	// refusal is the worker's forwarded pre-exec refusal, if any.
-	refusal error
 
 	daemonDecoder *attemptFrameDecoder
 	generation    uint64
@@ -193,6 +190,9 @@ func (o *terminalOwner) awaitProviderExec(stagePTY *ptyStageSink) error {
 		}
 		switch source {
 		case sourceChild:
+			if refusal := o.queuedWorkerRefusal(); refusal != nil {
+				return refusal
+			}
 			if err == nil {
 				return ErrState
 			}
@@ -216,12 +216,7 @@ func (o *terminalOwner) awaitProviderExec(stagePTY *ptyStageSink) error {
 				return err
 			}
 			if validProviderErrorFrame(frame) {
-				// Forward the bounded refusal, as the stage checkpoints do, so the
-				// daemon records it as the run's failure cause, then serve the
-				// exited worker like a provider so its retained output reaches
-				// the daemon's diagnostics.
-				o.refusal = fmt.Errorf("runner: provider exec: %s", frame.Payload)
-				return o.writeDaemonFrame(frame)
+				return fmt.Errorf("runner: provider exec: %s", frame.Payload)
 			}
 			if validProviderHandoffCheck(frame) {
 				// The worker has completed every provider check and is paused
@@ -251,6 +246,24 @@ func (o *terminalOwner) awaitProviderExec(stagePTY *ptyStageSink) error {
 			return protocolError("provider exec", source, err)
 		}
 	}
+}
+
+// queuedWorkerRefusal reads the refusal a worker wrote before it exited: the
+// runner can observe the exit first, and the refusal is then already queued
+// on the worker socket. Only an already readable socket is read.
+func (o *terminalOwner) queuedWorkerRefusal() error {
+	if !o.workerOpen || o.worker == nil {
+		return nil
+	}
+	fds := []unix.PollFd{{Fd: int32(o.worker.Fd()), Events: unix.POLLIN}}
+	if n, err := unix.Poll(fds, 0); n != 1 || err != nil {
+		return nil
+	}
+	var frame attemptFrame
+	if err := readFrame(o.worker, &frame, maxFrameBytes); err != nil || !validProviderErrorFrame(frame) {
+		return nil
+	}
+	return fmt.Errorf("runner: provider exec: %s", frame.Payload)
 }
 
 func (o *terminalOwner) serve() (bool, error) {
@@ -859,45 +872,6 @@ func (o *terminalOwner) consumePTY(data []byte, readErr error) error {
 	return readErr
 }
 
-// awaitFirstCredit gives the daemon a bounded chance to grant its first
-// output credit when the PTY ends before it arrived: a refusal or an early
-// exit otherwise ends with its output unsent and its run's diagnostics
-// empty. Only credit is applied; the daemon reads no other command's answer
-// once the PTY has ended.
-func (o *terminalOwner) awaitFirstCredit() error {
-	// The daemon grants first credit as soon as it reads TerminalReady, so a
-	// short bound suffices; with nothing retained there is nothing to wait for.
-	deadline := time.Now().Add(250 * time.Millisecond)
-	for o.credit == 0 && o.sent == 0 && o.ring.Head() > o.sent && o.daemonOpen && o.daemonDecoder != nil && !o.detached && time.Now().Before(deadline) {
-		fds := []unix.PollFd{{Fd: int32(o.daemon.Fd()), Events: unix.POLLIN}}
-		if n, err := unix.Poll(fds, 50); n == 0 || errors.Is(err, unix.EINTR) {
-			continue
-		} else if err != nil {
-			return err
-		}
-		buf := make([]byte, 16<<10)
-		n, err := unix.Read(int(o.daemon.Fd()), buf)
-		if errors.Is(err, unix.EAGAIN) || errors.Is(err, unix.EINTR) {
-			continue
-		}
-		if n <= 0 {
-			return nil
-		}
-		frames, err := o.daemonDecoder.Feed(buf[:n])
-		if err != nil {
-			return err
-		}
-		for _, frame := range frames {
-			if command, err := terminalCommandFromFrame(frame); err == nil && command.Kind == TerminalCredit {
-				if err := o.command(frame); err != nil {
-					return err
-				}
-			}
-		}
-	}
-	return nil
-}
-
 func (o *terminalOwner) drainPTY() error {
 	deadline := time.Now().Add(2 * time.Second)
 	var streamErr error
@@ -1080,13 +1054,6 @@ func (o *terminalOwner) emitPTYEOF() error {
 	}
 	if o.ptyEOF {
 		return nil
-	}
-	// EOF ends live output, so send what was retained before it first.
-	if err := o.awaitFirstCredit(); err != nil {
-		return err
-	}
-	if err := o.flush(); err != nil {
-		return err
 	}
 	o.ptyEOF = true
 	o.inputActive = false

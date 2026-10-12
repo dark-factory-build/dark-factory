@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 	"sync"
 	"time"
 
@@ -678,18 +679,23 @@ func (attempt *liveAttempt) pendingOutcomeSnapshot() (kernel.Proposal, bool) {
 }
 
 // exitOutcome is the retained proposal, or else a provider_exit failure
-// naming the tail of the provider's retained output: the only cause a
-// provider that exits without an outcome leaves.
-func (attempt *liveAttempt) exitOutcome() (kernel.Proposal, bool) {
+// naming what the runner recorded: the error that ended the attempt and the
+// tail of its retained output, the only causes such an exit leaves.
+func (attempt *liveAttempt) exitOutcome(diagnostics runner.AttemptDiagnostics) (kernel.Proposal, bool) {
 	if pending, ok := attempt.pendingOutcomeSnapshot(); ok {
 		return pending, true
 	}
-	floor, _, payload := attempt.diagnosticSnapshot()
-	tail := terminalTextProjection(payload, floor != 0, 512)
-	if tail == "" {
+	var causes []string
+	if cause := terminalTextProjection([]byte(diagnostics.Cause), false, 1024); cause != "" {
+		causes = append(causes, cause)
+	}
+	if tail := terminalTextProjection(diagnostics.Output, diagnostics.Floor != 0, 512); tail != "" {
+		causes = append(causes, "output tail: "+tail)
+	}
+	if len(causes) == 0 {
 		return kernel.Proposal{}, false
 	}
-	proposal, err := kernel.NewFailureProposal(kernel.FailureProviderExit, "provider exited before an attempt outcome; output tail: "+tail)
+	proposal, err := kernel.NewFailureProposal(kernel.FailureProviderExit, "provider exited before an attempt outcome: "+strings.Join(causes, "; "))
 	return proposal, err == nil
 }
 

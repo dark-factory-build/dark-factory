@@ -250,10 +250,6 @@ func (c *AttemptController) Next(timeout time.Duration) (AttemptEvent, error) {
 				if validProviderErrorFrame(frame) {
 					return AttemptEvent{}, errors.Join(fmt.Errorf("runner: worker preparation: %s", frame.Payload), c.spend())
 				}
-			case controllerProviderReleased:
-				if validProviderErrorFrame(frame) && !c.terminalReady {
-					return AttemptEvent{Kind: AttemptProviderExecError, Payload: frame.Payload}, nil
-				}
 			}
 			return AttemptEvent{}, ErrState
 		}
@@ -1172,6 +1168,7 @@ func runAttempt(daemon, dir, lifetime *os.File, cfg attemptConfig, workerConfig 
 	// output buffer is 1024 bytes, so the master must be read from this point
 	// on or a talkative worker blocks in write(2) and never exits.
 	retained := &terminalByteRing{}
+	reads.ring = retained
 	reads.ptyFD = int(child.ptyMaster.Fd())
 	if err := reads.registerPTY(); err != nil {
 		return finishAttemptFailure(child, dir, cfg, &reads, err)
@@ -1514,6 +1511,15 @@ type attemptReadSet struct {
 	workerRegistered bool
 	ptyRegistered    bool
 	testUnregister   func(int) error // package-test-only; production is nil
+	// ring is the one retained PTY byte history; every drain appends to it.
+	ring *terminalByteRing
+}
+
+func (reads *attemptReadSet) retained() *terminalByteRing {
+	if reads == nil || reads.ring == nil {
+		return &terminalByteRing{}
+	}
+	return reads.ring
 }
 
 func (reads *attemptReadSet) registerDaemon() error {
@@ -1746,7 +1752,7 @@ func finishAttemptWithExit(child *OwnedChild, dir *os.File, cfg attemptConfig, r
 		// Pre-exec refusals need the same controlling-terminal drain as a
 		// running provider's stop: Darwin can otherwise hold exit behind the
 		// unread PTY tail, so neither signalling nor NOTE_EXIT can converge.
-		owner := terminalOwner{child: child, daemon: daemon, reads: reads, daemonOpen: daemonOpen, ptyOpen: true, ring: &terminalByteRing{}}
+		owner := terminalOwner{child: child, daemon: daemon, reads: reads, daemonOpen: daemonOpen, ptyOpen: true, ring: reads.retained()}
 		cause = errors.Join(cause, owner.terminateDrainingPTY())
 	}
 	exit, cleanupErr := waitForAttemptChild(child)
@@ -1763,6 +1769,9 @@ func finishAttemptWithExit(child *OwnedChild, dir *os.File, cfg attemptConfig, r
 	if err := drainAndCloseAttemptPTY(child, reads, daemon, daemonOpen); err != nil {
 		return errors.Join(cause, fmt.Errorf("runner: drain inner PTY: %w", err))
 	}
+	// Evidence only: a run settles without it, so a failed write is reported
+	// in the runner's error, never instead of the result.
+	cause = errors.Join(cause, writeAttemptDiagnostics(dir, cause, reads.retained()))
 	proof, err := decodeResultProof(cfg.ResultProof)
 	if err != nil {
 		return errors.Join(cause, err)
@@ -1855,7 +1864,7 @@ func drainAndCloseAttemptPTY(child *OwnedChild, reads *attemptReadSet, daemon *o
 	if !child.ptyDrained {
 		owner := terminalOwner{
 			child: child, daemon: daemon, reads: reads, daemonOpen: daemonOpen,
-			ptyOpen: true, ring: &terminalByteRing{},
+			ptyOpen: true, ring: reads.retained(),
 		}
 		drainErr = owner.drainPTY()
 	}

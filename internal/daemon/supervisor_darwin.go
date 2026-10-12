@@ -1009,8 +1009,16 @@ func (daemon *Daemon) attemptResultTail(
 	// once the authenticated runner result proves the provider has converged.
 	// A competing durable outcome wins normally: its unauthorized response is
 	// not a license to replace that outcome. A provider that left nothing
-	// retained is failed with its output's tail as the cause.
-	if pending, ok := live.exitOutcome(); ok {
+	// retained is failed with what the runner recorded on disk as the cause;
+	// the live stream is the fallback when that record is absent.
+	diagnostics, recorded, diagnosticsErr := runner.ReadAttemptDiagnostics(runtimeDirectory)
+	if diagnosticsErr != nil {
+		LogFactoryd(daemon.log, "factoryd: run %s attempt diagnostics unreadable: %v\n", run.ID, diagnosticsErr)
+	}
+	if !recorded || len(diagnostics.Output) == 0 {
+		diagnostics.Floor, diagnostics.Head, diagnostics.Output = live.diagnosticSnapshot()
+	}
+	if pending, ok := live.exitOutcome(diagnostics); ok {
 		at, proposalErr := daemon.timestamp()
 		if proposalErr != nil {
 			return kernel.Run{}, proposalErr
@@ -1026,10 +1034,10 @@ func (daemon *Daemon) attemptResultTail(
 	if err != nil {
 		return kernel.Run{}, err
 	}
-	if floor, head, payload := live.diagnosticSnapshot(); len(payload) > 0 {
+	if len(diagnostics.Output) > 0 {
 		capturedAt, saveErr := daemon.timestamp()
 		if saveErr == nil {
-			saveErr = daemon.store.SaveTerminalDiagnostics(daemon.cleanupCtx, kernel.TerminalDiagnostics{RunID: run.ID, Floor: floor, Head: head, Payload: payload, CapturedAt: capturedAt})
+			saveErr = daemon.store.SaveTerminalDiagnostics(daemon.cleanupCtx, kernel.TerminalDiagnostics{RunID: run.ID, Floor: diagnostics.Floor, Head: diagnostics.Head, Payload: diagnostics.Output, CapturedAt: capturedAt})
 		}
 		if saveErr != nil {
 			LogFactoryd(daemon.log, "factoryd: run %s terminal diagnostics not saved: %v\n", run.ID, saveErr)
