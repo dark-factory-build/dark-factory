@@ -25,6 +25,7 @@ type fakePublishMaintainer struct {
 	tip            string // the pull request branch's head
 	journal        map[string]json.RawMessage
 	planned        map[string]bool  // ids a write stopped before GitHub
+	indeterminate  map[string]bool  // ids whose Worker outcome needs recovery
 	writes         []map[string]any // every write sent
 	refuse         string           // a path publish_commit refuses
 	externalRefuse bool             // the Maintainer refuses before the App can apply it
@@ -54,6 +55,9 @@ func (f *fakePublishMaintainer) call(_ context.Context, name string, arguments m
 		}
 		if f.planned[id] {
 			return json.Marshal(map[string]any{"operation_id": id, "state": "planned"})
+		}
+		if f.indeterminate[id] {
+			return json.Marshal(map[string]any{"operation_id": id, "state": "indeterminate"})
 		}
 		return json.Marshal(map[string]any{"operation_id": id, "state": "missing"})
 	case "list_pull_requests":
@@ -238,6 +242,21 @@ func TestFactorydPreservesLegacyFiftyFilePublicationReceipts(t *testing.T) {
 	changes := commit["changes"].([]map[string]any)
 	if commit["operation_id"] != uuid5("dark-factory:"+c.Change.String()+":publish-"+c.Head[:8]+"-2") || len(changes) != 50 || changes[0]["path"] != "f50.txt" {
 		t.Fatalf("legacy second batch = %+v", commit)
+	}
+}
+
+func TestFactorydRecoversAnIndeterminateLegacyPublication(t *testing.T) {
+	fixture, c, source, app, checkout := publishFixture(t, 99, false)
+	app.indeterminate = map[string]bool{uuid5("dark-factory:" + c.Change.String() + ":publish-" + c.Head[:8] + "-1"): true}
+	if err := fixture.daemon.publishChange(context.Background(), c, "team/repo", source, app.call, checkout); err != nil {
+		t.Fatal(err)
+	}
+	if len(app.writes) != 2 {
+		t.Fatalf("writes = %+v", app.writes)
+	}
+	commit := app.writes[0]["arguments"].(map[string]any)
+	if commit["operation_id"] != uuid5("dark-factory:"+c.Change.String()+":publish-v2-"+c.Head[:8]+"-1") || len(commit["changes"].([]map[string]any)) != 100 {
+		t.Fatalf("recovered publication = %+v", commit)
 	}
 }
 

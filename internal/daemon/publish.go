@@ -229,7 +229,11 @@ func (daemon *Daemon) publishPull(ctx context.Context, c kernel.PublishableChang
 		Parent string `json:"parent_sha"`
 	}
 	legacyDone, err := completed(legacyPrefix+"1", &legacyFirst)
-	legacy := err == nil && state != "" && state != "missing"
+	// Completed and planned receipts retain the old 50-file operation
+	// namespace. An indeterminate old operation has no completed receipt to
+	// replay; retry it under the new namespace so a permanently indeterminate
+	// journal record cannot strand the Change.
+	legacy := err == nil && (state == "completed" || state == "planned")
 	if err != nil {
 		return err
 	}
