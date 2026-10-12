@@ -424,7 +424,11 @@ func deployWorker(ctx context.Context, daemon *Daemon, tree, live, sha string) e
 			return nil
 		}
 	}
-	command := exec.CommandContext(ctx, filepath.Join(tree, "scripts", "release.sh"), sha)
+	// release.sh builds the whole tree (scripts/local-ci.sh, cargo included)
+	// for many minutes on the factory's own machine. Background QoS keeps
+	// that build from starving factoryd: on 12 Oct a release build timed out
+	// every run's control read and stalled admission for 20 minutes.
+	command := exec.CommandContext(ctx, "/usr/sbin/taskpolicy", "-b", filepath.Join(tree, "scripts", "release.sh"), sha)
 	command.Dir, command.Env = tree, daemon.toolEnvironment()
 	command.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	command.Cancel = func() error { return syscall.Kill(-command.Process.Pid, syscall.SIGKILL) }
