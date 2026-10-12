@@ -160,7 +160,7 @@ func (store *Store) ListContentRevisionAccesses(ctx context.Context, project Pro
 	if limit == 0 {
 		limit = contentPageSize
 	}
-	tx, err := store.beginRead(ctx)
+	tx, archived, err := store.beginHistoryRead(ctx)
 	if err != nil {
 		return ContentAccessPage{}, err
 	}
@@ -172,7 +172,7 @@ func (store *Store) ListContentRevisionAccesses(ctx context.Context, project Pro
 	if content.ProjectID != project {
 		return ContentAccessPage{}, ErrUnauthorized
 	}
-	rows, err := tx.connection.QueryContext(ctx, `SELECT a.run_id,a.kind,a.byte_offset,a.byte_length,a.created_at_ms,r.task_id,r.admitted_task_work_revision FROM content_accesses a JOIN runs r ON r.id=a.run_id WHERE a.content_id=? AND a.content_revision=? AND a.kind IN ('supplied','read') ORDER BY a.created_at_ms DESC,a.run_id,a.kind,a.byte_offset LIMIT ? OFFSET ?`, id.Bytes(), revision.Int64(), limit+1, offset)
+	rows, err := tx.connection.QueryContext(ctx, `SELECT a.run_id,a.kind,a.byte_offset,a.byte_length,a.created_at_ms,a.task_id,a.task_work_revision FROM `+contentAccessesSQL(archived)+` a WHERE a.content_id=? AND a.content_revision=? AND a.kind IN ('supplied','read') ORDER BY a.created_at_ms DESC,a.run_id,a.kind,a.byte_offset LIMIT ? OFFSET ?`, id.Bytes(), revision.Int64(), limit+1, offset)
 	if err != nil {
 		return ContentAccessPage{}, err
 	}
@@ -260,7 +260,7 @@ func (store *Store) ListContentActivity(ctx context.Context, project ProjectID, 
 	if project.zero() || offset < 0 || limit < 1 || limit > contentPageSize {
 		return ContentActivityPage{}, ErrInvalidValue
 	}
-	tx, err := store.beginRead(ctx)
+	tx, archived, err := store.beginHistoryRead(ctx)
 	if err != nil {
 		return ContentActivityPage{}, err
 	}
@@ -268,7 +268,7 @@ func (store *Store) ListContentActivity(ctx context.Context, project ProjectID, 
 	rows, err := tx.connection.QueryContext(ctx, `SELECT e.op,c.id,c.kind,c.revision,c.title,c.author,c.source_references,c.deprecated,e.run_id,e.agent_id,e.task_id,e.at FROM (
 SELECT 'revision' AS op,id,revision,NULL AS run_id,NULL AS agent_id,NULL AS task_id,created_at_ms AS at FROM project_content_revisions WHERE project_id=?
 UNION ALL
-SELECT a.kind,a.content_id,a.content_revision,a.run_id,r.agent_id,r.task_id,max(a.created_at_ms) FROM content_accesses a JOIN runs r ON r.id=a.run_id WHERE r.project_id=? AND a.kind IN ('supplied','read') GROUP BY a.run_id,a.content_id,a.content_revision,a.kind
+SELECT a.kind,a.content_id,a.content_revision,a.run_id,a.agent_id,a.task_id,max(a.created_at_ms) FROM `+contentAccessesSQL(archived)+` a WHERE a.project_id=? AND a.kind IN ('supplied','read') GROUP BY a.run_id,a.content_id,a.content_revision,a.kind
 ) e JOIN project_content_revisions c ON c.id=e.id AND c.revision=e.revision WHERE c.project_id=? ORDER BY e.at DESC,e.op,c.id,c.revision,e.run_id LIMIT ? OFFSET ?`, project.Bytes(), project.Bytes(), project.Bytes(), limit+1, offset)
 	if err != nil {
 		return ContentActivityPage{}, err

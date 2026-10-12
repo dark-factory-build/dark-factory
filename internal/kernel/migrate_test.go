@@ -9,19 +9,19 @@ import (
 	"errors"
 	"fmt"
 	"reflect"
-	"slices"
 	"strings"
 	"testing"
 )
 
-// A current home opens untouched; a v40 home (with a continuations table), a
-// v39 one (also with browser_security_events), a
+// A current home opens untouched; a v41 home (without archive_batches), a v40
+// one (also with a continuations table), a v39 one (also with
+// browser_security_events), a
 // v38 one (also with runs naming 'runner_exit' for 'transient') and a v37 one
 // (also without the specialist columns) migrate, keep every row, and then
 // record a transient failure.
 func TestCurrentAndLegacyHomesOpenWithEveryRow(t *testing.T) {
 	t.Parallel()
-	for _, version := range []int{userVersion, v40UserVersion, v39UserVersion, v38UserVersion, v37UserVersion} {
+	for _, version := range []int{userVersion, v41UserVersion, v40UserVersion, v39UserVersion, v38UserVersion, v37UserVersion} {
 		t.Run(fmt.Sprintf("v%d", version), func(t *testing.T) { testHomeOpensWithEveryRow(t, version) })
 	}
 }
@@ -72,7 +72,10 @@ func downgradeHome(t *testing.T, store *Store, version int, extra ...string) {
 	t.Helper()
 	var statements []string
 	if version < userVersion {
-		statements = append(slices.Clone(v40Continuations),
+		statements = []string{"DROP TABLE archive_batches", fmt.Sprintf("PRAGMA user_version = %d", version)}
+	}
+	if version < v41UserVersion {
+		statements = append(append(statements, v40Continuations...),
 			`INSERT INTO continuations(id, project_id, task_id, task_incarnation_id, work_revision, context_digest, condition_kind, condition_id, condition_revision, state, resolution_detail, revision, created_at_ms, updated_at_ms, resolved_at_ms)
 			SELECT randomblob(16), r.project_id, r.task_id, r.task_incarnation_id, r.admitted_task_work_revision, randomblob(32), 'human_request', h.id, 1, h.continuation, coalesce(h.continuation_reply, iif(h.continuation = 'cancelled', 'cancelled', NULL)), 1, h.created_at_ms, h.updated_at_ms, iif(h.continuation = 'waiting', NULL, h.updated_at_ms)
 			FROM human_requests AS h JOIN runs AS r ON r.id = h.run_id WHERE h.continuation IS NOT NULL`,
@@ -227,8 +230,12 @@ func snapshotRows(t *testing.T, ctx context.Context, connection *sql.Conn) map[s
 func TestSchemaDigestsArePinned(t *testing.T) {
 	t.Parallel()
 	sum := sha256.Sum256([]byte(strings.Join(schemaStatements, "\n")))
-	if got := hex.EncodeToString(sum[:]); got != "eac1732ec587d300a18fdbe1058ffc64468f1abf9ff20ad0c765cbab1e8de5d0" {
+	if got := hex.EncodeToString(sum[:]); got != "29b677239205a73e850defc4bd3bc72ea43d0197a51ebeb7c6a45d4c83aee669" {
 		t.Errorf("current schema digest = %s", got)
+	}
+	sum = sha256.Sum256([]byte(strings.Join(legacySchemaStatements(v41UserVersion), "\n")))
+	if got := hex.EncodeToString(sum[:]); got != "eac1732ec587d300a18fdbe1058ffc64468f1abf9ff20ad0c765cbab1e8de5d0" {
+		t.Errorf("v41 schema digest = %s", got)
 	}
 	sum = sha256.Sum256([]byte(strings.Join(legacySchemaStatements(v40UserVersion), "\n")))
 	if got := hex.EncodeToString(sum[:]); got != "97d786b424ca0c3097e97738821298f75b60f3a29c49629fdc47de5dba623268" {

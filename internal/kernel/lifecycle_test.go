@@ -899,6 +899,12 @@ func runningOrchestratorRun(t *testing.T) (*Store, Run, AdmissionKeys) {
 
 func finalizingReleasedRun(t *testing.T, role AgentRole, proposal Proposal) (*Store, Run) {
 	t.Helper()
+	return finalizingReleasedRunAfter(t, role, proposal, nil)
+}
+
+// finalizingReleasedRunAfter runs live, when set, while the attempt is running.
+func finalizingReleasedRunAfter(t *testing.T, role AgentRole, proposal Proposal, live func(*Store, Run, AdmissionKeys)) (*Store, Run) {
+	t.Helper()
 	path := filepath.Join(t.TempDir(), "kernel.db")
 	store, err := createTestStore(context.Background(), path, FactoryConfig{DispatchEnabled: true, Capacity: 2}, mustTime(t, 1))
 	if err != nil {
@@ -951,6 +957,9 @@ func finalizingReleasedRun(t *testing.T, role AgentRole, proposal Proposal) (*St
 	if err != nil {
 		store.Close()
 		t.Fatal(err)
+	}
+	if live != nil {
+		live(store, running, keys)
 	}
 	finalizing, err := store.ProposeAttemptOutcome(context.Background(), keys.AttemptDigest, proposal, mustTime(t, 40))
 	if err != nil {

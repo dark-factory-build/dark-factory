@@ -36,6 +36,7 @@ type Store struct {
 	held atomic.Pointer[error]
 
 	repositoryBase string // Boot-owned initial binding default; protected by writerGate.
+	archivePath    string // The history archive beside the database; see ArchiveHistory.
 }
 
 func newStore() *Store {
