@@ -38,7 +38,7 @@ func TestReportAndWhyReadTheReconcilersState(t *testing.T) {
 		"top task tokens=300 " + task.ID.String() + ` running "oversee"`,
 		"lessons=0 reads=0 citations=0 stale=0",
 	}
-	if err != nil || !slices.Equal(lines, want) {
+	if err != nil || len(lines) != len(want)+1 || !slices.Equal(lines[:len(want)], want) || !strings.HasPrefix(lines[len(want)], "wal_bytes=") {
 		t.Fatalf("report = %q, %v", lines, err)
 	}
 	head := strings.Repeat("a", 40)
@@ -119,7 +119,7 @@ func TestReportLessonCountersUseLatestRevision(t *testing.T) {
 		t.Fatal(err)
 	}
 	lines, err := store.Report(ctx, &run.ProjectID, 0, 3600000)
-	if err != nil || len(lines) != 2 || lines[1] != "lessons=1 reads=0 citations=1 stale=0" {
+	if err != nil || len(lines) != 3 || lines[1] != "lessons=1 reads=0 citations=1 stale=0" || !strings.HasPrefix(lines[2], "wal_bytes=") {
 		t.Fatalf("latest lesson report = %q, %v", lines, err)
 	}
 }

@@ -109,6 +109,7 @@ func (store *Store) Report(ctx context.Context, project *ProjectID, since, bucke
 		return nil, err
 	}
 	lines = append(lines, fmt.Sprintf("lessons=%d reads=%d citations=%d stale=%d", lessons, reads, citations, stale))
+	lines = append(lines, fmt.Sprintf("wal_bytes=%d", store.WALSize()))
 	return lines, nil
 }
 

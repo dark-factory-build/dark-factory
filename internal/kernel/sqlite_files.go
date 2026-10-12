@@ -115,7 +115,10 @@ func openExistingFiles(ctx context.Context, absolutePath string, files *database
 	if err := files.refreshPinnedInfo(); err != nil {
 		return closeRejectedOpen(store, files, err)
 	}
-	if err := store.validateOpen(ctx); err != nil {
+	// Flush recovery WAL frames before validating the durable snapshot. A
+	// concurrent reader can keep truncation busy; validation must still run.
+	_ = store.CheckpointWAL(ctx, "TRUNCATE")
+	if err := store.validateOpenWithRetry(ctx); err != nil {
 		return closeRejectedOpen(store, files, err)
 	}
 	if sqliteActivationHook != nil {
