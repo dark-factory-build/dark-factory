@@ -757,14 +757,20 @@ func (client client) call(ctx context.Context, method string, params, output any
 	// An attempt outlives factoryd generations. A restart unbinds the socket
 	// and drains in-flight requests as unavailable, so the call waits the
 	// restart out instead of handing the run a blocker. A mutation's
-	// unavailable reply may follow its commit, so only reads replay it.
+	// unavailable reply may follow its commit, so only reads replay it. A reply
+	// lost to a restart is replayed for a read and for an outcome: a committed
+	// outcome revoked the credential, so it is refused, not applied twice.
+	// A reply lost while the same daemon still holds the socket is its answer.
 	retryUntil := time.Now().Add(RestartRetryWindow)
 	for {
 		err := client.exchange(ctx, method, encoded, output)
 		retry := readMethod(method) && unavailable(err)
 		var failure undelivered
+		var dropped lost
 		if errors.As(err, &failure) {
 			err, retry = failure.err, true
+		} else if errors.As(err, &dropped) {
+			err, retry = dropped.err, readMethod(method) || outcomeMethod(method)
 		}
 		if !retry || client.domain != attemptDomain || time.Now().After(retryUntil) {
 			return err
@@ -823,7 +829,13 @@ func (client client) exchange(ctx context.Context, method string, encoded []byte
 	}
 	response, err := readFrame(connection)
 	if err != nil {
-		return classifyFrameError(ctx, err)
+		err = classifyFrameError(ctx, err)
+		// A reply lost because its daemon generation unbound the socket is a
+		// restart, not this daemon's answer, so call may replay it.
+		if after, inspectErr := inspectSocket(client.socketPath); errors.Is(err, ErrTransport) && (inspectErr != nil || !after.same(before)) {
+			return lost{err}
+		}
+		return err
 	}
 	if len(response) < responsePrelude || response[0] != client.domain {
 		return ErrProtocol
@@ -1454,6 +1466,12 @@ func validTaskStatus(status string) bool {
 type undelivered struct{ err error }
 
 func (failure undelivered) Error() string { return failure.err.Error() }
+
+// lost is a reply that never came because the daemon generation holding the
+// request has since unbound the socket. A read or an outcome may replay it.
+type lost struct{ err error }
+
+func (failure lost) Error() string { return failure.err.Error() }
 
 // socketAbsent is the gap between daemon generations: the private parent
 // stands and only the socket name is missing.

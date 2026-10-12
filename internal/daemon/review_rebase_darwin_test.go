@@ -24,82 +24,8 @@ import (
 // that Change itself, without a worker turn, and only once: a Change already
 // on main has nothing to move.
 func TestConflictRepairRebasesAnAppPublishedPullsChangeOnce(t *testing.T) {
-	fixture := newRecoveryFixtureWithRole(t, 0x9c, kernel.RoleWorker)
-	ctx := context.Background()
-	fixture.stageRuntime(t)
-	fixture.beginRunnerStart(t)
-	fixture.activateRunner(t)
-	fixture.writeMarker(t, runner.OuterActivationMarkerName)
-	changeState, path := fixture.settlementWorktree(t)
-	git := change.TrustedGitExecutable
-	providerIdentity, err := processResourceIdentity(runner.Identity{PID: 99995, PGID: 99995, Birth: runner.Birth{Seconds: 1700, Microseconds: 4}})
-	if err != nil {
-		t.Fatal(err)
-	}
-	states := fixture.resourceStates(t)
-	process, group := states[kernel.ResourceProviderProcess], states[kernel.ResourceProviderGroup]
-	if _, _, err := fixture.store.ActivateProviderResources(ctx, fixture.run.ID, process.ID, process.Revision, group.ID, group.Revision, providerIdentity, mustKernelTime(t, 450)); err != nil {
-		t.Fatal(err)
-	}
-	session, found, err := fixture.store.TerminalSessionForRun(ctx, fixture.run.ID)
-	if err != nil || !found {
-		t.Fatalf("session: found=%v err=%v", found, err)
-	}
-	if fixture.run, err = fixture.store.ActivateRun(ctx, fixture.run.ID, session.ID, fixture.currentRun(t).Revision, session.Revision, mustKernelTime(t, 460)); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(path, "made.txt"), []byte("made\n"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	settlementGit(t, git, path, "add", "made.txt")
-	settlementGit(t, git, path, "commit", "-q", "-m", "made a file")
-	local := strings.TrimSpace(settlementGit(t, git, path, "rev-parse", "HEAD"))
-	success, err := kernel.NewSuccessProposal("made a file")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, err := fixture.store.ProposeAttemptOutcome(ctx, fixture.keys.AttemptDigest, success, mustKernelTime(t, 500)); err != nil {
-		t.Fatal(err)
-	}
-	fixture.writeArtifact(t, []byte(fmt.Sprintf(`{"version":1,"attempt_id":%q,"kind":"inner_converged","proof":%q,"process":{"pid":99995,"pgid":99995,"birth":{"seconds":1700,"microseconds":4}},"exit":{"code":0}}`, fixture.run.ID.String(), hex.EncodeToString(fixture.proof[:]))))
-	if disposition := fixture.sweep(t); disposition.Action != RecoveredResultConsumed || disposition.Err != nil {
-		t.Fatalf("disposition = %+v", disposition)
-	}
-
-	// main moves on without touching the Change's file.
-	repository := filepath.Join(filepath.Dir(filepath.Dir(fixture.parentPath)), "repo")
-	if err := os.WriteFile(filepath.Join(repository, "main.txt"), []byte("main\n"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	settlementGit(t, git, repository, "add", "main.txt")
-	settlementGit(t, git, repository, "commit", "-q", "-m", "main moved")
-	origin := filepath.Join(filepath.Dir(repository), "origin.git")
-	settlementGit(t, git, repository, "clone", "-q", "--bare", repository, origin)
-	settlementGit(t, git, origin, "update-ref", "refs/heads/main", "HEAD") // the published base branch
-	settlementGit(t, git, repository, "remote", "add", "origin", origin)
-	settlementGit(t, git, repository, "config", "protocol.file.allow", "always")
-	source, err := inspectRegisteredRepository(ctx, repository, "HEAD")
-	if err != nil {
-		t.Fatal(err)
-	}
-	source.PublicationRepository = "team/repo"
-	if err := fixture.store.BindRepositorySource(ctx, kernel.RepositoryID(changeState.ProjectID), source); err != nil {
-		t.Fatal(err)
-	}
-	if err := fixture.store.InitializeRepositoryBase(ctx, "HEAD"); err != nil {
-		t.Fatal(err)
-	}
-
-	// factoryd published the Change to #12, whose head is the App's commit.
-	pr := kernel.ProductionPullRequest{Number: 12, Title: "Ship it", URL: "https://github.com/team/repo/pull/12", Head: local, Branch: "factory/" + changeState.ID.String()[:12], Base: "main", State: "open", Review: kernel.ProductionReview{Head: local, State: "unknown"}}
-	if err := fixture.store.RecordPublication(ctx, changeState.ProjectID, changeState.TaskID, "team/repo", pr, mustKernelTime(t, 510)); err != nil {
-		t.Fatal(err)
-	}
-	published := strings.Repeat("d", 40)
-	pr.Head, pr.Review.Head = published, published
-	if err := fixture.store.RecordProductionObservation(ctx, changeState.ProjectID, kernel.ProductionObservation{Repository: "team/repo", ObservedAt: 520, PullRequests: []kernel.ProductionPullRequest{pr}}, mustKernelTime(t, 520)); err != nil {
-		t.Fatal(err)
-	}
+	fixture, changeState, path, repository, local, pr := appPublishedChange(t)
+	ctx, git := context.Background(), change.TrustedGitExecutable
 	task, _, err := fixture.store.Task(ctx, changeState.TaskID)
 	if err != nil {
 		t.Fatal(err)
@@ -204,6 +130,142 @@ func TestConflictRepairRebasesAnAppPublishedPullsChangeOnce(t *testing.T) {
 	if found, err := fixture.store.PublishableChanges(ctx, mustKernelTime(t, 1<<40)); err != nil || len(found) != 0 {
 		t.Fatalf("published correction still unpublished: %+v %v", found, err)
 	}
+}
+
+// #1784: a correction whose head lacks the main its pull request already
+// carries would revert that main. publication writes nothing and sends the
+// task back to rebase.
+func TestACorrectionLackingItsPullRequestBaseGoesBackToRebase(t *testing.T) {
+	fixture, changeState, _, repository, _, pr := appPublishedChange(t)
+	ctx, git := context.Background(), change.TrustedGitExecutable
+	fixture.daemon.now = func() time.Time { return time.UnixMilli(10_000) }
+	open := kernel.OpenPull{Project: changeState.ProjectID, Repository: "team/repo", Pull: pr, Task: changeState.TaskID}
+	// The correction: the Change, rebased onto main after its publication.
+	if moved, err := fixture.daemon.rebaseChange(ctx, open); err != nil || !moved {
+		t.Fatalf("rebased=%v err=%v", moved, err)
+	}
+	// main moves again, and the pull request's branch takes it in.
+	if err := os.WriteFile(filepath.Join(repository, "later.txt"), []byte("later\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	settlementGit(t, git, repository, "add", "later.txt")
+	settlementGit(t, git, repository, "commit", "-q", "-m", "main moved again")
+	settlementGit(t, git, repository, "push", "-q", "origin", "HEAD:refs/heads/main", "+HEAD:refs/heads/"+pr.Branch)
+	main := strings.TrimSpace(settlementGit(t, git, repository, "rev-parse", "HEAD"))
+
+	task, _, err := fixture.store.Task(ctx, changeState.TaskID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	found, err := fixture.store.PublishableChanges(ctx, mustKernelTime(t, 10_000))
+	if err != nil || len(found) != 1 || found[0].Task.ID != task.ID || found[0].Pull != pr.Number || task.Status != kernel.TaskSucceeded {
+		t.Fatalf("publishable correction = %+v, task %+v, err %v", found, task, err)
+	}
+	if err := fixture.store.BindRepositoryGitHubID(ctx, kernel.RepositoryID(changeState.ProjectID), 42); err != nil {
+		t.Fatal(err)
+	}
+	if err := fixture.home.WriteMaintainerCredential([]byte(`{"disabled":true}`)); err != nil {
+		t.Fatal(err)
+	}
+	if fixture.daemon.github, err = maintainer.OpenHost(fixture.home); err != nil || !fixture.daemon.customerMaintainer() {
+		t.Fatalf("customer host: %v", err)
+	}
+	app := &fakePublishMaintainer{main: main, tip: main, journal: map[string]json.RawMessage{}}
+	fixture.daemon.reviewBackend = func(string, uint64) review.Backend { return &publishingReviewBackend{fakePublishMaintainer: app} }
+	if !fixture.daemon.publishSettledChanges(ctx, task.ID) {
+		t.Fatal("the correction was not tried")
+	}
+	sent, _, err := fixture.store.Task(ctx, task.ID)
+	if feedback := kernel.TaskFeedback(sent); err != nil || len(app.writes) != 0 || sent.Status != kernel.TaskQueued || sent.WorkRevision.Int64() != task.WorkRevision.Int64()+1 ||
+		!strings.Contains(feedback, "Rebase the Change onto origin/main") || !strings.Contains(feedback, main) {
+		t.Fatalf("writes %+v, sent back task %+v, err %v", app.writes, sent, err)
+	}
+}
+
+// appPublishedChange is a succeeded worker whose retained Change, one commit
+// on the registered repository's main, factoryd published to #12 (pr), the
+// App's commit of it being that pull request's head; main has since moved on.
+// It returns the Change's worktree path, the registered repository (whose
+// origin is a bare clone), and the Change's settled head local.
+func appPublishedChange(t *testing.T) (*recoveryFixture, kernel.Change, string, string, string, kernel.ProductionPullRequest) {
+	t.Helper()
+	fixture := newRecoveryFixtureFor(t, 0x9c, kernel.RoleWorker, kernel.ProviderCodex) // a shell task takes no send-back note
+	ctx := context.Background()
+	fixture.stageRuntime(t)
+	fixture.beginRunnerStart(t)
+	fixture.activateRunner(t)
+	fixture.writeMarker(t, runner.OuterActivationMarkerName)
+	changeState, path := fixture.settlementWorktree(t)
+	git := change.TrustedGitExecutable
+	providerIdentity, err := processResourceIdentity(runner.Identity{PID: 99995, PGID: 99995, Birth: runner.Birth{Seconds: 1700, Microseconds: 4}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	states := fixture.resourceStates(t)
+	process, group := states[kernel.ResourceProviderProcess], states[kernel.ResourceProviderGroup]
+	if _, _, err := fixture.store.ActivateProviderResources(ctx, fixture.run.ID, process.ID, process.Revision, group.ID, group.Revision, providerIdentity, mustKernelTime(t, 450)); err != nil {
+		t.Fatal(err)
+	}
+	session, found, err := fixture.store.TerminalSessionForRun(ctx, fixture.run.ID)
+	if err != nil || !found {
+		t.Fatalf("session: found=%v err=%v", found, err)
+	}
+	if fixture.run, err = fixture.store.ActivateRun(ctx, fixture.run.ID, session.ID, fixture.currentRun(t).Revision, session.Revision, mustKernelTime(t, 460)); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(path, "made.txt"), []byte("made\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	settlementGit(t, git, path, "add", "made.txt")
+	settlementGit(t, git, path, "commit", "-q", "-m", "made a file")
+	local := strings.TrimSpace(settlementGit(t, git, path, "rev-parse", "HEAD"))
+	success, err := kernel.NewSuccessProposal("made a file")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := fixture.store.ProposeAttemptOutcome(ctx, fixture.keys.AttemptDigest, success, mustKernelTime(t, 500)); err != nil {
+		t.Fatal(err)
+	}
+	fixture.writeArtifact(t, []byte(fmt.Sprintf(`{"version":1,"attempt_id":%q,"kind":"inner_converged","proof":%q,"process":{"pid":99995,"pgid":99995,"birth":{"seconds":1700,"microseconds":4}},"exit":{"code":0}}`, fixture.run.ID.String(), hex.EncodeToString(fixture.proof[:]))))
+	if disposition := fixture.sweep(t); disposition.Action != RecoveredResultConsumed || disposition.Err != nil {
+		t.Fatalf("disposition = %+v", disposition)
+	}
+
+	// main moves on without touching the Change's file.
+	repository := filepath.Join(filepath.Dir(filepath.Dir(fixture.parentPath)), "repo")
+	if err := os.WriteFile(filepath.Join(repository, "main.txt"), []byte("main\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	settlementGit(t, git, repository, "add", "main.txt")
+	settlementGit(t, git, repository, "commit", "-q", "-m", "main moved")
+	origin := filepath.Join(filepath.Dir(repository), "origin.git")
+	settlementGit(t, git, repository, "clone", "-q", "--bare", repository, origin)
+	settlementGit(t, git, origin, "update-ref", "refs/heads/main", "HEAD") // the published base branch
+	settlementGit(t, git, repository, "remote", "add", "origin", origin)
+	settlementGit(t, git, repository, "config", "protocol.file.allow", "always")
+	source, err := inspectRegisteredRepository(ctx, repository, "HEAD")
+	if err != nil {
+		t.Fatal(err)
+	}
+	source.PublicationRepository = "team/repo"
+	if err := fixture.store.BindRepositorySource(ctx, kernel.RepositoryID(changeState.ProjectID), source); err != nil {
+		t.Fatal(err)
+	}
+	if err := fixture.store.InitializeRepositoryBase(ctx, "HEAD"); err != nil {
+		t.Fatal(err)
+	}
+
+	// factoryd published the Change to #12, whose head is the App's commit.
+	pr := kernel.ProductionPullRequest{Number: 12, Title: "Ship it", URL: "https://github.com/team/repo/pull/12", Head: local, Branch: "factory/" + changeState.ID.String()[:12], Base: "main", State: "open", Review: kernel.ProductionReview{Head: local, State: "unknown"}}
+	if err := fixture.store.RecordPublication(ctx, changeState.ProjectID, changeState.TaskID, "team/repo", pr, mustKernelTime(t, 510)); err != nil {
+		t.Fatal(err)
+	}
+	published := strings.Repeat("d", 40)
+	pr.Head, pr.Review.Head = published, published
+	if err := fixture.store.RecordProductionObservation(ctx, changeState.ProjectID, kernel.ProductionObservation{Repository: "team/repo", ObservedAt: 520, PullRequests: []kernel.ProductionPullRequest{pr}}, mustKernelTime(t, 520)); err != nil {
+		t.Fatal(err)
+	}
+	return fixture, changeState, path, repository, local, pr
 }
 
 // publishingReviewBackend is also the Maintainer factoryd publishes through.

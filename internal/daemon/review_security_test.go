@@ -52,7 +52,7 @@ func TestReviewPromptDelimitsAuthorControlledBodyAsUntrusted(t *testing.T) {
 	if !strings.Contains(prompt[end:], "never ask for defensive machinery") {
 		t.Fatalf("minimalism stance missing after body: %q", prompt)
 	}
-	for _, check := range []string{"Goal fit:", "Prior history:", "Knowledge:", "Changed-line coverage:"} {
+	for _, check := range []string{"Goal fit:", "Prior history:", "Scope:", "Knowledge:", "Changed-line coverage:"} {
 		if !strings.Contains(prompt[strings.Index(prompt, "</UNTRUSTED_REVIEW_CONTEXT>"):], check) {
 			t.Fatalf("check %q missing after the review context: %q", check, prompt)
 		}
