@@ -64,7 +64,7 @@ func RunReview(ctx context.Context, kind kernel.Provider, toolPath, toolchainRoo
 	}
 	root := filepath.Dir(checkout)
 	home, tmp := filepath.Join(root, ".review-home"), filepath.Join(root, ".review-tmp")
-	golang := []string{"PATH=" + toolPath, "GOENV=off", "GOCACHE=" + filepath.Join(home, "go-build"), "GOPATH=" + filepath.Join(home, "go"), "GOFLAGS=-mod=readonly", "GOPROXY=off", "GOSUMDB=off", "GOTOOLCHAIN=local", "CGO_ENABLED=0", "CARGO_HOME=" + filepath.Join(home, ".cargo"), "COREPACK_HOME=" + filepath.Join(home, ".cache", "corepack"), "COREPACK_ENABLE_NETWORK=0", "npm_config_cache=" + filepath.Join(home, ".cache", "npm"), "XDG_CACHE_HOME=" + filepath.Join(home, ".cache")}
+	golang := []string{"PATH=" + toolPath, "GOENV=off", "GOCACHE=" + filepath.Join(home, "go-build"), "GOPATH=" + filepath.Join(home, "go"), "GOFLAGS=-mod=readonly", "GOPROXY=off", "GOSUMDB=off", "GOTOOLCHAIN=local", "CGO_ENABLED=0", "CARGO_HOME=" + filepath.Join(home, ".cargo"), "COREPACK_HOME=" + filepath.Join(home, ".cache", "corepack"), "COREPACK_ENABLE_NETWORK=0", "npm_config_cache=" + filepath.Join(home, ".cache", "npm"), "XDG_CACHE_HOME=" + filepath.Join(home, ".cache"), "CLAUDE_CODE_TMPDIR=" + tmp}
 	readable = append(readable, filepath.SplitList(toolchainRoots)...)
 	if operatorHome != "" {
 		readable = append(readable, goModuleCachePath(operatorHome), pnpmStorePath(operatorHome), filepath.Join(operatorHome, ".rustup"))

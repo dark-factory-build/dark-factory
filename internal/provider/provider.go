@@ -926,10 +926,10 @@ func ClaudeReview(writable []string, readable ...string) (string, error) {
 	for _, path := range readable {
 		grants = append(grants, grant{path, false})
 	}
-	return claudeConfinement(grants, []string{"Bash"}, map[string]any{})
+	return claudeConfinement(grants, []string{"Bash"}, map[string]any{}, filepath.Join("/private/tmp", fmt.Sprintf("claude-%d", os.Getuid())))
 }
 
-func claudeConfinement(grants []grant, allow []string, hooks map[string]any) (string, error) {
+func claudeConfinement(grants []grant, allow []string, hooks map[string]any, extraDenyWrites ...string) (string, error) {
 	read, write, denyWrite := []string{}, []string{}, []string{}
 	// Claude names files by their resolved path, and a Change is reached
 	// through a link, so each grant is allowed under both spellings.
@@ -937,6 +937,9 @@ func claudeConfinement(grants []grant, allow []string, hooks map[string]any) (st
 		if resolved, err := filepath.EvalSymlinks(given.path); err == nil && resolved != given.path {
 			grants = append(grants, grant{resolved, given.write})
 		}
+	}
+	for _, path := range extraDenyWrites {
+		denyWrite = append(denyWrite, "/"+path)
 	}
 	for _, grant := range grants {
 		rule := "/" + grant.path // a leading "//" is Claude's absolute path
