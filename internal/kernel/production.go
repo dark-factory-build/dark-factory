@@ -332,7 +332,7 @@ func (store *Store) recordProductionObservation(ctx context.Context, c *sql.Conn
 }
 
 func validProductionDelivery(delivery ProductionDelivery, at UnixMillis) bool {
-	return productionSHA(delivery.Revision) && validOutcomeText(delivery.Kind, 64) && validOutcomeText(delivery.Destination, 256) && validOutcomeText(delivery.State, 64) && productionURL(delivery.URL) && productionNumbers(delivery.PullRequests) && delivery.UpdatedAt >= 0 && delivery.UpdatedAt <= at.Int64()+5000 && validOutcomeText(delivery.Phase, 64) && validOutcomeText(delivery.Reason, 2048) && delivery.Overflow >= 0 && delivery.VerifiedAt >= 0 && delivery.VerifiedAt <= at.Int64()+5000
+	return productionSHA(delivery.Revision) && validOutcomeText(delivery.Kind, 64) && validOutcomeText(delivery.Destination, 256) && validOutcomeText(delivery.State, 64) && productionURL(delivery.URL) && productionNumbers(delivery.PullRequests) && delivery.UpdatedAt >= 0 && delivery.UpdatedAt <= at.Int64()+5000 && validOutcomeText(delivery.Phase, 64) && validOutcomeText(delivery.Reason, 2048) && delivery.Overflow >= 0 && delivery.Group >= 0 && delivery.VerifiedAt >= 0 && delivery.VerifiedAt <= at.Int64()+5000
 }
 
 // RecordDelivery writes one delivery row, such as a runtime release.
@@ -370,6 +370,16 @@ func (store *Store) RecordDelivery(ctx context.Context, project ProjectID, repos
 
 // Delivery reads the delivery row id and the project that recorded it.
 func (store *Store) Delivery(ctx context.Context, id string) (ProjectID, ProductionDelivery, bool, error) {
+	return store.delivery(ctx, `identity = ?`, id)
+}
+
+// LatestRelease reads the newest release row: releases run one at a time, so
+// only it can still be running.
+func (store *Store) LatestRelease(ctx context.Context) (ProjectID, ProductionDelivery, bool, error) {
+	return store.delivery(ctx, `identity LIKE 'release:%'`)
+}
+
+func (store *Store) delivery(ctx context.Context, where string, args ...any) (ProjectID, ProductionDelivery, bool, error) {
 	var delivery ProductionDelivery
 	tx, err := store.beginRead(ctx)
 	if err != nil {
@@ -378,7 +388,7 @@ func (store *Store) Delivery(ctx context.Context, id string) (ProjectID, Product
 	defer tx.Close()
 	var projectBytes []byte
 	var document string
-	err = tx.connection.QueryRowContext(ctx, `SELECT project_id, document FROM production_records WHERE kind = 'delivery' AND identity = ? ORDER BY observed_at_ms DESC LIMIT 1`, id).Scan(&projectBytes, &document)
+	err = tx.connection.QueryRowContext(ctx, `SELECT project_id, document FROM production_records WHERE kind = 'delivery' AND `+where+` ORDER BY observed_at_ms DESC LIMIT 1`, args...).Scan(&projectBytes, &document)
 	if errors.Is(err, sql.ErrNoRows) {
 		return ProjectID{}, delivery, false, nil
 	}

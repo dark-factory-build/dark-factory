@@ -3,6 +3,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
@@ -16,6 +17,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/dark-factory-build/dark-factory/internal/api"
 	"github.com/dark-factory-build/dark-factory/internal/install"
 	"github.com/dark-factory-build/dark-factory/internal/kernel"
 )
@@ -328,6 +330,59 @@ func bootUntilSettled(t *testing.T, home string) {
 		if time.Now().After(deadline) {
 			t.Fatal("the boot never settled the release")
 		}
+	}
+	cancel()
+	if err := <-done; err != nil {
+		t.Fatalf("serve = %v", err)
+	}
+}
+
+// #1854: a boot with no upgrade marker fails the release its previous process
+// left running and stops that release's orphaned build.
+func TestBootFailsAReleaseItsPreviousProcessLeftRunning(t *testing.T) {
+	home := initializedHome(t)
+	orphan := exec.Command("/bin/sleep", "60")
+	orphan.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	if err := orphan.Start(); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = orphan.Process.Kill() })
+	sha := strings.Repeat("7", 40)
+	ctx := context.Background()
+	opened, err := install.OpenOperationalHome(ctx, home)
+	if err != nil {
+		t.Fatal(err)
+	}
+	store, err := opened.OpenStore(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	project, err := kernel.ProjectIDFromBytes(bytes.Repeat([]byte{0x31}, kernel.IDBytes))
+	at, atErr := kernel.NewUnixMillis(time.Now().UnixMilli())
+	if err = errors.Join(err, atErr); err == nil {
+		_, err = store.CreateProject(ctx, kernel.NewProject{ID: project, Name: "self", Root: filepath.Join(filepath.Dir(home), "repo")}, at)
+	}
+	if err == nil {
+		err = store.RecordDelivery(ctx, project, "dark-factory-build/dark-factory", kernel.ProductionDelivery{ID: "release:" + sha, Kind: "runtime", Destination: "factoryd", Revision: sha, State: "running", Phase: "build", PullRequests: []uint64{}, UpdatedAt: at.Int64(), Group: orphan.Process.Pid}, at)
+	}
+	if err = errors.Join(err, store.Close(), opened.Close()); err != nil {
+		t.Fatal(err)
+	}
+	serveCtx, cancel := context.WithCancel(ctx)
+	done := make(chan error, 1)
+	go func() { done <- serve(serveCtx, testConfig(home)) }()
+	client := waitOperatorClient(t, home)
+	for deadline := time.Now().Add(5 * time.Second); ; time.Sleep(10 * time.Millisecond) {
+		delivery, err := client.Release(ctx, api.ReleaseInput{SHA: sha})
+		if err == nil && delivery.State == "failed" && delivery.Reason == "interrupted by a factoryd restart" && delivery.Group == 0 {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("the boot never failed the interrupted release: %+v, %v", delivery, err)
+		}
+	}
+	if err := orphan.Wait(); err == nil || !strings.Contains(err.Error(), "killed") {
+		t.Fatalf("the interrupted release's build survived the boot: %v", err)
 	}
 	cancel()
 	if err := <-done; err != nil {

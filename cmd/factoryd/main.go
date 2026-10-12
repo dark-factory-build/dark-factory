@@ -378,9 +378,9 @@ func serve(ctx context.Context, configuration config) error {
 		} else {
 			owner.settleRelease(ctx, configuration.home, marker.Target, "failed", cmp.Or(marker.Reason, "interrupted before promotion"))
 		}
-	} else if err := install.RemoveUpgrade(configuration.home); err != nil {
-		// A backup never outlives its release.
-		daemon.LogFactoryd(recoveryLog, "factoryd: removing a stale upgrade backup: %v\n", err)
+	} else if err := errors.Join(install.RemoveUpgrade(configuration.home), owner.daemon.FailInterruptedRelease(ctx)); err != nil {
+		// A backup never outlives its release, nor a record its process.
+		daemon.LogFactoryd(recoveryLog, "factoryd: settling an interrupted release: %v\n", err)
 	}
 	if err := owner.wait(ctx); err != nil {
 		return err

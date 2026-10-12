@@ -90,6 +90,9 @@ type ProductionDelivery struct {
 	Phase        string   `json:"phase,omitempty"`
 	Reason       string   `json:"reason,omitempty"`
 	Overflow     int      `json:"overflow,omitempty"`
+	// Group is the process group of a release's running build or deploy
+	// command, which the next factoryd stops if this one dies first.
+	Group int `json:"group,omitempty"`
 	// RecordDelivery sets a release's Cause (phase and reason up to its
 	// first colon) and FailedAt (when it first failed so), carried over
 	// consecutive releases that fail the same way.
