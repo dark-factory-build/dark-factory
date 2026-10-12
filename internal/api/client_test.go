@@ -1524,15 +1524,6 @@ func TestAttemptReplaysOnlyRepliesLostToARestart(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	drop := func(listener *net.UnixListener) error {
-		connection, err := listener.Accept()
-		if err != nil {
-			return err
-		}
-		defer connection.Close()
-		_, err = readTestFrame(connection)
-		return err
-	}
 	answer := func(listener *net.UnixListener, reply func(net.Conn) error) error {
 		connection, err := listener.Accept()
 		if err != nil {
@@ -1544,15 +1535,15 @@ func TestAttemptReplaysOnlyRepliesLostToARestart(t *testing.T) {
 		}
 		return reply(connection)
 	}
-	// restart drops the request, unbinds, and answers from a new generation.
+	// restart unbinds before it drops the request, as a draining daemon does,
+	// and answers from a new generation.
 	restart := func(reply func(net.Conn) error) chan error {
 		done := make(chan error, 1)
 		go func() {
-			if err := drop(listener); err != nil {
+			if err := answer(listener, func(net.Conn) error { return listener.Close() }); err != nil {
 				done <- err
 				return
 			}
-			listener.Close()
 			listener, _ = testListener(t, directory)
 			done <- answer(listener, reply)
 		}()
@@ -1582,7 +1573,7 @@ func TestAttemptReplaysOnlyRepliesLostToARestart(t *testing.T) {
 		func() error { _, err := client.Succeed(context.Background(), "finished"); return err },
 	} {
 		done := make(chan error, 1)
-		go func() { done <- drop(listener) }()
+		go func() { done <- answer(listener, func(net.Conn) error { return nil }) }()
 		if err := call(); !errors.Is(err, ErrTransport) {
 			t.Fatalf("reply lost by a live daemon = %v", err)
 		}

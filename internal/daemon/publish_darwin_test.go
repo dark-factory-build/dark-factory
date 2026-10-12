@@ -14,6 +14,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 	"unicode/utf8"
 
 	"github.com/dark-factory-build/dark-factory/internal/change"
@@ -439,9 +440,23 @@ func TestACorrectionLackingItsPullRequestBaseGoesBackToRebase(t *testing.T) {
 	supervisorGit(t, git, "-C", registered, "-c", "user.name=fixture", "-c", "user.email=fixture@example.invalid", "commit", "-q", "-m", "merged since")
 	app.main = strings.TrimSpace(supervisorGitOutput(t, git, "-C", registered, "rev-parse", "HEAD"))
 	app.tip, c.Pull = app.main, 31 // the pull request's branch already carries that main
-	err := fixture.daemon.publishChange(context.Background(), c, "team/repo", source, app.call, checkout)
-	if !errors.Is(err, errPublishLater) || !strings.Contains(err.Error(), "sent back to rebase") || !strings.Contains(err.Error(), app.main) || len(app.writes) != 0 {
+	ctx := context.Background()
+	fixture.daemon.now = func() time.Time { return time.UnixMilli(2000) }
+	failIntakeRun(t, fixture) // the worker's run has ended, so its task can go back
+	fixture.daemon.now = func() time.Time { return time.Unix(3000, 0) }
+	task, _, err := fixture.store.Task(ctx, c.Task.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	c.Task = task
+	err = fixture.daemon.publishChange(ctx, c, "team/repo", source, app.call, checkout)
+	if !errors.Is(err, errPublishLater) || !strings.Contains(err.Error(), "sent back to rebase") || len(app.writes) != 0 {
 		t.Fatalf("err = %v, writes = %+v", err, app.writes)
+	}
+	sent, _, err := fixture.store.Task(ctx, c.Task.ID)
+	if feedback := kernel.TaskFeedback(sent); err != nil || sent.Status != kernel.TaskQueued || sent.WorkRevision.Int64() != task.WorkRevision.Int64()+1 ||
+		!strings.Contains(feedback, "Rebase the Change onto origin/main") || !strings.Contains(feedback, app.main) {
+		t.Fatalf("sent back task = %+v, %v", sent, err)
 	}
 }
 

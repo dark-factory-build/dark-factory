@@ -273,7 +273,10 @@ func (daemon *Daemon) publishPull(ctx context.Context, c kernel.PublishableChang
 			if err == nil {
 				_, err = daemon.store.SendBackTask(ctx, nil, c.Task.ID, c.Task.Revision, c.Head, note, at)
 			}
-			return errors.Join(errPublishLater, errors.New("sent back to rebase: "+note), err)
+			if err != nil {
+				return fmt.Errorf("a correction lacking its pull request's base could not go back to rebase: %w", err)
+			}
+			return errors.Join(errPublishLater, errors.New("sent back to rebase: "+note))
 		}
 	}
 	head, diffFrom, mergeParent := from, from, ""
