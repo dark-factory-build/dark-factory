@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"strconv"
 	"strings"
 
@@ -316,14 +317,24 @@ func (daemon *Daemon) publishPull(ctx context.Context, c kernel.PublishableChang
 	result := string(redactTerminalText([]byte(c.Task.Result)))
 	result = strings.ToValidUTF8(result[:min(len(result), 24000)], "")
 	body := fmt.Sprintf("%s\n\nPublished by factoryd from Change %s at %s: +%d -%d across %d files from %s.\n\nThe merge queue runs the gate.", result, c.Change, head, added, deleted, files, from)
+	issue := c.Accepted.Snapshot.IssueNumber
 	if c.Pull != 0 {
-		// The corrected body keeps its closing line; factoryd's refresh
-		// reviews a new head. One settlement's body is written once.
+		// The corrected body keeps its close-or-reference line, and a pull
+		// request that only references its issue keeps doing so; factoryd's
+		// refresh reviews a new head. One settlement's body is written once.
 		if !c.Repair {
 			step := fmt.Sprintf("body-%s-%d", head[:8], c.Revision.Int64())
 			done, err := completed(step, new(json.RawMessage))
+			var current json.RawMessage
 			if err == nil && !done {
-				_, err = call(ctx, "update_pull_request_body", map[string]any{"repository": repo, "operation_id": operation(step), "pull_number": c.Pull, "body": fmt.Sprintf("%s\n\nCloses #%d", body, c.Accepted.Snapshot.IssueNumber)})
+				current, err = call(ctx, "list_pull_requests", map[string]any{"repository": repo, "page": 1, "per_page": 1, "pull_number": c.Pull})
+			}
+			if err == nil && !done {
+				footer := "Refs"
+				if closesIssue(result+"\n"+string(current), issue, files) {
+					footer = "Closes"
+				}
+				_, err = call(ctx, "update_pull_request_body", map[string]any{"repository": repo, "operation_id": operation(step), "pull_number": c.Pull, "body": fmt.Sprintf("%s\n\n%s #%d", body, footer, issue)})
 			}
 			if err != nil {
 				return err
@@ -356,7 +367,7 @@ func (daemon *Daemon) publishPull(ctx context.Context, c kernel.PublishableChang
 	}
 	if err == nil && !done {
 		arguments := map[string]any{"repository": repo, "operation_id": operation(step), "head": branch, "head_sha": head, "base": "main", "base_sha": base, "title": message, "body": body, "draft": false,
-			"issue_number": c.Accepted.Snapshot.IssueNumber, "close_on_merge": true} // the source issue is in repo itself
+			"issue_number": issue, "close_on_merge": closesIssue(result, issue, files)} // the source issue is in repo itself
 		var response json.RawMessage
 		if response, err = call(ctx, "create_pull_request", arguments); err == nil {
 			err = json.Unmarshal(response, &pull)
@@ -369,6 +380,13 @@ func (daemon *Daemon) publishPull(ctx context.Context, c kernel.PublishableChang
 		return err
 	}
 	return daemon.recordPublishedPull(ctx, c.Task.ProjectID, c.Task.ID, repo, kernel.ProductionPullRequest{Number: pull.Number, Title: message, URL: pull.URL, Head: pull.Head, HeadRepository: repo, Branch: branch, Base: "main", State: "open", Review: kernel.ProductionReview{Head: pull.Head, State: "unknown"}}, body, pull.Base)
+}
+
+// closesIssue is whether a publication completes its intake issue. One that
+// changes no file, or whose text references the issue (Refs #N, the partial
+// form) instead, leaves it open: merging never closes an unfinished issue.
+func closesIssue(text string, issue uint64, files int) bool {
+	return files > 0 && !regexp.MustCompile(fmt.Sprintf(`(?i)\brefs #%d\b`, issue)).MatchString(text)
 }
 
 // publicationTitle is the accepted title on one line, within the App's
