@@ -624,13 +624,21 @@ func (daemon *Daemon) agentPaths(ctx context.Context, call api.Call) api.Reply {
 	} else if !found {
 		return newErrorReply(api.RemoteNotFound)
 	}
-	runID, sourcePath, runtimePath, err := daemon.liveRunLocations(ctx, agentID)
+	liveRunID, sourcePath, runtimePath, err := daemon.liveRunLocations(ctx, agentID)
 	if err != nil {
 		return newErrorReply(remoteErrorCode(err))
 	}
+	runID := liveRunID
+	if runID == (kernel.RunID{}) {
+		if latest, found, latestErr := daemon.store.LatestRunForAgent(ctx, agentID); latestErr != nil {
+			return newErrorReply(remoteErrorCode(latestErr))
+		} else if found {
+			runID = latest.ID
+		}
+	}
 	run := ""
 	paths := []string{}
-	if runID != (kernel.RunID{}) {
+	if liveRunID != (kernel.RunID{}) {
 		run = runID.String()
 		pathsRunID, observedPaths, pathErr := daemon.RunPaths(ctx, agentID)
 		if pathErr != nil {
@@ -647,11 +655,14 @@ func (daemon *Daemon) agentPaths(ctx context.Context, call api.Call) api.Reply {
 	if runID != (kernel.RunID{}) {
 		if value := daemon.runTelemetryView(runID); value != nil {
 			telemetry = &api.RunTelemetry{TokensIn: value.TokensIn, TokensOut: value.TokensOut, CostMicroUSD: value.CostMicroUSD, ToolCalls: value.ToolCalls, APIRequests: value.APIRequests, QuietSeconds: value.QuietSeconds}
-			if tokens, found, tokenErr := daemon.store.RunTokens(ctx, runID); tokenErr != nil {
-				return newErrorReply(remoteErrorCode(tokenErr))
-			} else if found {
-				telemetry.Tokens = tokens
+		}
+		if tokens, found, tokenErr := daemon.store.RunTokens(ctx, runID); tokenErr != nil {
+			return newErrorReply(remoteErrorCode(tokenErr))
+		} else if found {
+			if telemetry == nil {
+				telemetry = &api.RunTelemetry{}
 			}
+			telemetry.Tokens = tokens
 		}
 	}
 	reply, err := api.NewAgentPathsReply(api.AgentPaths{AgentID: input.AgentID, RunID: run, SourcePath: sourcePath, RuntimePath: runtimePath, Paths: paths, Telemetry: telemetry})

@@ -1286,6 +1286,25 @@ func TestDaemonOperatorAgentPathsReturnsNoChangeOverseerRuntime(t *testing.T) {
 	}
 }
 
+func TestDaemonOperatorAgentPathsReturnsDurableRunTokensWithoutLiveOwner(t *testing.T) {
+	fixture := newDispatchFixture(t)
+	active := prepareActiveAttempt(t, fixture, 237)
+	ctx := context.Background()
+	if err := fixture.store.AddRunTokens(ctx, active.run.ID, 123); err != nil {
+		t.Fatal(err)
+	}
+	operator, err := api.NewOperatorClient(fixture.socket, fixture.operator)
+	if err != nil {
+		t.Fatal(err)
+	}
+	done := fixture.serve(t)
+	paths, err := operator.AgentPaths(ctx, api.AgentPathsInput{AgentID: active.run.AgentID.String()})
+	waitDispatch(t, done)
+	if err != nil || paths.RunID != active.run.ID.String() || paths.Telemetry == nil || paths.Telemetry.Tokens != 123 {
+		t.Fatalf("durable agent paths = %+v, %v", paths, err)
+	}
+}
+
 func TestDaemonDispatchesBlockAndFailCalls(t *testing.T) {
 	for _, test := range []struct {
 		name string

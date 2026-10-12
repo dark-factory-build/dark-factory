@@ -399,6 +399,35 @@ func (store *Store) Run(ctx context.Context, id RunID) (Run, bool, error) {
 	return run, true, nil
 }
 
+func (store *Store) LatestRunForAgent(ctx context.Context, agentID AgentID) (Run, bool, error) {
+	if agentID == (AgentID{}) {
+		return Run{}, false, fmt.Errorf("%w: agent", ErrInvalidValue)
+	}
+	tx, err := store.beginRead(ctx)
+	if err != nil {
+		return Run{}, false, err
+	}
+	defer tx.Close()
+	row := tx.connection.QueryRowContext(ctx, `SELECT `+runColumns+` FROM runs WHERE agent_id = ? ORDER BY admitted_at_ms DESC, id DESC LIMIT 1`, agentID.Bytes())
+	run, found, err := scanRun(row)
+	if !found && err == nil {
+		return Run{}, false, nil
+	}
+	if errors.Is(err, sql.ErrNoRows) {
+		return Run{}, false, nil
+	}
+	if err != nil {
+		return Run{}, false, err
+	}
+	if err := validateOwnershipLocators(ctx, tx.connection); err != nil {
+		return Run{}, false, err
+	}
+	if _, err := loadRunRelationships(ctx, tx.connection, run); err != nil {
+		return Run{}, false, err
+	}
+	return run, true, nil
+}
+
 // Resources returns the canonical fixed resource set for one durable run.
 // It remains available after terminalization so cleanup and recovery never
 // need process-local admission identifiers as authority.
