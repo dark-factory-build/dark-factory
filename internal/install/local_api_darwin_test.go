@@ -11,6 +11,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"syscall"
 	"testing"
 	"time"
@@ -1713,6 +1714,58 @@ func TestLocalAPISocketPathIsTheOneBindAndDialDerivation(t *testing.T) {
 		t.Fatalf("client dial at the shared derivation failed: %v", err)
 	}
 	if err := client.Close(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// Closing races an accept poll: the poll's deadline call fails on the listener
+// close just closed. That is a stop, not lost authority, so close is certain.
+func TestLocalAPICloseDuringAcceptPollIsCertain(t *testing.T) {
+	parent := installTempDir(t)
+	homePath := filepath.Join(parent, "home")
+	if _, err := Init(context.Background(), homePath); err != nil {
+		t.Fatal(err)
+	}
+	home, err := OpenOperationalHome(context.Background(), homePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	authority, err := home.OpenLocalAPI(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	protocol, err := authority.ClaimProtocol()
+	if err != nil {
+		t.Fatal(err)
+	}
+	original := localAPISetListenerDeadline
+	defer func() { localAPISetListenerDeadline = original }()
+	polling, closing := make(chan struct{}), make(chan struct{})
+	var once, closeOnce sync.Once
+	localAPISetListenerDeadline = func(listener *net.UnixListener, deadline time.Time) error {
+		if time.Until(deadline) > localAPIAcceptPoll/2 {
+			armed := false
+			once.Do(func() { armed = true })
+			if armed {
+				close(polling)
+				<-closing
+				return net.ErrClosed
+			}
+		} else {
+			closeOnce.Do(func() { close(closing) })
+		}
+		return original(listener, deadline)
+	}
+	accepted := make(chan error, 1)
+	go func() { _, err := protocol.Accept(); accepted <- err }()
+	<-polling
+	if err := authority.Close(); err != nil {
+		t.Fatalf("close during an accept poll = %v", err)
+	}
+	if err := <-accepted; !errors.Is(err, ErrClosed) {
+		t.Fatalf("accept during close = %v", err)
+	}
+	if err := home.Close(); err != nil {
 		t.Fatal(err)
 	}
 }

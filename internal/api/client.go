@@ -824,8 +824,12 @@ func (client client) exchange(ctx context.Context, method string, encoded []byte
 	if !ok {
 		return ErrTransport
 	}
-	if !outcomeReceipt && unix.CloseWrite() != nil {
-		return ErrTransport
+	if !outcomeReceipt {
+		// A daemon that already closed the connection (a draining restart)
+		// makes CloseWrite fail with ENOTCONN on macOS. readFrame then sees
+		// EOF and classifies the reply as lost, so a read replays it
+		// instead of failing as transport (a merge-queue flake).
+		_ = unix.CloseWrite()
 	}
 	response, err := readFrame(connection)
 	if err != nil {
