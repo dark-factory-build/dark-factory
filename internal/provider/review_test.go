@@ -38,6 +38,13 @@ func TestReviewUsageLimitedRequiresProviderMarkers(t *testing.T) {
 func TestRunReviewConfinesClaudeFileReads(t *testing.T) {
 	bin, root, account := t.TempDir(), t.TempDir(), t.TempDir()
 	operatorHome := t.TempDir()
+	corepack := filepath.Join(operatorHome, "Library", "Caches", "dark-factory", "local-ci", "trusted", "corepack", "v1", "pnpm", pnpmVersion)
+	if err := os.MkdirAll(corepack, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(corepack, "package.json"), []byte(`{"name":"pnpm","version":"`+pnpmVersion+`"}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
 	checkout, scratch := filepath.Join(root, "checkout"), filepath.Join(root, "scratch")
 	for _, directory := range []string{checkout, scratch} {
 		if err := os.Mkdir(directory, 0o700); err != nil {
@@ -91,7 +98,10 @@ func TestRunReviewConfinesClaudeFileReads(t *testing.T) {
 	if got, err := os.ReadFile(filepath.Join(filepath.Dir(account), "review-tmp")); err != nil || string(got) != filepath.Join(root, ".review-tmp")+"\n"+cargoHome {
 		t.Fatalf("CLAUDE_CODE_TMPDIR = %q, err=%v", got, err)
 	}
-	for _, rule := range []string{"Bash", "Read(/" + checkout + "/**)", "Read(//opt/toolchain/**)", "Read(/" + goModuleCachePath(operatorHome) + "/**)", "Read(/" + pnpmStorePath(operatorHome) + "/**)", "Read(/" + filepath.Join(operatorHome, ".rustup") + "/**)"} {
+	if _, err := os.Stat(filepath.Join(root, ".review-home", ".cache", "corepack", "v1", "pnpm", pnpmVersion, "package.json")); err != nil {
+		t.Fatalf("review Corepack cache was not prepared: %v", err)
+	}
+	for _, rule := range []string{"Bash", "Read(/" + checkout + "/**)", "Read(//opt/toolchain/**)", "Read(//System/Library/OpenSSL/openssl.cnf/**)", "Read(/" + goModuleCachePath(operatorHome) + "/**)", "Read(/" + pnpmStorePath(operatorHome) + "/**)", "Read(/" + filepath.Join(operatorHome, ".rustup") + "/**)"} {
 		if !slices.Contains(allow, rule) {
 			t.Fatalf("allow rules lack %s: %q", rule, allow)
 		}
