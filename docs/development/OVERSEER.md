@@ -360,14 +360,16 @@ factoryd publishes accepted intake work itself when its GitHub source issue
 is in the destination repository and you delegated it to exactly one worker
 task (one issue, one worker; a Linear or cross-repository source, or work
 split over several tasks, is yours): when that task succeeds at work
-revision 1 with a settled head, it runs sections 3 and 4 with the same
-operation ids, opens the pull request from the accepted source (`Closes #N`, or `Refs #N`
+revision 1 with a settled head, it pushes that exact head (`publish_pack`)
+to `factory/<first 12 hex of change_id>`, so the pull request head is the
+Change head, opens the pull request from the accepted source (`Closes #N`, or `Refs #N`
 when the head changes no file or the worker's result says `Refs #N`),
 records it against the worker task and reviews it; when it succeeds again
-after a send-back, it publishes the correction on that pull request's branch
-and replaces its body. The App refuses your `publish_commit` and
-`create_pull_request` on that branch. When it cannot
-(a refused path, a symlink, a file over the bound, an indeterminate write), it
+after a send-back, it pushes the corrected head to that pull request's branch,
+replacing the head it observed there, and replaces its body. The App refuses
+your `publish_commit` and `create_pull_request` on that branch. When it cannot
+(a review-authority path, a pack over 8 MiB, a branch moved since it was
+observed, an indeterminate write), it
 wakes you once with `Escalated: factoryd cannot publish change CHANGE for task
 TASK: ...` and retries that Change revision on its own every hour, without
 waking you again: send the task back if the Change itself is the cause.

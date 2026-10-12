@@ -131,7 +131,7 @@ func TestProductionPersistsFinalizedConstructionPublicationAndRebase(t *testing.
 	}
 }
 
-func TestPublishedPullSendBackIsBoundToThePullHead(t *testing.T) {
+func TestPublishedPullSendBackIsBoundToTheChangeHead(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
 	proposal, err := NewSuccessProposal("published")
@@ -152,23 +152,24 @@ func TestPublishedPullSendBackIsBoundToThePullHead(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	// The App publishes its own commit of the Change's tree, so the pull
-	// request head is never the local Change head. A review of an older head
-	// sends nothing back: the worker could not reproduce its premise (#1673).
-	published := strings.Repeat("a", 40)
-	pr := ProductionPullRequest{Number: 77, Title: "Review me", URL: "https://github.com/example/factory/pull/77", Head: published, Branch: "factory/review", Base: "main", State: "open", Review: ProductionReview{Head: published, State: "unknown"}}
+	// factoryd publishes the Change's exact commit, so the pull request head
+	// is the Change head. A note at any other head, even one a pull request
+	// of this task recorded, sends nothing back: the worker could not
+	// reproduce its premise (#1673), and no head is mapped onto another.
+	stale := strings.Repeat("a", 40)
+	pr := ProductionPullRequest{Number: 77, Title: "Review me", URL: "https://github.com/example/factory/pull/77", Head: stale, Branch: "factory/review", Base: "main", State: "open", Review: ProductionReview{Head: stale, State: "unknown"}}
 	if err := store.RecordPublication(ctx, finalizing.ProjectID, finalizing.TaskID, "example/factory", pr, mustTime(t, 80)); err != nil {
 		t.Fatal(err)
 	}
-	if head := changeHead(t, store, finalizing.TaskID); head == "" || head == published {
-		t.Fatalf("change head %q must differ from the published head", head)
-	}
+	published := changeHead(t, store, finalizing.TaskID)
 	task, _, err := store.Task(ctx, finalizing.TaskID)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := store.SendBackTask(ctx, nil, task.ID, task.Revision, strings.Repeat("b", 40), "fix the findings", mustTime(t, 80)); !errors.Is(err, ErrSuperseded) {
-		t.Fatalf("stale review send-back err=%v", err)
+	for _, head := range []string{stale, strings.Repeat("b", 40)} {
+		if _, err := store.SendBackTask(ctx, nil, task.ID, task.Revision, head, "fix the findings", mustTime(t, 80)); !errors.Is(err, ErrSuperseded) {
+			t.Fatalf("send-back at %s err=%v", head, err)
+		}
 	}
 	sent, err := store.SendBackTask(ctx, nil, task.ID, task.Revision, published, "fix the findings", mustTime(t, 82))
 	if err != nil || TaskFeedback(sent) == "" || sent.WorkRevision.Int64() != 2 {
@@ -857,47 +858,5 @@ func TestHostPullRequestRepairTaskNamesTheReviewedHead(t *testing.T) {
 	}
 	if _, found, err := store.TaskOpenPullRequest(ctx, repair.ID); err != nil || found {
 		t.Fatalf("closed pull request found=%v err=%v", found, err)
-	}
-}
-
-// A pull request observed on its Change's branch, with no publication row, is
-// still the task's: a note at its head is sent back, and one at any other
-// head is refused.
-func TestSendBackAcceptsTheHeadOfTheChangeBranchPullRequest(t *testing.T) {
-	t.Parallel()
-	ctx := context.Background()
-	proposal, err := NewSuccessProposal("published")
-	if err != nil {
-		t.Fatal(err)
-	}
-	store, finalizing := finalizingReleasedRun(t, RoleWorker, proposal)
-	defer store.Close()
-	change, found, err := store.Change(ctx, *finalizing.ChangeID)
-	if err != nil || !found {
-		t.Fatalf("change=%+v found=%v err=%v", change, found, err)
-	}
-	settlement, err := NewRetainedChangeSettlement(change.Revision, change.HeadCommit)
-	if err != nil {
-		t.Fatal(err)
-	}
-	worker, err := store.FinalizeWorkerRun(ctx, finalizing.ID, finalizing.Revision, settlement, mustTime(t, 60))
-	if err != nil {
-		t.Fatal(err)
-	}
-	published := strings.Repeat("d", 40)
-	pr := ProductionPullRequest{Number: 9, Title: "Ship it", URL: "https://github.com/example/factory/pull/9", Head: published, Branch: "factory/" + change.ID.String()[:12], Base: "main", State: "open", Review: ProductionReview{Head: published, State: "unknown"}}
-	if err := store.RecordProductionObservation(ctx, worker.ProjectID, ProductionObservation{Repository: "example/factory", ObservedAt: 61, PullRequests: []ProductionPullRequest{pr}}, mustTime(t, 61)); err != nil {
-		t.Fatal(err)
-	}
-	task, found, err := store.Task(ctx, worker.TaskID)
-	if err != nil || !found {
-		t.Fatalf("task=%+v found=%v err=%v", task, found, err)
-	}
-	if _, err := store.SendBackTask(ctx, nil, task.ID, task.Revision, strings.Repeat("e", 40), "an older head", mustTime(t, 62)); !errors.Is(err, ErrSuperseded) {
-		t.Fatalf("other head err=%v, want ErrSuperseded", err)
-	}
-	sent, err := store.SendBackTask(ctx, nil, task.ID, task.Revision, published, "fix the finding", mustTime(t, 62))
-	if err != nil || sent.WorkRevision.Int64() != 2 {
-		t.Fatalf("published head send-back=%+v err=%v", sent, err)
 	}
 }

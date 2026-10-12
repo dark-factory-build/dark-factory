@@ -271,7 +271,7 @@ func (daemon *Daemon) reconcilePull(ctx context.Context, open kernel.OpenPull, u
 		// tree on the operation if that cost shows.
 		lacks, why := false, ""
 		if !working && task.CompletedAt != nil && task.CompletedAt.Int64() > op.CreatedAt.UnixMilli() {
-			lacks, why, err = daemon.publishUnanswered(ctx, coordinator.Backend, open, op.Request)
+			lacks, why, err = daemon.publishUnanswered(ctx, open, op.Request)
 		}
 		switch {
 		case why != "" && !op.Handled:
@@ -380,21 +380,21 @@ func (daemon *Daemon) sendBackPull(ctx context.Context, open kernel.OpenPull, ta
 	return err
 }
 
-// publishUnanswered reports whether the pull request lacks the tree of the
+// publishUnanswered reports whether the pull request's head is not the
 // Change head its task settled, which is then no answer (#1800): that head is
 // published at once, or why says factoryd does not publish it.
-func (daemon *Daemon) publishUnanswered(ctx context.Context, backend review.Backend, open kernel.OpenPull, request review.Request) (bool, string, error) {
-	settled, err := daemon.unpublishedHead(ctx, backend, open, request)
+func (daemon *Daemon) publishUnanswered(ctx context.Context, open kernel.OpenPull, request review.Request) (bool, string, error) {
+	settled, err := daemon.unpublishedHead(ctx, open, request)
 	if err != nil || settled == "" || daemon.publishSettledChanges(ctx, open.Task) {
 		return settled != "", "", err
 	}
-	return true, "its task settled head " + settled + ", whose tree head " + request.Head + " lacks, and factoryd does not publish it: its task did not succeed, its publication failed for good, or its work is not factoryd's to publish", nil
+	return true, "its task settled head " + settled + ", which pull request head " + request.Head + " is not, and factoryd does not publish it: its task did not succeed, its publication failed for good, or its work is not factoryd's to publish", nil
 }
 
 // unpublishedHead is the head of the retained Change published on the pull
-// request when its tree differs from that of the pull request's head, read
-// from a checkout of request; "" when they match or no Change is published.
-func (daemon *Daemon) unpublishedHead(ctx context.Context, backend review.Backend, open kernel.OpenPull, request review.Request) (string, error) {
+// request when it is not the pull request's head; "" when they match or no
+// Change is published. factoryd pushes the Change's exact commit.
+func (daemon *Daemon) unpublishedHead(ctx context.Context, open kernel.OpenPull, request review.Request) (string, error) {
 	changeID, found, err := daemon.store.PublishedChangeID(ctx, open.Project, open.Repository, open.Pull.Number)
 	if err != nil || !found {
 		return "", err
@@ -403,25 +403,10 @@ func (daemon *Daemon) unpublishedHead(ctx context.Context, backend review.Backen
 	if err != nil || !found || state.Phase != kernel.ChangeRetained || state.HeadCommit == nil {
 		return "", err
 	}
-	parent := daemon.changeParent.Load()
-	if parent == nil || *parent == "" {
-		return "", errPublishLater
+	if head := hex.EncodeToString(state.HeadCommit.Bytes()); !strings.EqualFold(head, request.Head) {
+		return head, nil
 	}
-	head := hex.EncodeToString(state.HeadCommit.Bytes())
-	checkout, cleanup, err := backend.CloneReadOnly(ctx, request)
-	if err != nil {
-		return "", err
-	}
-	defer cleanup()
-	settled := reviewGit(ctx, filepath.Join(*parent, changeID.String()), "rev-parse", head+"^{tree}")
-	published := reviewGit(ctx, checkout, "rev-parse", request.Head+"^{tree}")
-	if len(settled) != 1 || len(published) != 1 {
-		return "", errors.New("the trees of its Change head " + head + " and pull request head " + request.Head + " are unreadable")
-	}
-	if strings.TrimSpace(settled[0]) == strings.TrimSpace(published[0]) {
-		return "", nil
-	}
-	return head, nil
+	return "", nil
 }
 
 // rebaseChange brings the retained Change published on the pull request up to

@@ -361,7 +361,21 @@ authority.
 Workflows write was added under `maintainer-operations-v6` so the factory can
 deliver changes to its own workflow files (#1251). `publish_commit` and `enqueue_pull_request` mint it;
 publication no longer refuses `.github/workflows/**`, which still passes the
-same exact-head review and merge queue as any other change. The token carries
+same exact-head review and merge queue as any other change. `publish_pack`
+mints it too.
+
+factoryd publishes a worker's Change with `publish_pack`: GitHub stores the
+worker's commits byte for byte, so the pull request head is the Change head
+and its author, committer, dates and parents are the worker's. The App is
+only the authenticated pusher. These commits are not signed, so GitHub does
+not mark them "Verified" as it does commits the App creates through the API.
+On 12 Oct 2026 `GET /repos/dark-factory-build/dark-factory/rules/branches/main`
+listed deletion, non-fast-forward, linear history, the `required` check, the
+squash merge queue and pull request rules, and no signed-commit rule;
+`factory/*` branches had no rules, so replacing a factory branch's head is
+allowed; main receives only the queue's squash commit, which GitHub makes. A
+repository whose rules require signed commits on `factory/*` refuses the push,
+and factoryd escalates it rather than signing or rewriting the worker's commit. The token carries
 Workflows write only where the installation has accepted it; elsewhere GitHub
 refuses just the workflow-changing push and every other operation is
 unaffected, so installations may accept before or after promotion.
