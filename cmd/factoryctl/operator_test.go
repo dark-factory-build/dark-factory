@@ -238,6 +238,25 @@ func TestOperatorCommandsRequireExactEnvironmentBeforeDialing(t *testing.T) {
 	}
 }
 
+// An absent socket under its home is a daemon that is down or restarting,
+// not a misconfigured shell (#1830).
+func TestOperatorCommandReportsAbsentSocketAsDaemonDown(t *testing.T) {
+	fixture := newAPIFixture(t)
+	defer fixture.close(t)
+	if err := fixture.listener.Close(); err != nil {
+		t.Fatal(err)
+	}
+	fixture.listener = nil
+	environment := map[string]string{"DARK_FACTORY_SOCKET": fixture.socket, "DARK_FACTORY_OPERATOR_TOKEN_FILE": fixture.directory + "/home/operator.token"}
+	for _, args := range [][]string{{"dispatch", "on"}, {"release"}} {
+		var stdout, stderr bytes.Buffer
+		exit := run(context.Background(), args, func(name string) string { return environment[name] }, &stdout, &stderr)
+		if exit != exitFailure || stdout.Len() != 0 || stderr.String() != "factoryctl: factoryd is not running or is restarting\n" {
+			t.Fatalf("%v with absent socket = exit %d stdout %q stderr %q", args, exit, stdout.String(), stderr.String())
+		}
+	}
+}
+
 func TestProjectCreateMintsIdentityAndReportsResult(t *testing.T) {
 	fixture := newAPIFixture(t)
 	defer fixture.close(t)

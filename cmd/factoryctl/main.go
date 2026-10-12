@@ -2262,6 +2262,18 @@ func newOperatorID() (string, error) {
 	return encoded, nil
 }
 
+// operatorClientFailure reports a client that could not be made: an absent
+// socket under its private parent is a daemon that is down or between
+// generations, not a misconfigured shell.
+func operatorClientFailure(stderr io.Writer, socket string) int {
+	message := "factoryctl: operator client configuration is invalid\n"
+	if api.SocketAbsent(socket) {
+		message = "factoryctl: factoryd is not running or is restarting\n"
+	}
+	_, _ = io.WriteString(stderr, message)
+	return exitFailure
+}
+
 func runOperator(ctx context.Context, command attemptCommand, getenv func(string) string, stdout, stderr io.Writer) int {
 	socket := getenv("DARK_FACTORY_SOCKET")
 	token := getenv("DARK_FACTORY_OPERATOR_TOKEN_FILE")
@@ -2274,8 +2286,7 @@ func runOperator(ctx context.Context, command attemptCommand, getenv func(string
 		client, err = api.NewAttemptReaderFromEnvironment(socket)
 	}
 	if err != nil {
-		_, _ = io.WriteString(stderr, "factoryctl: operator client configuration is invalid\n")
-		return exitFailure
+		return operatorClientFailure(stderr, socket)
 	}
 	timeout := attemptRequestTimeout
 	if command.kind == commandIntake || command.kind == commandStatus && command.project != "" {

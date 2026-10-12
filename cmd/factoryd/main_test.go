@@ -265,31 +265,31 @@ func TestStartupCancellationIsCleanAtEveryStartupPhase(t *testing.T) {
 	}
 }
 
-func TestReviewRecoveryRunsAfterMaintainerConfiguration(t *testing.T) {
+// Review recovery reconciles every open pull request over GitHub, so the
+// local API answers while it is still running (#1830).
+func TestLocalAPIAnswersWhileReviewRecoveryIsBlocked(t *testing.T) {
 	home := initializedHome(t)
-	var phases []string
-	startupPhaseHook = func(observed string) { phases = append(phases, observed) }
+	blocked, release := make(chan struct{}), make(chan struct{})
+	startupPhaseHook = func(observed string) {
+		if observed == "review recovery" {
+			close(blocked)
+			<-release
+		}
+	}
 	defer func() { startupPhaseHook = nil }()
 
 	owner, err := openProcess(context.Background(), testConfig(home))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := owner.close(); err != nil {
-		t.Fatal(err)
+	<-blocked
+	_, err = waitOperatorClient(t, home).WebStatus(context.Background())
+	close(release)
+	if closeErr := owner.close(); closeErr != nil {
+		t.Fatal(closeErr)
 	}
-
-	maintainer, recovery := -1, -1
-	for index, phase := range phases {
-		switch phase {
-		case "maintainer":
-			maintainer = index
-		case "review recovery":
-			recovery = index
-		}
-	}
-	if maintainer == -1 || recovery == -1 || maintainer > recovery {
-		t.Fatalf("startup phase order = %v", phases)
+	if err != nil {
+		t.Fatalf("web_status during review recovery = %v", err)
 	}
 }
 
@@ -821,6 +821,10 @@ func TestBootRecoverySweepConvergesResidueBeforeAnyListener(t *testing.T) {
 	socketAtSweep := errors.New("unobserved")
 	phases := make([]string, 0, 16)
 	startupPhaseHook = func(observed string) {
+		// Review recovery is the scheduler goroutine's first pass.
+		if observed == "review recovery" {
+			return
+		}
 		phases = append(phases, observed)
 		if observed == "recovery sweep" {
 			_, socketAtSweep = os.Lstat(install.LocalAPISocketPath(home))
