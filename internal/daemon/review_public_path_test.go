@@ -919,9 +919,10 @@ func TestStartupRecoveryDoesNotRelaunchAReviewThisDaemonAccepted(t *testing.T) {
 	}
 }
 
-// factoryd's listener opens before startup review recovery (#1830), so an API
-// call is answered while recovery's reconcile of an open pull request is
-// still blocked on GitHub.
+// factoryd's listener opens before startup review recovery (#1830), so a
+// review_pr sent through the local API is accepted and reviewed while
+// recovery's reconcile of another open pull request is still blocked on
+// GitHub, and each review's provider runs once.
 func TestAPIAnswersWhileStartupReviewReconcileIsBlocked(t *testing.T) {
 	fixture, project, _, settle := publishedTask(t)
 	settle()
@@ -947,14 +948,27 @@ func TestAPIAnswersWhileStartupReviewReconcileIsBlocked(t *testing.T) {
 		t.Fatal(err)
 	}
 	done := fixture.serve(t)
-	_, err = client.Snapshot(ctx)
+	input := api.IntakeInput{Action: "review_pr", ProjectID: project.String(), ReviewRequest: &api.ReviewRequest{Repository: "team/repo", PullNumber: 7, Head: strings.Repeat("a", 40), Base: strings.Repeat("b", 40), BaseRef: "main", Provider: "codex"}}
+	result, err := client.Intake(ctx, input)
+	if err == nil {
+		waitDispatch(t, done)
+	}
+	reviewed := false
+	for deadline := time.Now().Add(5 * time.Second); err == nil && !reviewed && time.Now().Before(deadline); time.Sleep(5 * time.Millisecond) {
+		var op review.Operation
+		document, found, readErr := fixture.store.ReviewOperation(ctx, project, result.ReviewOperation)
+		reviewed = readErr == nil && found && json.Unmarshal(document, &op) == nil && op.Submitted
+	}
 	close(backend.release)
-	waitDispatch(t, done)
-	if err != nil {
-		t.Fatalf("snapshot while review reconcile is blocked = %v", err)
+	if err != nil || result.State != "ok" || !reviewed {
+		t.Fatalf("review_pr while review reconcile is blocked = %+v, %v (reviewed=%v)", result, err, reviewed)
 	}
 	if err := <-recovered; err != nil {
 		t.Fatal(err)
+	}
+	waitForMergePipeline(t, fixture.daemon)
+	if backend.reviews != 2 || backend.submits != 2 {
+		t.Fatalf("a review's provider ran twice: backend=%+v", backend.publicReviewBackend)
 	}
 }
 
