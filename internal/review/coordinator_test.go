@@ -237,7 +237,7 @@ func TestReviewWaitsForTheHeadsRequiredChecks(t *testing.T) {
 		reviews int
 		detail  string
 	}{
-		{name: "red after running", pulls: []Pull{{}, {Pending: true}, failed}, state: "ejected", detail: "Not reviewed: its checks failed. Exact head " + reviewRequest().Head + " cannot merge. Failing checks: required.\n- --- FAIL: TestA (0.01s)\n"},
+		{name: "red after running", pulls: []Pull{{}, {Pending: true}, failed}, state: "ejected", detail: "Not reviewed: its checks failed. Exact head " + reviewRequest().Head + " cannot merge. Failing checks: required. CI reproduced this failure on the exact head, so it is the premise: if your rerun passes, report what differs (environment, which tests you ran) and work from these lines; \"premise not reproduced\" is not a valid ending.\n- --- FAIL: TestA (0.01s)\n"},
 		{name: "green after running", pulls: []Pull{{Pending: true}, {Checks: []string{"required=success"}}}, state: "enqueued", reviews: 1},
 		{name: "no required check past the grace", pulls: []Pull{{}}, age: checksGrace, state: "enqueued", reviews: 1},
 		{name: "still running past the grace", pulls: []Pull{{Pending: true}, {Checks: []string{"required=success"}}}, age: checksGrace, state: "enqueued", reviews: 1},

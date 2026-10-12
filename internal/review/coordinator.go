@@ -364,9 +364,9 @@ func (op Operation) conflict() string {
 }
 
 // failing names the failed required checks at the head and the first ten
-// failing tests CI annotated.
+// failing tests CI annotated, as the premise a sandbox rerun cannot overturn.
 func (p Pull) failing() string {
-	note := fmt.Sprintf("Exact head %s cannot merge. Failing checks: %s.", p.Head, strings.Join(p.Failing, ", "))
+	note := fmt.Sprintf("Exact head %s cannot merge. Failing checks: %s. CI reproduced this failure on the exact head, so it is the premise: if your rerun passes, report what differs (environment, which tests you ran) and work from these lines; \"premise not reproduced\" is not a valid ending.", p.Head, strings.Join(p.Failing, ", "))
 	for _, line := range p.Tests[:min(len(p.Tests), 10)] {
 		note += "\n- " + line
 	}

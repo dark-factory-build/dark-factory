@@ -1905,8 +1905,8 @@ func TestCodexLaunchGrantsTheRepositoryGitDirectoryByRole(t *testing.T) {
 // Claude and Codex start from one bootstrap prompt, the last argv element,
 // naming only their own attempt server; neither has a task typed into its PTY.
 func TestNativeProvidersShareTheBootstrapPrompt(t *testing.T) {
-	if !strings.Contains(bootstrapPrompt, `argv ["attempt","task"] before doing anything else`) || !strings.Contains(bootstrapPrompt, "including corrections after send-back") || strings.Contains(bootstrapPrompt, "attempt source") || !strings.Contains(bootstrapPrompt, "Never substitute another task or private Change path") || !strings.Contains(bootstrapPrompt, "screenshots are illustrative only and never blocking evidence") {
-		t.Fatal("bootstrap prompt loses its task fetch or own-checkout instruction")
+	if !strings.Contains(bootstrapPrompt, `argv ["attempt","task"] before doing anything else`) || !strings.Contains(bootstrapPrompt, "including corrections after send-back") || strings.Contains(bootstrapPrompt, "attempt source") || !strings.Contains(bootstrapPrompt, "Never substitute another task or private Change path") || !strings.Contains(bootstrapPrompt, "screenshots are illustrative only and never blocking evidence") || !strings.Contains(bootstrapPrompt, `checks-failed send-back is the exception: CI's failure on the exact head is its premise`) {
+		t.Fatal("bootstrap prompt loses its task fetch, own-checkout or checks-failed premise instruction")
 	}
 	for _, role := range []kernel.AgentRole{kernel.RoleWorker, kernel.RoleOrchestrator} {
 		prompts := map[kernel.Provider]string{}
