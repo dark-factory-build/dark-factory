@@ -1,6 +1,7 @@
 package daemon
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -144,9 +145,9 @@ var (
 // tickRelease releases the base tip into this factory once per tip. Only a
 // home with a registered checkout of factoryd's own repository releases
 // itself. A tip with any release record (running, verified or failed) is never
-// started again: a failed release waits for a newer tip or `factoryctl
-// release`. The newest tip wins when the releaseBatch window closes, so
-// merges in between are released together.
+// started again, except one a restart interrupted: a failed release waits for
+// a newer tip or `factoryctl release`. The newest tip wins when the
+// releaseBatch window closes, so merges in between are released together.
 func (daemon *Daemon) tickRelease(ctx context.Context) {
 	// The wall clock, not daemon.now: this cadence is not factory time.
 	now := time.Now()
@@ -166,8 +167,8 @@ func (daemon *Daemon) tickRelease(ctx context.Context) {
 			LogFactoryd(daemon.log, "factoryd: release: observe %s: %v\n", selfBase, err)
 			return
 		}
-		_, _, found, err := daemon.store.Delivery(ctx, "release:"+head)
-		if err != nil || found {
+		_, existing, found, err := daemon.store.Delivery(ctx, "release:"+head)
+		if err != nil || found && existing.Reason != releaseInterrupted {
 			if err == nil {
 				daemon.releaseSince.Store(0)
 			}
@@ -266,6 +267,29 @@ func (daemon *Daemon) FinishRelease(ctx context.Context, sha, state, reason stri
 	return daemon.writeRelease(ctx, project, &delivery)
 }
 
+const releaseInterrupted = "interrupted by a factoryd restart"
+
+// FailInterruptedRelease runs at a boot with no upgrade marker: a release
+// still running then belongs to a factoryd that died before staging it, so
+// its build or deploy is stopped and it fails, and the release lane starts
+// the base tip again without waiting out a batch window.
+func (daemon *Daemon) FailInterruptedRelease(ctx context.Context) error {
+	if !daemon.releaseBusy.CompareAndSwap(false, true) {
+		return nil
+	}
+	defer daemon.releaseBusy.Store(false)
+	project, delivery, found, err := daemon.store.LatestRelease(ctx)
+	if err != nil || !found || delivery.State != "running" {
+		return err
+	}
+	if delivery.Group > 0 {
+		_ = syscall.Kill(-delivery.Group, syscall.SIGKILL)
+	}
+	delivery.State, delivery.Reason, delivery.Group = "failed", releaseInterrupted, 0
+	daemon.releaseSince.Store(1)
+	return daemon.writeRelease(ctx, project, &delivery)
+}
+
 func (daemon *Daemon) selfRepositorySource(ctx context.Context) (project kernel.ProjectID, root string, source change.RepositorySourceIdentity, err error) {
 	projects, err := daemon.store.PublishingProjects(ctx)
 	for _, project = range projects {
@@ -295,13 +319,30 @@ func (daemon *Daemon) release(project kernel.ProjectID, root string, source chan
 		delivery.State, delivery.Reason = "failed", reason
 		_ = daemon.writeRelease(context.WithoutCancel(ctx), project, &delivery)
 	}
+	// run gives each build and deploy command its own process group, recorded
+	// while it runs, for the next factoryd to stop if this one dies first.
+	run := func(command *exec.Cmd) ([]byte, error) {
+		var output bytes.Buffer
+		command.Stdout, command.Stderr = &output, &output
+		command.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+		command.Cancel = func() error { return syscall.Kill(-command.Process.Pid, syscall.SIGKILL) }
+		command.WaitDelay = 5 * time.Second
+		err := command.Start()
+		if err == nil {
+			delivery.Group = command.Process.Pid
+			_ = daemon.writeRelease(ctx, project, &delivery)
+			err = command.Wait()
+		}
+		delivery.Group = 0
+		return output.Bytes(), err
+	}
 	directory, err := os.MkdirTemp("", "dark-factory-release-")
 	if err != nil {
 		fail(err.Error())
 		return
 	}
 	defer os.RemoveAll(directory)
-	identity, err := releaseBuild(ctx, daemon, root, source, delivery.Revision, directory)
+	identity, err := releaseBuild(ctx, daemon, root, source, delivery.Revision, directory, run)
 	if err != nil {
 		fail(err.Error())
 		return
@@ -332,7 +373,7 @@ func (daemon *Daemon) release(project kernel.ProjectID, root string, source chan
 		fail("worker: " + err.Error())
 		return
 	}
-	err = releaseWorker(ctx, daemon, filepath.Join(directory, "tree"), live, delivery.Revision)
+	err = releaseWorker(ctx, daemon, filepath.Join(directory, "tree"), live, delivery.Revision, run)
 	worker.State = "verified"
 	if err != nil {
 		worker.State, worker.Reason = "failed", err.Error()
@@ -395,7 +436,7 @@ func (daemon *Daemon) drainForRelease(ctx context.Context) (string, error) {
 
 // buildRelease builds the three binaries at sha, from a base-only clone of
 // the registered checkout, into directory/bin as an exact release identity.
-func buildRelease(ctx context.Context, daemon *Daemon, root string, source change.RepositorySourceIdentity, sha, directory string) (buildinfo.Identity, error) {
+func buildRelease(ctx context.Context, daemon *Daemon, root string, source change.RepositorySourceIdentity, sha, directory string, run func(*exec.Cmd) ([]byte, error)) (buildinfo.Identity, error) {
 	tree := filepath.Join(directory, "tree")
 	if err := change.ReviewCheckout(ctx, change.TrustedGitExecutable, root, source, tree, "", sha, sha, selfBase); err != nil {
 		return buildinfo.Identity{}, fmt.Errorf("release checkout: %w", err)
@@ -406,11 +447,7 @@ func buildRelease(ctx context.Context, daemon *Daemon, root string, source chang
 		}
 	}
 	// /usr/bin/env resolves go on the operator's tool path, not ours.
-	return buildinfo.BuildRelease(ctx, tree, sha, runtime.GOOS+"/"+runtime.GOARCH, filepath.Join(directory, "bin"), daemon.toolEnvironment(), func(command *exec.Cmd) {
-		command.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
-		command.Cancel = func() error { return syscall.Kill(-command.Process.Pid, syscall.SIGKILL) }
-		command.WaitDelay = 5 * time.Second
-	})
+	return buildinfo.BuildRelease(ctx, tree, sha, runtime.GOOS+"/"+runtime.GOARCH, filepath.Join(directory, "bin"), daemon.toolEnvironment(), run)
 }
 
 // deployWorker deploys the control-plane Worker at sha with the release
@@ -418,7 +455,7 @@ func buildRelease(ctx context.Context, daemon *Daemon, root string, source chang
 // up, whenever control-plane/ differs from the live Worker's commit (always
 // when that is unknown). It runs before factoryd is staged, so factoryd and
 // the Worker it calls are released together (#1512).
-func deployWorker(ctx context.Context, daemon *Daemon, tree, live, sha string) error {
+func deployWorker(ctx context.Context, daemon *Daemon, tree, live, sha string, run func(*exec.Cmd) ([]byte, error)) error {
 	if live != "" {
 		if _, err := gitOutput(ctx, filepath.Join(tree, ".git"), "diff", "--quiet", live, sha, "--", "control-plane"); err == nil {
 			return nil
@@ -426,10 +463,7 @@ func deployWorker(ctx context.Context, daemon *Daemon, tree, live, sha string) e
 	}
 	command := exec.CommandContext(ctx, filepath.Join(tree, "scripts", "release.sh"), sha)
 	command.Dir, command.Env = tree, daemon.toolEnvironment()
-	command.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
-	command.Cancel = func() error { return syscall.Kill(-command.Process.Pid, syscall.SIGKILL) }
-	command.WaitDelay = 5 * time.Second
-	if output, err := command.CombinedOutput(); err != nil {
+	if output, err := run(command); err != nil {
 		lines := strings.Split(strings.TrimSpace(string(output)), "\n")
 		return fmt.Errorf("%w: %s", err, lines[len(lines)-1])
 	}

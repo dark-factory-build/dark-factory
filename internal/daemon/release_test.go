@@ -12,6 +12,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync/atomic"
+	"syscall"
 	"testing"
 	"time"
 
@@ -151,12 +152,14 @@ func releaseFixture(t *testing.T) (*dispatchFixture, func(), chan string) {
 	t.Cleanup(func() {
 		releaseBuild, releaseWorker, releaseUpgrade, releaseExit, releaseDrainLimit, releaseDrainPoll = build, worker, upgrade, exit, limit, poll
 	})
-	releaseBuild = func(_ context.Context, _ *Daemon, root string, _ change.RepositorySourceIdentity, sha, _ string) (buildinfo.Identity, error) {
+	releaseBuild = func(_ context.Context, _ *Daemon, root string, _ change.RepositorySourceIdentity, sha, _ string, _ func(*exec.Cmd) ([]byte, error)) (buildinfo.Identity, error) {
 		events <- "build " + root
 		value, _ := buildinfo.Expected("1.2.3", sha, "darwin/arm64")
 		return value, nil
 	}
-	releaseWorker = func(context.Context, *Daemon, string, string, string) error { return nil }
+	releaseWorker = func(context.Context, *Daemon, string, string, string, func(*exec.Cmd) ([]byte, error)) error {
+		return nil
+	}
 	releaseUpgrade = func(_ context.Context, upgradeHome, _ string, identity buildinfo.Identity) error {
 		if _, err := os.Stat(install.UpgradeBackupPath(upgradeHome)); err != nil {
 			t.Errorf("upgrade without a backup: %v", err)
@@ -187,7 +190,7 @@ func awaitRelease(t *testing.T, daemon *Daemon, sha string, settled func(kernel.
 func TestReleaseBuildsDrainsBacksUpAndSwapsThenRestarts(t *testing.T) {
 	fixture, settle, events := releaseFixture(t)
 	settle()
-	releaseWorker = func(_ context.Context, _ *Daemon, _, _, sha string) error {
+	releaseWorker = func(_ context.Context, _ *Daemon, _, _, sha string, _ func(*exec.Cmd) ([]byte, error)) error {
 		events <- "worker " + sha
 		return nil
 	}
@@ -272,7 +275,7 @@ func TestReleaseRecordsAFailedUpgradeAndNeverRestarts(t *testing.T) {
 func TestReleaseRecordsAFailedWorkerAndNeverStagesFactoryd(t *testing.T) {
 	fixture, settle, events := releaseFixture(t)
 	settle()
-	releaseWorker = func(context.Context, *Daemon, string, string, string) error {
+	releaseWorker = func(context.Context, *Daemon, string, string, string, func(*exec.Cmd) ([]byte, error)) error {
 		return errors.New("release: control-plane health_failed rolled back")
 	}
 	sha := strings.Repeat("9", 40)
@@ -297,7 +300,7 @@ func TestReleaseComparesWithTheLiveWorkerNotTheRunningBuild(t *testing.T) {
 	fixture, settle, events := releaseFixture(t)
 	settle()
 	lives := make(chan string, 2)
-	releaseWorker = func(_ context.Context, _ *Daemon, _, live, _ string) error {
+	releaseWorker = func(_ context.Context, _ *Daemon, _, live, _ string, _ func(*exec.Cmd) ([]byte, error)) error {
 		lives <- live
 		return nil
 	}
@@ -382,20 +385,20 @@ func TestDeployWorkerRunsOnlyWhenTheControlPlaneChanged(t *testing.T) {
 		_ = os.Remove(filepath.Join(tree, "deployed"))
 		return string(data)
 	}
-	if err := deployWorker(ctx, daemon, tree, live, unchanged); err != nil || deployed() != "" {
+	if err := deployWorker(ctx, daemon, tree, live, unchanged, (*exec.Cmd).CombinedOutput); err != nil || deployed() != "" {
 		t.Fatalf("unchanged control plane deployed: %v", err)
 	}
-	if err := deployWorker(ctx, daemon, tree, live, changed); err != nil || deployed() != changed+"\n" {
+	if err := deployWorker(ctx, daemon, tree, live, changed, (*exec.Cmd).CombinedOutput); err != nil || deployed() != changed+"\n" {
 		t.Fatalf("changed control plane not deployed: %v", err)
 	}
 	// An unknown live Worker, or one the tree cannot compare, is deployed.
 	for _, unknown := range []string{"", strings.Repeat("1", 40)} {
-		if err := deployWorker(ctx, daemon, tree, unknown, unchanged); err != nil || deployed() != unchanged+"\n" {
+		if err := deployWorker(ctx, daemon, tree, unknown, unchanged, (*exec.Cmd).CombinedOutput); err != nil || deployed() != unchanged+"\n" {
 			t.Fatalf("unknown live Worker %q not deployed: %v", unknown, err)
 		}
 	}
 	write("fail", "1", 0o644)
-	if err := deployWorker(ctx, daemon, tree, live, changed); err == nil || !strings.HasSuffix(err.Error(), ": release: control-plane deploy_failed") {
+	if err := deployWorker(ctx, daemon, tree, live, changed, (*exec.Cmd).CombinedOutput); err == nil || !strings.HasSuffix(err.Error(), ": release: control-plane deploy_failed") {
 		t.Fatalf("failed deploy = %v", err)
 	}
 }
@@ -489,6 +492,47 @@ func TestTickBatchesBaseTipsIntoOneRelease(t *testing.T) {
 	if _, _, found, err := fixture.store.Delivery(context.Background(), "release:"+first); err != nil || found {
 		t.Fatalf("passed tip released: %t, %v", found, err)
 	}
+}
+
+// #1854: a release a previous factoryd left running is failed at boot, its
+// build's process group stopped, and the next pass releases the tip at once.
+func TestBootFailsTheInterruptedReleaseAndTheNextPassStartsIt(t *testing.T) {
+	fixture, settle, events := releaseFixture(t)
+	settle()
+	head, poll, batch := releaseHead, releasePoll, releaseBatch
+	t.Cleanup(func() { releaseHead, releasePoll, releaseBatch = head, poll, batch })
+	sha := strings.Repeat("7", 40)
+	releaseHead = func(context.Context, *Daemon, string) (string, error) { return sha, nil }
+	releasePoll, releaseBatch = 0, time.Hour
+	orphan := exec.Command("/bin/sleep", "60")
+	orphan.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	if err := orphan.Start(); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = orphan.Process.Kill() })
+	ctx := context.Background()
+	project, _, _, err := fixture.daemon.selfRepositorySource(ctx)
+	interrupted := kernel.ProductionDelivery{ID: "release:" + sha, Kind: "runtime", Destination: "factoryd", Revision: sha, State: "running", Phase: "build", PullRequests: []uint64{}, Group: orphan.Process.Pid}
+	if err == nil {
+		err = fixture.daemon.writeRelease(ctx, project, &interrupted)
+	}
+	if err == nil {
+		err = fixture.daemon.FailInterruptedRelease(ctx)
+	}
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := orphan.Wait(); err == nil || !strings.Contains(err.Error(), "killed") {
+		t.Fatalf("the interrupted build's group survived: %v", err)
+	}
+	if delivery, err := fixture.daemon.Release(ctx, sha, false); err != nil || delivery.State != "failed" || delivery.Reason != releaseInterrupted || delivery.Group != 0 {
+		t.Fatalf("interrupted release = %+v, %v", delivery, err)
+	}
+	fixture.daemon.tickRelease(ctx)
+	if got := <-events; got != "build /self-repository" {
+		t.Fatalf("next pass: %q", got)
+	}
+	awaitRelease(t, fixture.daemon, sha, func(value kernel.ProductionDelivery) bool { return value.Phase == "trial" })
 }
 
 func TestSchedulerAdmitsNothingWhileAReleaseHoldsAdmission(t *testing.T) {

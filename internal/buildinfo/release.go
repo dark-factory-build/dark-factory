@@ -37,9 +37,12 @@ var (
 // BuildRelease builds the three release binaries of the source tree at dir,
 // commit source, for target ("darwin/arm64") into out as an exact release
 // identity, with the toolchain line of dir's go.mod (its go line stays at the
-// floor worker hosts run). go resolves on the PATH in environment; prepare,
-// when set, adjusts each command before it runs.
-func BuildRelease(ctx context.Context, dir, source, target, out string, environment []string, prepare func(*exec.Cmd)) (Identity, error) {
+// floor worker hosts run). go resolves on the PATH in environment; run, when
+// set, runs each command for its combined output.
+func BuildRelease(ctx context.Context, dir, source, target, out string, environment []string, run func(*exec.Cmd) ([]byte, error)) (Identity, error) {
+	if run == nil {
+		run = (*exec.Cmd).CombinedOutput
+	}
 	version, versionErr := os.ReadFile(filepath.Join(dir, "VERSION"))
 	module, moduleErr := os.ReadFile(filepath.Join(dir, "go.mod"))
 	goVersion := regexp.MustCompile(`(?m)^toolchain go([0-9]+\.[0-9]+\.[0-9]+)$`).FindSubmatch(module)
@@ -53,10 +56,7 @@ func BuildRelease(ctx context.Context, dir, source, target, out string, environm
 		command := exec.CommandContext(ctx, "/usr/bin/env", append([]string{"corepack", "pnpm"}, step...)...)
 		command.Dir = filepath.Join(dir, "web")
 		command.Env = append(environment, "CI=true")
-		if prepare != nil {
-			prepare(command)
-		}
-		if log, err := command.CombinedOutput(); err != nil {
+		if log, err := run(command); err != nil {
 			return Identity{}, fmt.Errorf("console %s: %v: %s", step[0], err, log[max(0, len(log)-1024):])
 		}
 	}
@@ -66,10 +66,7 @@ func BuildRelease(ctx context.Context, dir, source, target, out string, environm
 		command := exec.CommandContext(ctx, "/usr/bin/env", "go", "build", "-trimpath", "-buildvcs=false", "-ldflags", "-s -w -X github.com/dark-factory-build/dark-factory/internal/buildinfo.receipt="+identity.Receipt(), "-o", output, "./cmd/"+name)
 		command.Dir = dir
 		command.Env = append(environment, "CGO_ENABLED=0", "GOOS="+goos, "GOARCH="+goarch, "GOENV=off", "GOAUTH=off", "GOTOOLCHAIN=go"+string(goVersion[1]))
-		if prepare != nil {
-			prepare(command)
-		}
-		if log, err := command.CombinedOutput(); err != nil {
+		if log, err := run(command); err != nil {
 			return Identity{}, fmt.Errorf("go build %s: %v: %s", name, err, log[max(0, len(log)-1024):])
 		}
 		// The release artifact contract is exactly 0755; the linker honors umask.
