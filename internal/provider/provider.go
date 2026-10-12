@@ -887,13 +887,31 @@ func claudeSettings(request Request, servers []string) (string, error) {
 	for _, server := range servers {
 		allow = append(allow, "mcp__"+server)
 	}
-	read, write := []string{}, []string{}
 	// The attempt socket and its token are withheld: outcomes go through the
 	// factory_attempt tool, a child of the CLI outside this sandbox, so Bash
 	// and the file tools get no route to the attempt API at all.
 	grants := slices.DeleteFunc(sandboxGrants(request), func(given grant) bool {
 		return given.path == request.runtime.token || given.path == request.runtime.socket
 	})
+	// The Stop hook runs outside the sandbox with the attempt environment, so
+	// a turn that ends without an outcome is answered at once, not by the
+	// stall rule ten minutes later.
+	stop := "'" + strings.ReplaceAll(request.runtime.factoryctl, "'", `'\''`) + "' attempt turn-complete"
+	return claudeConfinement(grants, allow, map[string]any{"Stop": []any{map[string]any{"hooks": []any{map[string]any{"type": "command", "command": stop}}}}})
+}
+
+// ClaudeReview is claudeSettings for a review: the file tools read only
+// readable, nothing is writable and no hook runs.
+func ClaudeReview(readable ...string) (string, error) {
+	var grants []grant
+	for _, path := range readable {
+		grants = append(grants, grant{path, false})
+	}
+	return claudeConfinement(grants, nil, map[string]any{})
+}
+
+func claudeConfinement(grants []grant, allow []string, hooks map[string]any) (string, error) {
+	read, write := []string{}, []string{}
 	// Claude names files by their resolved path, and a Change is reached
 	// through a link, so each grant is allowed under both spellings.
 	for _, given := range slices.Clone(grants) {
@@ -910,12 +928,8 @@ func claudeSettings(request Request, servers []string) (string, error) {
 			allow = append(allow, "Edit("+rule+"/**)")
 		}
 	}
-	// The Stop hook runs outside the sandbox with the attempt environment, so
-	// a turn that ends without an outcome is answered at once, not by the
-	// stall rule ten minutes later.
-	stop := "'" + strings.ReplaceAll(request.runtime.factoryctl, "'", `'\''`) + "' attempt turn-complete"
 	settings, err := json.Marshal(map[string]any{
-		"hooks":       map[string]any{"Stop": []any{map[string]any{"hooks": []any{map[string]any{"type": "command", "command": stop}}}}},
+		"hooks":       hooks,
 		"permissions": map[string]any{"allow": allow},
 		"sandbox": map[string]any{
 			"enabled": true, "failIfUnavailable": true, "allowUnsandboxedCommands": false, "autoAllowBashIfSandboxed": true,

@@ -691,9 +691,9 @@ func (b *daemonReviewBackend) Review(ctx context.Context, checkout string, reque
 	}
 	ctx, cancel := context.WithTimeout(ctx, reviewDeadline)
 	defer cancel()
-	// The Claude reviewer has no shell (Bash would read the whole home), so
-	// factoryd writes the complete diff where its Read tool can reach it:
-	// inside the checkout, untracked under .git.
+	// The Claude reviewer has no shell and reads only the checkout's grants,
+	// so factoryd writes the complete diff inside the checkout, untracked
+	// under .git.
 	diff := filepath.Join(checkout, ".git", "change.diff")
 	command := exec.CommandContext(ctx, change.TrustedGitExecutable, "-C", checkout, "diff", "--no-ext-diff", "--no-textconv", request.Base+"...HEAD")
 	command.Env = provider.ReviewEnvironment(filepath.Dir(checkout))
