@@ -39,6 +39,10 @@ var sqlitePostPoolHook func(string) error
 // instrumentation for the one fresh-snapshot retry during inspection.
 var sqliteOpenableSnapshotHook func() error
 
+// sqliteValidationHook is package-local deterministic fault instrumentation
+// after one complete validation snapshot has closed.
+var sqliteValidationHook func(error)
+
 // OpenOperational validates and activates one canonical absolute database
 // path bound to the supplied retained home and main-database descriptors. It
 // takes ownership of both descriptors and retains the exact path/file

@@ -148,6 +148,34 @@ func TestCheckpointOperationalShrinksRetainedWAL(t *testing.T) {
 	}
 }
 
+func TestStoreValidationRetriesDatabaseCorruptionOnFreshSnapshot(t *testing.T) {
+	store, run, _ := admittedWorkerRun(t)
+	defer store.Close()
+	change, found, err := store.Change(context.Background(), *run.ChangeID)
+	if err != nil || !found {
+		t.Fatalf("read admitted Change = %+v, %v", change, err)
+	}
+	if _, err := store.writer.Exec(`UPDATE changes SET phase = 'abandoned', settled_run_id = ?, revision = revision + 1, updated_at_ms = 70 WHERE id = ?`, run.ID.Bytes(), change.ID.Bytes()); err != nil {
+		t.Fatal(err)
+	}
+	calls := 0
+	sqliteValidationHook = func(validationErr error) {
+		if calls == 0 && errors.Is(validationErr, ErrCorruptState) {
+			if _, err := store.writer.Exec(`UPDATE changes SET phase = 'reserved', settled_run_id = NULL, revision = revision - 1, updated_at_ms = 10 WHERE id = ?`, change.ID.Bytes()); err != nil {
+				t.Error(err)
+			}
+		}
+		calls++
+	}
+	defer func() { sqliteValidationHook = nil }()
+	if err := store.Validate(context.Background()); err != nil {
+		t.Fatalf("validation after transient database corruption = %v", err)
+	}
+	if calls != 2 {
+		t.Fatalf("validation snapshots = %d, want 2", calls)
+	}
+}
+
 func TestOpenRequiresCanonicalOwnerOnlyDatabaseParent(t *testing.T) {
 	image, err := NewDatabaseImage(context.Background(), FactoryConfig{}, mustTime(t, 1))
 	if err != nil {

@@ -336,7 +336,11 @@ func (store *Store) validateOpen(ctx context.Context) error {
 		return err
 	}
 	err = validateDatabaseSnapshot(ctx, tx.connection)
-	return errors.Join(err, tx.Close())
+	err = errors.Join(err, tx.Close())
+	if sqliteValidationHook != nil {
+		sqliteValidationHook(err)
+	}
+	return err
 }
 
 func (store *Store) validateOpenWithRetry(ctx context.Context) error {

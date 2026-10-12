@@ -407,21 +407,12 @@ func ownedReservedChange(t *testing.T) (*Store, Change) {
 }
 
 func TestInterruptedWorkerChangeOwnershipIsNotCorruption(t *testing.T) {
-	store, run, _ := admittedWorkerRun(t)
+	store, _, _ := admittedWorkerRun(t)
 	defer store.Close()
-	change, found, err := store.Change(context.Background(), *run.ChangeID)
-	if err != nil || !found {
-		t.Fatalf("read admitted Change = %+v, %v", change, err)
-	}
-	connection, err := store.readerConnection(context.Background())
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer connection.Close()
 	ctx, cancel := context.WithCancel(context.Background())
-	cancel()
-	_, err = classifyWorkerChangeOwnership(ctx, connection, run, change)
-	if err == nil || errors.Is(err, ErrCorruptState) {
+	sqliteWorkerChangeProvenanceHook = cancel
+	defer func() { sqliteWorkerChangeProvenanceHook = nil }()
+	if err := store.Validate(ctx); err == nil || errors.Is(err, ErrCorruptState) {
 		t.Fatalf("interrupted ownership validation = %v", err)
 	}
 }
