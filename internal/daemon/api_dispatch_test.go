@@ -1291,6 +1291,9 @@ func TestDaemonOperatorAgentPathsReturnsNoChangeOverseerRuntime(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer fixture.daemon.unregisterLiveAttempt(active.run.ID, owner)
+	if err := fixture.store.AddRunTokens(ctx, active.run.ID, 123); err != nil {
+		t.Fatal(err)
+	}
 	resources, err := fixture.store.Resources(ctx, active.run.ID)
 	if err != nil {
 		t.Fatal(err)
@@ -1310,6 +1313,13 @@ func TestDaemonOperatorAgentPathsReturnsNoChangeOverseerRuntime(t *testing.T) {
 	waitDispatch(t, done)
 	if err != nil || paths.RunID != active.run.ID.String() || paths.SourcePath != "" || paths.RuntimePath != wantRuntime || paths.Paths == nil {
 		t.Fatalf("operator overseer paths = %+v, %v; want runtime %q", paths, err, wantRuntime)
+	}
+	fixture.daemon.unregisterLiveAttempt(active.run.ID, owner)
+	done = fixture.serve(t)
+	paths, err = operator.AgentPaths(ctx, api.AgentPathsInput{AgentID: active.run.AgentID.String()})
+	waitDispatch(t, done)
+	if err != nil || paths.RunID != active.run.ID.String() || paths.Telemetry == nil || paths.Telemetry.Tokens != 123 {
+		t.Fatalf("durable agent paths after owner exit = %+v, %v", paths, err)
 	}
 }
 
@@ -2153,6 +2163,9 @@ func TestDaemonSpecialistOperatorReadsStayInItsProject(t *testing.T) {
 		}
 		call(func() error {
 			snapshot, err := client.Snapshot(ctx)
+			if client == reader && (len(snapshot.Accounts) != 0 || len(snapshot.PeerQuestions) != 0 || len(snapshot.HumanRequests) != 0) {
+				t.Fatalf("scoped snapshot leaked factory collections: accounts=%d peer_questions=%d human_requests=%d", len(snapshot.Accounts), len(snapshot.PeerQuestions), len(snapshot.HumanRequests))
+			}
 			for _, project := range snapshot.Projects {
 				seen["project "+project.ID] = true
 			}

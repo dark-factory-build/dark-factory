@@ -728,6 +728,8 @@ type DashboardSnapshot struct {
 	Agents        []AgentSummary
 	Tasks         []TaskSummary
 	HumanRequests []HumanRequestProjection
+	Accounts      []AccountSummary
+	PeerQuestions []PeerQuestionSummary
 }
 
 func byteLen(value string) int { return len([]byte(value)) }

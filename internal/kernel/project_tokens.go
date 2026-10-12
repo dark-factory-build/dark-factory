@@ -2,6 +2,8 @@ package kernel
 
 import (
 	"context"
+	"database/sql"
+	"errors"
 	"fmt"
 )
 
@@ -55,4 +57,27 @@ func (store *Store) AddRunTokens(ctx context.Context, runID RunID, tokens uint64
 		return tx.Rollback(err)
 	}
 	return tx.Commit(ctx)
+}
+
+func (store *Store) RunTokens(ctx context.Context, runID RunID) (uint64, bool, error) {
+	if runID == (RunID{}) {
+		return 0, false, fmt.Errorf("%w: run tokens", ErrInvalidValue)
+	}
+	tx, err := store.beginRead(ctx)
+	if err != nil {
+		return 0, false, err
+	}
+	defer tx.Close()
+	var tokens int64
+	err = tx.connection.QueryRowContext(ctx, `SELECT tokens FROM run_tokens WHERE run_id = ?`, runID.Bytes()).Scan(&tokens)
+	if errors.Is(err, sql.ErrNoRows) {
+		return 0, false, nil
+	}
+	if err != nil {
+		return 0, false, err
+	}
+	if tokens < 0 {
+		return 0, false, ErrCorruptState
+	}
+	return uint64(tokens), true, nil
 }

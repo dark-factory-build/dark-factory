@@ -245,21 +245,28 @@ func readPublicAgents(ctx context.Context, connection *sql.Conn) ([]AgentSummary
 	if err := errors.Join(rows.Err(), rows.Close()); err != nil {
 		return nil, err
 	}
-	for index, summary := range result {
-		if summary.Role != RoleWorker.String() || summary.Idle.Policy != IdleStandingInstruction {
-			continue
-		}
-		agent, found, err := agentByID(ctx, connection, summary.ID)
-		if err != nil || !found {
-			return nil, errors.Join(err, ErrCorruptState)
-		}
-		state, _, _, err := specialistSchedule(ctx, connection, agent)
-		if err != nil {
+	for index := range result {
+		if err := enrichSpecialistSummary(ctx, connection, &result[index]); err != nil {
 			return nil, err
 		}
-		result[index].Specialist = &state
 	}
 	return result, nil
+}
+
+func enrichSpecialistSummary(ctx context.Context, connection *sql.Conn, summary *AgentSummary) error {
+	if summary.Role != RoleWorker.String() || summary.Idle.Policy != IdleStandingInstruction {
+		return nil
+	}
+	agent, found, err := agentByID(ctx, connection, summary.ID)
+	if err != nil || !found {
+		return errors.Join(err, ErrCorruptState)
+	}
+	state, _, _, err := specialistSchedule(ctx, connection, agent)
+	if err != nil {
+		return err
+	}
+	summary.Specialist = &state
+	return nil
 }
 
 func readPublicTasks(ctx context.Context, connection *sql.Conn) ([]TaskSummary, error) {

@@ -76,3 +76,29 @@ func TestAgentProjectionCarriesLaunchAndIdleControlsToBothOperatorViews(t *testi
 		t.Fatalf("overseer agent = %+v, err=%v", overseer.Agents, err)
 	}
 }
+
+func TestDashboardSharedTasksExcludesTerminalUnclaimedWork(t *testing.T) {
+	projectID, err := kernel.ProjectIDFromBytes(bytes.Repeat([]byte{3}, kernel.IDBytes))
+	if err != nil {
+		t.Fatal(err)
+	}
+	queued, err := kernel.TaskIDFromBytes(bytes.Repeat([]byte{4}, kernel.IDBytes))
+	if err != nil {
+		t.Fatal(err)
+	}
+	cancelled, err := kernel.TaskIDFromBytes(bytes.Repeat([]byte{5}, kernel.IDBytes))
+	if err != nil {
+		t.Fatal(err)
+	}
+	revision, err := kernel.NewRevision(1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	snapshot := projectSnapshot(kernel.DashboardSnapshot{Tasks: []kernel.TaskSummary{
+		{ID: queued, ProjectID: projectID, Status: kernel.TaskQueued.String(), Revision: revision},
+		{ID: cancelled, ProjectID: projectID, Status: kernel.TaskCancelled.String(), Revision: revision},
+	}})
+	if len(snapshot.SharedTasks) != 1 || snapshot.SharedTasks[0].ID != queued.String() {
+		t.Fatalf("shared tasks = %+v", snapshot.SharedTasks)
+	}
+}
