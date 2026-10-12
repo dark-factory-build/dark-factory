@@ -331,6 +331,7 @@ func (store *Store) Task(ctx context.Context, id TaskID) (Task, bool, error) {
 type readTx struct {
 	connection *sql.Conn
 	active     bool
+	attached   bool // The history archive is attached; Close detaches it.
 }
 
 func (store *Store) beginRead(ctx context.Context) (*readTx, error) {
@@ -356,6 +357,13 @@ func (tx *readTx) Close() error {
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Duration(busyMilliseconds)*time.Millisecond)
 	defer cancel()
 	_, rollbackErr := tx.connection.ExecContext(ctx, "ROLLBACK")
+	if rollbackErr == nil && tx.attached {
+		if _, rollbackErr = tx.connection.ExecContext(ctx, "DETACH archive"); rollbackErr != nil {
+			discardConnection(tx.connection)
+			tx.active = false
+			return rollbackErr
+		}
+	}
 	if rollbackErr != nil {
 		releaseUncertainConnection(tx.connection)
 	} else {

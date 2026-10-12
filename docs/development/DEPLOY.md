@@ -130,7 +130,10 @@ removed when the release fails before staging and when a boot settles the
 marker, so it never outlives its release. To roll back by hand after a promotion,
 stop the service, confirm the daemon released `home.lock`, restore a backup
 over `factory.sqlite3`, delete `factory.sqlite3-wal` and `factory.sqlite3-shm`,
-and install the previous binaries.
+and install the previous binaries. Leave `factory.sqlite3-archive` in place:
+factoryd moves week-old history there and only appends, a restored store
+reads the generations it recorded, and the next pass discards and copies again
+any generation the store does not record.
 
 ## Where the service runs from
 

@@ -82,6 +82,7 @@ func openExistingFiles(ctx context.Context, absolutePath string, files *database
 	}
 	store := newStore()
 	store.pathBinding = files
+	store.archivePath = absolutePath + "-archive"
 	if err := openFixedPools(ctx, store, absolutePath, files.recheckActivationBindings); err != nil {
 		// SQLite activation may have created or changed sidecars. Without an
 		// exact live creation descriptor they remain visible evidence; cleanup

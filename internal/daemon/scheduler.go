@@ -177,6 +177,9 @@ func (daemon *Daemon) RunScheduler(ctx context.Context, spec SupervisorSpec) err
 						for _, id := range expired {
 							LogFactoryd(daemon.log, "factoryd: task %s %s\n", id, kernel.BlockedExpiryReason)
 						}
+						if _, err := daemon.store.ArchiveHistory(ownedCtx, at); err != nil {
+							LogFactoryd(daemon.log, "factoryd: history archive: %v\n", err)
+						}
 						if err := daemon.store.ExpireTaskAttachments(ownedCtx, at); err == nil {
 							nextAttachmentCleanup = now.Add(time.Hour)
 						}

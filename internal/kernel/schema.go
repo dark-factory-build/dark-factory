@@ -9,7 +9,7 @@ import (
 
 const (
 	applicationID = 0x4446474f
-	userVersion   = 41
+	userVersion   = 42
 
 	// SQLite reserves the exact lower-case "sqlite_" prefix. Use a literal,
 	// binary prefix test: LIKE would treat '_' as a wildcard and hide names
@@ -606,7 +606,19 @@ var schemaStatements = []string{
     captured_at_ms INTEGER NOT NULL CHECK (captured_at_ms >= 0)
 ) STRICT, WITHOUT ROWID`,
 	taskAutomaticEventsTable,
+	archiveBatchesTable,
 }
+
+// archiveBatchesTable is v42's hot record of each history generation
+// committed to the archive beside the database (see ArchiveHistory): no hot
+// row refers into the archive, and a generation recorded here that the
+// archive lacks fails closed every read that crosses into it.
+const archiveBatchesTable = `CREATE TABLE archive_batches (
+    generation INTEGER PRIMARY KEY CHECK (generation >= 1),
+    rows INTEGER NOT NULL CHECK (rows >= 1),
+    digest BLOB NOT NULL CHECK (length(digest) = 32),
+    archived_at_ms INTEGER NOT NULL CHECK (archived_at_ms >= 0)
+) STRICT`
 
 // taskAutomaticEventsTable records what factoryd did to a task on its own,
 // at the task row revision it left: a blocked expiry, which is the cause of
