@@ -573,7 +573,10 @@ func (daemon *Daemon) previewIntake(ctx context.Context, source kernel.IntakeSou
 				}
 			}
 		}
-		if tick && found && reason == string(kernel.IntakeContentChanged) && accepted.WithdrawnAt == nil {
+		previewSource = source
+		previewSource.Enabled = true
+		automaticReaccept := source.Policy == kernel.IntakePolicyTrustedAuthors && kernel.PreviewIntake(previewSource, snapshot, nil) == kernel.IntakeEligibleTrusted
+		if tick && found && reason == string(kernel.IntakeContentChanged) && accepted.WithdrawnAt == nil && automaticReaccept {
 			task, taskFound, err := daemon.store.Task(ctx, accepted.TaskID)
 			if err != nil {
 				return failure(err)
