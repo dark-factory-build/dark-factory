@@ -930,7 +930,7 @@ func ClaudeReview(writable []string, readable ...string) (string, error) {
 }
 
 func claudeConfinement(grants []grant, allow []string, hooks map[string]any) (string, error) {
-	read, write := []string{}, []string{}
+	read, write, denyWrite := []string{}, []string{}, []string{}
 	// Claude names files by their resolved path, and a Change is reached
 	// through a link, so each grant is allowed under both spellings.
 	for _, given := range slices.Clone(grants) {
@@ -945,6 +945,8 @@ func claudeConfinement(grants []grant, allow []string, hooks map[string]any) (st
 		if grant.write {
 			write = append(write, rule)
 			allow = append(allow, "Edit("+rule+"/**)")
+		} else {
+			denyWrite = append(denyWrite, rule)
 		}
 	}
 	settings, err := json.Marshal(map[string]any{
@@ -952,7 +954,7 @@ func claudeConfinement(grants []grant, allow []string, hooks map[string]any) (st
 		"permissions": map[string]any{"allow": allow},
 		"sandbox": map[string]any{
 			"enabled": true, "failIfUnavailable": true, "allowUnsandboxedCommands": false, "autoAllowBashIfSandboxed": true,
-			"filesystem": map[string]any{"allowWrite": write, "denyRead": claudeDeniedReads, "allowRead": append(read, fmt.Sprintf("//private/tmp/claude-%d", os.Getuid()))},
+			"filesystem": map[string]any{"allowWrite": write, "denyWrite": denyWrite, "denyRead": claudeDeniedReads, "allowRead": append(read, fmt.Sprintf("//private/tmp/claude-%d", os.Getuid()))},
 			"network":    map[string]any{"allowedDomains": []string{"*"}, "allowLocalBinding": true},
 		},
 	})

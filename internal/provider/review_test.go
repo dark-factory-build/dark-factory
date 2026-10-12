@@ -36,6 +36,7 @@ func TestReviewUsageLimitedRequiresProviderMarkers(t *testing.T) {
 // Codex keeps its own read-only profile.
 func TestRunReviewConfinesClaudeFileReads(t *testing.T) {
 	bin, root, account := t.TempDir(), t.TempDir(), t.TempDir()
+	operatorHome := t.TempDir()
 	checkout, scratch := filepath.Join(root, "checkout"), filepath.Join(root, "scratch")
 	for _, directory := range []string{checkout, scratch} {
 		if err := os.Mkdir(directory, 0o700); err != nil {
@@ -49,7 +50,7 @@ func TestRunReviewConfinesClaudeFileReads(t *testing.T) {
 	}
 	toolPath := bin + string(os.PathListSeparator) + "/usr/bin:/bin"
 	review := func(kind kernel.Provider) []string {
-		result, err := RunReview(context.Background(), kind, toolPath, "/opt/toolchain", "", []string{account}, checkout, "untrusted prompt", []string{checkout})
+		result, err := RunReview(context.Background(), kind, toolPath, "/opt/toolchain", operatorHome, []string{account}, checkout, "untrusted prompt", []string{checkout})
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -66,7 +67,7 @@ func TestRunReviewConfinesClaudeFileReads(t *testing.T) {
 	var settings struct {
 		Permissions struct{ Allow []string }
 		Sandbox     struct {
-			Filesystem struct{ AllowWrite, DenyRead, AllowRead []string }
+			Filesystem struct{ AllowWrite, DenyWrite, DenyRead, AllowRead []string }
 		}
 	}
 	if err := json.Unmarshal([]byte(argv[at+1]), &settings); err != nil {
@@ -76,7 +77,12 @@ func TestRunReviewConfinesClaudeFileReads(t *testing.T) {
 	if !slices.Contains(filesystem.DenyRead, "//Users") || !slices.Contains(filesystem.AllowRead, "/"+checkout) || len(filesystem.AllowWrite) != 2 {
 		t.Fatalf("read boundary = %+v", filesystem)
 	}
-	for _, rule := range []string{"Bash", "Read(/" + checkout + "/**)", "Read(//opt/toolchain/**)"} {
+	for _, path := range []string{checkout, "/opt/toolchain", goModuleCachePath(operatorHome), pnpmStorePath(operatorHome), filepath.Join(operatorHome, ".rustup")} {
+		if !slices.Contains(filesystem.DenyWrite, "/"+path) {
+			t.Fatalf("missing deny-write grant for %s: %+v", path, filesystem.DenyWrite)
+		}
+	}
+	for _, rule := range []string{"Bash", "Read(/" + checkout + "/**)", "Read(//opt/toolchain/**)", "Read(/" + goModuleCachePath(operatorHome) + "/**)", "Read(/" + pnpmStorePath(operatorHome) + "/**)", "Read(/" + filepath.Join(operatorHome, ".rustup") + "/**)"} {
 		if !slices.Contains(allow, rule) {
 			t.Fatalf("allow rules lack %s: %q", rule, allow)
 		}
