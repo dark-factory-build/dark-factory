@@ -272,9 +272,9 @@ func TestServerDecodesClosedMethodMatrix(t *testing.T) {
 				t.Fatalf("agent input = %+v, %t", input, ok)
 			}
 		}},
-		{name: "agent idle policy", domain: operatorDomain, bearer: operatorBearer, body: `{"method":"agent_idle_policy","params":{"agent_id":"` + id('2') + `","expected_revision":7,"policy":"standing_instruction","after_seconds":60,"instruction":"review retained changes","run_budget":3}}`, kind: CallAgentIdlePolicy, check: func(t *testing.T, call Call) {
+		{name: "agent idle policy", domain: operatorDomain, bearer: operatorBearer, body: `{"method":"agent_idle_policy","params":{"agent_id":"` + id('2') + `","expected_revision":7,"policy":"standing_instruction","after_seconds":60,"instruction":"review retained changes"}}`, kind: CallAgentIdlePolicy, check: func(t *testing.T, call Call) {
 			input, ok := call.AgentIdlePolicyInput()
-			if !ok || input.Policy != "standing_instruction" || input.AfterSeconds != 60 || input.Instruction != "review retained changes" || input.RunBudget != 3 {
+			if !ok || input.Policy != "standing_instruction" || input.AfterSeconds != 60 || input.Instruction != "review retained changes" {
 				t.Fatalf("idle policy input = %+v, %t", input, ok)
 			}
 		}},
