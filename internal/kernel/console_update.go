@@ -441,14 +441,39 @@ const (
 // open human request. Its Change is left retained. A task changed since the read loses the revision
 // race and is reconsidered on a later tick.
 func (store *Store) ExpireBlockedTasks(ctx context.Context, at UnixMillis) ([]TaskID, error) {
+	return store.cancelTasksWhere(ctx, TaskPatch{Cancel: true, expired: true}, at, `SELECT id, revision FROM tasks t WHERE status = 'blocked' AND updated_at_ms <= ?
+ AND NOT EXISTS (SELECT 1 FROM human_requests h JOIN runs r ON r.id = h.run_id WHERE r.task_id = t.id AND h.status IN ('open', 'delivering', 'delivery_unknown'))`, at.Int64()-BlockedExpiry.Milliseconds())
+}
+
+// taskPrerequisiteCancelled holds while queued task t waits on a producer
+// cancelled at the pinned work revision by a cancel that was not automatic:
+// only the operator revives it, and a retry carries the pin forward
+// (carryPrerequisites). A failure or an automatic end may still be retried.
+const taskPrerequisiteCancelled = `EXISTS (SELECT 1 FROM task_prerequisites AS p JOIN tasks AS u ON u.id = p.upstream_task_id AND u.work_revision = p.upstream_work_revision
+	WHERE p.task_id = t.id AND p.consumed_run_id IS NULL AND u.status = 'cancelled' AND NOT EXISTS (SELECT 1 FROM tasks AS t WHERE t.id = u.id AND ` + taskEndedAutomatically + `))`
+
+// CancelOrphanedTasks cancels, through the operator cancel path, every queued
+// task a cancelled prerequisite can never satisfy, and then their dependents.
+func (store *Store) CancelOrphanedTasks(ctx context.Context, at UnixMillis) ([]TaskID, error) {
+	var cancelled []TaskID
+	for {
+		ids, err := store.cancelTasksWhere(ctx, TaskPatch{Cancel: true}, at, `SELECT id, revision FROM tasks AS t WHERE status = 'queued' AND `+taskPrerequisiteCancelled)
+		if cancelled = append(cancelled, ids...); err != nil || len(ids) == 0 {
+			return cancelled, err
+		}
+	}
+}
+
+// cancelTasksWhere cancels each task (id, revision) query selects. A task
+// changed since the read loses the revision race and is reconsidered later.
+func (store *Store) cancelTasksWhere(ctx context.Context, patch TaskPatch, at UnixMillis, query string, args ...any) ([]TaskID, error) {
 	var ids [][]byte
 	var revisions []int64
 	read, err := store.beginRead(ctx)
 	if err != nil {
 		return nil, err
 	}
-	rows, err := read.connection.QueryContext(ctx, `SELECT id, revision FROM tasks t WHERE status = 'blocked' AND updated_at_ms <= ?
- AND NOT EXISTS (SELECT 1 FROM human_requests h JOIN runs r ON r.id = h.run_id WHERE r.task_id = t.id AND h.status IN ('open', 'delivering', 'delivery_unknown'))`, at.Int64()-BlockedExpiry.Milliseconds())
+	rows, err := read.connection.QueryContext(ctx, query, args...)
 	for err == nil && rows.Next() {
 		var id []byte
 		var revision int64
@@ -463,24 +488,24 @@ func (store *Store) ExpireBlockedTasks(ctx context.Context, at UnixMillis) ([]Ta
 	if err != nil {
 		return nil, err
 	}
-	var expired []TaskID
+	var cancelled []TaskID
 	for i := range ids {
 		id, err := TaskIDFromBytes(ids[i])
 		if err != nil {
-			return expired, err
+			return cancelled, err
 		}
 		revision, err := NewRevision(revisions[i])
 		if err != nil {
-			return expired, err
+			return cancelled, err
 		}
-		_, err = store.UpdateTaskForOperator(ctx, id, revision, TaskPatch{Cancel: true, expired: true}, at)
+		_, err = store.UpdateTaskForOperator(ctx, id, revision, patch, at)
 		if errors.Is(err, ErrConflict) || errors.Is(err, ErrRevisionConflict) {
 			continue
 		}
 		if err != nil {
-			return expired, err
+			return cancelled, err
 		}
-		expired = append(expired, id)
+		cancelled = append(cancelled, id)
 	}
-	return expired, nil
+	return cancelled, nil
 }

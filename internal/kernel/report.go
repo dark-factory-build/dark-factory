@@ -171,7 +171,8 @@ func why(ctx context.Context, c *sql.Conn, project *ProjectID, repository string
 		if pull != 0 {
 			return nil, ErrNotFound
 		}
-		return append(lines, "pull: none published", "waits on: "+whyTaskWaits(task)), nil
+		waits, err := whyTaskWaits(ctx, c, task)
+		return append(lines, "pull: none published", "waits on: "+waits), err
 	}
 	var pr ProductionPullRequest
 	if err == nil && json.Unmarshal([]byte(document), &pr) != nil {
@@ -266,11 +267,17 @@ func why(ctx context.Context, c *sql.Conn, project *ProjectID, repository string
 		}
 		lines = append(lines, fmt.Sprintf("reconciler: operation %s %s, failures=%d, enqueues=%d, at %s; last action: %s", op.ID, op.State, op.Failures, op.Enqueues, op.UpdatedAt.UTC().Format(time.RFC3339), oneLine(last, 300)))
 	}
-	return append(lines, "waits on: "+whyPullWaits(pr, found, task, op, pending, failed)), nil
+	taskWaits := ""
+	if found {
+		if taskWaits, err = whyTaskWaits(ctx, c, task); err != nil {
+			return nil, err
+		}
+	}
+	return append(lines, "waits on: "+whyPullWaits(pr, found, task, taskWaits, op, pending, failed)), nil
 }
 
 // whyPullWaits names whom an open pull request waits on, first match wins.
-func whyPullWaits(pr ProductionPullRequest, hasTask bool, task Task, op *review.Operation, pending, failed int) string {
+func whyPullWaits(pr ProductionPullRequest, hasTask bool, task Task, taskWaits string, op *review.Operation, pending, failed int) string {
 	switch {
 	case pr.State != "open":
 		return "nobody: it is " + pr.State
@@ -278,7 +285,7 @@ func whyPullWaits(pr ProductionPullRequest, hasTask bool, task Task, op *review.
 		// reconcilePull leaves it: an operator's cancel is final.
 		return "operator: its task was cancelled, so factoryd no longer advances it"
 	case hasTask && (task.Status == TaskQueued || task.Status == TaskRunning):
-		return "worker: its task is " + task.Status.String()
+		return taskWaits
 	case op != nil && op.OwnerApproval:
 		return "owner: the merge queue requires CODEOWNERS approval"
 	case op != nil && op.Escalation != "":
@@ -301,16 +308,38 @@ func whyPullWaits(pr ProductionPullRequest, hasTask bool, task Task, op *review.
 	return "factoryd: its next pass acts (every 5 minutes)"
 }
 
-func whyTaskWaits(task Task) string {
+// whyTaskWaits names whom a task waits on; a queued one, the first admission
+// blocker AdmitNext applies to it (factoryd's health holds are why --project's).
+func whyTaskWaits(ctx context.Context, c *sql.Conn, task Task) (string, error) {
 	switch task.Status {
-	case TaskQueued, TaskRunning:
-		return "worker: its task is " + task.Status.String()
+	case TaskQueued:
+		var blocker string
+		err := c.QueryRowContext(ctx, `SELECT COALESCE(
+			(SELECT 'factoryd: dispatch is disabled' FROM factory WHERE dispatch_enabled = 0),
+			(SELECT 'intake: its issue was withdrawn' WHERE `+taskIssueWithdrawn+`),
+			(SELECT 'prerequisite: task ' || lower(hex(u.id)) || ' is ' || u.status || ' at work revision ' || u.work_revision || '; it needs revision ' || p.upstream_work_revision || ' to succeed'
+				FROM task_prerequisites AS p JOIN tasks AS u ON u.id = p.upstream_task_id
+				WHERE p.task_id = t.id AND p.consumed_run_id IS NULL AND NOT (u.status = 'succeeded' AND u.work_revision = p.upstream_work_revision)),
+			(SELECT 'conflict path: ' || mine.path || ' is held by running task ' || lower(hex(a.id))
+				FROM task_conflict_paths AS mine JOIN task_conflict_paths AS theirs ON theirs.path = mine.path JOIN tasks AS a ON a.id = theirs.task_id AND a.project_id = t.project_id AND a.status = 'running'
+				JOIN task_repository_bindings AS mr ON mr.task_id = t.id JOIN task_repository_bindings AS ar ON ar.task_id = a.id AND ar.repository_id = mr.repository_id
+				WHERE mine.task_id = t.id),
+			(SELECT 'agent: ' || g.name || CASE WHEN g.archived THEN ' is archived' WHEN g.paused THEN ' is paused' WHEN g.role <> 'orchestrator' AND g.tool_calls_used >= g.tool_budget_limit THEN ' has spent its tool budget' ELSE ' has a run in progress' END
+				FROM agents AS g WHERE g.id = t.assigned_agent_id AND (g.archived OR g.paused OR g.role <> 'orchestrator' AND g.tool_calls_used >= g.tool_budget_limit OR EXISTS (SELECT 1 FROM runs AS r WHERE r.agent_id = g.id AND r.phase <> 'terminal'))),
+			(SELECT 'account limit: its project has spent its run budget' FROM projects AS p WHERE p.id = t.project_id AND p.run_budget_limit > 0 AND p.runs_used >= p.run_budget_limit),
+			(SELECT 'account limit: its project has spent its token limit' FROM project_tokens AS k WHERE k.project_id = t.project_id AND k.token_limit > 0 AND k.tokens_used >= k.token_limit),
+			(SELECT 'capacity: ' || COUNT(*) || ' worker runs fill every slot' FROM runs WHERE role = 'worker' AND phase <> 'terminal' HAVING COUNT(*) >= (SELECT capacity FROM factory)),
+			'worker: its task is queued for the next admission')
+			FROM tasks AS t WHERE t.id = ?`, task.ID.Bytes()).Scan(&blocker)
+		return blocker, err
+	case TaskRunning:
+		return "worker: its task is running", nil
 	case TaskBlocked, TaskFailed:
-		return "operator: its task is " + task.Status.String()
+		return "operator: its task is " + task.Status.String(), nil
 	case TaskSucceeded:
-		return "factoryd: publication of its settled Change"
+		return "factoryd: publication of its settled Change", nil
 	}
-	return "nobody: its task is " + task.Status.String()
+	return "nobody: its task is " + task.Status.String(), nil
 }
 
 func whyTask(task Task) string {

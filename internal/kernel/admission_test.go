@@ -127,6 +127,40 @@ func TestAdmissionWaitsForExactProducerWorkRevision(t *testing.T) {
 	}
 }
 
+func TestCancelledProducerCancelsItsQueuedConsumers(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	store, _, project, agent := newAdmissionStore(t, RoleWorker, 2)
+	defer store.Close()
+	producer, err := store.EnqueueTask(ctx, NewTask{ID: taskID(t, 216), ProjectID: project.ID, AssignedAgentID: agent.ID, IncarnationID: incarnationID(t, 217), Title: "producer"}, mustTime(t, 5))
+	if err != nil {
+		t.Fatal(err)
+	}
+	consumer, err := store.EnqueueTask(ctx, NewTask{ID: taskID(t, 218), ProjectID: project.ID, AssignedAgentID: agent.ID, IncarnationID: incarnationID(t, 219), Title: "consumer", Prerequisites: []TaskPrerequisite{{TaskID: producer.ID, WorkRevision: mustRevision(t, 1)}}}, mustTime(t, 6))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.EnqueueTask(ctx, NewTask{ID: taskID(t, 220), ProjectID: project.ID, IncarnationID: incarnationID(t, 221), Title: "shared consumer", Prerequisites: []TaskPrerequisite{{TaskID: consumer.ID, WorkRevision: mustRevision(t, 1)}}}, mustTime(t, 7)); err != nil {
+		t.Fatal(err)
+	}
+	if cancelled, err := store.CancelOrphanedTasks(ctx, mustTime(t, 8)); err != nil || len(cancelled) != 0 {
+		t.Fatalf("cancelled before the producer ended = %v, %v", cancelled, err)
+	}
+	if lines, err := store.Why(ctx, nil, 0, consumer.ID); err != nil || lines[len(lines)-1] != "waits on: prerequisite: task "+producer.ID.String()+" is queued at work revision 1; it needs revision 1 to succeed" {
+		t.Fatalf("why = %q, %v", lines, err)
+	}
+	if _, err := store.UpdateTaskForOperator(ctx, producer.ID, producer.Revision, TaskPatch{Cancel: true}, mustTime(t, 9)); err != nil {
+		t.Fatal(err)
+	}
+	cancelled, err := store.CancelOrphanedTasks(ctx, mustTime(t, 10))
+	if err != nil || len(cancelled) != 2 || cancelled[0] != consumer.ID || cancelled[1] != taskID(t, 220) {
+		t.Fatalf("cancelled = %v, %v", cancelled, err)
+	}
+	if err := store.Validate(ctx); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestAdmissionConsumesExactSuccessfulProducerRevision(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
