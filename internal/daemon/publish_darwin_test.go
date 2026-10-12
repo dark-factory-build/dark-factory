@@ -24,8 +24,11 @@ type fakePublishMaintainer struct {
 	main                       string
 	tip                        string // the pull request branch's head
 	journal                    map[string]json.RawMessage
-	planned                    map[string]bool  // ids a write stopped before GitHub
-	indeterminate              map[string]bool  // ids whose Worker outcome needs recovery
+	planned                    map[string]bool // ids a write stopped before GitHub
+	indeterminate              map[string]bool // ids whose Worker outcome needs recovery
+	landed                     map[string]json.RawMessage
+	landBeforeUnavailable      bool
+	reconciliations            []string
 	indeterminateOnUnavailable bool             // failed writes transition to indeterminate
 	writes                     []map[string]any // every write sent
 	refuse                     string           // a path publish_commit refuses
@@ -67,10 +70,24 @@ func (f *fakePublishMaintainer) call(_ context.Context, name string, arguments m
 	if _, replay := f.journal[id]; replay || f.planned[id] {
 		return nil, fmt.Errorf("conflict: operation %s replayed", id)
 	}
+	if name == "publish_commit" && f.indeterminate[id] {
+		f.reconciliations = append(f.reconciliations, id)
+		if result, ok := f.landed[id]; ok {
+			f.journal[id] = result
+			return result, nil
+		}
+		return nil, maintainer.ErrUnavailable
+	}
 	f.writes = append(f.writes, map[string]any{"name": name, "arguments": arguments})
 	if f.unavailable {
 		if name == "publish_commit" && f.indeterminateOnUnavailable {
 			f.indeterminate[id] = true
+			if f.landBeforeUnavailable {
+				sha := fmt.Sprintf("%x", sha1.Sum([]byte(id)))
+				result, _ := json.Marshal(map[string]any{"branch": arguments["branch"], "commit_sha": sha, "parent_sha": arguments["expected_head_sha"]})
+				f.landed[id] = result
+				f.tip = sha
+			}
 		}
 		return nil, maintainerRejection("unavailable: Maintainer authority is unavailable.")
 	}
@@ -193,7 +210,7 @@ func publishFixtureMode(t *testing.T, files int, workflow, integratedMain bool) 
 		supervisorGit(t, git, "clone", "-q", "--shared", registered, clone)
 		return filepath.Join(clone, ".git"), func() {}, nil
 	}
-	return fixture, candidate, filepath.Join(root, ".git"), &fakePublishMaintainer{main: main, journal: map[string]json.RawMessage{}}, checkout
+	return fixture, candidate, filepath.Join(root, ".git"), &fakePublishMaintainer{main: main, journal: map[string]json.RawMessage{}, landed: map[string]json.RawMessage{}}, checkout
 }
 
 // First publication end to end, with the first commit's response lost: the
@@ -293,6 +310,42 @@ func TestFactorydRecoversAnIndeterminateLegacyPublication(t *testing.T) {
 	commit := app.writes[1]["arguments"].(map[string]any)
 	if commit["operation_id"] != uuid5("dark-factory:"+c.Change.String()+":publish-v2-"+c.Head[:8]+"-1") || commit["merge_parent_sha"] != nil || len(commit["changes"].([]map[string]any)) != 50 {
 		t.Fatalf("recovered publication = %+v", commit)
+	}
+}
+
+func TestFactorydReconcilesLandedIndeterminateLegacyPublication(t *testing.T) {
+	fixture, c, source, app, checkout := publishFixture(t, 99, false)
+	firstOperation := uuid5("dark-factory:" + c.Change.String() + ":publish-" + c.Head[:8] + "-1")
+	secondOperation := uuid5("dark-factory:" + c.Change.String() + ":publish-" + c.Head[:8] + "-2")
+	firstCommit := strings.Repeat("a", 40)
+	app.tip = firstCommit
+	app.journal[firstOperation], _ = json.Marshal(map[string]any{
+		"branch": "factory/" + c.Change.String()[:12], "commit_sha": firstCommit, "parent_sha": c.Base,
+	})
+	app.indeterminate = map[string]bool{}
+	app.landBeforeUnavailable = true
+	app.indeterminateOnUnavailable = true
+	app.unavailable = true
+	if err := fixture.daemon.publishChange(context.Background(), c, "team/repo", source, app.call, checkout); err != nil {
+		t.Fatal(err)
+	}
+	if !app.indeterminate[secondOperation] || app.tip == firstCommit {
+		t.Fatalf("landed batch was not recorded: tip=%s indeterminate=%+v", app.tip, app.indeterminate)
+	}
+	landed := app.tip
+	app.unavailable = false
+	app.indeterminateOnUnavailable = false
+	if err := fixture.daemon.publishChange(context.Background(), c, "team/repo", source, app.call, checkout); err != nil {
+		t.Fatal(err)
+	}
+	if len(app.writes) != 2 {
+		t.Fatalf("writes = %+v", app.writes)
+	}
+	if len(app.reconciliations) != 1 || app.reconciliations[0] != secondOperation || app.writes[1]["name"] != "create_pull_request" {
+		t.Fatalf("reconciliation writes = %+v, reconciliations = %+v", app.writes, app.reconciliations)
+	}
+	if app.writes[1]["arguments"].(map[string]any)["head_sha"] != landed {
+		t.Fatalf("pull request did not use landed commit: %+v", app.writes[1])
 	}
 }
 

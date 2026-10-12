@@ -306,6 +306,8 @@ func (daemon *Daemon) publishPull(ctx context.Context, c kernel.PublishableChang
 		// A later old batch can be indeterminate even when batch 1 completed.
 		// Retain every completed old receipt, then publish only the unfinished
 		// suffix under the recoverable namespace.
+		reconciledThrough := 0
+		recovered := false
 		for offset, previous := 50, legacyFirst.SHA; offset < len(changes); offset += 50 {
 			var prior struct {
 				SHA string `json:"commit_sha"`
@@ -322,11 +324,28 @@ func (daemon *Daemon) publishPull(ctx context.Context, c kernel.PublishableChang
 				if previous == "" {
 					return errors.New("legacy publication has no completed parent")
 				}
+				request := map[string]any{"repository": repo, "operation_id": operation(legacyPrefix + strconv.Itoa(offset/50+1)), "branch": branch, "expected_head_sha": previous, "message": message, "changes": changes[offset:min(len(changes), offset+50)]}
+				response, reconcileErr := call(ctx, "publish_commit", request)
+				if reconcileErr == nil {
+					var committed struct {
+						SHA string `json:"commit_sha"`
+					}
+					if json.Unmarshal(response, &committed) == nil && committed.SHA != "" {
+						head = committed.SHA
+						previous = committed.SHA
+						reconciledThrough = min(len(changes), offset+50)
+						continue
+					}
+				}
 				prefix, batchSize, head, mergeParent = "publish-v2-"+c.Head[:8]+"-", 100, previous, ""
 				changes = changes[offset:]
+				recovered = true
 				break
 			}
 			break
+		}
+		if !recovered && reconciledThrough != 0 {
+			changes = changes[reconciledThrough:]
 		}
 	}
 	for i := 0; i*batchSize < len(changes); i++ {
