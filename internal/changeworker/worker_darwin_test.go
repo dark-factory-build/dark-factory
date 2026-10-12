@@ -472,6 +472,9 @@ func TestFinalRuntimeRecheckRejectsFixedChildReplacement(t *testing.T) {
 	if diagnostic := fixture.output(); !strings.Contains(diagnostic, "runtime authority verification: Change worker failed") {
 		t.Fatalf("missing exact runtime rejection: %q", diagnostic)
 	}
+	if !strings.HasPrefix(fixture.refusal, "runtime authority verification") {
+		t.Fatalf("refusal not forwarded to the daemon: %q", fixture.refusal)
+	}
 	if code, ok := record.Result().Code(); ok && code == 0 {
 		t.Fatalf("replacement HOME reached provider: %+v", record.Result())
 	}
@@ -481,6 +484,8 @@ func TestFinalRuntimeRecheckRejectsFixedChildReplacement(t *testing.T) {
 }
 
 type workerFixture struct {
+	// refusal is the worker's pre-exec refusal forwarded ahead of its result.
+	refusal                                       string
 	base, git                                     string
 	root, repositoryRoot, changeParent, finalName string
 	witness, cwdWitness, envWitness               string
@@ -776,6 +781,10 @@ func (f *workerFixture) finish(t *testing.T, expectedSuccess ...bool) *runner.At
 	var err error
 	for {
 		event, err = f.controller.Next(workerEventPatience)
+		if err == nil && event.Kind == runner.AttemptProviderExecError {
+			f.refusal = string(event.Payload)
+			continue
+		}
 		if err != nil || event.Kind != runner.AttemptTerminalFrame {
 			break
 		}
