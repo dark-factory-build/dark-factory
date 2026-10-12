@@ -79,7 +79,7 @@ func (daemon *Daemon) RunScheduler(ctx context.Context, spec SupervisorSpec) err
 	owners := make(map[uint64]*scheduledOwner, kernel.MaxFactoryCapacity+1)
 	var nextID, probeID uint64
 	var nextAttachmentCleanup time.Time
-	nextWALCheckpoint := time.Now().Add(walCheckpointInterval)
+	nextWALCheckpoint := daemon.now().Add(walCheckpointInterval)
 	stopping := false
 	var resultErr error
 	var backoff, paused int
@@ -164,7 +164,7 @@ func (daemon *Daemon) RunScheduler(ctx context.Context, spec SupervisorSpec) err
 				paused--
 				continue
 			}
-			tick := time.Now()
+			tick := daemon.now()
 			if !stopping && !tick.Before(nextWALCheckpoint) {
 				nextWALCheckpoint = tick.Add(walCheckpointInterval)
 				if daemon.store.WALSize() >= walCheckpointLimit {
