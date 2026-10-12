@@ -221,12 +221,14 @@ func (daemon *Daemon) publishPull(ctx context.Context, c kernel.PublishableChang
 	prefix := "publish-v2-" + c.Head[:8] + "-"
 	var first struct {
 		Parent string `json:"parent_sha"`
+		SHA    string `json:"commit_sha"`
 	}
 	// Before the 100-file boundary, step 1 meant exactly the first 50
 	// changes. A completed old receipt must keep that meaning on replay; new
 	// publications use a versioned operation namespace and the 100-file unit.
 	var legacyFirst struct {
 		Parent string `json:"parent_sha"`
+		SHA    string `json:"commit_sha"`
 	}
 	legacyDone, err := completed(legacyPrefix+"1", &legacyFirst)
 	// Completed and planned receipts retain the old 50-file operation
@@ -300,6 +302,33 @@ func (daemon *Daemon) publishPull(ctx context.Context, c kernel.PublishableChang
 		return errors.New("nothing to publish: its head " + c.Head + " changes no file from " + diffFrom)
 	}
 	message := publicationMessage(c)
+	if legacy {
+		// A later old batch can be indeterminate even when batch 1 completed.
+		// Retain every completed old receipt, then publish only the unfinished
+		// suffix under the recoverable namespace.
+		for offset, previous := 50, legacyFirst.SHA; offset < len(changes); offset += 50 {
+			var prior struct {
+				SHA string `json:"commit_sha"`
+			}
+			batchDone, observeErr := completed(legacyPrefix+strconv.Itoa(offset/50+1), &prior)
+			if observeErr != nil {
+				return observeErr
+			}
+			if batchDone {
+				previous = prior.SHA
+				continue
+			}
+			if state == "indeterminate" {
+				if previous == "" {
+					return errors.New("legacy publication has no completed parent")
+				}
+				prefix, batchSize, head = "publish-v2-"+c.Head[:8]+"-", 100, previous
+				changes = changes[offset:]
+				break
+			}
+			break
+		}
+	}
 	for i := 0; i*batchSize < len(changes); i++ {
 		step := prefix + strconv.Itoa(i+1)
 		var commit struct {

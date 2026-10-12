@@ -21,17 +21,18 @@ import (
 // fakePublishMaintainer is the App's journal: one result per operation id,
 // a replay of a completed id answered from it.
 type fakePublishMaintainer struct {
-	main           string
-	tip            string // the pull request branch's head
-	journal        map[string]json.RawMessage
-	planned        map[string]bool  // ids a write stopped before GitHub
-	indeterminate  map[string]bool  // ids whose Worker outcome needs recovery
-	writes         []map[string]any // every write sent
-	refuse         string           // a path publish_commit refuses
-	externalRefuse bool             // the Maintainer refuses before the App can apply it
-	unavailable    bool             // the Maintainer authority is temporarily unavailable
-	loseNext       bool             // the next write lands but its response is lost
-	body           string           // the open pull request's stored body
+	main                       string
+	tip                        string // the pull request branch's head
+	journal                    map[string]json.RawMessage
+	planned                    map[string]bool  // ids a write stopped before GitHub
+	indeterminate              map[string]bool  // ids whose Worker outcome needs recovery
+	indeterminateOnUnavailable bool             // failed writes transition to indeterminate
+	writes                     []map[string]any // every write sent
+	refuse                     string           // a path publish_commit refuses
+	externalRefuse             bool             // the Maintainer refuses before the App can apply it
+	unavailable                bool             // the Maintainer authority is temporarily unavailable
+	loseNext                   bool             // the next write lands but its response is lost
+	body                       string           // the open pull request's stored body
 }
 
 func TestRepairPublicationUsesTaskTitle(t *testing.T) {
@@ -68,6 +69,9 @@ func (f *fakePublishMaintainer) call(_ context.Context, name string, arguments m
 	}
 	f.writes = append(f.writes, map[string]any{"name": name, "arguments": arguments})
 	if f.unavailable {
+		if name == "publish_commit" && f.indeterminateOnUnavailable {
+			f.indeterminate[id] = true
+		}
 		return nil, maintainerRejection("unavailable: Maintainer authority is unavailable.")
 	}
 	var result json.RawMessage
@@ -247,15 +251,32 @@ func TestFactorydPreservesLegacyFiftyFilePublicationReceipts(t *testing.T) {
 
 func TestFactorydRecoversAnIndeterminateLegacyPublication(t *testing.T) {
 	fixture, c, source, app, checkout := publishFixture(t, 99, false)
-	app.indeterminate = map[string]bool{uuid5("dark-factory:" + c.Change.String() + ":publish-" + c.Head[:8] + "-1"): true}
+	firstOperation := uuid5("dark-factory:" + c.Change.String() + ":publish-" + c.Head[:8] + "-1")
+	firstCommit := strings.Repeat("a", 40)
+	app.tip = firstCommit
+	app.journal[firstOperation], _ = json.Marshal(map[string]any{
+		"branch": "factory/" + c.Change.String()[:12], "commit_sha": firstCommit, "parent_sha": c.Base,
+	})
+	app.indeterminate = map[string]bool{}
+	app.indeterminateOnUnavailable = true
+	app.unavailable = true
 	if err := fixture.daemon.publishChange(context.Background(), c, "team/repo", source, app.call, checkout); err != nil {
 		t.Fatal(err)
 	}
-	if len(app.writes) != 2 {
+	secondOperation := uuid5("dark-factory:" + c.Change.String() + ":publish-" + c.Head[:8] + "-2")
+	if !app.indeterminate[secondOperation] {
+		t.Fatalf("failed batch was not journalled indeterminate: %+v", app.indeterminate)
+	}
+	app.unavailable = false
+	app.indeterminateOnUnavailable = false
+	if err := fixture.daemon.publishChange(context.Background(), c, "team/repo", source, app.call, checkout); err != nil {
+		t.Fatal(err)
+	}
+	if len(app.writes) != 3 {
 		t.Fatalf("writes = %+v", app.writes)
 	}
-	commit := app.writes[0]["arguments"].(map[string]any)
-	if commit["operation_id"] != uuid5("dark-factory:"+c.Change.String()+":publish-v2-"+c.Head[:8]+"-1") || len(commit["changes"].([]map[string]any)) != 100 {
+	commit := app.writes[1]["arguments"].(map[string]any)
+	if commit["operation_id"] != uuid5("dark-factory:"+c.Change.String()+":publish-v2-"+c.Head[:8]+"-1") || len(commit["changes"].([]map[string]any)) != 50 {
 		t.Fatalf("recovered publication = %+v", commit)
 	}
 }
