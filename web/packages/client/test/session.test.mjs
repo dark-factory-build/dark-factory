@@ -498,10 +498,10 @@ test("console edits and topology carry exact bodies and correlate their results"
   socket.reply(encodeServerControl({ type: "AGENT_UPDATE_RESULT", id: agentFrame.id, body: { agent_id: agentId, revision: 8n } }));
   assert.deepEqual(await agentPending, { agentId, revision: 8n });
 
-  const limitsPending = session.setProjectLimits({ projectId, expectedRevision: 4n, runBudget: 7n, maxRunSeconds: 900 });
+  const limitsPending = session.setProjectLimits({ projectId, expectedRevision: 4n, maxRunSeconds: 900 });
   const limitsFrame = decodeClientControl(socket.sent.at(-1));
   assert.equal(limitsFrame.type, "PROJECT_LIMITS");
-  assert.deepEqual(limitsFrame.body, { project_id: projectId, expected_revision: 4n, run_budget: 7n, max_run_seconds: 900 });
+  assert.deepEqual(limitsFrame.body, { project_id: projectId, expected_revision: 4n, max_run_seconds: 900 });
   socket.reply(encodeServerControl({ type: "PROJECT_LIMITS_RESULT", id: limitsFrame.id, body: { project_id: projectId, revision: 5n } }));
   assert.deepEqual(await limitsPending, { projectId, revision: 5n });
 
