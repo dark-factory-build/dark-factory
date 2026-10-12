@@ -168,7 +168,7 @@ func (daemon *Daemon) RunScheduler(ctx context.Context, spec SupervisorSpec) err
 			if !stopping && !tick.Before(nextWALCheckpoint) {
 				nextWALCheckpoint = tick.Add(walCheckpointInterval)
 				if daemon.store.WALSize() >= walCheckpointLimit {
-					if err := daemon.store.CheckpointWAL(ownedCtx, "RESTART"); err != nil {
+					if err := daemon.store.CheckpointWAL(ownedCtx, "TRUNCATE"); err != nil {
 						LogFactoryd(daemon.log, "factoryd: WAL checkpoint: %v\n", err)
 					}
 				}

@@ -345,6 +345,9 @@ func (store *Store) validateOpen(ctx context.Context) error {
 // is not corruption and leaves the hold as it was.
 func (store *Store) Validate(ctx context.Context) error {
 	err := store.validateOpen(ctx)
+	if errors.Is(err, ErrCorruptState) {
+		err = store.validateOpen(ctx)
+	}
 	switch {
 	case err == nil:
 		store.held.Store(nil)
