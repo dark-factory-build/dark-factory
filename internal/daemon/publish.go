@@ -325,13 +325,23 @@ func (daemon *Daemon) publishPull(ctx context.Context, c kernel.PublishableChang
 		if !c.Repair {
 			step := fmt.Sprintf("body-%s-%d", head[:8], c.Revision.Int64())
 			done, err := completed(step, new(json.RawMessage))
-			var current json.RawMessage
-			if err == nil && !done {
-				current, err = call(ctx, "list_pull_requests", map[string]any{"repository": repo, "page": 1, "per_page": 1, "pull_number": c.Pull})
+			var current struct {
+				PullRequests []struct {
+					Body string `json:"body"`
+				} `json:"pull_requests"`
 			}
 			if err == nil && !done {
-				footer := "Refs"
-				if closesIssue(result+"\n"+string(current), issue, files) {
+				var response json.RawMessage
+				if response, err = call(ctx, "list_pull_requests", map[string]any{"repository": repo, "page": 1, "per_page": 1, "pull_number": c.Pull}); err == nil {
+					err = json.Unmarshal(response, &current)
+				}
+			}
+			if err == nil && !done {
+				footer, text := "Refs", result
+				for _, pull := range current.PullRequests {
+					text += "\n" + pull.Body
+				}
+				if closesIssue(text, issue, files) {
 					footer = "Closes"
 				}
 				_, err = call(ctx, "update_pull_request_body", map[string]any{"repository": repo, "operation_id": operation(step), "pull_number": c.Pull, "body": fmt.Sprintf("%s\n\n%s #%d", body, footer, issue)})
