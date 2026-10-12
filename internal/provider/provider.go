@@ -945,7 +945,9 @@ func claudeConfinement(grants []grant, allow []string, hooks map[string]any, ext
 		if resolved != "" && resolved != given.path {
 			if given.write {
 				rule := "/" + resolved
+				read = append(read, rule)
 				write = append(write, rule)
+				allow = append(allow, "Read("+rule+"/**)")
 				allow = append(allow, "Edit("+rule+"/**)")
 			} else {
 				rule := "/" + resolved

@@ -52,15 +52,16 @@ func TestClaudeConfinementResolvesMissingWritableChildAlias(t *testing.T) {
 	}
 	var parsed struct {
 		Sandbox struct {
-			Filesystem struct{ AllowWrite []string }
+			Filesystem struct{ AllowRead, AllowWrite []string }
 		}
+		Permissions struct{ Allow []string }
 	}
 	if err := json.Unmarshal([]byte(settings), &parsed); err != nil {
 		t.Fatal(err)
 	}
 	for _, path := range []string{"/" + missing, "/" + filepath.Join(resolvedTarget, "missing")} {
-		if !slices.Contains(parsed.Sandbox.Filesystem.AllowWrite, path) {
-			t.Fatalf("missing writable alias %s: %v", path, parsed.Sandbox.Filesystem.AllowWrite)
+		if !slices.Contains(parsed.Sandbox.Filesystem.AllowRead, path) || !slices.Contains(parsed.Sandbox.Filesystem.AllowWrite, path) || !slices.Contains(parsed.Permissions.Allow, "Read("+path+"/**)") {
+			t.Fatalf("missing writable alias %s: %+v %v", path, parsed.Sandbox.Filesystem, parsed.Permissions.Allow)
 		}
 	}
 }
