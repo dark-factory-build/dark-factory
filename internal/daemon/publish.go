@@ -334,6 +334,7 @@ func (daemon *Daemon) publishPull(ctx context.Context, c kernel.PublishableChang
 					if json.Unmarshal(response, &committed) == nil && committed.SHA != "" {
 						head = committed.SHA
 						previous = committed.SHA
+						mergeParent = ""
 						reconciledThrough = min(len(changes), offset+50)
 						continue
 					}

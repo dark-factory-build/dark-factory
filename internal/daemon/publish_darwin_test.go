@@ -350,7 +350,7 @@ func TestFactorydReconcilesLandedIndeterminateLegacyPublication(t *testing.T) {
 }
 
 func TestFactorydPublishesUnfinishedLegacySuffixAfterReconciliation(t *testing.T) {
-	fixture, c, source, app, checkout := publishFixture(t, 149, false)
+	fixture, c, source, app, checkout := publishFixtureMode(t, 149, false, true)
 	firstOperation := uuid5("dark-factory:" + c.Change.String() + ":publish-" + c.Head[:8] + "-1")
 	secondOperation := uuid5("dark-factory:" + c.Change.String() + ":publish-" + c.Head[:8] + "-2")
 	thirdOperation := uuid5("dark-factory:" + c.Change.String() + ":publish-" + c.Head[:8] + "-3")
@@ -376,7 +376,7 @@ func TestFactorydPublishesUnfinishedLegacySuffixAfterReconciliation(t *testing.T
 		t.Fatalf("suffix recovery writes = %+v, reconciliations = %+v", app.writes, app.reconciliations)
 	}
 	third := app.writes[1]["arguments"].(map[string]any)
-	if third["operation_id"] != thirdOperation || len(third["changes"].([]map[string]any)) != 50 || third["expected_head_sha"] != landed {
+	if third["operation_id"] != thirdOperation || len(third["changes"].([]map[string]any)) != 50 || third["expected_head_sha"] != landed || third["merge_parent_sha"] != nil {
 		t.Fatalf("unfinished legacy suffix = %+v", third)
 	}
 	thirdCommit := fmt.Sprintf("%x", sha1.Sum([]byte(thirdOperation)))
