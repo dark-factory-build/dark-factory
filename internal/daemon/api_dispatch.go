@@ -638,8 +638,10 @@ func (daemon *Daemon) agentPaths(ctx context.Context, call api.Call) api.Reply {
 	}
 	run := ""
 	paths := []string{}
-	if liveRunID != (kernel.RunID{}) {
+	if runID != (kernel.RunID{}) {
 		run = runID.String()
+	}
+	if liveRunID != (kernel.RunID{}) {
 		pathsRunID, observedPaths, pathErr := daemon.RunPaths(ctx, agentID)
 		if pathErr != nil {
 			return newErrorReply(remoteErrorCode(pathErr))
