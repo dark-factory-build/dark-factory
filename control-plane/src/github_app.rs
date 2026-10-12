@@ -10,7 +10,7 @@ use zeroize::{Zeroize as _, Zeroizing};
 
 #[cfg(any(target_arch = "wasm32", test))]
 use crate::journal::Operation;
-#[cfg(target_arch = "wasm32")]
+#[cfg(any(target_arch = "wasm32", all(test, feature = "development-sqlite")))]
 use crate::journal::{Chunk, ChunkRecord, DeliveryJournal, OperationRecord, OperationTransition};
 use crate::maintainer::MAX_EXACT_INTEGER;
 
@@ -1533,97 +1533,30 @@ impl AppAuthority {
         }
     }
 
-    /// Hold one chunk of an exact pack; the last pushes it. A replay after a
-    /// lost response resends the same chunk: the journal returns a completed
-    /// push, holds an identical chunk once, and a push of unknown outcome is
-    /// reconciled from the branch and otherwise retried, which the ref's
-    /// compare-and-swap makes safe.
     #[cfg(target_arch = "wasm32")]
     pub(crate) async fn publish_pack(
         &self,
         journal: &DeliveryJournal,
-        mut request: PublishPack,
+        request: PublishPack,
     ) -> Result<PackResult, OperationError> {
-        request.validate()?;
-        let repository = RepositoryName::requested(&mut request.repository)?;
-        let operation = request.operation("publish_pack")?;
-        let state = journal
-            .begin_operation(&operation)
-            .await
-            .map_err(|_| OperationError::Unavailable)?;
-        if let Some(result) = completed_or_conflict::<PackResult>(&state)? {
-            return Ok(result);
-        }
-        let chunk = Chunk {
-            operation: operation.clone(),
-            index: request.chunk_index,
-            count: request.chunks() as u32,
-            content: std::mem::take(&mut request.chunk_base64),
-        };
-        let chunks = match journal
-            .append_chunk(chunk)
-            .await
-            .map_err(|_| OperationError::Unavailable)?
-        {
-            ChunkRecord::Received(held) => return Ok(request.result(held.into(), None)),
-            ChunkRecord::Conflict => return Err(OperationError::Conflict),
-            ChunkRecord::Assembled(chunks) => chunks,
-        };
-        let mut pack = Vec::with_capacity(request.pack_bytes as usize);
-        for chunk in chunks {
-            pack.extend(
-                general_purpose::STANDARD
-                    .decode(chunk)
-                    .map_err(|_| OperationError::Unavailable)?,
-            );
-        }
-        if hex::encode(Sha256::digest(&pack)) != request.pack_sha256 {
-            return Err(OperationError::Conflict);
-        }
-        let token = self
-            .0
-            .installation_token(
-                repository,
-                BTreeMap::from([
-                    ("contents", "write"),
-                    ("metadata", "read"),
-                    ("workflows", "write"),
-                ]),
-            )
-            .await?;
-        let published = |head: Option<GitReference>| {
-            head.filter(|head| head.object.sha == request.head_sha)
-                .map(|_| request.result(request.chunks(), Some(request.head_sha.clone())))
-        };
-        let head = self.0.read_ref_optional(&token, &request.branch).await?;
-        if head.as_ref().map(|head| &head.object.sha) != request.expected_head_sha.as_ref() {
-            return match published(head) {
-                Some(result) => complete(journal, &operation, result).await,
-                None => Err(OperationError::Conflict),
-            };
-        }
-        if let OperationRecord::Completed(result) = journal
-            .mark_operation(&operation, OperationTransition::Executing)
-            .await
-            .map_err(|_| OperationError::Unavailable)?
-        {
-            return serde_json::from_str(&result).map_err(|_| OperationError::Unavailable);
-        }
-        let pushed = self.0.receive_pack(&token, &request, &pack).await;
-        if let Some(result) = published(self.0.read_ref_optional(&token, &request.branch).await?) {
-            return complete(journal, &operation, result).await;
-        }
-        let (transition, error) = match pushed {
-            Err(OperationError::Conflict) => {
-                (OperationTransition::Refused, OperationError::Conflict)
-            }
-            _ => (
-                OperationTransition::Indeterminate,
-                OperationError::Indeterminate,
-            ),
-        };
-        let _ = journal.mark_operation(&operation, transition).await;
-        Err(error)
+        publish_exact_pack(journal, request, |repository| async move {
+            let token = self
+                .0
+                .installation_token(
+                    repository,
+                    BTreeMap::from([
+                        ("contents", "write"),
+                        ("metadata", "read"),
+                        ("workflows", "write"),
+                    ]),
+                )
+                .await?;
+            Ok(GitHubPack {
+                authority: &self.0,
+                token,
+            })
+        })
+        .await
     }
 
     /// Ensure one exact head is in its base's merge queue. It journals
@@ -2157,7 +2090,7 @@ impl PublishPack {
             .ok_or(OperationError::InvalidInput)
     }
 
-    #[cfg(target_arch = "wasm32")]
+    #[cfg(any(target_arch = "wasm32", all(test, feature = "development-sqlite")))]
     fn operation(&self, kind: &str) -> Result<Operation, OperationError> {
         operation(kind, &self.operation_id, self)
     }
@@ -2232,6 +2165,123 @@ fn receive_pack_outcome(report: &[u8], branch: &str) -> Result<(), OperationErro
             Err(OperationError::Conflict)
         }
         _ => Err(OperationError::Indeterminate),
+    }
+}
+
+#[cfg(any(target_arch = "wasm32", all(test, feature = "development-sqlite")))]
+/// GitHub as `publish_pack` needs it once a pack is assembled: the branch head
+/// and one push returning its report. It holds the installation token, which
+/// never reaches the handler, the journal or a result.
+trait PackRemote {
+    async fn head(&self, branch: &str) -> Result<Option<String>, OperationError>;
+    async fn push(&self, body: Vec<u8>) -> Result<Vec<u8>, OperationError>;
+}
+
+/// Hold one chunk of an exact pack; the last pushes it. A replay after a lost
+/// response resends the same chunk: the journal returns a completed push,
+/// holds an identical chunk once, and a push of unknown outcome is reconciled
+/// from the branch and otherwise retried, which the ref's compare-and-swap
+/// makes safe. `connect` mints the remote only once the pack is whole.
+#[cfg(any(target_arch = "wasm32", all(test, feature = "development-sqlite")))]
+async fn publish_exact_pack<
+    R: PackRemote,
+    F: std::future::Future<Output = Result<R, OperationError>>,
+>(
+    journal: &DeliveryJournal,
+    mut request: PublishPack,
+    connect: impl FnOnce(RepositoryName) -> F,
+) -> Result<PackResult, OperationError> {
+    request.validate()?;
+    let repository = RepositoryName::requested(&mut request.repository)?;
+    let operation = request.operation("publish_pack")?;
+    let state = journal
+        .begin_operation(&operation)
+        .await
+        .map_err(|_| OperationError::Unavailable)?;
+    if let Some(result) = completed_or_conflict::<PackResult>(&state)? {
+        return Ok(result);
+    }
+    let chunk = Chunk {
+        operation: operation.clone(),
+        index: request.chunk_index,
+        count: request.chunks() as u32,
+        content: std::mem::take(&mut request.chunk_base64),
+    };
+    let chunks = match journal
+        .append_chunk(chunk)
+        .await
+        .map_err(|_| OperationError::Unavailable)?
+    {
+        ChunkRecord::Received(held) => return Ok(request.result(held.into(), None)),
+        ChunkRecord::Conflict => return Err(OperationError::Conflict),
+        ChunkRecord::Assembled(chunks) => chunks,
+    };
+    let mut pack = Vec::with_capacity(request.pack_bytes as usize);
+    for chunk in chunks {
+        pack.extend(
+            general_purpose::STANDARD
+                .decode(chunk)
+                .map_err(|_| OperationError::Unavailable)?,
+        );
+    }
+    if hex::encode(Sha256::digest(&pack)) != request.pack_sha256 {
+        return Err(OperationError::Conflict);
+    }
+    let remote = connect(repository).await?;
+    let published = |head: Option<String>| {
+        (head.as_ref() == Some(&request.head_sha))
+            .then(|| request.result(request.chunks(), Some(request.head_sha.clone())))
+    };
+    let head = remote.head(&request.branch).await?;
+    if head != request.expected_head_sha {
+        return match published(head) {
+            Some(result) => complete(journal, &operation, result).await,
+            None => Err(OperationError::Conflict),
+        };
+    }
+    if let OperationRecord::Completed(result) = journal
+        .mark_operation(&operation, OperationTransition::Executing)
+        .await
+        .map_err(|_| OperationError::Unavailable)?
+    {
+        return serde_json::from_str(&result).map_err(|_| OperationError::Unavailable);
+    }
+    let pushed = remote
+        .push(receive_pack_body(&request, &pack))
+        .await
+        .and_then(|report| receive_pack_outcome(&report, &request.branch));
+    if let Some(result) = published(remote.head(&request.branch).await?) {
+        return complete(journal, &operation, result).await;
+    }
+    let (transition, error) = match pushed {
+        Err(OperationError::Conflict) => (OperationTransition::Refused, OperationError::Conflict),
+        _ => (
+            OperationTransition::Indeterminate,
+            OperationError::Indeterminate,
+        ),
+    };
+    let _ = journal.mark_operation(&operation, transition).await;
+    Err(error)
+}
+
+#[cfg(target_arch = "wasm32")]
+struct GitHubPack<'a> {
+    authority: &'a Authority,
+    token: RepositoryToken,
+}
+
+#[cfg(target_arch = "wasm32")]
+impl PackRemote for GitHubPack<'_> {
+    async fn head(&self, branch: &str) -> Result<Option<String>, OperationError> {
+        Ok(self
+            .authority
+            .read_ref_optional(&self.token, branch)
+            .await?
+            .map(|head| head.object.sha))
+    }
+
+    async fn push(&self, body: Vec<u8>) -> Result<Vec<u8>, OperationError> {
+        self.authority.receive_pack(&self.token, body).await
     }
 }
 
@@ -2633,7 +2683,7 @@ fn valid_github_timestamp(value: &str) -> Result<(), OperationError> {
     .ok_or(OperationError::InvalidInput)
 }
 
-#[cfg(target_arch = "wasm32")]
+#[cfg(any(target_arch = "wasm32", all(test, feature = "development-sqlite")))]
 fn operation<T: Serialize>(
     kind: &str,
     operation_id: &str,
@@ -2683,7 +2733,7 @@ fn request_digest<T: Serialize>(request: &T) -> Result<String, OperationError> {
     Ok(hex::encode(Sha256::digest(canonical)))
 }
 
-#[cfg(target_arch = "wasm32")]
+#[cfg(any(target_arch = "wasm32", all(test, feature = "development-sqlite")))]
 fn completed_or_conflict<T: serde::de::DeserializeOwned>(
     state: &OperationRecord,
 ) -> Result<Option<T>, OperationError> {
@@ -2696,7 +2746,7 @@ fn completed_or_conflict<T: serde::de::DeserializeOwned>(
     }
 }
 
-#[cfg(target_arch = "wasm32")]
+#[cfg(any(target_arch = "wasm32", all(test, feature = "development-sqlite")))]
 async fn complete<T: Serialize + serde::de::DeserializeOwned>(
     journal: &DeliveryJournal,
     operation: &Operation,
@@ -3409,9 +3459,8 @@ impl Authority {
     async fn receive_pack(
         &self,
         token: &RepositoryToken,
-        request: &PublishPack,
-        pack: &[u8],
-    ) -> Result<(), OperationError> {
+        body: Vec<u8>,
+    ) -> Result<Vec<u8>, OperationError> {
         use worker::{Fetch, Headers, Method, Request, RequestInit, RequestRedirect};
 
         let headers = Headers::new();
@@ -3432,7 +3481,7 @@ impl Authority {
                 .set(name, value)
                 .map_err(|_| OperationError::Unavailable)?;
         }
-        let body = js_sys::Uint8Array::from(receive_pack_body(request, pack).as_slice());
+        let body = js_sys::Uint8Array::from(body.as_slice());
         let mut init = RequestInit::new();
         init.with_method(Method::Post)
             .with_redirect(RequestRedirect::Manual)
@@ -3445,10 +3494,9 @@ impl Authority {
             worker::console_error!("github push failed: {url}: {error:?}");
             OperationError::Indeterminate
         })?;
-        let report = read_github_response(response, &url, 64 * 1024)
+        read_github_response(response, &url, 64 * 1024)
             .await
-            .map_err(|_| OperationError::Indeterminate)?;
-        receive_pack_outcome(&report, &request.branch)
+            .map_err(|_| OperationError::Indeterminate)
     }
 
     /// Create the content-addressed tree for one request. Repeating these blob
@@ -6157,6 +6205,207 @@ mod tests {
                 "{unknown}"
             );
         }
+    }
+
+    /// GitHub behind `publish_exact_pack`: a branch moved only by a push whose
+    /// old value matches, a token the handler never sees, and faults placed
+    /// around the push.
+    #[cfg(feature = "development-sqlite")]
+    #[derive(Default)]
+    struct FakeRemote {
+        head: std::cell::RefCell<Option<String>>,
+        pushes: std::cell::RefCell<Vec<Vec<u8>>>,
+        connects: std::cell::Cell<u32>,
+        moved_by_another: std::cell::RefCell<Option<String>>, // before the push lands
+        lose_response: std::cell::Cell<bool>,                 // after it lands
+        fail_before_landing: std::cell::Cell<bool>,
+    }
+
+    #[cfg(feature = "development-sqlite")]
+    const FAKE_TOKEN: &str = "ghs_fake-installation-token-never-disclosed";
+
+    #[cfg(feature = "development-sqlite")]
+    impl PackRemote for &FakeRemote {
+        async fn head(&self, _branch: &str) -> Result<Option<String>, OperationError> {
+            Ok(self.head.borrow().clone())
+        }
+
+        async fn push(&self, body: Vec<u8>) -> Result<Vec<u8>, OperationError> {
+            assert!(!String::from_utf8_lossy(&body).contains(FAKE_TOKEN));
+            self.pushes.borrow_mut().push(body.clone());
+            if self.fail_before_landing.replace(false) {
+                return Err(OperationError::Indeterminate);
+            }
+            if let Some(other) = self.moved_by_another.borrow_mut().take() {
+                *self.head.borrow_mut() = Some(other);
+            }
+            let command = String::from_utf8_lossy(&body[4..85]).into_owned();
+            let (old, new) = command.split_once(' ').unwrap();
+            let zero = "0".repeat(40);
+            let current = self.head.borrow().clone().unwrap_or(zero);
+            let line = if old == current {
+                *self.head.borrow_mut() = Some(new.to_owned());
+                "ok refs/heads/factory/d2fe80c351a5"
+            } else {
+                "ng refs/heads/factory/d2fe80c351a5 stale info"
+            };
+            if self.lose_response.replace(false) {
+                return Err(OperationError::Indeterminate);
+            }
+            Ok(format!("000eunpack ok\n{:04x}{line}\n0000", line.len() + 5).into_bytes())
+        }
+    }
+
+    #[cfg(feature = "development-sqlite")]
+    async fn send_pack(
+        journal: &DeliveryJournal,
+        remote: &FakeRemote,
+        request: PublishPack,
+    ) -> Result<PackResult, OperationError> {
+        publish_exact_pack(journal, request, |repository| async move {
+            assert_eq!(repository.full_name, "team/shared");
+            remote.connects.set(remote.connects.get() + 1);
+            Ok(remote)
+        })
+        .await
+    }
+
+    /// The production handler, its journal and its reconciliation, with only
+    /// GitHub's transport substituted.
+    #[cfg(feature = "development-sqlite")]
+    #[tokio::test]
+    async fn the_pack_handler_replays_reconciles_and_refuses_races_from_its_journal() {
+        let directory = tempfile::tempdir().unwrap();
+        let database = directory.path().join("journal.db");
+        let root = DeliveryJournal::open_development(&database).unwrap();
+        let journal = root.for_connection(&"a".repeat(64), "github:2").unwrap();
+        let pack: Vec<u8> = (0..2 * PACK_CHUNK_BYTES + 9)
+            .map(|i| (i * 7) as u8)
+            .collect();
+        let a = "a".repeat(40);
+        let b = "b".repeat(40);
+        let remote = FakeRemote::default();
+        *remote.head.borrow_mut() = Some(a.clone());
+
+        // Chunks are held in order and replay; nothing reaches GitHub yet.
+        for (index, held) in [(0, 1), (1, 2), (1, 2)] {
+            let result = send_pack(&journal, &remote, pack_chunk(&pack, index))
+                .await
+                .unwrap();
+            assert_eq!((result.received_chunks, result.commit_sha), (held, None));
+        }
+        let mut changed = pack_chunk(&pack, 1);
+        changed.chunk_base64 = general_purpose::STANDARD.encode(vec![1; PACK_CHUNK_BYTES as usize]);
+        assert_eq!(
+            send_pack(&journal, &remote, changed).await.err(),
+            Some(OperationError::Conflict)
+        );
+        // Another repository's connection cannot add to or finish this upload.
+        let other = root.for_connection(&"a".repeat(64), "github:3").unwrap();
+        assert_eq!(
+            send_pack(&other, &remote, pack_chunk(&pack, 2)).await.err(),
+            Some(OperationError::Conflict)
+        );
+        assert_eq!(remote.connects.get(), 0);
+
+        // The push lands but its response is lost: the branch reconciles it.
+        remote.lose_response.set(true);
+        let published = send_pack(&journal, &remote, pack_chunk(&pack, 2))
+            .await
+            .unwrap();
+        assert_eq!(published.commit_sha.as_deref(), Some(b.as_str()));
+        assert_eq!(remote.pushes.borrow().len(), 1);
+        assert_eq!(
+            remote.pushes.borrow()[0],
+            receive_pack_body(&pack_chunk(&pack, 0), &pack),
+            "GitHub receives the caller's pack byte for byte under one compare-and-swap"
+        );
+        // Every later replay is the journaled result, with no GitHub call.
+        for index in 0..3 {
+            let replay = send_pack(&journal, &remote, pack_chunk(&pack, index))
+                .await
+                .unwrap();
+            assert_eq!(replay.commit_sha.as_deref(), Some(b.as_str()));
+        }
+        assert_eq!(
+            (remote.connects.get(), remote.pushes.borrow().len()),
+            (1, 1)
+        );
+        let stored = journal
+            .observe_operation("7d1f0f8e-7f1f-11f0-952e-acde48001122")
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(stored.state, "completed");
+        assert!(!stored.result_json.unwrap().contains(FAKE_TOKEN));
+
+        // A push of unknown outcome that did not land stays indeterminate and
+        // its replay pushes again.
+        let next = |id: &str, expected: &str, head: &str| {
+            let mut request = pack_chunk(&pack, 0);
+            request.operation_id = id.into();
+            request.expected_head_sha = Some(expected.into());
+            request.head_sha = head.into();
+            request.pack_bytes = 9;
+            request.chunk_base64 = general_purpose::STANDARD.encode(&pack[..9]);
+            request.pack_sha256 = hex::encode(Sha256::digest(&pack[..9]));
+            request
+        };
+        let c = "c".repeat(40);
+        let retried = next("8d1f0f8e-7f1f-11f0-952e-acde48001122", &b, &c);
+        remote.fail_before_landing.set(true);
+        assert_eq!(
+            send_pack(&journal, &remote, retried.clone()).await.err(),
+            Some(OperationError::Indeterminate)
+        );
+        assert_eq!(remote.head.borrow().as_deref(), Some(b.as_str()));
+        let landed = send_pack(&journal, &remote, retried).await.unwrap();
+        assert_eq!(landed.commit_sha.as_deref(), Some(c.as_str()));
+        assert_eq!(remote.pushes.borrow().len(), 3);
+
+        // A stale precondition is refused before any push.
+        let pushes = remote.pushes.borrow().len();
+        assert_eq!(
+            send_pack(
+                &journal,
+                &remote,
+                next("9d1f0f8e-7f1f-11f0-952e-acde48001122", &a, &"d".repeat(40))
+            )
+            .await
+            .err(),
+            Some(OperationError::Conflict)
+        );
+        assert_eq!(remote.pushes.borrow().len(), pushes);
+        // A branch moved between the check and the push is refused by the
+        // compare-and-swap, never overwritten, and the claim and chunks are
+        // released for a fresh upload.
+        let e = "e".repeat(40);
+        *remote.moved_by_another.borrow_mut() = Some(e.clone());
+        let raced = next("ad1f0f8e-7f1f-11f0-952e-acde48001122", &c, &"f".repeat(40));
+        assert_eq!(
+            send_pack(&journal, &remote, raced.clone()).await.err(),
+            Some(OperationError::Conflict)
+        );
+        assert_eq!(remote.head.borrow().as_deref(), Some(e.as_str()));
+        assert_eq!(
+            journal
+                .observe_operation(&raced.operation_id)
+                .await
+                .unwrap()
+                .unwrap()
+                .state,
+            "planned"
+        );
+
+        // A pack that does not match its digest never reaches GitHub.
+        let mut forged = next("bd1f0f8e-7f1f-11f0-952e-acde48001122", &e, &a);
+        forged.pack_sha256 = hex::encode(Sha256::digest(b"another pack"));
+        let connects = remote.connects.get();
+        assert_eq!(
+            send_pack(&journal, &remote, forged).await.err(),
+            Some(OperationError::Conflict)
+        );
+        assert_eq!(remote.connects.get(), connects);
     }
 
     /// `valid_ref` is the only guard on the string that reaches

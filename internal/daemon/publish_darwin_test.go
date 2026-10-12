@@ -806,12 +806,27 @@ func TestPublishPackSendsExactObjectsInReplaySafeChunks(t *testing.T) {
 		t.Fatalf("a refused push moved the branch to %s", m.branch)
 	}
 
-	write(".github/CODEOWNERS", []byte("* @someone\n"))
+	// Each path publish_commit refuses, including a blob replacing the
+	// .github tree, is refused before anything is sent.
+	write(".github/workflows/ci.yml", []byte("on: push\n"))
 	run("add", ".")
-	run("commit", "-q", "-m", "authority")
-	authority := run("rev-parse", "HEAD")
-	m.result, m.chunks, m.fields = nil, nil, ""
-	if err := publishPack(ctx, m.call, gitDir, "team/repo", uuid5("dark-factory:pack-authority"), "factory/d2fe80c351a5", head, head, authority); err == nil || !strings.Contains(err.Error(), ".github/CODEOWNERS") || m.fields != "" {
-		t.Fatalf("review authority = %v, sent %q", err, m.fields)
+	run("commit", "-q", "-m", "workflow")
+	workflow := run("rev-parse", "HEAD")
+	for _, change := range []struct{ path, name string }{{".github/CODEOWNERS", ".github/CODEOWNERS"}, {"docs/CODEOWNERS", "docs/CODEOWNERS"}, {".github", ".github"}, {".GitHub", ".GitHub"}} {
+		run("checkout", "-q", "--detach", workflow)
+		if strings.EqualFold(change.path, ".github") {
+			run("rm", "-rq", ".github")
+		}
+		write(change.path, []byte("* @someone\n"))
+		run("add", ".")
+		run("commit", "-q", "-m", "authority")
+		m.result, m.chunks, m.fields = nil, nil, ""
+		if err := publishPack(ctx, m.call, gitDir, "team/repo", uuid5("dark-factory:pack-authority"), "factory/d2fe80c351a5", head, workflow, run("rev-parse", "HEAD")); err == nil || !strings.HasSuffix(err.Error(), "review authority: "+change.name) || m.fields != "" {
+			t.Fatalf("%s = %v, sent %q", change.path, err, m.fields)
+		}
+	}
+	// A workflow is not review authority.
+	if err := publishPack(ctx, m.call, gitDir, "team/repo", uuid5("dark-factory:pack-workflow"), "factory/d2fe80c351a5", head, head, workflow); err != nil {
+		t.Fatal(err)
 	}
 }

@@ -494,15 +494,21 @@ const packChunkBytes = 256 << 10
 // Maintainer's publish_pack, which pushes the objects head has beyond known, a
 // commit GitHub holds, byte for byte. Every chunk replays under operation, so
 // after an ambiguous response the whole call is repeated and the Maintainer
-// reconciles the push. publish_commit refuses review-authority paths, but a
-// pack is opaque to the Maintainer, so they are refused here.
+// reconciles the push. A pack is opaque to the Maintainer, so the paths
+// publish_commit refuses (valid_repository_path) are refused here.
 func publishPack(ctx context.Context, call publishCall, gitDir, repo, operation, branch, expected, known, head string) error {
-	changed, err := gitOutput(ctx, gitDir, "diff", "--no-renames", "--name-only", known, head, "--", "CODEOWNERS", ".github/CODEOWNERS", "docs/CODEOWNERS", ".github/dependabot.yml", ".github/dependabot.yaml")
-	if err == nil && len(changed) > 0 {
-		err = fmt.Errorf("%s changes review authority: %s", head, strings.Fields(string(changed)))
-	}
+	changed, err := gitOutput(ctx, gitDir, "diff", "--no-renames", "--name-only", "-z", known, head, "--", ":(icase).github", "CODEOWNERS", "docs/CODEOWNERS")
 	if err != nil {
 		return err
+	}
+	for _, name := range strings.Split(string(changed), "\x00") {
+		authority := strings.EqualFold(name, ".github") // replacing the tree itself
+		for _, path := range []string{"CODEOWNERS", ".github/CODEOWNERS", "docs/CODEOWNERS", ".github/dependabot.yml", ".github/dependabot.yaml"} {
+			authority = authority || name == path || strings.HasPrefix(name, path+"/")
+		}
+		if authority {
+			return fmt.Errorf("%s changes review authority: %s", head, name)
+		}
 	}
 	command := exec.CommandContext(ctx, change.TrustedGitExecutable, "--git-dir", gitDir, "pack-objects", "--stdout", "--revs", "--quiet")
 	command.Env = append(filteredReviewEnvironment(), "GIT_CONFIG_NOSYSTEM=1", "GIT_CONFIG_GLOBAL=/dev/null")
