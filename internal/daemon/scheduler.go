@@ -180,25 +180,23 @@ func (daemon *Daemon) RunScheduler(ctx context.Context, spec SupervisorSpec) err
 				if now := daemon.now(); !now.Before(nextAttachmentCleanup) {
 					if at, err := kernel.NewUnixMillis(now.UnixMilli()); err == nil {
 						// Each maintenance step over a second is named: they share the writer.
-						started := time.Now()
-						timed := func(step string) {
+						timed := func(step string, run func()) {
+							started := time.Now()
+							run()
 							if took := time.Since(started); took > time.Second {
 								LogFactoryd(daemon.log, "factoryd: hourly maintenance %s took %s\n", step, took.Round(time.Millisecond))
 							}
-							started = time.Now()
 						}
-						expired, _ := daemon.store.ExpireBlockedTasks(ownedCtx, at)
-						timed("ExpireBlockedTasks")
+						var expired []kernel.TaskID
+						timed("ExpireBlockedTasks", func() { expired, _ = daemon.store.ExpireBlockedTasks(ownedCtx, at) })
 						for _, id := range expired {
 							LogFactoryd(daemon.log, "factoryd: task %s %s\n", id, kernel.BlockedExpiryReason)
 						}
-						_, err := daemon.store.ArchiveHistory(ownedCtx, at)
-						timed("ArchiveHistory")
+						timed("ArchiveHistory", func() { _, err = daemon.store.ArchiveHistory(ownedCtx, at) })
 						if err != nil {
 							LogFactoryd(daemon.log, "factoryd: history archive: %v\n", err)
 						}
-						err = daemon.store.ExpireTaskAttachments(ownedCtx, at)
-						timed("ExpireTaskAttachments")
+						timed("ExpireTaskAttachments", func() { err = daemon.store.ExpireTaskAttachments(ownedCtx, at) })
 						if err == nil {
 							nextAttachmentCleanup = now.Add(time.Hour)
 						}
