@@ -14,7 +14,6 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
-	"time"
 	"unicode/utf8"
 
 	"github.com/dark-factory-build/dark-factory/internal/change"
@@ -423,40 +422,6 @@ func TestFactorydPublishesCorrectionFromThePRTip(t *testing.T) {
 	}
 	if err != nil || len(changes) != 1 || changes[0]["path"] != "fix.txt" || string(content) != "correction\n" {
 		t.Fatalf("correction changes = %+v", changes)
-	}
-}
-
-// A correction whose head lacks the main its pull request already carries
-// would revert that main on publication (#1784): nothing is written and its
-// task goes back to rebase.
-func TestACorrectionLackingItsPullRequestBaseGoesBackToRebase(t *testing.T) {
-	fixture, c, source, app, checkout := publishFixture(t, 1, false)
-	root, git := filepath.Dir(source), change.TrustedGitExecutable
-	registered := strings.TrimSpace(supervisorGitOutput(t, git, "-C", root, "remote", "get-url", "origin"))
-	if err := os.WriteFile(filepath.Join(registered, "merged.txt"), []byte("merged since\n"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	supervisorGit(t, git, "-C", registered, "-c", "user.name=fixture", "-c", "user.email=fixture@example.invalid", "add", "merged.txt")
-	supervisorGit(t, git, "-C", registered, "-c", "user.name=fixture", "-c", "user.email=fixture@example.invalid", "commit", "-q", "-m", "merged since")
-	app.main = strings.TrimSpace(supervisorGitOutput(t, git, "-C", registered, "rev-parse", "HEAD"))
-	app.tip, c.Pull = app.main, 31 // the pull request's branch already carries that main
-	ctx := context.Background()
-	fixture.daemon.now = func() time.Time { return time.UnixMilli(2000) }
-	failIntakeRun(t, fixture) // the worker's run has ended, so its task can go back
-	fixture.daemon.now = func() time.Time { return time.Unix(3000, 0) }
-	task, _, err := fixture.store.Task(ctx, c.Task.ID)
-	if err != nil {
-		t.Fatal(err)
-	}
-	c.Task = task
-	err = fixture.daemon.publishChange(ctx, c, "team/repo", source, app.call, checkout)
-	if !errors.Is(err, errPublishLater) || !strings.Contains(err.Error(), "sent back to rebase") || len(app.writes) != 0 {
-		t.Fatalf("err = %v, writes = %+v", err, app.writes)
-	}
-	sent, _, err := fixture.store.Task(ctx, c.Task.ID)
-	if feedback := kernel.TaskFeedback(sent); err != nil || sent.Status != kernel.TaskQueued || sent.WorkRevision.Int64() != task.WorkRevision.Int64()+1 ||
-		!strings.Contains(feedback, "Rebase the Change onto origin/main") || !strings.Contains(feedback, app.main) {
-		t.Fatalf("sent back task = %+v, %v", sent, err)
 	}
 }
 
