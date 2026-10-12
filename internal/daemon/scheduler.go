@@ -179,14 +179,27 @@ func (daemon *Daemon) RunScheduler(ctx context.Context, spec SupervisorSpec) err
 				}
 				if now := daemon.now(); !now.Before(nextAttachmentCleanup) {
 					if at, err := kernel.NewUnixMillis(now.UnixMilli()); err == nil {
+						// Each maintenance step over a second is named: they share the writer.
+						started := time.Now()
+						timed := func(step string) {
+							if took := time.Since(started); took > time.Second {
+								LogFactoryd(daemon.log, "factoryd: hourly maintenance %s took %s\n", step, took.Round(time.Millisecond))
+							}
+							started = time.Now()
+						}
 						expired, _ := daemon.store.ExpireBlockedTasks(ownedCtx, at)
+						timed("ExpireBlockedTasks")
 						for _, id := range expired {
 							LogFactoryd(daemon.log, "factoryd: task %s %s\n", id, kernel.BlockedExpiryReason)
 						}
-						if _, err := daemon.store.ArchiveHistory(ownedCtx, at); err != nil {
+						_, err := daemon.store.ArchiveHistory(ownedCtx, at)
+						timed("ArchiveHistory")
+						if err != nil {
 							LogFactoryd(daemon.log, "factoryd: history archive: %v\n", err)
 						}
-						if err := daemon.store.ExpireTaskAttachments(ownedCtx, at); err == nil {
+						err = daemon.store.ExpireTaskAttachments(ownedCtx, at)
+						timed("ExpireTaskAttachments")
+						if err == nil {
 							nextAttachmentCleanup = now.Add(time.Hour)
 						}
 					}

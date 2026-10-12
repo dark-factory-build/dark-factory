@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"net/url"
+	"runtime"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -37,6 +38,45 @@ type Store struct {
 
 	repositoryBase string // Boot-owned initial binding default; protected by writerGate.
 	archivePath    string // The history archive beside the database; see ArchiveHistory.
+
+	// Writer-hold diagnostics (see LogWriterHolds). The holder fields are
+	// protected by writerGate; the waiter count is read by the holder.
+	writerLog     atomic.Pointer[func(string, ...any)]
+	writerWaiters atomic.Int64
+	writerHolder  [8]uintptr
+	writerSince   time.Time
+	longestWait   time.Duration
+	longestWaiter [8]uintptr
+	waitReported  time.Time
+}
+
+// slowWriter is the writer hold, or wait, that LogWriterHolds names.
+const slowWriter = time.Second
+
+// LogWriterHolds logs each writer hold over slowWriter with its holder and the
+// writers queued behind it, and once a minute the longest wait over slowWriter.
+func (store *Store) LogWriterHolds(log func(format string, args ...any)) {
+	store.writerLog.Store(&log)
+}
+
+func (store *Store) logWriter(format string, args ...any) {
+	if log := store.writerLog.Load(); log != nil {
+		(*log)(format, args...)
+	}
+}
+
+// writerCaller names the function that took the writer, skipping the write
+// plumbing every mutation goes through.
+func writerCaller(stack [8]uintptr) string {
+	frames := runtime.CallersFrames(stack[:])
+	for {
+		frame, more := frames.Next()
+		name := frame.Function[strings.LastIndex(frame.Function, "/")+1:]
+		if more && (strings.HasSuffix(name, ".beginUncheckedWrite") || strings.HasSuffix(name, ".beginValidatedWrite")) {
+			continue
+		}
+		return name
+	}
 }
 
 func newStore() *Store {
@@ -665,10 +705,26 @@ func (store *Store) acquireWriter(ctx context.Context) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
+	var caller [8]uintptr
+	runtime.Callers(2, caller[:])
+	waiting := time.Now()
+	store.writerWaiters.Add(1)
 	select {
 	case <-ctx.Done():
+		store.writerWaiters.Add(-1)
 		return ctx.Err()
 	case <-store.writerGate:
+	}
+	store.writerWaiters.Add(-1)
+	store.writerHolder, store.writerSince = caller, time.Now()
+	if wait := store.writerSince.Sub(waiting); wait > store.longestWait {
+		store.longestWait, store.longestWaiter = wait, caller
+	}
+	if store.writerSince.Sub(store.waitReported) >= time.Minute {
+		if store.longestWait > slowWriter {
+			store.logWriter("factoryd: longest sqlite writer wait in the last minute %s by %s\n", store.longestWait.Round(time.Millisecond), writerCaller(store.longestWaiter))
+		}
+		store.longestWait, store.waitReported = 0, store.writerSince
 	}
 	if err := ctx.Err(); err != nil {
 		store.releaseWriter()
@@ -678,6 +734,9 @@ func (store *Store) acquireWriter(ctx context.Context) error {
 }
 
 func (store *Store) releaseWriter() {
+	if held := time.Since(store.writerSince); held > slowWriter {
+		store.logWriter("factoryd: sqlite writer held %s by %s, %d waiting\n", held.Round(time.Millisecond), writerCaller(store.writerHolder), store.writerWaiters.Load())
+	}
 	store.writerGate <- struct{}{}
 }
 

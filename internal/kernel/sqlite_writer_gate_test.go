@@ -6,8 +6,10 @@ import (
 	"database/sql"
 	sqldriver "database/sql/driver"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -638,5 +640,52 @@ func releaseRetainedStoreForTest(store *Store) {
 	if store.pathBinding != nil {
 		_ = store.pathBinding.Close()
 		store.pathBinding = nil
+	}
+}
+
+// holdWriterPastSlowWriter is the named holder the writer-hold log must find.
+func holdWriterPastSlowWriter(store *Store) error {
+	tx, err := store.beginValidatedWrite(context.Background())
+	if err != nil {
+		return err
+	}
+	defer tx.Close()
+	time.Sleep(slowWriter + 100*time.Millisecond)
+	return tx.Commit(context.Background())
+}
+
+func TestSlowWriterHoldLogsItsHolderAndWaiters(t *testing.T) {
+	store, _ := newTestStore(t)
+	defer store.Close()
+	var lines []string
+	store.LogWriterHolds(func(format string, args ...any) { lines = append(lines, fmt.Sprintf(format, args...)) })
+
+	held := make(chan error, 1)
+	go func() { held <- holdWriterPastSlowWriter(store) }()
+	for len(store.writerGate) != 0 {
+		time.Sleep(time.Millisecond)
+	}
+	// A queued writer is counted behind the holder.
+	if err := store.acquireWriter(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if err := <-held; err != nil {
+		t.Fatal(err)
+	}
+	if len(lines) != 1 || !strings.Contains(lines[0], "sqlite writer held 1.") || !strings.Contains(lines[0], "by kernel.holdWriterPastSlowWriter, 1 waiting") {
+		t.Fatalf("writer-hold log = %q", lines)
+	}
+	// The queued writer's wait is the minute's longest, reported a minute on.
+	store.waitReported = store.waitReported.Add(-time.Minute)
+	store.releaseWriter()
+	if len(lines) != 1 {
+		t.Fatalf("a quick hold was logged: %q", lines)
+	}
+	if err := store.acquireWriter(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	store.releaseWriter()
+	if len(lines) != 2 || !strings.Contains(lines[1], "longest sqlite writer wait in the last minute 1.") || !strings.Contains(lines[1], "by kernel.TestSlowWriterHoldLogsItsHolderAndWaiters") {
+		t.Fatalf("longest-wait log = %q", lines)
 	}
 }
