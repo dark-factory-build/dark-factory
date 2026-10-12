@@ -65,6 +65,40 @@ func TestClaudeConfinementResolvesMissingWritableChildAlias(t *testing.T) {
 	}
 }
 
+func TestClaudeConfinementPreservesReadOnlyAlias(t *testing.T) {
+	root := t.TempDir()
+	target := filepath.Join(root, "target")
+	link := filepath.Join(root, "link")
+	if err := os.Mkdir(target, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(target, link); err != nil {
+		t.Fatal(err)
+	}
+	resolvedTarget, err := filepath.EvalSymlinks(target)
+	if err != nil {
+		t.Fatal(err)
+	}
+	settings, err := claudeConfinement([]grant{{link, false}}, nil, map[string]any{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var parsed struct {
+		Permissions struct{ Allow []string }
+		Sandbox     struct {
+			Filesystem struct{ AllowRead, DenyWrite []string }
+		}
+	}
+	if err := json.Unmarshal([]byte(settings), &parsed); err != nil {
+		t.Fatal(err)
+	}
+	for _, path := range []string{"/" + link, "/" + resolvedTarget} {
+		if !slices.Contains(parsed.Sandbox.Filesystem.AllowRead, path) || !slices.Contains(parsed.Sandbox.Filesystem.DenyWrite, path) || !slices.Contains(parsed.Permissions.Allow, "Read("+path+"/**)") {
+			t.Fatalf("missing read-only alias %s: %+v %v", path, parsed.Sandbox.Filesystem, parsed.Permissions.Allow)
+		}
+	}
+}
+
 // The prompt carries untrusted task, pull request, diff and dispute text, so
 // a Claude reviewer's file tools get the worker's confinement: user data is
 // denied, the checkout and toolchain are re-allowed, and nothing else is.
