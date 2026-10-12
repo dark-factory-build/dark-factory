@@ -56,7 +56,7 @@ func TestRunReviewConfinesClaudeFileReads(t *testing.T) {
 		return strings.Split(strings.TrimSuffix(result.Stdout, "\x00"), "\x00")
 	}
 	argv := review(kernel.ProviderClaudeCode)
-	if mode := slices.Index(argv, "--permission-mode"); mode < 0 || argv[mode+1] != "dontAsk" || slices.Contains(argv, "--allowedTools") {
+	if mode := slices.Index(argv, "--permission-mode"); mode < 0 || argv[mode+1] != "dontAsk" || slices.Contains(argv, "--allowedTools") || !slices.Contains(argv, "Read,Grep,Glob,Bash") {
 		t.Fatalf("Claude review allows reads no rule grants: %q", argv)
 	}
 	at := slices.Index(argv, "--settings")
@@ -73,16 +73,19 @@ func TestRunReviewConfinesClaudeFileReads(t *testing.T) {
 		t.Fatal(err)
 	}
 	filesystem, allow := settings.Sandbox.Filesystem, settings.Permissions.Allow
-	if !slices.Contains(filesystem.DenyRead, "//Users") || !slices.Contains(filesystem.AllowRead, "/"+checkout) || len(filesystem.AllowWrite) != 0 {
+	if !slices.Contains(filesystem.DenyRead, "//Users") || !slices.Contains(filesystem.AllowRead, "/"+checkout) || len(filesystem.AllowWrite) != 2 {
 		t.Fatalf("read boundary = %+v", filesystem)
 	}
-	for _, rule := range []string{"Read(/" + checkout + "/**)", "Read(//opt/toolchain/**)"} {
+	for _, rule := range []string{"Bash", "Read(/" + checkout + "/**)", "Read(//opt/toolchain/**)"} {
 		if !slices.Contains(allow, rule) {
 			t.Fatalf("allow rules lack %s: %q", rule, allow)
 		}
 	}
 	for _, rule := range allow {
-		if !strings.HasPrefix(rule, "Read(") || strings.Contains(rule, scratch) || strings.Contains(rule, account) {
+		if (strings.HasPrefix(rule, "Write(") || strings.HasPrefix(rule, "Edit(")) && !strings.Contains(rule, filepath.Join(root, ".review-home")) && !strings.Contains(rule, filepath.Join(root, ".review-tmp")) {
+			t.Fatalf("allow rule %q widens the review past its grants: %q", rule, allow)
+		}
+		if strings.HasPrefix(rule, "Read(") && (strings.Contains(rule, scratch) || strings.Contains(rule, account)) {
 			t.Fatalf("allow rule %q widens the review past its grants: %q", rule, allow)
 		}
 	}

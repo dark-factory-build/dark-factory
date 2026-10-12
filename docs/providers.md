@@ -331,8 +331,9 @@ natively on CLI 0.160.1: a sibling of the checkout, the home directory, the user
 and shared temp directories, by absolute path, `../` and symlink, writes to the
 checkout, to `CODEX_HOME` and to the borrowed object store, and a nested
 `codex` asking for full access were all refused, while `git log`, `git show` and
-`git diff base...HEAD` worked in a `ReviewCheckout` checkout. factoryd's Claude reviewer has no shell: `--restricted --safe-mode`
-with only Read, Grep and Glob, which were refused the same outside reads.
+`git diff base...HEAD` worked in a `ReviewCheckout` checkout. factoryd's Claude reviewer runs Bash under the same restricted sandbox, with only the checkout,
+toolchain and trusted cache reads plus private review-home/temp writes; repository
+and credential paths remain denied.
 Factory-owned MCP servers and command permissions are supplied explicitly at launch.
 
 ## Run-scoped browser tools

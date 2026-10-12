@@ -915,14 +915,18 @@ func claudeSettings(request Request, servers []string) (string, error) {
 	return claudeConfinement(grants, allow, map[string]any{"Stop": []any{map[string]any{"hooks": []any{map[string]any{"type": "command", "command": stop}}}}})
 }
 
-// ClaudeReview is claudeSettings for a review: the file tools read only
-// readable, nothing is writable and no hook runs.
-func ClaudeReview(readable ...string) (string, error) {
+// ClaudeReview is claudeSettings for a review: Bash may run inside the
+// review's private writable roots, while repository and cache grants remain
+// read-only and no hook runs.
+func ClaudeReview(writable []string, readable ...string) (string, error) {
 	var grants []grant
+	for _, path := range writable {
+		grants = append(grants, grant{path, true})
+	}
 	for _, path := range readable {
 		grants = append(grants, grant{path, false})
 	}
-	return claudeConfinement(grants, nil, map[string]any{})
+	return claudeConfinement(grants, []string{"Bash"}, map[string]any{})
 }
 
 func claudeConfinement(grants []grant, allow []string, hooks map[string]any) (string, error) {
