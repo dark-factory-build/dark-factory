@@ -456,10 +456,12 @@ func (daemon *Daemon) ConfigureHost(home, toolPath, toolchainRoots, operatorHome
 	daemon.home, daemon.toolPath, daemon.toolchainRoots, daemon.operatorHome = home, toolPath, toolchainRoots, operatorHome
 }
 
-// ConfigureLog sets the process stderr boundary used by daemon-owned logs.
+// ConfigureLog sets the process stderr boundary used by daemon-owned logs,
+// including the store's slow writer holds.
 func (daemon *Daemon) ConfigureLog(writer io.Writer) {
 	if writer != nil {
 		daemon.log = writer
+		daemon.store.LogWriterHolds(func(format string, args ...any) { LogFactoryd(writer, format, args...) })
 	}
 }
 

@@ -179,14 +179,18 @@ func (daemon *Daemon) RunScheduler(ctx context.Context, spec SupervisorSpec) err
 				}
 				if now := daemon.now(); !now.Before(nextAttachmentCleanup) {
 					if at, err := kernel.NewUnixMillis(now.UnixMilli()); err == nil {
-						expired, _ := daemon.store.ExpireBlockedTasks(ownedCtx, at)
+						timed := func(step string, run func()) { timeMaintenance(daemon.log, step, run) }
+						var expired []kernel.TaskID
+						timed("ExpireBlockedTasks", func() { expired, _ = daemon.store.ExpireBlockedTasks(ownedCtx, at) })
 						for _, id := range expired {
 							LogFactoryd(daemon.log, "factoryd: task %s %s\n", id, kernel.BlockedExpiryReason)
 						}
-						if _, err := daemon.store.ArchiveHistory(ownedCtx, at); err != nil {
+						timed("ArchiveHistory", func() { _, err = daemon.store.ArchiveHistory(ownedCtx, at) })
+						if err != nil {
 							LogFactoryd(daemon.log, "factoryd: history archive: %v\n", err)
 						}
-						if err := daemon.store.ExpireTaskAttachments(ownedCtx, at); err == nil {
+						timed("ExpireTaskAttachments", func() { err = daemon.store.ExpireTaskAttachments(ownedCtx, at) })
+						if err == nil {
 							nextAttachmentCleanup = now.Add(time.Hour)
 						}
 					}
