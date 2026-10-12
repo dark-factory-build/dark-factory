@@ -214,14 +214,14 @@ func TestSpecialistSchedule(t *testing.T) {
 
 	// Pausing stops its wakes.
 	current, _, _ = store.Agent(ctx, agent.ID)
-	paused := pauseAgent(t, store, current, true, task.UpdatedAt.Int64()+1)
+	paused := pauseAgent(t, store, current, true, state.NextReviewAt+2)
 	if state := specialistStateOf(t, store, agent.ID); state.Waiting != "paused" || state.NextReviewAt != 0 {
 		t.Fatalf("paused state = %+v", state)
 	}
 	if woken := wakeBodies(t, store, 1<<40); len(woken) != 0 {
 		t.Fatalf("paused wake = %q", woken)
 	}
-	_ = pauseAgent(t, store, paused, false, task.CompletedAt.Int64()+2)
+	_ = pauseAgent(t, store, paused, false, state.NextReviewAt+3)
 }
 
 // A specialist never claims shared work. Its carrier needs a worker slot
