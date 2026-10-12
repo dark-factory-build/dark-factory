@@ -258,6 +258,24 @@ func (daemon *Daemon) publishPull(ctx context.Context, c kernel.PublishableChang
 	if err != nil {
 		return err
 	}
+	// A correction replaces the pull request's tree with its head's, so a head
+	// lacking the main the pull request already carries would silently revert
+	// it (#1784). Until publication merges (#1807), the worker rebases.
+	if c.Pull != 0 && tip != "" {
+		if prBase, err := gitOutput(ctx, gitDir, "merge-base", tip, main); err != nil {
+			return err
+		} else if _, err = gitOutput(ctx, gitDir, "merge-base", "--is-ancestor", strings.TrimSpace(string(prBase)), c.Head); err != nil {
+			if exit := new(exec.ExitError); !errors.As(err, &exit) || exit.ExitCode() != 1 {
+				return err
+			}
+			note := fmt.Sprintf("factoryd did not publish head %s to pull request #%d: it lacks main at %s, which the pull request already carries, so publishing it would revert that work. Rebase the Change onto origin/main, keep only this task's changes, and settle again.", c.Head, c.Pull, strings.TrimSpace(string(prBase)))
+			at, err := daemon.timestamp()
+			if err == nil {
+				_, err = daemon.store.SendBackTask(ctx, nil, c.Task.ID, c.Task.Revision, c.Head, note, at)
+			}
+			return errors.Join(errPublishLater, errors.New("sent back to rebase: "+note), err)
+		}
+	}
 	head, diffFrom, mergeParent := from, from, ""
 	if tip != "" {
 		if c.Pull != 0 {

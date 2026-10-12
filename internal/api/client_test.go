@@ -1511,6 +1511,87 @@ func TestAttemptRestartRetryHonorsDeadline(t *testing.T) {
 	}
 }
 
+// A read or an outcome whose reply is lost to a restart is sent again to the
+// next generation, while a reply lost by the daemon that still holds the
+// socket is its answer: the call fails at once instead of resending it.
+func TestAttemptReplaysOnlyRepliesLostToARestart(t *testing.T) {
+	directory := privateTestDirectory(t)
+	token := filepath.Join(directory, "token")
+	writeTestToken(t, token, testCredential('L'))
+	t.Setenv(attemptTokenFileEnv, token)
+	listener, socket := testListener(t, directory)
+	client, err := NewAttemptClientFromEnvironment(socket)
+	if err != nil {
+		t.Fatal(err)
+	}
+	drop := func(listener *net.UnixListener) error {
+		connection, err := listener.Accept()
+		if err != nil {
+			return err
+		}
+		defer connection.Close()
+		_, err = readTestFrame(connection)
+		return err
+	}
+	answer := func(listener *net.UnixListener, reply func(net.Conn) error) error {
+		connection, err := listener.Accept()
+		if err != nil {
+			return err
+		}
+		defer connection.Close()
+		if _, err := readTestFrame(connection); err != nil {
+			return err
+		}
+		return reply(connection)
+	}
+	// restart drops the request, unbinds, and answers from a new generation.
+	restart := func(reply func(net.Conn) error) chan error {
+		done := make(chan error, 1)
+		go func() {
+			if err := drop(listener); err != nil {
+				done <- err
+				return
+			}
+			listener.Close()
+			listener, _ = testListener(t, directory)
+			done <- answer(listener, reply)
+		}()
+		return done
+	}
+	done := restart(func(connection net.Conn) error {
+		return writeTestResponse(connection, wireAttemptDomain, successResponse(`{"task":"replayed"}`))
+	})
+	if task, err := client.Task(context.Background()); err != nil || task.Task != "replayed" {
+		t.Fatalf("task after lost reply = %+v, %v", task, err)
+	}
+	if err := <-done; err != nil {
+		t.Fatal(err)
+	}
+	done = restart(func(connection net.Conn) error {
+		return writeTestOutcomeResponse(connection, wireAttemptDomain, mutationResponse())
+	})
+	if result, err := client.Succeed(context.Background(), "finished"); err != nil || result.Revision != 4 {
+		t.Fatalf("outcome after lost reply = %+v, %v", result, err)
+	}
+	if err := <-done; err != nil {
+		t.Fatal(err)
+	}
+	defer listener.Close()
+	for _, call := range []func() error{
+		func() error { _, err := client.Task(context.Background()); return err },
+		func() error { _, err := client.Succeed(context.Background(), "finished"); return err },
+	} {
+		done := make(chan error, 1)
+		go func() { done <- drop(listener) }()
+		if err := call(); !errors.Is(err, ErrTransport) {
+			t.Fatalf("reply lost by a live daemon = %v", err)
+		}
+		if err := <-done; err != nil {
+			t.Fatal(err)
+		}
+	}
+}
+
 func TestInputBoundsFailBeforeConnection(t *testing.T) {
 	bearer := testCredential('B')
 	directory := privateTestDirectory(t)

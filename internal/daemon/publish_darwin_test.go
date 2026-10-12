@@ -425,6 +425,26 @@ func TestFactorydPublishesCorrectionFromThePRTip(t *testing.T) {
 	}
 }
 
+// A correction whose head lacks the main its pull request already carries
+// would revert that main on publication (#1784): nothing is written and its
+// task goes back to rebase.
+func TestACorrectionLackingItsPullRequestBaseGoesBackToRebase(t *testing.T) {
+	fixture, c, source, app, checkout := publishFixture(t, 1, false)
+	root, git := filepath.Dir(source), change.TrustedGitExecutable
+	registered := strings.TrimSpace(supervisorGitOutput(t, git, "-C", root, "remote", "get-url", "origin"))
+	if err := os.WriteFile(filepath.Join(registered, "merged.txt"), []byte("merged since\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	supervisorGit(t, git, "-C", registered, "-c", "user.name=fixture", "-c", "user.email=fixture@example.invalid", "add", "merged.txt")
+	supervisorGit(t, git, "-C", registered, "-c", "user.name=fixture", "-c", "user.email=fixture@example.invalid", "commit", "-q", "-m", "merged since")
+	app.main = strings.TrimSpace(supervisorGitOutput(t, git, "-C", registered, "rev-parse", "HEAD"))
+	app.tip, c.Pull = app.main, 31 // the pull request's branch already carries that main
+	err := fixture.daemon.publishChange(context.Background(), c, "team/repo", source, app.call, checkout)
+	if !errors.Is(err, errPublishLater) || !strings.Contains(err.Error(), "sent back to rebase") || !strings.Contains(err.Error(), app.main) || len(app.writes) != 0 {
+		t.Fatalf("err = %v, writes = %+v", err, app.writes)
+	}
+}
+
 // A worker answering a verdict with evidence and no file change (#1706)
 // moves no head: its answer replaces the body, instead of publication
 // refusing "nothing to publish". The reconciler reviews the head once more.
