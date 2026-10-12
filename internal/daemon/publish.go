@@ -3,7 +3,9 @@ package daemon
 import (
 	"context"
 	"crypto/sha1"
+	"crypto/sha256"
 	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -482,6 +484,55 @@ func publicationEntries(ctx context.Context, gitDir, from, head string) ([]map[s
 		entries = append(entries, map[string]any{"path": path, "mode": mode, "content_base64": encoded})
 	}
 	return entries, nil
+}
+
+// packChunkBytes is publish_pack's chunk, whose base64 and JSON-RPC envelope
+// fit the 512 KiB attempt envelope (control-plane PACK_CHUNK_BYTES).
+const packChunkBytes = 256 << 10
+
+// publishPack moves branch from expected ("" creates it) to head through the
+// Maintainer's publish_pack, which pushes the objects head has beyond known, a
+// commit GitHub holds, byte for byte. Every chunk replays under operation, so
+// after an ambiguous response the whole call is repeated and the Maintainer
+// reconciles the push. publish_commit refuses review-authority paths, but a
+// pack is opaque to the Maintainer, so they are refused here.
+func publishPack(ctx context.Context, call publishCall, gitDir, repo, operation, branch, expected, known, head string) error {
+	changed, err := gitOutput(ctx, gitDir, "diff", "--no-renames", "--name-only", known, head, "--", "CODEOWNERS", ".github/CODEOWNERS", "docs/CODEOWNERS", ".github/dependabot.yml", ".github/dependabot.yaml")
+	if err == nil && len(changed) > 0 {
+		err = fmt.Errorf("%s changes review authority: %s", head, strings.Fields(string(changed)))
+	}
+	if err != nil {
+		return err
+	}
+	command := exec.CommandContext(ctx, change.TrustedGitExecutable, "--git-dir", gitDir, "pack-objects", "--stdout", "--revs", "--quiet")
+	command.Env = append(filteredReviewEnvironment(), "GIT_CONFIG_NOSYSTEM=1", "GIT_CONFIG_GLOBAL=/dev/null")
+	command.Stdin = strings.NewReader(head + "\n^" + known + "\n")
+	pack, err := command.Output()
+	if err != nil {
+		return fmt.Errorf("pack %s from %s: %w", head, known, err)
+	}
+	sum := sha256.Sum256(pack)
+	var published struct {
+		Commit *string `json:"commit_sha"`
+	}
+	for index := 0; index*packChunkBytes < len(pack); index++ {
+		arguments := map[string]any{"repository": repo, "operation_id": operation, "branch": branch, "head_sha": head, "pack_sha256": hex.EncodeToString(sum[:]), "pack_bytes": len(pack),
+			"chunk_index": index, "chunk_base64": base64.StdEncoding.EncodeToString(pack[index*packChunkBytes : min(len(pack), (index+1)*packChunkBytes)])}
+		if expected != "" {
+			arguments["expected_head_sha"] = expected
+		}
+		response, err := call(ctx, "publish_pack", arguments)
+		if err == nil {
+			err = json.Unmarshal(response, &published)
+		}
+		if err != nil {
+			return err
+		}
+	}
+	if published.Commit == nil || *published.Commit != head {
+		return fmt.Errorf("publish_pack did not move %s to %s", branch, head)
+	}
+	return nil
 }
 
 func gitOutput(ctx context.Context, gitDir string, arguments ...string) ([]byte, error) {
