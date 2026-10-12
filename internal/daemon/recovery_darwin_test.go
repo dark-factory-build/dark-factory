@@ -33,6 +33,7 @@ type recoveryFixture struct {
 	keys         kernel.AdmissionKeys
 	run          kernel.Run
 	proof        [32]byte
+	home         *install.OperationalHome
 }
 
 func newRecoveryFixture(t *testing.T, seed byte) *recoveryFixture {
@@ -115,7 +116,7 @@ func newRecoveryFixtureFor(t *testing.T, seed byte, role kernel.AgentRole, provi
 	if _, err := store.SetDispatch(ctx, factory.Revision, true, at); err != nil {
 		t.Fatal(err)
 	}
-	fixture := &recoveryFixture{daemon: daemon, store: store, parent: parent, parentPath: parentPath, changeParent: filepath.Join(homePath, "changes"), storePath: storePath}
+	fixture := &recoveryFixture{daemon: daemon, store: store, parent: parent, parentPath: parentPath, changeParent: filepath.Join(homePath, "changes"), storePath: storePath, home: home}
 	copy(fixture.proof[:], bytes.Repeat([]byte{seed + 4}, 32))
 	proofDigest := sha256.Sum256(fixture.proof[:])
 	storedProof, err := kernel.ResultProofDigestFromBytes(proofDigest[:])
