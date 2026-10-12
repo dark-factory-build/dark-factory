@@ -158,6 +158,9 @@ func runProvider(ctx context.Context) (resultErr error) {
 			return err
 		}
 	}
+	if config.FreshSession {
+		request = request.WithFreshSession()
+	}
 	launch, err := provider.Build(request)
 	if err != nil {
 		_ = cwd.Close()

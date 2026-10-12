@@ -42,6 +42,9 @@ const (
 	// asks the released daemon to confirm that it is still present immediately
 	// before provider exec.
 	AttemptProviderHandoff AttemptEventKind = "provider-handoff"
+	// AttemptProviderExecError carries the worker's bounded refusal after
+	// provider release and before exec; the attempt result follows it.
+	AttemptProviderExecError AttemptEventKind = "provider-exec-error"
 )
 
 // TerminalCommandKind and TerminalEventKind are intentionally closed unions.

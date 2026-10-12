@@ -310,6 +310,15 @@ type Request struct {
 	// same agent's most recent terminal run (see
 	// kernel.Store.LatestTerminalRuntimeRoot). See WithPreviousWorkingDirectory.
 	previousWorkingDirectory string
+	freshSession             bool
+}
+
+// WithFreshSession makes Build start a new native session rather than resume
+// one: the task's previous run left without an attempt outcome, and an early
+// exit writes no new transcript, so resuming would pick that session again.
+func (request Request) WithFreshSession() Request {
+	request.freshSession = true
+	return request
 }
 
 // WithPreviousWorkingDirectory names the working directory a previous run of
@@ -414,21 +423,25 @@ var claudeSessionNamespace = sha256.Sum256([]byte("dark-factory.claude-code.sess
 // project+task+incarnation). Deriving the id from provider+agent+incarnation
 // means no extra state is needed to remember which session belongs to which
 // task: the same retry always recomputes the same id.
-func claudeSessionSelection(runtime RuntimePaths, cwd, agentID, taskIncarnationID string) (id string, resume bool, err error) {
+// The newest generation on disk is resumed while under the rotation ceiling;
+// fresh skips every existing one, so a later resume continues the newest.
+func claudeSessionSelection(runtime RuntimePaths, cwd, agentID, taskIncarnationID string, fresh bool) (id string, resume bool, err error) {
 	projectDir := filepath.Join(claudeConfigHome(runtime), "projects", escapeClaudeProjectPath(cwd))
 	seed := "claude-code\x00" + agentID + "\x00" + taskIncarnationID
+	previous, resumable := "", false
 	for generation := 0; generation < maxClaudeSessionGenerations; generation++ {
 		candidate := formatUUID(uuidV5(claudeSessionNamespace, []byte(fmt.Sprintf("%s\x00%d", seed, generation))))
 		info, statErr := os.Stat(filepath.Join(projectDir, candidate+".jsonl"))
-		if statErr == nil && info.Size() < nativeSessionRotateBytes {
-			return candidate, true, nil
-		}
 		if statErr != nil {
 			// Missing, or some other stat failure: nothing provably resumable
 			// exists at this generation, so start fresh with this exact id
 			// rather than fail a launch over an absent or unreadable file.
+			if resumable {
+				return previous, true, nil
+			}
 			return candidate, false, nil
 		}
+		previous, resumable = candidate, !fresh && info.Size() < nativeSessionRotateBytes
 	}
 	return "", false, ErrInvalid
 }
@@ -643,7 +656,7 @@ func Build(request Request) (Launch, error) {
 		// boundary below. The account login lives outside those files.
 		argv := []string{path, "--permission-mode", "dontAsk", "--setting-sources", ""}
 		if request.role == kernel.RoleWorker {
-			id, resume, err := claudeSessionSelection(request.runtime, request.workingDirectory, request.agentID, request.taskIncarnationID)
+			id, resume, err := claudeSessionSelection(request.runtime, request.workingDirectory, request.agentID, request.taskIncarnationID, request.freshSession)
 			if err != nil {
 				return Launch{}, err
 			}
@@ -710,7 +723,7 @@ func Build(request Request) (Launch, error) {
 			discoveryCwd = request.previousWorkingDirectory
 		}
 		argv := []string{path}
-		if id, resume := codexSessionSelection(request.runtime, discoveryCwd); resume {
+		if id, resume := codexSessionSelection(request.runtime, discoveryCwd); resume && !request.freshSession {
 			argv = append(argv, "resume", id)
 		}
 		// Codex's explicit resume can otherwise open its interactive CWD

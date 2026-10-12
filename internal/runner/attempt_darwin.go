@@ -250,6 +250,10 @@ func (c *AttemptController) Next(timeout time.Duration) (AttemptEvent, error) {
 				if validProviderErrorFrame(frame) {
 					return AttemptEvent{}, errors.Join(fmt.Errorf("runner: worker preparation: %s", frame.Payload), c.spend())
 				}
+			case controllerProviderReleased:
+				if validProviderErrorFrame(frame) && !c.terminalReady {
+					return AttemptEvent{Kind: AttemptProviderExecError, Payload: frame.Payload}, nil
+				}
 			}
 			return AttemptEvent{}, ErrState
 		}

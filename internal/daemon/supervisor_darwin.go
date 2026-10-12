@@ -524,12 +524,14 @@ func (daemon *Daemon) runNext(ctx context.Context, spec SupervisorSpec) (resultR
 	if _, err := daemon.activateResource(ctx, run.ID, keys.resources.RuntimeRoot, runtimeIdentity); err != nil {
 		return kernel.Run{}, kernel.NewOutcomeUnknownError(err)
 	}
+	// Like the hint above, a failed read only means resuming as before.
+	freshSession, _ := daemon.store.LatestTaskRunProviderExit(ctx, run.TaskID, run.TaskIncarnationID)
 	if _, err := runtimeValue.PublishAttemptToken(ctx, keys.token); err != nil {
 		return daemon.failRun(run, kernel.FailureSpawn, err)
 	}
 	config := changeworker.Config{
 		GitAuthor: daemon.gitAuthor(ctx), CustomerMaintainer: customerMaintainer, Provider: run.Provider, Role: run.Role, Model: run.Model, ReasoningEffort: run.ReasoningEffort,
-		AgentID: run.AgentID.String(), TaskIncarnationID: run.TaskIncarnationID.String(), PreviousWorkingDirectory: previousWorkingDirectory,
+		AgentID: run.AgentID.String(), TaskIncarnationID: run.TaskIncarnationID.String(), PreviousWorkingDirectory: previousWorkingDirectory, FreshSession: freshSession,
 		RuntimePath: gotRuntimePath, RuntimeIdentity: runtimeFileIdentity,
 		GitExecutable: spec.GitExecutable, FactoryctlExecutable: factoryctl.Path(), ToolPath: spec.ToolPath, ToolchainReadRoots: spec.ToolchainReadRoots, LocalCILeaseDir: localCILeaseDir, TraceReceiverPort: traceReceiverPort, RunID: telemetryRunID, AccountHome: spec.AccountHome, AccountConfigDir: accountConfigDir, RepositoryRoot: repository.Root, RepositoryIdentity: repositoryIdentity, RepositoryGitIdentity: repositoryGitIdentity, RepositoryOriginDigest: repositoryOriginDigest, GitCommonDir: gitCommonDir, ProjectGitDirs: projectGitDirs,
 		Revision: revision, ChangeParent: spec.ChangeParent, FinalName: finalName,
@@ -1024,8 +1026,12 @@ func (daemon *Daemon) attemptResultTail(
 		return kernel.Run{}, err
 	}
 	if floor, head, payload := live.diagnosticSnapshot(); len(payload) > 0 {
-		if capturedAt, timestampErr := daemon.timestamp(); timestampErr == nil {
-			_ = daemon.store.SaveTerminalDiagnostics(daemon.cleanupCtx, kernel.TerminalDiagnostics{RunID: run.ID, Floor: floor, Head: head, Payload: payload, CapturedAt: capturedAt})
+		capturedAt, saveErr := daemon.timestamp()
+		if saveErr == nil {
+			saveErr = daemon.store.SaveTerminalDiagnostics(daemon.cleanupCtx, kernel.TerminalDiagnostics{RunID: run.ID, Floor: floor, Head: head, Payload: payload, CapturedAt: capturedAt})
+		}
+		if saveErr != nil {
+			LogFactoryd(daemon.log, "factoryd: run %s terminal diagnostics not saved: %v\n", run.ID, saveErr)
 		}
 	}
 	exitEvent, err := terminalExitEvent(record)

@@ -736,6 +736,21 @@ func (attempt *liveAttempt) handleRunnerEvent(event runner.AttemptEvent) (bool, 
 			return false, runner.ErrState
 		}
 		return false, attempt.routeFrame(*event.Frame)
+	case runner.AttemptProviderExecError:
+		// The worker refused before provider exec, so no provider will name a
+		// cause. Retain its first line as the outcome the supervisor proposes
+		// before it consumes the attempt result that follows.
+		detail, _, _ := strings.Cut(string(event.Payload), "\n")
+		proposal, err := kernel.NewFailureProposal(kernel.FailureProviderExit, "provider exec refused: "+terminalTextProjection([]byte(detail), false, 1024))
+		if err != nil {
+			return false, err
+		}
+		attempt.daemon.operationMu.Lock()
+		if attempt.pendingOutcome == nil {
+			attempt.pendingOutcome = &proposal
+		}
+		attempt.daemon.operationMu.Unlock()
+		return false, nil
 	case runner.AttemptResultReady:
 		if event.Result == nil {
 			return false, runner.ErrState

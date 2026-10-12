@@ -213,7 +213,9 @@ func (o *terminalOwner) awaitProviderExec(stagePTY *ptyStageSink) error {
 				return err
 			}
 			if validProviderErrorFrame(frame) {
-				return fmt.Errorf("runner: provider exec: %s", frame.Payload)
+				// Forward the bounded refusal, as the stage checkpoints do, so the
+				// daemon records it as the run's failure cause.
+				return errors.Join(fmt.Errorf("runner: provider exec: %s", frame.Payload), o.writeDaemonFrame(frame))
 			}
 			if validProviderHandoffCheck(frame) {
 				// The worker has completed every provider check and is paused

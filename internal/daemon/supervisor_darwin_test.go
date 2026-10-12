@@ -1619,6 +1619,34 @@ func TestSupervisorProviderExitWithoutTypedOutcomeFails(t *testing.T) {
 	fixture.assertOneWitness(t)
 }
 
+func TestSupervisorRecordsPreExecRefusalAsProviderExitCause(t *testing.T) {
+	fixture := newSupervisorFixture(t, supervisorProgram(t, true, false))
+	fixture.spec.beforeProviderStateCheck = func() error {
+		recoverable, err := fixture.store.RecoverableRuns(context.Background())
+		if err != nil || len(recoverable) != 1 {
+			return fmt.Errorf("recoverable runs = %d, err = %v", len(recoverable), err)
+		}
+		// The worker's post-release authority check refuses a token whose mode
+		// changed, so it exits before provider exec as a failing gate would.
+		return os.Chmod(filepath.Join(fixture.runtimeParentPath, recoverable[0].Run.ID.String(), changeworker.AttemptTokenName), 0o400)
+	}
+	run, err := fixture.daemon.RunNext(context.Background(), fixture.spec)
+	if err != nil {
+		t.Fatalf("RunNext: %v", err)
+	}
+	fixture.assertTerminal(t, run, kernel.OutcomeFailed)
+	if run.Terminal.Code() != kernel.FailureProviderExit || !strings.Contains(run.Terminal.Detail(), "provider exec refused: runtime authority verification") {
+		t.Fatalf("terminal = %s %q, want the worker's refusal", run.Terminal.Code(), run.Terminal.Detail())
+	}
+	if _, statErr := os.Stat(fixture.witness); !errors.Is(statErr, os.ErrNotExist) {
+		t.Fatalf("provider ran after refusal: %v", statErr)
+	}
+	fresh, err := fixture.store.LatestTaskRunProviderExit(context.Background(), run.TaskID, run.TaskIncarnationID)
+	if err != nil || !fresh {
+		t.Fatalf("next attempt fresh = %v, err = %v", fresh, err)
+	}
+}
+
 func TestSupervisorPersistsOuterRunnerExitNotProviderExit(t *testing.T) {
 	fixture := newSupervisorFixture(t, providerExitAfterSuccessProgram(t, 7))
 	run, err := fixture.daemon.RunNext(context.Background(), fixture.spec)

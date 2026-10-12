@@ -290,7 +290,7 @@ func TestPrepareGoModuleCacheRejectsSymlinkAncestor(t *testing.T) {
 // temp-directory paths.
 func wantClaudeWorkerSessionFlag(t *testing.T, request Request) []string {
 	t.Helper()
-	id, resume, err := claudeSessionSelection(request.runtime, request.workingDirectory, request.agentID, request.taskIncarnationID)
+	id, resume, err := claudeSessionSelection(request.runtime, request.workingDirectory, request.agentID, request.taskIncarnationID, false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -635,7 +635,7 @@ func TestCodexAttemptMCPNamesAreBoundToRuntimeHome(t *testing.T) {
 func TestClaudeWorkerSessionStartsFreshWhenNoTranscriptExists(t *testing.T) {
 	installation, runtime, _ := nativeFixture(t, kernel.ProviderClaudeCode)
 	cwd := filepath.Join(t.TempDir(), "change")
-	id, resume, err := claudeSessionSelection(runtime, cwd, testAgentID, testIncarnationID)
+	id, resume, err := claudeSessionSelection(runtime, cwd, testAgentID, testIncarnationID, false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -688,7 +688,7 @@ func TestClaudeProjectPathEscapeMatchesTheCLI(t *testing.T) {
 func TestClaudeWorkerSessionResumesWhenTranscriptExistsUnderLimit(t *testing.T) {
 	installation, runtime, _ := nativeFixture(t, kernel.ProviderClaudeCode)
 	cwd := filepath.Join(t.TempDir(), ".dark-factory", "changes", "change")
-	id, resume, err := claudeSessionSelection(runtime, cwd, testAgentID, testIncarnationID)
+	id, resume, err := claudeSessionSelection(runtime, cwd, testAgentID, testIncarnationID, false)
 	if err != nil || resume {
 		t.Fatalf("initial selection id=%q resume=%v err=%v", id, resume, err)
 	}
@@ -713,6 +713,23 @@ func TestClaudeWorkerSessionResumesWhenTranscriptExistsUnderLimit(t *testing.T) 
 	if slices.Contains(launch.Argv(), "--session-id") {
 		t.Fatalf("worker argv = %q, want no --session-id once a transcript exists", launch.Argv())
 	}
+	// A fresh session takes the next unused id, and a later ordinary launch
+	// resumes that newest generation rather than the abandoned one.
+	fresh, err := Build(request.WithFreshSession())
+	if err != nil {
+		t.Fatal(err)
+	}
+	i := slices.Index(fresh.Argv(), "--session-id")
+	if i < 0 || fresh.Argv()[i+1] == id || slices.Contains(fresh.Argv(), "--resume") {
+		t.Fatalf("fresh worker argv = %q, want a new --session-id", fresh.Argv())
+	}
+	next := fresh.Argv()[i+1]
+	if err := os.WriteFile(filepath.Join(transcriptDir, next+".jsonl"), []byte(`{"type":"session_meta"}`+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if got, resume, err := claudeSessionSelection(runtime, cwd, testAgentID, testIncarnationID, false); err != nil || !resume || got != next {
+		t.Fatalf("after fresh selection id=%q resume=%v err=%v, want resume %q", got, resume, err, next)
+	}
 }
 
 // A linked Claude account's launch exports CLAUDE_CONFIG_DIR set to the
@@ -736,7 +753,7 @@ func TestClaudeWorkerLinkedAccountSessionResumesUnderItsOwnConfigDirectory(t *te
 		t.Fatalf("fixture is not actually a linked account launch: %q", linked.environment(kernel.ProviderClaudeCode))
 	}
 	cwd := filepath.Join(t.TempDir(), "change")
-	id, resume, err := claudeSessionSelection(linked, cwd, testAgentID, testIncarnationID)
+	id, resume, err := claudeSessionSelection(linked, cwd, testAgentID, testIncarnationID, false)
 	if err != nil || resume {
 		t.Fatalf("initial selection id=%q resume=%v err=%v", id, resume, err)
 	}
@@ -771,7 +788,7 @@ func TestClaudeWorkerLinkedAccountSessionResumesUnderItsOwnConfigDirectory(t *te
 func TestClaudeWorkerSessionRotatesWhenTranscriptExceedsLimit(t *testing.T) {
 	installation, runtime, _ := nativeFixture(t, kernel.ProviderClaudeCode)
 	cwd := filepath.Join(t.TempDir(), "change")
-	firstGeneration, resume, err := claudeSessionSelection(runtime, cwd, testAgentID, testIncarnationID)
+	firstGeneration, resume, err := claudeSessionSelection(runtime, cwd, testAgentID, testIncarnationID, false)
 	if err != nil || resume {
 		t.Fatalf("initial selection id=%q resume=%v err=%v", firstGeneration, resume, err)
 	}
@@ -789,7 +806,7 @@ func TestClaudeWorkerSessionRotatesWhenTranscriptExceedsLimit(t *testing.T) {
 	if err := oversized.Close(); err != nil {
 		t.Fatal(err)
 	}
-	secondGeneration, resume, err := claudeSessionSelection(runtime, cwd, testAgentID, testIncarnationID)
+	secondGeneration, resume, err := claudeSessionSelection(runtime, cwd, testAgentID, testIncarnationID, false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -881,6 +898,15 @@ func TestCodexWorkerResumesTheNewestRolloutForItsExactCwd(t *testing.T) {
 	}
 	if launch.Argv()[1] != "resume" || launch.Argv()[2] != newest {
 		t.Fatalf("worker argv = %q, want a leading resume of %q", launch.Argv(), newest)
+	}
+	// After a provider_exit without an outcome the same rollout is still
+	// newest, so the next attempt must not resume it.
+	fresh, err := Build(request.WithFreshSession())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if fresh.Argv()[1] == "resume" {
+		t.Fatalf("fresh worker argv = %q, want no resume", fresh.Argv())
 	}
 }
 

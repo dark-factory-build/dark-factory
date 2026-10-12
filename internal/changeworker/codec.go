@@ -55,13 +55,17 @@ type Config struct {
 	// current working directory is a fresh runtime root every run and could
 	// never itself be found again; see provider.codexSessionSelection.
 	PreviousWorkingDirectory string
-	RuntimePath              string
-	RuntimeIdentity          runner.FileIdentity
-	GitExecutable            string
-	FactoryctlExecutable     string
-	ToolPath                 string
-	ToolchainReadRoots       string
-	LocalCILeaseDir          string
+	// FreshSession starts a new native provider session instead of resuming:
+	// the task's previous run ended provider_exit before an attempt outcome,
+	// so resuming its session could only repeat that exit.
+	FreshSession         bool
+	RuntimePath          string
+	RuntimeIdentity      runner.FileIdentity
+	GitExecutable        string
+	FactoryctlExecutable string
+	ToolPath             string
+	ToolchainReadRoots   string
+	LocalCILeaseDir      string
 	// RunID names this run in the agent telemetry its CLI exports to
 	// TraceReceiverPort; empty when there is no receiver.
 	RunID string
@@ -132,6 +136,7 @@ type configWire struct {
 	AgentID                  string             `json:"agent_id"`
 	TaskIncarnationID        string             `json:"task_incarnation_id"`
 	PreviousWorkingDirectory string             `json:"previous_working_directory,omitempty"`
+	FreshSession             bool               `json:"fresh_session,omitempty"`
 	RuntimePath              string             `json:"runtime_path"`
 	RuntimeIdentity          identityWire       `json:"runtime_identity"`
 	GitExecutable            string             `json:"git_executable"`
@@ -163,7 +168,7 @@ func EncodeConfig(config Config) ([]byte, error) {
 	}
 	wire := configWire{GitAuthor: config.GitAuthor, CustomerMaintainer: config.CustomerMaintainer,
 		Provider: config.Provider.String(), Role: config.Role.String(), Model: config.Model, ReasoningEffort: config.ReasoningEffort,
-		AgentID: config.AgentID, TaskIncarnationID: config.TaskIncarnationID, PreviousWorkingDirectory: config.PreviousWorkingDirectory,
+		AgentID: config.AgentID, TaskIncarnationID: config.TaskIncarnationID, PreviousWorkingDirectory: config.PreviousWorkingDirectory, FreshSession: config.FreshSession,
 		RuntimePath: config.RuntimePath, RuntimeIdentity: identityWire{Device: config.RuntimeIdentity.Device, Inode: config.RuntimeIdentity.Inode},
 		GitExecutable: config.GitExecutable, FactoryctlExecutable: config.FactoryctlExecutable, ToolPath: config.ToolPath, ToolchainReadRoots: config.ToolchainReadRoots, LocalCILeaseDir: config.LocalCILeaseDir, TraceReceiverPort: config.TraceReceiverPort, RunID: config.RunID, AccountHome: config.AccountHome, AccountConfigDir: config.AccountConfigDir,
 		RepositoryGitIdentity: identityWire{Device: config.RepositoryGitIdentity.Device(), Inode: config.RepositoryGitIdentity.Inode()}, RepositoryOriginDigest: config.RepositoryOriginDigest,
@@ -206,7 +211,7 @@ func DecodeConfig(encoded []byte) (Config, error) {
 	}
 	config := Config{GitAuthor: wire.GitAuthor, CustomerMaintainer: wire.CustomerMaintainer,
 		Provider: providerKind, Role: role, Model: wire.Model, ReasoningEffort: wire.ReasoningEffort,
-		AgentID: wire.AgentID, TaskIncarnationID: wire.TaskIncarnationID, PreviousWorkingDirectory: wire.PreviousWorkingDirectory,
+		AgentID: wire.AgentID, TaskIncarnationID: wire.TaskIncarnationID, PreviousWorkingDirectory: wire.PreviousWorkingDirectory, FreshSession: wire.FreshSession,
 		RuntimePath: wire.RuntimePath, RuntimeIdentity: runner.FileIdentity{Device: wire.RuntimeIdentity.Device, Inode: wire.RuntimeIdentity.Inode},
 		GitExecutable: wire.GitExecutable, FactoryctlExecutable: wire.FactoryctlExecutable, ToolPath: wire.ToolPath, ToolchainReadRoots: wire.ToolchainReadRoots, LocalCILeaseDir: wire.LocalCILeaseDir, TraceReceiverPort: wire.TraceReceiverPort, RunID: wire.RunID, AccountHome: wire.AccountHome, AccountConfigDir: wire.AccountConfigDir,
 		RepositoryGitIdentity: repositoryGitIdentity, RepositoryOriginDigest: wire.RepositoryOriginDigest,

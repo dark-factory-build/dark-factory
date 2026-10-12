@@ -240,6 +240,19 @@ func TestLiveAttemptShutdownReturnsFallbackToSupervisor(t *testing.T) {
 	}
 }
 
+func TestLiveAttemptRetainsPreExecRefusalAsProviderExitOutcome(t *testing.T) {
+	runID, sessionID := liveTestIDs(t, 11002)
+	attempt := newLiveAttempt(&Daemon{}, runID, sessionID, nil)
+	payload := []byte("runtime authority verification: Change worker failed\nsecond line")
+	if stop, err := attempt.handleRunnerEvent(runner.AttemptEvent{Kind: runner.AttemptProviderExecError, Payload: payload}); stop || err != nil {
+		t.Fatalf("refusal = stop %v err %v", stop, err)
+	}
+	proposal, ok := attempt.pendingOutcomeSnapshot()
+	if !ok || proposal.Code() != kernel.FailureProviderExit || proposal.Detail() != "provider exec refused: runtime authority verification: Change worker failed" {
+		t.Fatalf("retained outcome = %v %s %q", ok, proposal.Code(), proposal.Detail())
+	}
+}
+
 func TestLiveAttemptRejectsExitBroadcastWithoutCommittedResult(t *testing.T) {
 	runID, sessionID := liveTestIDs(t, 11001)
 	attempt := newLiveAttempt(nil, runID, sessionID, nil)

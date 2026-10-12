@@ -652,6 +652,27 @@ func (store *Store) LatestTaskRun(ctx context.Context, id TaskID, incarnation In
 	return latestRunForTask(ctx, read.connection, task)
 }
 
+// LatestTaskRunProviderExit reports whether the task incarnation's most
+// recently terminal run ended provider_exit: its provider left before an
+// attempt outcome of its own.
+func (store *Store) LatestTaskRunProviderExit(ctx context.Context, id TaskID, incarnation IncarnationID) (bool, error) {
+	if id.zero() || incarnation.zero() {
+		return false, ErrInvalidValue
+	}
+	read, err := store.beginRead(ctx)
+	if err != nil {
+		return false, err
+	}
+	defer read.Close()
+	var code sql.NullString
+	err = read.connection.QueryRowContext(ctx, `SELECT terminal_code FROM runs WHERE task_id = ? AND task_incarnation_id = ? AND phase = 'terminal'
+		ORDER BY terminal_at_ms DESC, id DESC LIMIT 1`, id.Bytes(), incarnation.Bytes()).Scan(&code)
+	if errors.Is(err, sql.ErrNoRows) {
+		return false, nil
+	}
+	return code.String == FailureProviderExit.String(), err
+}
+
 func latestRunForTask(ctx context.Context, connection *sql.Conn, task Task) (Run, bool, error) {
 	return scanRun(connection.QueryRowContext(ctx, `SELECT `+runColumns+` FROM runs WHERE project_id=? AND task_id=? AND task_incarnation_id=? ORDER BY admitted_task_work_revision DESC LIMIT 1`, task.ProjectID.Bytes(), task.ID.Bytes(), task.IncarnationID.Bytes()))
 }
