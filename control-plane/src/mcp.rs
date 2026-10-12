@@ -683,7 +683,7 @@ fn tools() -> Value {
     }, {
         "name": "publish_pack",
         "title": "Publish an exact Git pack to a factory branch",
-        "description": "Move one factory/ branch from expected_head_sha (absent: the branch must not exist) to head_sha by pushing a Git pack whose objects GitHub stores byte for byte. Send the pack in order as chunks of exactly 262144 bytes, the last one shorter, at most 128; every call repeats the same fields but chunk_index and chunk_base64, which bind each chunk to pack_sha256. The last chunk pushes the pack with the expected head as the ref's precondition, so a moved branch is refused. It applies no path policy: factoryd refuses review-authority paths before sending, and offers this tool to no agent. Resending a chunk with the same operation UUID is a replay.",
+        "description": "Move one factory/ branch from expected_head_sha (absent: the branch must not exist) to head_sha by pushing a Git pack whose objects GitHub stores byte for byte. Send the pack in order as chunks of exactly 262144 bytes, the last one shorter, at most 32 (8 MiB); every call repeats the same fields but chunk_index and chunk_base64, which bind each chunk to pack_sha256. The last chunk pushes the pack with the expected head as the ref's precondition, so a moved branch is refused. It applies no path policy: factoryd refuses review-authority paths before sending, and offers this tool to no agent. Resending a chunk with the same operation UUID is a replay.",
         "inputSchema": {
             "type": "object",
             "properties": {
@@ -693,8 +693,8 @@ fn tools() -> Value {
                 "expected_head_sha": {"type": "string", "pattern": "^[0-9a-f]{40}$"},
                 "head_sha": {"type": "string", "pattern": "^[0-9a-f]{40}$"},
                 "pack_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
-                "pack_bytes": {"type": "integer", "minimum": 1, "maximum": 33554432},
-                "chunk_index": {"type": "integer", "minimum": 0, "maximum": 127},
+                "pack_bytes": {"type": "integer", "minimum": 1, "maximum": 8388608},
+                "chunk_index": {"type": "integer", "minimum": 0, "maximum": 31},
                 "chunk_base64": {"type": "string", "minLength": 4, "maxLength": 349528}
             },
             "required": ["repository", "operation_id", "branch", "head_sha", "pack_sha256", "pack_bytes", "chunk_index", "chunk_base64"],

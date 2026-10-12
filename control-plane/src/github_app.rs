@@ -27,10 +27,13 @@ pub(crate) const MAX_GITHUB_RESPONSE_BYTES: usize = 8 * 1024 * 1024;
 const MAX_COMMIT_FILES: usize = 50;
 const MAX_COMMIT_FILE_BYTES: usize = 1_000_000;
 /// One `publish_pack` chunk, so its base64 and JSON-RPC envelope fit
-/// factoryd's 512 KiB attempt envelope, and at most 32 MiB in all, which the
-/// Worker assembles in memory.
+/// factoryd's 512 KiB attempt envelope, and at most 8 MiB in all. The last
+/// chunk holds the whole pack about eight times over at once -- the journal's
+/// base64 JSON reply and its JavaScript copy, the parsed chunks, the decoded
+/// pack, the push body and its `Uint8Array` -- so 8 MiB keeps that near 64 MiB
+/// of the isolate's 128 MB, which counts JavaScript and WebAssembly alike.
 const PACK_CHUNK_BYTES: u64 = 256 * 1024;
-const MAX_PACK_CHUNKS: u64 = 128;
+const MAX_PACK_CHUNKS: u64 = 32;
 const MAX_ISSUE_LABELS: usize = 100;
 const MAX_ISSUE_LABEL_BYTES: usize = 50;
 
@@ -6124,6 +6127,21 @@ mod tests {
         );
         assert!(include_str!("../migrations/0006_operation_chunks.sql").contains("349528"));
         assert!(include_str!("mcp.rs").contains(r#""maxLength": 349528"#));
+        // So do the pack and index bounds.
+        assert!(include_str!("mcp.rs").contains(&format!(
+            r#""pack_bytes": {{"type": "integer", "minimum": 1, "maximum": {}}}"#,
+            MAX_PACK_CHUNKS * PACK_CHUNK_BYTES
+        )));
+        assert!(include_str!("mcp.rs").contains(&format!(
+            r#""chunk_index": {{"type": "integer", "minimum": 0, "maximum": {}}}"#,
+            MAX_PACK_CHUNKS - 1
+        )));
+        assert!(
+            include_str!("../migrations/0006_operation_chunks.sql").contains(&format!(
+                "chunk_index BETWEEN 0 AND {}",
+                MAX_PACK_CHUNKS - 1
+            ))
+        );
     }
 
     #[test]

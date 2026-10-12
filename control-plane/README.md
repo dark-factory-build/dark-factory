@@ -70,7 +70,9 @@ Access policy, or App configuration is live.
   `publish_pack` moves one `factory/` branch to an exact commit by pushing
   the caller's Git pack through `git-receive-pack`, with the stated branch
   head as the ref's compare-and-swap old value. Its chunks (256 KiB, at most
-  128, so each fits factoryd's 512 KiB attempt envelope) are held in order in
+  32, so each fits factoryd's 512 KiB attempt envelope and the whole pack,
+  held several times over while it is pushed, fits the isolate's memory)
+  are held in order in
   `maintainer_operation_chunks`, bound to the operation's request digest and
   the pack's SHA-256, and released when the operation completes or is
   refused. The pack is opaque to the Worker, so factoryd refuses
