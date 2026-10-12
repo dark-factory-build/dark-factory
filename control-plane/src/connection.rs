@@ -159,6 +159,7 @@ fn tool_write(name: &str) -> Option<bool> {
         | "list_issues"
         | "list_pull_requests"
         | "observe_pull_request_checks"
+        | "observe_repository_checks"
         | "list_deployments"
         | "observe_pull_request_merge" => Some(false),
         "create_issue"
@@ -1158,6 +1159,7 @@ mod tests {
         installation.suspended_at = Some("now".into());
         assert!(!installation.active(4));
         assert_eq!(tool_write("publish_commit"), Some(true));
+        assert_eq!(tool_write("observe_repository_checks"), Some(false));
         assert_eq!(tool_write("unknown"), None);
     }
 }

@@ -62,8 +62,8 @@ func (daemon *Daemon) refreshProduction(ctx context.Context, project kernel.Proj
 			observation, err = pullRequestObservation(ctx, daemon.github.MCP, identity.PublicationRepository, githubID, known, settled, daemon.noteMaintainerFault)
 			if err == nil {
 				var mainChecks []maintainerMainCheck
-				mainChecks, err = readMaintainerMainChecks(ctx, daemon.github.MCP, identity.PublicationRepository, githubID)
-				if err != nil {
+				mainChecks, mainErr := readMaintainerMainChecks(ctx, daemon.github.MCP, identity.PublicationRepository, githubID)
+				if mainErr != nil {
 					observation.Unavailable = "main_checks"
 				} else if len(mainChecks) > 0 {
 					converted := mainChecksToProduction(mainChecks, mainChecks[0].Revision)
