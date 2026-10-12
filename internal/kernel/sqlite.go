@@ -337,17 +337,6 @@ func (store *Store) validateOpen(ctx context.Context) error {
 	}
 	err = validateDatabaseSnapshot(ctx, tx.connection)
 	err = errors.Join(err, tx.Close())
-	if sqliteValidationHook != nil {
-		sqliteValidationHook(err)
-	}
-	return err
-}
-
-func (store *Store) validateOpenWithRetry(ctx context.Context) error {
-	err := store.validateOpen(ctx)
-	if errors.Is(err, ErrCorruptState) {
-		err = store.validateOpen(ctx)
-	}
 	return err
 }
 
@@ -356,7 +345,7 @@ func (store *Store) validateOpenWithRetry(ctx context.Context) error {
 // snapshot reads until a later validation passes; a timeout or interruption
 // is not corruption and leaves the hold as it was.
 func (store *Store) Validate(ctx context.Context) error {
-	err := store.validateOpenWithRetry(ctx)
+	err := store.validateOpen(ctx)
 	switch {
 	case err == nil:
 		store.held.Store(nil)
