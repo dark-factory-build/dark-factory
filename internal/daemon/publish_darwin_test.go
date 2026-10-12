@@ -32,8 +32,14 @@ type fakePublishMaintainer struct {
 	unavailable             bool             // the Maintainer authority is temporarily unavailable
 	indeterminateAgain      bool             // the fresh operation is also indeterminate
 	landCreateIndeterminate bool             // create_pull_request lands before losing its response
-	loseNext                bool             // the next write lands but its response is lost
-	body                    string           // the open pull request's stored body
+	headRef                 string
+	bodyIndeterminate       bool
+	bodyWrites              int
+	extraPull               bool
+	landSecondCommit        bool
+	commitWrites            int
+	loseNext                bool   // the next write lands but its response is lost
+	body                    string // the open pull request's stored body
 }
 
 func TestRepairPublicationUsesTaskTitle(t *testing.T) {
@@ -67,7 +73,12 @@ func (f *fakePublishMaintainer) call(_ context.Context, name string, arguments m
 		if number == nil {
 			number = uint64(31)
 		}
-		return json.Marshal(map[string]any{"pull_requests": []any{map[string]any{"number": number, "url": "https://github.com/team/repo/pull/31", "head_sha": f.tip, "base_sha": f.main, "base_ref": "main", "state": "open", "mergeable": true, "merge_state_status": "clean", "body": f.body}}})
+		pull := map[string]any{"number": number, "url": "https://github.com/team/repo/pull/31", "head_sha": f.tip, "head_ref": f.headRef, "base_sha": f.main, "base_ref": "main", "state": "open", "mergeable": true, "merge_state_status": "clean", "body": f.body}
+		pulls := []any{pull}
+		if f.extraPull {
+			pulls = []any{map[string]any{"number": uint64(29), "url": "https://github.com/team/repo/pull/29", "head_sha": f.tip, "head_ref": "factory/other", "base_sha": f.main, "base_ref": "main", "state": "open", "mergeable": true, "merge_state_status": "clean"}, pull}
+		}
+		return json.Marshal(map[string]any{"pull_requests": pulls})
 	case "observe_pull_request_merge":
 		return json.Marshal(map[string]any{"pull_number": arguments["pull_number"], "head_sha": f.tip, "base": "main", "state": "INACTIVE", "queue_state": nil, "merge_commit_sha": nil, "merge_group": nil})
 	}
@@ -77,10 +88,17 @@ func (f *fakePublishMaintainer) call(_ context.Context, name string, arguments m
 	priorWrites := len(f.writes)
 	f.writes = append(f.writes, map[string]any{"name": name, "arguments": arguments})
 	landCreate := f.landCreateIndeterminate && name == "create_pull_request"
-	if f.unavailable || landCreate || (f.indeterminateAgain && priorWrites > 0) {
+	landCommit := f.landSecondCommit && name == "publish_commit"
+	if name == "publish_commit" {
+		f.commitWrites++
+	}
+	if name == "update_pull_request_body" && f.bodyIndeterminate {
+		f.bodyWrites++
+	}
+	if f.unavailable || landCreate || (f.indeterminateAgain && priorWrites > 0) || (name == "update_pull_request_body" && f.bodyIndeterminate) || (landCommit && f.commitWrites == 2) {
 		f.unavailable = false
 		f.indeterminate[id] = true
-		if !landCreate {
+		if !landCreate && !landCommit {
 			return nil, maintainerRejection("unavailable: Maintainer authority is unavailable.")
 		}
 	}
@@ -108,7 +126,7 @@ func (f *fakePublishMaintainer) call(_ context.Context, name string, arguments m
 		return nil, fmt.Errorf("unexpected tool %s", name)
 	}
 	f.journal[id] = result
-	if landCreate {
+	if landCreate || landCommit {
 		f.landCreateIndeterminate = false
 		return nil, maintainerRejection("unavailable: Maintainer authority is unavailable.")
 	}
@@ -192,7 +210,7 @@ func publishFixture(t *testing.T, files int, workflow bool) (*dispatchFixture, k
 		supervisorGit(t, git, "clone", "-q", "--shared", registered, clone)
 		return filepath.Join(clone, ".git"), func() {}, nil
 	}
-	return fixture, candidate, filepath.Join(root, ".git"), &fakePublishMaintainer{main: base, journal: map[string]json.RawMessage{}, indeterminate: map[string]bool{}}, checkout
+	return fixture, candidate, filepath.Join(root, ".git"), &fakePublishMaintainer{main: base, headRef: "factory/" + changeID.String()[:12], journal: map[string]json.RawMessage{}, indeterminate: map[string]bool{}}, checkout
 }
 
 // First publication end to end, with the first commit's response lost: the
@@ -582,6 +600,7 @@ func TestIndeterminatePublicationEscalatesOnceAfterFreshOperation(t *testing.T) 
 func TestIndeterminateCreateThatLandedIsRecorded(t *testing.T) {
 	fixture, c, source, app, checkout := publishFixture(t, 1, false)
 	app.landCreateIndeterminate = true
+	app.extraPull = true
 	if err := fixture.daemon.publishChange(context.Background(), c, "team/repo", source, app.call, checkout); err != nil {
 		t.Fatal(err)
 	}
@@ -593,6 +612,41 @@ func TestIndeterminateCreateThatLandedIsRecorded(t *testing.T) {
 	}
 	if open, err := fixture.store.OpenPulls(context.Background()); err != nil || len(open) != 1 {
 		t.Fatalf("landed create was not recorded: %+v %v", open, err)
+	}
+}
+
+func TestIndeterminateBodyRetryIsObservedAndNotReplayed(t *testing.T) {
+	fixture, c, source, app, checkout := publishFixture(t, 2, false)
+	ctx := context.Background()
+	app.tip, c.Pull = c.Head, 31
+	root, git := filepath.Dir(source), change.TrustedGitExecutable
+	if err := os.WriteFile(filepath.Join(root, "f00.txt"), []byte("corrected\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	supervisorGit(t, git, "-C", root, "-c", "user.name=fixture", "-c", "user.email=fixture@example.invalid", "commit", "-q", "-am", "correct")
+	c.Head = strings.TrimSpace(supervisorGitOutput(t, git, "-C", root, "rev-parse", "HEAD"))
+	app.bodyIndeterminate = true
+	for range 3 {
+		if err := fixture.daemon.publishChange(ctx, c, "team/repo", source, app.call, checkout); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if app.bodyWrites != 2 || len(app.writes) != 3 {
+		t.Fatalf("body retry writes = %d / %+v", app.bodyWrites, app.writes)
+	}
+}
+
+func TestIndeterminateLandedCorrectionCommitBatchIsRecorded(t *testing.T) {
+	fixture, c, source, app, checkout := publishFixture(t, 101, false)
+	app.tip, c.Pull, app.landSecondCommit = c.Base, 31, true
+	if err := fixture.daemon.publishChange(context.Background(), c, "team/repo", source, app.call, checkout); err != nil {
+		t.Fatal(err)
+	}
+	if err := fixture.daemon.publishChange(context.Background(), c, "team/repo", source, app.call, checkout); err != nil {
+		t.Fatal(err)
+	}
+	if app.commitWrites != 2 || len(app.writes) != 2 {
+		t.Fatalf("landed correction commits = %d / %+v", app.commitWrites, app.writes)
 	}
 }
 

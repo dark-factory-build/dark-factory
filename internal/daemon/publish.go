@@ -43,6 +43,7 @@ type observedPull struct {
 	Head       string `json:"head_sha"`
 	Base       string `json:"base_sha"`
 	State      string `json:"state"`
+	HeadRef    string `json:"head_ref"`
 	Body       string `json:"body"`
 	Mergeable  *bool  `json:"mergeable"`
 	MergeState string `json:"merge_state_status"`
@@ -264,7 +265,7 @@ func (daemon *Daemon) publishPull(ctx context.Context, c kernel.PublishableChang
 			return observed, err
 		}
 		for i := range page.PullRequests {
-			if pull == 0 || page.PullRequests[i].Number == pull {
+			if pull != 0 && page.PullRequests[i].Number == pull || pull == 0 && page.PullRequests[i].HeadRef == branch {
 				observed.pull = &page.PullRequests[i]
 				break
 			}
@@ -287,14 +288,28 @@ func (daemon *Daemon) publishPull(ctx context.Context, c kernel.PublishableChang
 		}
 		return observed, nil
 	}
+	routeObserved := func(observed observedPublication) error {
+		if observed.pull == nil {
+			return nil
+		}
+		dirty := strings.EqualFold(observed.pull.MergeState, "DIRTY") || observed.pull.Mergeable != nil && !*observed.pull.Mergeable
+		if !dirty && observed.pull.MergeQueue == "" && observed.pull.State == "open" {
+			return nil
+		}
+		_, err := daemon.advanceReviewOperations(ctx, false)
+		return errors.Join(err, errPublishLater)
+	}
 	recover := func(step, expected string, pull uint64, expectPull bool) (observedPublication, string, bool, error) {
 		observed, err := observe(branch, pull)
 		if err != nil {
 			return observed, "", false, err
 		}
+		if err := routeObserved(observed); err != nil {
+			return observed, "", false, err
+		}
 		// A changed branch ref is the durable receipt for a commit write. The
 		// pull observation is the receipt for a create-pull write.
-		if pull == 0 && observed.ref != "" && observed.ref != expected {
+		if observed.ref != "" && observed.ref != expected {
 			return observed, "", true, nil
 		}
 		if expectPull && observed.pull != nil && (pull != 0 || observed.pull.Head == observed.ref) {
@@ -452,9 +467,7 @@ func (daemon *Daemon) publishPull(ctx context.Context, c kernel.PublishableChang
 					return observeErr
 				}
 				retryStep, varObserved, done, err = retry, observed.pull, false, nil
-				if varObserved == nil {
-					done, err = completed(retryStep, new(json.RawMessage))
-				}
+				done, err = completed(retryStep, new(json.RawMessage))
 			}
 			var current struct {
 				PullRequests []struct {
