@@ -347,7 +347,7 @@ func validateFactoryItem(value FactoryItem) error {
 }
 
 func validateProjectItem(value ProjectItem) error {
-	if validateDynamicID(value.ID) != nil || validateBoundedText(value.Name, 1, MaxProjectNameBytes) != nil || value.RunBudgetLimit != 0 && value.RunsUsed > value.RunBudgetLimit || value.MaxRunSeconds > 86400 || value.Revision == 0 || value.SpecialistRuns > 16 || value.SpecialistOpenProposals > 32 {
+	if validateDynamicID(value.ID) != nil || validateBoundedText(value.Name, 1, MaxProjectNameBytes) != nil || value.MaxRunSeconds > 86400 || value.Revision == 0 {
 		return fmt.Errorf("%w: project item", ErrMalformed)
 	}
 	return nil

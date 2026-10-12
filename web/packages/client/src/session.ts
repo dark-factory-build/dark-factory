@@ -368,7 +368,7 @@ export class BrowserSession {
   }
 
   /** Edit one agent's configuration. An omitted member is left alone. */
-  updateAgent(request: { agentId: string; expectedRevision: bigint; appearance?: SpriteAppearance; model?: string; reasoningEffort?: string; accountId?: string; paused?: boolean; archived?: boolean; idlePolicy?: IdlePolicy; idleAfterSeconds?: number; idleInstruction?: string; idleRunBudget?: number; idleWakeOn?: IdleWakeOn }): Promise<AgentUpdateResult> {
+  updateAgent(request: { agentId: string; expectedRevision: bigint; appearance?: SpriteAppearance; model?: string; reasoningEffort?: string; accountId?: string; paused?: boolean; archived?: boolean; idlePolicy?: IdlePolicy; idleAfterSeconds?: number; idleInstruction?: string; idleWakeOn?: IdleWakeOn }): Promise<AgentUpdateResult> {
     const body: AgentUpdateBody = { agent_id: request.agentId, expected_revision: request.expectedRevision };
     if (request.appearance !== undefined) body.appearance = request.appearance;
     if (request.model !== undefined) body.model = request.model;
@@ -379,11 +379,9 @@ export class BrowserSession {
     if (request.idlePolicy !== undefined) body.idle_policy = request.idlePolicy;
     if (request.idleAfterSeconds !== undefined) body.idle_after_seconds = request.idleAfterSeconds;
     if (request.idleInstruction !== undefined) body.idle_instruction = request.idleInstruction;
-    if (request.idleRunBudget !== undefined) body.idle_run_budget = request.idleRunBudget;
     if (request.idleWakeOn !== undefined) body.idle_wake_on = request.idleWakeOn;
     if (bounded(request.model, MAX_AGENT_MODEL_BYTES) || bounded(request.reasoningEffort, MAX_AGENT_MODEL_BYTES) || bounded(request.idleInstruction, MAX_TASK_INSTRUCTION_BYTES)) return Promise.reject(new SessionError("invalid_request"));
     if (request.idleAfterSeconds !== undefined && !(Number.isSafeInteger(request.idleAfterSeconds) && request.idleAfterSeconds >= 0 && request.idleAfterSeconds <= MAX_IDLE_AFTER_SECONDS)) return Promise.reject(new SessionError("invalid_request"));
-    if (request.idleRunBudget !== undefined && !(Number.isSafeInteger(request.idleRunBudget) && request.idleRunBudget >= 0 && request.idleRunBudget <= MAX_IDLE_RUN_BUDGET)) return Promise.reject(new SessionError("invalid_request"));
     // Which login an agent runs as is administration, like the logins themselves.
     if (request.accountId !== undefined && (this.#capabilities & CAPABILITIES.administration) === 0) return Promise.reject(new SessionError("unauthorized"));
     return this.#consoleRequest("AGENT_UPDATE_RESULT", request.agentId, request.expectedRevision, "agent-update", (id) => encodeClientControl({ type: "AGENT_UPDATE", id, body }));

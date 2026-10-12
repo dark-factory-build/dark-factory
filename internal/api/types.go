@@ -1001,16 +1001,15 @@ type AgentIdlePolicyInput struct {
 	Policy           string `json:"policy"`
 	AfterSeconds     uint32 `json:"after_seconds"`
 	Instruction      string `json:"instruction"`
-	RunBudget        uint64 `json:"-"`
 	// WakeOn is a specialist's event classes; empty is none.
 	WakeOn string `json:"wake_on,omitempty"`
 }
 
 func validAgentIdlePolicyInput(input AgentIdlePolicyInput) bool {
-	if !validID(input.AgentID) || input.ExpectedRevision == 0 || input.AfterSeconds > kernel.MaxIdleAfterSeconds || input.RunBudget > uint64(kernel.MaxIdleRunBudget) || !validText(input.Instruction, 0, 32768) {
+	if !validID(input.AgentID) || input.ExpectedRevision == 0 || input.AfterSeconds > kernel.MaxIdleAfterSeconds || !validText(input.Instruction, 0, 32768) {
 		return false
 	}
-	return input.Policy == "wait" && input.AfterSeconds == 0 && input.Instruction == "" && input.RunBudget == 0 && input.WakeOn == "" || input.Policy == "standing_instruction" && input.AfterSeconds > 0 && input.Instruction != ""
+	return input.Policy == "wait" && input.AfterSeconds == 0 && input.Instruction == "" && input.WakeOn == "" || input.Policy == "standing_instruction" && input.AfterSeconds > 0 && input.Instruction != ""
 }
 
 type OverseerRunStopInput struct {
@@ -1103,14 +1102,7 @@ type ProjectRepositories struct {
 type ProjectLimitsInput struct {
 	ProjectID        string `json:"project_id"`
 	ExpectedRevision uint64 `json:"expected_revision"`
-	RunBudget        uint64 `json:"run_budget"`
 	MaxRunSeconds    uint32 `json:"max_run_seconds"`
-	// TokenBudget permits this many more provider tokens than are already
-	// recorded; zero removes the ceiling and absent leaves it as it is.
-	TokenBudget *uint64 `json:"-"`
-	// The specialist limits; absent leaves each as it is.
-	SpecialistRuns          *uint32 `json:"-"`
-	SpecialistOpenProposals *uint32 `json:"-"`
 }
 
 type CreateAgentInput struct {

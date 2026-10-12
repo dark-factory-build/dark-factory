@@ -61,7 +61,7 @@ func TestOverseerRunHasBackstopBelowDisabledOrLongerProjectLimit(t *testing.T) {
 	}
 }
 
-func TestAdmissionSkipsExhaustedProjectBeforePriority(t *testing.T) {
+func TestAdmissionAllowsProjectPastRetainedRunCeiling(t *testing.T) {
 	t.Parallel()
 	for _, role := range []AgentRole{RoleWorker, RoleOrchestrator} {
 		t.Run(role.String(), func(t *testing.T) {
@@ -89,6 +89,15 @@ func TestAdmissionSkipsExhaustedProjectBeforePriority(t *testing.T) {
 			result, err := store.AdmitNext(ctx, admissionKeys(t, 216, nil), mustTime(t, 8))
 			if err != nil || !result.Admitted() || result.Run.TaskID != taskID(t, 212) {
 				t.Fatalf("admission = %+v, %v", result, err)
+			}
+			snapshot, err := store.ReadPublicSnapshot(ctx)
+			if err != nil {
+				t.Fatal(err)
+			}
+			for _, summary := range snapshot.Projects {
+				if summary.ID == exhausted.ID && summary.RunsUsed != 2 {
+					t.Fatalf("project snapshot = %+v", summary)
+				}
 			}
 		})
 	}

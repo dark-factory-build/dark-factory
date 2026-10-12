@@ -299,7 +299,7 @@ func TestDaemonDispatchesOperatorCallsAndBoundsProjection(t *testing.T) {
 	assertNoSchedulerWake(t, fixture.daemon)
 
 	done = fixture.serve(t)
-	limits, err := client.SetProjectLimits(ctx, api.ProjectLimitsInput{ProjectID: projectInput.ID, ExpectedRevision: projectResult.Revision, RunBudget: 3, MaxRunSeconds: 60})
+	limits, err := client.SetProjectLimits(ctx, api.ProjectLimitsInput{ProjectID: projectInput.ID, ExpectedRevision: projectResult.Revision, MaxRunSeconds: 60})
 	if err != nil || limits.Revision != projectResult.Revision+1 {
 		t.Fatalf("set project limits = %+v, %v", limits, err)
 	}
@@ -307,7 +307,7 @@ func TestDaemonDispatchesOperatorCallsAndBoundsProjection(t *testing.T) {
 	assertNoSchedulerWake(t, fixture.daemon)
 
 	done = fixture.serve(t)
-	if _, err := client.SetProjectLimits(ctx, api.ProjectLimitsInput{ProjectID: projectInput.ID, ExpectedRevision: projectResult.Revision, RunBudget: 3, MaxRunSeconds: 60}); err == nil {
+	if _, err := client.SetProjectLimits(ctx, api.ProjectLimitsInput{ProjectID: projectInput.ID, ExpectedRevision: projectResult.Revision, MaxRunSeconds: 60}); err == nil {
 		t.Fatal("stale project limits accepted")
 	}
 	waitDispatch(t, done)

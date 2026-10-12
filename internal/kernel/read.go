@@ -434,7 +434,7 @@ func (store *Store) Snapshot(ctx context.Context) (DashboardSnapshot, error) {
 		}
 		id, idErr := ProjectIDFromBytes(rawID)
 		revision, revisionErr := NewRevision(rawRevision)
-		if idErr != nil || revisionErr != nil || byteLen(name) < 1 || byteLen(name) > 128 || runBudget < 0 || runsUsed < 0 || runBudget != 0 && runsUsed > runBudget || maxRunSeconds < 0 || maxRunSeconds > 86400 {
+		if idErr != nil || revisionErr != nil || byteLen(name) < 1 || byteLen(name) > 128 || runBudget < 0 || runsUsed < 0 || maxRunSeconds < 0 || maxRunSeconds > 86400 {
 			projectRows.Close()
 			return DashboardSnapshot{}, fmt.Errorf("%w: invalid project summary", ErrCorruptState)
 		}

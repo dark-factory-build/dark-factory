@@ -95,17 +95,6 @@ func specialistStateOf(t *testing.T, store *Store, id AgentID) SpecialistState {
 	return SpecialistState{}
 }
 
-func setSpecialistLimits(t *testing.T, store *Store, project ProjectID, runs, proposals *uint32, at int64) {
-	t.Helper()
-	current, _, err := store.Project(context.Background(), project)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, err := store.SetProjectLimitsWithTokens(context.Background(), project, current.Revision, 0, 0, nil, runs, proposals, mustTime(t, at)); err != nil {
-		t.Fatal(err)
-	}
-}
-
 // A specialist is due at once, then a cadence after each review, doubling for
 // each quiet review up to 8x; a proposal resets the backoff, and only its
 // wake_on classes bring a review forward, a quarter cadence after the last. A
@@ -262,15 +251,12 @@ func TestSpecialistAdmission(t *testing.T) {
 	store, _, project, specialist, _ = newSharedQueueStore(t, 3)
 	defer store.Close()
 	makeSpecialist(t, store, specialist, "", 5)
-	zero, one := uint32(0), uint32(1)
-	setSpecialistLimits(t, store, project.ID, &zero, nil, 6)
 	if bodies := wakeBodies(t, store, 7); len(bodies) != 1 {
 		t.Fatalf("carrier = %q", bodies)
 	}
 	if admission, err := store.AdmitNext(ctx, admissionKeys(t, 40, nil), mustTime(t, 8)); err != nil || !admission.Admitted() {
 		t.Fatalf("carrier despite obsolete specialist_runs: %+v, %v", admission, err)
 	}
-	_ = one
 }
 
 // A specialist's carrier is never an overseer item; an open proposal is one
@@ -341,13 +327,10 @@ func TestSpecialistRecordLimits(t *testing.T) {
 	proposal := func(seed byte) NewContent {
 		return knowledgeSpec(t, run.ProjectID, seed, ContentObservation, KnowledgeMetadata{Status: "tentative", RecordType: "proposal"})
 	}
-	zero, three := uint32(0), uint32(3)
-	setSpecialistLimits(t, store, run.ProjectID, nil, &zero, 40)
 	first, err := store.CreateContentForAttempt(ctx, run.CredentialDigest, proposal(90), mustTime(t, 41))
 	if err != nil {
 		t.Fatalf("proposal despite obsolete open cap: %v", err)
 	}
-	setSpecialistLimits(t, store, run.ProjectID, nil, &three, 42)
 	if _, err := store.CreateContentForAttempt(ctx, run.CredentialDigest, proposal(91), mustTime(t, 44)); !errors.Is(err, ErrConflict) {
 		t.Fatalf("second proposal in one run: %v", err)
 	}

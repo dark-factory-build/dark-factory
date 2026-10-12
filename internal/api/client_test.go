@@ -1619,9 +1619,9 @@ func TestInputBoundsFailBeforeConnection(t *testing.T) {
 		})
 	}
 	for name, input := range map[string]AgentIdlePolicyInput{
-		"missing instruction": {AgentID: id('2'), ExpectedRevision: 1, Policy: "standing_instruction", AfterSeconds: 1, RunBudget: 1},
-		"missing cooldown":    {AgentID: id('2'), ExpectedRevision: 1, Policy: "standing_instruction", Instruction: "x", RunBudget: 1},
-		"wait partial":        {AgentID: id('2'), ExpectedRevision: 1, Policy: "wait", RunBudget: 1},
+		"missing instruction": {AgentID: id('2'), ExpectedRevision: 1, Policy: "standing_instruction", AfterSeconds: 1},
+		"missing cooldown":    {AgentID: id('2'), ExpectedRevision: 1, Policy: "standing_instruction", Instruction: "x"},
+		"wait partial":        {AgentID: id('2'), ExpectedRevision: 1, Policy: "wait", WakeOn: "failures"},
 	} {
 		t.Run("idle policy "+name, func(t *testing.T) {
 			if _, err := operator.SetAgentIdlePolicy(context.Background(), input); !errors.Is(err, ErrInvalidInput) {

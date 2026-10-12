@@ -26,8 +26,8 @@ func TestParseExactOperatorCommands(t *testing.T) {
 		{name: "debug profile", args: []string{"debug", "profile", "--seconds", "30"}},
 		{name: "select model", args: []string{"agent", "select-model", "--agent", id, "--revision", "7", "--model", "gpt-5.6-luna"}},
 		{name: "project create", args: []string{"project", "create", "--name", "North Workshop", "--root", "/private/tmp/repo"}},
-		{name: "agent create shell default role", args: []string{"agent", "create", "--project", id, "--name", "Builder One", "--provider", "shell", "--tool-budget", "100"}},
-		{name: "agent create codex controls", args: []string{"agent", "create", "--project", id, "--name", "Foreman", "--provider", "codex", "--model", "gpt-5.6-luna", "--reasoning-effort", "medium", "--tool-budget", "100", "--role", "orchestrator"}},
+		{name: "agent create shell default role", args: []string{"agent", "create", "--project", id, "--name", "Builder One", "--provider", "shell"}},
+		{name: "agent create codex controls", args: []string{"agent", "create", "--project", id, "--name", "Foreman", "--provider", "codex", "--model", "gpt-5.6-luna", "--reasoning-effort", "medium", "--role", "orchestrator"}},
 		{name: "agent idle policy", args: []string{"agent", "idle-policy", "--agent", id, "--revision", "7", "--policy", "standing_instruction", "--after-seconds", "60", "--instruction", "review retained changes"}},
 		{name: "agent idle policy legacy zero budget", args: []string{"agent", "idle-policy", "--agent", id, "--revision", "7", "--policy", "standing_instruction", "--after-seconds", "60", "--instruction", "legacy scope"}},
 		{name: "agent idle wait", args: []string{"agent", "idle-policy", "--agent", id, "--revision", "7", "--policy", "wait"}},
@@ -79,18 +79,15 @@ func TestParseExactOperatorCommands(t *testing.T) {
 		{"project", "create", "--name", "n", "--root", "/r", "--name", "n"},
 		{"project", "create", "--name", "n", "--root", "/r", "--project", id},
 		{"agent", "create", "--project", id, "--name", "n"},
-		{"agent", "create", "--project", id, "--name", "n", "--tool-budget", "1"},
-		{"agent", "create", "--project", id, "--name", "n", "--provider", "unknown", "--tool-budget", "1"},
-		{"agent", "create", "--project", id, "--name", "n", "--provider", "shell", "--model", "model", "--tool-budget", "1"},
-		{"agent", "create", "--project", id, "--name", "n", "--provider", "shell", "--reasoning-effort", "medium", "--tool-budget", "1"},
-		{"agent", "create", "--project", id, "--name", "n", "--provider", "codex", "--reasoning-effort", "extreme", "--tool-budget", "1"},
-		{"agent", "create", "--project", id, "--name", "n", "--provider", "claude_code", "--reasoning-effort", "ultra", "--tool-budget", "1"},
-		{"agent", "create", "--project", id, "--name", "n", "--provider", "codex", "--model", strings.Repeat("m", 129), "--tool-budget", "1"},
-		{"agent", "create", "--project", id, "--name", "n", "--provider", "shell", "--tool-budget", "0"},
-		{"agent", "create", "--project", id, "--name", "n", "--provider", "shell", "--tool-budget", "01"},
-		{"agent", "create", "--project", id, "--name", "n", "--provider", "shell", "--tool-budget", "x"},
-		{"agent", "create", "--project", "short", "--name", "n", "--provider", "shell", "--tool-budget", "1"},
-		{"agent", "create", "--project", id, "--name", "n", "--provider", "shell", "--tool-budget", "1", "--role", "manager"},
+		{"agent", "create", "--project", id, "--name", "n"},
+		{"agent", "create", "--project", id, "--name", "n", "--provider", "unknown"},
+		{"agent", "create", "--project", id, "--name", "n", "--provider", "shell", "--model", "model"},
+		{"agent", "create", "--project", id, "--name", "n", "--provider", "shell", "--reasoning-effort", "medium"},
+		{"agent", "create", "--project", id, "--name", "n", "--provider", "codex", "--reasoning-effort", "extreme"},
+		{"agent", "create", "--project", id, "--name", "n", "--provider", "claude_code", "--reasoning-effort", "ultra"},
+		{"agent", "create", "--project", id, "--name", "n", "--provider", "codex", "--model", strings.Repeat("m", 129)},
+		{"agent", "create", "--project", "short", "--name", "n", "--provider", "shell"},
+		{"agent", "create", "--project", id, "--name", "n", "--provider", "shell", "--role", "manager"},
 		{"agent", "idle-policy", "--agent", id, "--revision", "7"},
 		{"agent", "idle-policy", "--agent", id, "--revision", "7", "--policy", "wait", "--wake-on", "failures"},
 		{"account", "link", "--provider", "shell", "--home", "/Users/operator/.shell", "--label", "shell"},
@@ -338,13 +335,13 @@ func TestAgentCreateCarriesProviderControls(t *testing.T) {
 	var stdout, stderr bytes.Buffer
 	exit := run(context.Background(), []string{
 		"agent", "create", "--project", projectID, "--name", "Builder", "--provider", "codex",
-		"--model", "gpt-5.6-luna", "--reasoning-effort", "medium", "--tool-budget", "100", "--role", "orchestrator",
+		"--model", "gpt-5.6-luna", "--reasoning-effort", "medium", "--role", "orchestrator",
 	}, webEnvironment(fixture), &stdout, &stderr)
 	awaitServer(t, done)
 	if exit != 0 || stderr.Len() != 0 {
 		t.Fatalf("agent create = exit %d stderr %q", exit, stderr.String())
 	}
-	if received.ProjectID != projectID || received.Name != "Builder" || received.Role != "orchestrator" || received.Provider != "codex" || received.Model != "gpt-5.6-luna" || received.ReasoningEffort != "medium" || received.ToolBudgetLimit != 100 || !validHumanRequestKey(received.ID) {
+	if received.ProjectID != projectID || received.Name != "Builder" || received.Role != "orchestrator" || received.Provider != "codex" || received.Model != "gpt-5.6-luna" || received.ReasoningEffort != "medium" || !validHumanRequestKey(received.ID) {
 		t.Fatalf("daemon received %+v", received)
 	}
 	if !strings.Contains(stdout.String(), received.ID) || !strings.Contains(stdout.String(), `"head":8`) || !strings.Contains(stdout.String(), `"revision":1`) {
@@ -572,7 +569,7 @@ func TestOperatorRemoteRejectionIsReportedWithoutFabricatedSuccess(t *testing.T)
 		return reply
 	})
 	var stdout, stderr bytes.Buffer
-	exit := run(context.Background(), []string{"agent", "create", "--project", strings.Repeat("11", 16), "--name", "Builder", "--provider", "shell", "--tool-budget", "10"}, webEnvironment(fixture), &stdout, &stderr)
+	exit := run(context.Background(), []string{"agent", "create", "--project", strings.Repeat("11", 16), "--name", "Builder", "--provider", "shell"}, webEnvironment(fixture), &stdout, &stderr)
 	awaitServer(t, done)
 	if exit != exitFailure || stdout.Len() != 0 || !strings.Contains(stderr.String(), "agent create: local API request conflicts with durable state") {
 		t.Fatalf("rejection = exit %d stdout %q stderr %q", exit, stdout.String(), stderr.String())

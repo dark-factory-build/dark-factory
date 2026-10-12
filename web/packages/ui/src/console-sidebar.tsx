@@ -15,7 +15,7 @@ import type { FloorAppearance } from "./floor-appearance.js";
 import type { PublishedRelease, RuntimeBuild } from "./production-data.js";
 
 /** Only the controls the operator actually changed; the rest are left alone. */
-export type AgentConfigEdit = Readonly<{ model?: string; reasoningEffort?: string; accountId?: string; paused?: boolean; archived?: boolean; idlePolicy?: "wait" | "standing_instruction"; idleAfterSeconds?: number; idleInstruction?: string; idleRunBudget?: number; idleWakeOn?: IdleWakeOn }>;
+export type AgentConfigEdit = Readonly<{ model?: string; reasoningEffort?: string; accountId?: string; paused?: boolean; archived?: boolean; idlePolicy?: "wait" | "standing_instruction"; idleAfterSeconds?: number; idleInstruction?: string; idleWakeOn?: IdleWakeOn }>;
 
 export type TaskEdit = Readonly<{ title?: string; body?: string; priority?: number; assignedAgentId?: string; cancel?: boolean; retry?: boolean }>;
 export type TaskBrief = Readonly<{ taskId: string; revision: bigint; head: bigint; instruction: string; feedback: string; outcome?: string; peerQuestions: readonly TaskPeerQuestion[]; nextPeerOffset?: bigint }>;

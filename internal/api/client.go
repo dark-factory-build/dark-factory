@@ -365,7 +365,7 @@ func (client *OperatorClient) RemoveProjectRepository(ctx context.Context, id st
 }
 
 func (client *OperatorClient) SetProjectLimits(ctx context.Context, input ProjectLimitsInput) (MutationResult, error) {
-	if !validID(input.ProjectID) || input.ExpectedRevision == 0 || input.RunBudget > uint64(^uint64(0)>>1) || input.MaxRunSeconds > 86400 {
+	if !validID(input.ProjectID) || input.ExpectedRevision == 0 || input.MaxRunSeconds > 86400 {
 		return MutationResult{}, ErrInvalidInput
 	}
 	return client.client.mutate(ctx, "project_limits", input)

@@ -103,6 +103,7 @@ export function FactoryApp({ onStatusChange, browserPort }: FactoryAppProps = {}
       onAttachmentRetention={(enabled) => owner.current?.attachmentRetention(enabled) ?? Promise.reject(new Error("closed"))}
       onProjectContent={(operation, input) => owner.current?.projectContent(operation, input) ?? Promise.reject(new Error("closed"))}
       onSaveAgentConfig={(config) => { void owner.current?.updateAgentConfig(config); }}
+      onSaveProjectLimits={(project, limits) => { void owner.current?.updateProjectLimits(project, limits); }}
       onSaveAgentAppearance={(agentId, appearance) => owner.current?.updateAgentAppearance(agentId, appearance) ?? Promise.resolve(false)}
       appearanceAgentId={appearanceAgentId}
       onEditAppearance={(agent) => setAppearanceAgentId(agent.id)}
