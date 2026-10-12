@@ -33,7 +33,7 @@ func TestBlackBoxOrchestratorAcceptance(t *testing.T) {
 	projectID := fixture.operatorID(t, fixture.runFactoryctl(t, 0, "project", "create", "--name", "acceptance", "--root", fixture.repo))
 	foreignProject := fixture.operatorID(t, fixture.runFactoryctl(t, 0, "project", "create", "--name", "foreign", "--root", foreignRepo))
 	agent := func(project, name, role string) string {
-		return fixture.operatorID(t, fixture.runFactoryctl(t, 0, "agent", "create", "--project", project, "--name", name, "--provider", "shell", "--tool-budget", "4", "--role", role))
+		return fixture.operatorID(t, fixture.runFactoryctl(t, 0, "agent", "create", "--project", project, "--name", name, "--provider", "shell", "--role", role))
 	}
 	orchestrator := agent(projectID, "orchestrator", "orchestrator")
 	workerA, workerB := agent(projectID, "worker-a", "worker"), agent(projectID, "worker-b", "worker")
