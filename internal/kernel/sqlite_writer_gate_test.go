@@ -666,6 +666,10 @@ func abandonWriterWait(store *Store) error {
 func TestSlowWriterHoldLogsItsHolderAndWaiters(t *testing.T) {
 	store, _ := newTestStore(t)
 	defer store.Close()
+	// A shorter report window than a minute, rolled over by real elapsed time.
+	store.waitMu.Lock()
+	store.waitReport = 2 * time.Second
+	store.waitMu.Unlock()
 	var mu sync.Mutex
 	var lines []string
 	logged := func() []string { mu.Lock(); defer mu.Unlock(); return slices.Clone(lines) }
@@ -694,14 +698,14 @@ func TestSlowWriterHoldLogsItsHolderAndWaiters(t *testing.T) {
 	if got := logged(); len(got) != 1 || !strings.Contains(got[0], "sqlite writer held 1.") || !strings.Contains(got[0], "by kernel.holdWriterPastSlowWriter, 1 waiting") {
 		t.Fatalf("writer-hold log = %q", got)
 	}
-	// The cancelled wait is the minute's longest, reported a minute on.
-	store.waitMu.Lock()
-	store.waitReported = store.waitReported.Add(-time.Minute)
-	store.waitMu.Unlock()
+	// Nothing is reported before the window has elapsed.
 	store.releaseWriter()
 	if got := logged(); len(got) != 1 {
-		t.Fatalf("a quick hold was logged: %q", got)
+		t.Fatalf("a quick hold or an early wait report was logged: %q", got)
 	}
+	// Once the window has really elapsed, the next writer reports the
+	// cancelled wait as the window's longest.
+	time.Sleep(2 * time.Second)
 	if err := store.acquireWriter(context.Background()); err != nil {
 		t.Fatal(err)
 	}

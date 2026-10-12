@@ -51,6 +51,7 @@ type Store struct {
 	longestWait   time.Duration
 	longestWaiter [8]uintptr
 	waitReported  time.Time
+	waitReport    time.Duration // How often the longest wait is reported.
 }
 
 // slowWriter is the writer hold, or wait, that LogWriterHolds names.
@@ -85,7 +86,7 @@ func writerCaller(stack [8]uintptr) string {
 func newStore() *Store {
 	writerGate := make(chan struct{}, 1)
 	writerGate <- struct{}{}
-	return &Store{writerGate: writerGate}
+	return &Store{writerGate: writerGate, waitReport: time.Minute}
 }
 
 func openFixedPools(ctx context.Context, store *Store, path string, recheck func() error) error {
@@ -737,7 +738,7 @@ func (store *Store) noteWriterWait(caller [8]uintptr, waiting time.Time) time.Ti
 	if wait := now.Sub(waiting); wait > store.longestWait {
 		store.longestWait, store.longestWaiter = wait, caller
 	}
-	if now.Sub(store.waitReported) >= time.Minute {
+	if now.Sub(store.waitReported) >= store.waitReport {
 		if store.longestWait > slowWriter {
 			store.logWriter("factoryd: longest sqlite writer wait in the last minute %s by %s\n", store.longestWait.Round(time.Millisecond), writerCaller(store.longestWaiter))
 		}
