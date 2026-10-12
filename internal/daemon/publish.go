@@ -264,8 +264,8 @@ func (daemon *Daemon) publishPull(ctx context.Context, c kernel.PublishableChang
 	}
 	issue := c.Accepted.Snapshot.IssueNumber
 	issueBody := c.Accepted.Snapshot.Body
-	if strings.EqualFold(c.Accepted.SourceRepository, repo) {
-		if response, observeErr := call(ctx, "observe_issue", map[string]any{"repository": repo, "issue_number": issue}); observeErr == nil {
+	if sourceRepository := c.Accepted.SourceRepository; sourceRepository != "" {
+		if response, observeErr := call(ctx, "observe_issue", map[string]any{"repository": sourceRepository, "issue_number": issue}); observeErr == nil {
 			var observed struct {
 				Number uint64 `json:"number"`
 				Body   string `json:"body"`

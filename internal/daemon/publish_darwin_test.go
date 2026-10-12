@@ -25,20 +25,21 @@ import (
 // fakePublishMaintainer is the App's journal: one result per operation id,
 // a replay of a completed id answered from it.
 type fakePublishMaintainer struct {
-	t              *testing.T
-	bare           string // GitHub's repository, for publish_pack
-	pack           *packMaintainer
-	main           string
-	tip            string // the pull request branch's head
-	journal        map[string]json.RawMessage
-	planned        map[string]bool  // ids a write stopped before GitHub
-	writes         []map[string]any // every write sent
-	refuse         string           // a path whose push GitHub refuses
-	externalRefuse bool             // the Maintainer refuses before the App can apply it
-	unavailable    bool             // the Maintainer authority is temporarily unavailable
-	loseNext       bool             // the next write lands but its response is lost
-	body           string           // the open pull request's stored body
-	issueBody      string           // the current source issue body
+	t               *testing.T
+	bare            string // GitHub's repository, for publish_pack
+	pack            *packMaintainer
+	main            string
+	tip             string // the pull request branch's head
+	journal         map[string]json.RawMessage
+	planned         map[string]bool  // ids a write stopped before GitHub
+	writes          []map[string]any // every write sent
+	refuse          string           // a path whose push GitHub refuses
+	externalRefuse  bool             // the Maintainer refuses before the App can apply it
+	unavailable     bool             // the Maintainer authority is temporarily unavailable
+	loseNext        bool             // the next write lands but its response is lost
+	body            string           // the open pull request's stored body
+	issueBody       string           // the current source issue body
+	issueRepository string           // repository used for the current source issue
 }
 
 func TestRepairPublicationUsesTaskTitle(t *testing.T) {
@@ -67,6 +68,7 @@ func (f *fakePublishMaintainer) call(_ context.Context, name string, arguments m
 	case "list_pull_requests":
 		return json.Marshal(map[string]any{"pull_requests": []any{map[string]any{"number": arguments["pull_number"], "head_sha": f.tip, "body": f.body}}})
 	case "observe_issue":
+		f.issueRepository, _ = arguments["repository"].(string)
 		return json.Marshal(map[string]any{"number": arguments["issue_number"], "body": f.issueBody})
 	}
 	if _, replay := f.journal[id]; replay || f.planned[id] {
@@ -207,6 +209,7 @@ func TestFactorydPublishesASettledIntakeChange(t *testing.T) {
 	fixture, c, source, app, checkout := publishFixture(t, 51, false)
 	ctx := context.Background()
 	app.issueBody = "Current operator scope"
+	c.Accepted.SourceRepository = "feed/issues"
 	app.loseNext = true
 	if err := fixture.daemon.publishChange(ctx, c, "team/repo", source, app.call, checkout); err == nil {
 		t.Fatal("a lost response reported publication")
@@ -216,6 +219,9 @@ func TestFactorydPublishesASettledIntakeChange(t *testing.T) {
 	}
 	if len(app.writes) != 2 || app.writes[0]["name"] != "publish_pack" || app.writes[1]["name"] != "create_pull_request" {
 		t.Fatalf("writes = %+v", app.writes)
+	}
+	if app.issueRepository != c.Accepted.SourceRepository {
+		t.Fatalf("observed issue repository = %q, want %q", app.issueRepository, c.Accepted.SourceRepository)
 	}
 	push, pull := app.writes[0]["arguments"].(map[string]any), app.writes[1]["arguments"].(map[string]any)
 	if push["operation_id"] != uuid5("dark-factory:"+c.Change.String()+":pack-"+c.Head[:8]) || push["expected_head_sha"] != nil || push["head_sha"] != c.Head || push["branch"] != "factory/"+c.Change.String()[:12] ||

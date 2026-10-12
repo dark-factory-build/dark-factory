@@ -1298,7 +1298,15 @@ func (b *daemonReviewBackend) callResponse(ctx context.Context, name string, arg
 	if err != nil {
 		return nil, err
 	}
-	response, err := b.daemon.github.MCP(ctx, encoded, map[string]uint64{b.repository: b.repositoryID})
+	repositories := map[string]uint64{b.repository: b.repositoryID}
+	if repository, ok := arguments["repository"].(string); ok && !strings.EqualFold(repository, b.repository) {
+		if _, sources, _, sourceErr := b.daemon.projectMaintainerRepositories(ctx, b.project); sourceErr == nil {
+			if sourceID, found := sources[strings.ToLower(repository)]; found {
+				repositories[repository] = sourceID
+			}
+		}
+	}
+	response, err := b.daemon.github.MCP(ctx, encoded, repositories)
 	if err != nil {
 		return nil, err
 	}
