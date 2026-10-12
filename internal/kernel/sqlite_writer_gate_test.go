@@ -9,7 +9,9 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -650,20 +652,37 @@ func holdWriterPastSlowWriter(store *Store) error {
 		return err
 	}
 	defer tx.Close()
-	time.Sleep(slowWriter + 100*time.Millisecond)
+	time.Sleep(slowWriter + 300*time.Millisecond)
 	return tx.Commit(context.Background())
+}
+
+// abandonWriterWait queues for the writer and gives up past slowWriter.
+func abandonWriterWait(store *Store) error {
+	ctx, cancel := context.WithTimeout(context.Background(), slowWriter+200*time.Millisecond)
+	defer cancel()
+	return store.acquireWriter(ctx)
 }
 
 func TestSlowWriterHoldLogsItsHolderAndWaiters(t *testing.T) {
 	store, _ := newTestStore(t)
 	defer store.Close()
+	var mu sync.Mutex
 	var lines []string
-	store.LogWriterHolds(func(format string, args ...any) { lines = append(lines, fmt.Sprintf(format, args...)) })
+	logged := func() []string { mu.Lock(); defer mu.Unlock(); return slices.Clone(lines) }
+	store.LogWriterHolds(func(format string, args ...any) {
+		mu.Lock()
+		defer mu.Unlock()
+		lines = append(lines, fmt.Sprintf(format, args...))
+	})
 
 	held := make(chan error, 1)
 	go func() { held <- holdWriterPastSlowWriter(store) }()
 	for len(store.writerGate) != 0 {
 		time.Sleep(time.Millisecond)
+	}
+	// A wait cancelled behind the holder is still a wait the minute report names.
+	if err := abandonWriterWait(store); !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("queued timeout = %v", err)
 	}
 	// A queued writer is counted behind the holder.
 	if err := store.acquireWriter(context.Background()); err != nil {
@@ -672,20 +691,22 @@ func TestSlowWriterHoldLogsItsHolderAndWaiters(t *testing.T) {
 	if err := <-held; err != nil {
 		t.Fatal(err)
 	}
-	if len(lines) != 1 || !strings.Contains(lines[0], "sqlite writer held 1.") || !strings.Contains(lines[0], "by kernel.holdWriterPastSlowWriter, 1 waiting") {
-		t.Fatalf("writer-hold log = %q", lines)
+	if got := logged(); len(got) != 1 || !strings.Contains(got[0], "sqlite writer held 1.") || !strings.Contains(got[0], "by kernel.holdWriterPastSlowWriter, 1 waiting") {
+		t.Fatalf("writer-hold log = %q", got)
 	}
-	// The queued writer's wait is the minute's longest, reported a minute on.
+	// The cancelled wait is the minute's longest, reported a minute on.
+	store.waitMu.Lock()
 	store.waitReported = store.waitReported.Add(-time.Minute)
+	store.waitMu.Unlock()
 	store.releaseWriter()
-	if len(lines) != 1 {
-		t.Fatalf("a quick hold was logged: %q", lines)
+	if got := logged(); len(got) != 1 {
+		t.Fatalf("a quick hold was logged: %q", got)
 	}
 	if err := store.acquireWriter(context.Background()); err != nil {
 		t.Fatal(err)
 	}
 	store.releaseWriter()
-	if len(lines) != 2 || !strings.Contains(lines[1], "longest sqlite writer wait in the last minute 1.") || !strings.Contains(lines[1], "by kernel.TestSlowWriterHoldLogsItsHolderAndWaiters") {
-		t.Fatalf("longest-wait log = %q", lines)
+	if got := logged(); len(got) != 2 || !strings.Contains(got[1], "longest sqlite writer wait in the last minute 1.2") || !strings.Contains(got[1], "by kernel.abandonWriterWait") {
+		t.Fatalf("longest-wait log = %q", got)
 	}
 }

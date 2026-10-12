@@ -40,11 +40,14 @@ type Store struct {
 	archivePath    string // The history archive beside the database; see ArchiveHistory.
 
 	// Writer-hold diagnostics (see LogWriterHolds). The holder fields are
-	// protected by writerGate; the waiter count is read by the holder.
+	// protected by writerGate; the waiter count is read by the holder. The
+	// wait fields are protected by waitMu, since a cancelled wait never holds
+	// the gate.
 	writerLog     atomic.Pointer[func(string, ...any)]
 	writerWaiters atomic.Int64
 	writerHolder  [8]uintptr
 	writerSince   time.Time
+	waitMu        sync.Mutex
 	longestWait   time.Duration
 	longestWaiter [8]uintptr
 	waitReported  time.Time
@@ -712,25 +715,35 @@ func (store *Store) acquireWriter(ctx context.Context) error {
 	select {
 	case <-ctx.Done():
 		store.writerWaiters.Add(-1)
+		store.noteWriterWait(caller, waiting)
 		return ctx.Err()
 	case <-store.writerGate:
 	}
 	store.writerWaiters.Add(-1)
-	store.writerHolder, store.writerSince = caller, time.Now()
-	if wait := store.writerSince.Sub(waiting); wait > store.longestWait {
-		store.longestWait, store.longestWaiter = wait, caller
-	}
-	if store.writerSince.Sub(store.waitReported) >= time.Minute {
-		if store.longestWait > slowWriter {
-			store.logWriter("factoryd: longest sqlite writer wait in the last minute %s by %s\n", store.longestWait.Round(time.Millisecond), writerCaller(store.longestWaiter))
-		}
-		store.longestWait, store.waitReported = 0, store.writerSince
-	}
+	store.writerHolder, store.writerSince = caller, store.noteWriterWait(caller, waiting)
 	if err := ctx.Err(); err != nil {
 		store.releaseWriter()
 		return err
 	}
 	return nil
+}
+
+// noteWriterWait records a wait for the writer, whether it was admitted or
+// cancelled, and reports the minute's longest once a minute has passed.
+func (store *Store) noteWriterWait(caller [8]uintptr, waiting time.Time) time.Time {
+	now := time.Now()
+	store.waitMu.Lock()
+	defer store.waitMu.Unlock()
+	if wait := now.Sub(waiting); wait > store.longestWait {
+		store.longestWait, store.longestWaiter = wait, caller
+	}
+	if now.Sub(store.waitReported) >= time.Minute {
+		if store.longestWait > slowWriter {
+			store.logWriter("factoryd: longest sqlite writer wait in the last minute %s by %s\n", store.longestWait.Round(time.Millisecond), writerCaller(store.longestWaiter))
+		}
+		store.longestWait, store.waitReported = 0, now
+	}
+	return now
 }
 
 func (store *Store) releaseWriter() {
