@@ -258,9 +258,8 @@ func (store *Store) RecordChangeWorktree(ctx context.Context, id ChangeID, expec
 // A retained Change's worktree may be reclaimed once nothing of value is left
 // in it: its task has ended (succeeded, failed or cancelled), and the work is
 // empty, or given up: its pull request merged after the Change last changed
-// (the App publishes its own commit, so the merged head never equals the
-// Change's head), failed or cancelled (with no
-// open pull request) for changeReclaimAfterEnd, or succeeded and never
+// (its squash commit never equals the Change's head), failed or cancelled
+// (with no open pull request) for changeReclaimAfterEnd, or succeeded and never
 // published for changeReclaimAfterSuccess. The daemon adds the filesystem
 // half: the worktree is clean and verifies, and only given-up work leaves a
 // legacy shared-administration worktree or a Git-free copy.

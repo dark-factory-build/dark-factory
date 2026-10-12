@@ -2,7 +2,6 @@ package daemon
 
 import (
 	"context"
-	"crypto/sha1"
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/hex"
@@ -11,6 +10,7 @@ import (
 	"fmt"
 	"math/rand/v2"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -25,12 +25,15 @@ import (
 // fakePublishMaintainer is the App's journal: one result per operation id,
 // a replay of a completed id answered from it.
 type fakePublishMaintainer struct {
+	t              *testing.T
+	bare           string // GitHub's repository, for publish_pack
+	pack           *packMaintainer
 	main           string
 	tip            string // the pull request branch's head
 	journal        map[string]json.RawMessage
 	planned        map[string]bool  // ids a write stopped before GitHub
 	writes         []map[string]any // every write sent
-	refuse         string           // a path publish_commit refuses
+	refuse         string           // a path whose push GitHub refuses
 	externalRefuse bool             // the Maintainer refuses before the App can apply it
 	unavailable    bool             // the Maintainer authority is temporarily unavailable
 	loseNext       bool             // the next write lands but its response is lost
@@ -72,20 +75,21 @@ func (f *fakePublishMaintainer) call(_ context.Context, name string, arguments m
 	}
 	var result json.RawMessage
 	switch name {
-	case "publish_commit":
-		if f.tip != "" && arguments["expected_head_sha"] != f.tip {
-			return nil, fmt.Errorf("conflict: branch is at %s, not %v", f.tip, arguments["expected_head_sha"])
-		}
-		for _, entry := range arguments["changes"].([]map[string]any) {
-			if f.refuse != "" && strings.HasPrefix(entry["path"].(string), f.refuse) {
-				if f.externalRefuse {
-					return nil, maintainerRejection("refused: The request was refused: rejected before execution as UNPROCESSABLE.")
-				}
-				return nil, fmt.Errorf("refused: %s cannot be written", f.refuse)
+	case "publish_pack":
+		if f.refuse != "" {
+			if f.externalRefuse {
+				return nil, maintainerRejection("refused: The request was refused: rejected before execution as UNPROCESSABLE.")
 			}
+			return nil, fmt.Errorf("refused: %s cannot be written", f.refuse)
 		}
-		f.tip = fmt.Sprintf("%x", sha1.Sum([]byte(id)))
-		result, _ = json.Marshal(map[string]any{"branch": arguments["branch"], "commit_sha": f.tip, "parent_sha": arguments["expected_head_sha"]})
+		// Every chunk replays under one id, so the pack's own journal answers.
+		if f.pack == nil || f.pack.operation != id {
+			f.pack = &packMaintainer{t: f.t, bare: f.bare, operation: id}
+		}
+		f.pack.branch, f.pack.loseNext, f.loseNext = f.tip, f.loseNext, false
+		result, err := f.pack.call(context.Background(), name, arguments)
+		f.tip = f.pack.branch
+		return result, err
 	case "create_pull_request":
 		result, _ = json.Marshal(map[string]any{"number": 31, "url": "https://github.com/team/repo/pull/31", "head_sha": arguments["head_sha"], "base_sha": arguments["base_sha"]})
 	case "update_pull_request_body":
@@ -169,17 +173,32 @@ func publishFixture(t *testing.T, files int, workflow bool) (*dispatchFixture, k
 	candidate := kernel.PublishableChange{Task: task, Change: changeID, Revision: revision, Base: base, Head: head,
 		Accepted: kernel.IntakeAcceptance{SourceRepository: "team/repo", Snapshot: kernel.IntakeIssueSnapshot{GitHubRepositoryID: 42, IssueNumber: 9, Title: "Fix  the\nthing"}}}
 	fixture.daemon.reviewBackend = func(string, uint64) review.Backend { return &publicReviewBackend{} }
-	checkout := func(context.Context, string, string) (string, func(), error) {
+	checkout := func(context.Context, string) (string, func(), error) {
 		clone := filepath.Join(t.TempDir(), "clone")
 		supervisorGit(t, git, "clone", "-q", "--shared", registered, clone)
 		return filepath.Join(clone, ".git"), func() {}, nil
 	}
-	return fixture, candidate, filepath.Join(root, ".git"), &fakePublishMaintainer{main: base, journal: map[string]json.RawMessage{}}, checkout
+	bare := filepath.Join(t.TempDir(), "github.git")
+	supervisorGit(t, git, "clone", "-q", "--bare", "--shared", registered, bare)
+	return fixture, candidate, filepath.Join(root, ".git"), &fakePublishMaintainer{t: t, bare: bare, main: base, journal: map[string]json.RawMessage{}}, checkout
 }
 
-// First publication end to end, with the first commit's response lost: the
-// retry replays nothing the journal completed, chains 52 entries over two
-// commits, opens the pull request from the accepted issue with a redacted
+// publishedExactly fails unless GitHub's branch is the worker's head and holds
+// the worker's own commit bytes.
+func publishedExactly(t *testing.T, app *fakePublishMaintainer, source, head string) {
+	t.Helper()
+	git := change.TrustedGitExecutable
+	if app.tip != head {
+		t.Fatalf("branch at %s, want the Change head %s", app.tip, head)
+	}
+	if got, want := supervisorGitOutput(t, git, "--git-dir", app.bare, "cat-file", "commit", head), supervisorGitOutput(t, git, "--git-dir", source, "cat-file", "commit", head); got != want {
+		t.Fatalf("GitHub holds %q, the worker made %q", got, want)
+	}
+}
+
+// First publication end to end, with the push's response lost: the retry
+// finds the branch at the head and pushes nothing again, opens the pull
+// request at the worker's exact head from the accepted issue with a redacted
 // body, records it under the worker task and starts factoryd's review.
 func TestFactorydPublishesASettledIntakeChange(t *testing.T) {
 	fixture, c, source, app, checkout := publishFixture(t, 51, false)
@@ -188,27 +207,24 @@ func TestFactorydPublishesASettledIntakeChange(t *testing.T) {
 	if err := fixture.daemon.publishChange(ctx, c, "team/repo", source, app.call, checkout); err == nil {
 		t.Fatal("a lost response reported publication")
 	}
-	if len(app.writes) != 1 {
-		t.Fatalf("writes before the retry = %d", len(app.writes))
-	}
 	if err := fixture.daemon.publishChange(ctx, c, "team/repo", source, app.call, checkout); err != nil {
 		t.Fatal(err)
 	}
-	first, second, pull := app.writes[0]["arguments"].(map[string]any), app.writes[1]["arguments"].(map[string]any), app.writes[2]["arguments"].(map[string]any)
-	if len(app.writes) != 3 || first["operation_id"] != uuid5("dark-factory:"+c.Change.String()+":publish-"+c.Head[:8]+"-1") || second["operation_id"] != uuid5("dark-factory:"+c.Change.String()+":publish-"+c.Head[:8]+"-2") || pull["operation_id"] != uuid5("dark-factory:"+c.Change.String()+":pr-"+c.Head[:8]) {
+	if len(app.writes) != 2 || app.writes[0]["name"] != "publish_pack" || app.writes[1]["name"] != "create_pull_request" {
 		t.Fatalf("writes = %+v", app.writes)
 	}
-	firstCommit := fmt.Sprintf("%x", sha1.Sum([]byte(first["operation_id"].(string))))
-	secondCommit := fmt.Sprintf("%x", sha1.Sum([]byte(second["operation_id"].(string))))
-	if first["expected_head_sha"] != c.Base || len(first["changes"].([]map[string]any)) != 50 || second["expected_head_sha"] != firstCommit || len(second["changes"].([]map[string]any)) != 2 || first["message"] != "Fix the thing" || first["branch"] != "factory/"+c.Change.String()[:12] {
-		t.Fatalf("commit chain: first=%v second=%v", first["expected_head_sha"], second["expected_head_sha"])
+	push, pull := app.writes[0]["arguments"].(map[string]any), app.writes[1]["arguments"].(map[string]any)
+	if push["operation_id"] != uuid5("dark-factory:"+c.Change.String()+":pack-"+c.Head[:8]) || push["expected_head_sha"] != nil || push["head_sha"] != c.Head || push["branch"] != "factory/"+c.Change.String()[:12] ||
+		pull["operation_id"] != uuid5("dark-factory:"+c.Change.String()+":pr-"+c.Head[:8]) || pull["title"] != "Fix the thing" {
+		t.Fatalf("push = %+v pull = %+v", push, pull)
 	}
+	publishedExactly(t, app, source, c.Head)
 	body := pull["body"].(string)
-	if pull["head_sha"] != secondCommit || pull["issue_number"] != uint64(9) || pull["source_repository"] != nil || pull["close_on_merge"] != true || pull["base_sha"] != c.Base ||
-		strings.Contains(body, "example.com") || strings.Contains(body, "/Users/") || !strings.Contains(body, "Implemented it") || !strings.Contains(body, secondCommit) || !strings.Contains(body, "+51 -1 across 52 files") || !strings.HasSuffix(body, "The merge queue runs the gate.") {
+	if pull["head_sha"] != c.Head || pull["issue_number"] != uint64(9) || pull["source_repository"] != nil || pull["close_on_merge"] != true || pull["base_sha"] != c.Base ||
+		strings.Contains(body, "example.com") || strings.Contains(body, "/Users/") || !strings.Contains(body, "Implemented it") || !strings.Contains(body, c.Head) || !strings.Contains(body, "+51 -1 across 52 files") || !strings.HasSuffix(body, "The merge queue runs the gate.") {
 		t.Fatalf("pull request = %+v", pull)
 	}
-	if pr := readProductionPull(t, fixture.store, c.Task.ProjectID, 31); pr.Head != secondCommit || pr.Branch != "factory/"+c.Change.String()[:12] {
+	if pr := readProductionPull(t, fixture.store, c.Task.ProjectID, 31); pr.Head != c.Head || pr.Branch != "factory/"+c.Change.String()[:12] {
 		t.Fatalf("recorded pull = %+v", pr)
 	}
 	page, err := fixture.store.Production(ctx, c.Task.ProjectID, 0, 8, kernel.UnixMillis{})
@@ -220,43 +236,57 @@ func TestFactorydPublishesASettledIntakeChange(t *testing.T) {
 			t.Fatalf("publication tasks = %v, want the worker %s", record.Tasks, c.Task.ID)
 		}
 	}
-	if op := waitForDurableReview(t, fixture.store, c.Task.ProjectID, func(op review.Operation) bool { return op.State == "enqueued" }); op.State != "enqueued" || op.Request.PullNumber != 31 || op.Request.Head != secondCommit {
+	if op := waitForDurableReview(t, fixture.store, c.Task.ProjectID, func(op review.Operation) bool { return op.State == "enqueued" }); op.State != "enqueued" || op.Request.PullNumber != 31 || op.Request.Head != c.Head {
 		t.Fatalf("review = %+v", op)
 	}
 }
 
-// A head that changes after commits reached the Change's branch but before
-// its pull request (a retried task) goes on that branch head under new
-// operation ids, carrying only what differs from it.
-func TestFirstPublicationOfAChangedHeadBuildsOnItsBranch(t *testing.T) {
+// A head that changes after an earlier head reached the Change's branch but
+// before its pull request (a retried task) replaces that branch head, a range
+// of two worker commits pushed exactly.
+func TestFirstPublicationOfAChangedHeadReplacesItsBranch(t *testing.T) {
 	fixture, c, source, app, checkout := publishFixture(t, 2, false)
 	ctx := context.Background()
 	root, git := filepath.Dir(source), change.TrustedGitExecutable
 	stale := c.Head
-	app.tip = stale // the branch carries the earlier head's tree; no pull request
+	app.tip = stale // no pull request yet
 	if err := os.WriteFile(filepath.Join(root, "f00.txt"), []byte("retried\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	supervisorGit(t, git, "-C", root, "-c", "user.name=fixture", "-c", "user.email=fixture@example.invalid", "commit", "-q", "-am", "retry")
 	c.Head = strings.TrimSpace(supervisorGitOutput(t, git, "-C", root, "rev-parse", "HEAD"))
-	withTip := func(ctx context.Context, ref, head string) (string, func(), error) {
-		gitDir, cleanup, err := checkout(ctx, ref, head)
-		if err == nil && ref == "refs/heads/factory/"+c.Change.String()[:12] && head == stale {
-			_, err = gitOutput(ctx, gitDir, "-c", "protocol.file.allow=always", "fetch", "--quiet", source, stale)
-		}
-		return gitDir, cleanup, err
-	}
-	if err := fixture.daemon.publishChange(ctx, c, "team/repo", source, app.call, withTip); err != nil {
+	if err := fixture.daemon.publishChange(ctx, c, "team/repo", source, app.call, checkout); err != nil {
 		t.Fatal(err)
 	}
 	if len(app.writes) != 2 {
 		t.Fatalf("writes = %+v", app.writes)
 	}
-	commit, pull := app.writes[0]["arguments"].(map[string]any), app.writes[1]["arguments"].(map[string]any)
-	changes := commit["changes"].([]map[string]any)
-	if commit["operation_id"] != uuid5("dark-factory:"+c.Change.String()+":publish-"+c.Head[:8]+"-1") || commit["expected_head_sha"] != stale || len(changes) != 1 || changes[0]["path"] != "f00.txt" ||
-		pull["operation_id"] != uuid5("dark-factory:"+c.Change.String()+":pr-"+c.Head[:8]) || pull["head_sha"] != app.tip {
-		t.Fatalf("commit = %+v pull = %+v", commit, pull)
+	push, pull := app.writes[0]["arguments"].(map[string]any), app.writes[1]["arguments"].(map[string]any)
+	if push["operation_id"] != uuid5("dark-factory:"+c.Change.String()+":pack-"+c.Head[:8]) || push["expected_head_sha"] != stale || pull["head_sha"] != c.Head {
+		t.Fatalf("push = %+v pull = %+v", push, pull)
+	}
+	publishedExactly(t, app, source, c.Head)
+	app.tip = stale
+	publishedExactly(t, app, source, stale) // the range's first commit, as the worker made it
+}
+
+// A branch moved after factoryd observed it is never overwritten: the push's
+// expected head refuses it and no pull request opens.
+func TestPublicationRefusesABranchThatMovedSinceItWasObserved(t *testing.T) {
+	fixture, c, source, app, checkout := publishFixture(t, 1, false)
+	moved := c.Base
+	app.tip = moved
+	stale := func(ctx context.Context, name string, arguments map[string]any) (json.RawMessage, error) {
+		if name == "observe_ref" && arguments["branch"] != "main" {
+			return json.Marshal(map[string]any{"head_sha": ""}) // observed before it moved
+		}
+		return app.call(ctx, name, arguments)
+	}
+	if err := fixture.daemon.publishPull(context.Background(), c, "team/repo", source, stale, checkout); err == nil || !strings.Contains(err.Error(), "branch is at "+moved) {
+		t.Fatalf("raced push = %v", err)
+	}
+	if app.tip != moved || len(app.writes) != 1 || app.writes[0]["name"] != "publish_pack" {
+		t.Fatalf("branch %s, writes %+v", app.tip, app.writes)
 	}
 }
 
@@ -276,22 +306,15 @@ func TestAPlannedPullRequestCreateMovesToTheCurrentMain(t *testing.T) {
 	}
 }
 
-// A branch an earlier attempt already brought to the head's tree, with no
-// pull request, gets its pull request at that branch head and no commit.
-func TestFirstPublicationOfAnAlreadyPublishedTreeOpensItsPullRequest(t *testing.T) {
+// A branch an earlier attempt already brought to the head, with no pull
+// request, gets its pull request at that head and no push.
+func TestFirstPublicationOfAnAlreadyPushedHeadOpensItsPullRequest(t *testing.T) {
 	fixture, c, source, app, checkout := publishFixture(t, 1, false)
 	ctx := context.Background()
 	backend := &publicReviewBackend{}
 	fixture.daemon.reviewBackend = func(string, uint64) review.Backend { return backend }
-	app.tip = c.Head // the earlier attempt's commit carries the same tree
-	withTip := func(ctx context.Context, ref, head string) (string, func(), error) {
-		gitDir, cleanup, err := checkout(ctx, ref, head)
-		if err == nil {
-			_, err = gitOutput(ctx, gitDir, "-c", "protocol.file.allow=always", "fetch", "--quiet", source, head)
-		}
-		return gitDir, cleanup, err
-	}
-	if err := fixture.daemon.publishChange(ctx, c, "team/repo", source, app.call, withTip); err != nil {
+	app.tip = c.Head
+	if err := fixture.daemon.publishChange(ctx, c, "team/repo", source, app.call, checkout); err != nil {
 		t.Fatal(err)
 	}
 	if len(app.writes) != 1 || app.writes[0]["name"] != "create_pull_request" || app.writes[0]["arguments"].(map[string]any)["head_sha"] != c.Head {
@@ -302,8 +325,8 @@ func TestFirstPublicationOfAnAlreadyPublishedTreeOpensItsPullRequest(t *testing.
 	}
 }
 
-// An empty diff from the main the worker integrated says nothing about a
-// stale branch tip: no pull request opens there.
+// A true empty diff from the main the worker integrated opens no pull
+// request, whatever stale commit the branch holds.
 func TestEmptyDiffFromIntegratedMainOpensNoPullRequestAtAStaleTip(t *testing.T) {
 	fixture, c, source, app, checkout := publishFixture(t, 1, false)
 	ctx := context.Background()
@@ -316,113 +339,89 @@ func TestEmptyDiffFromIntegratedMainOpensNoPullRequestAtAStaleTip(t *testing.T) 
 	}
 }
 
-// A correction after a send-back goes on the open pull request's branch head
-// as one commit carrying only what the worker changed since, with its first
-// commit's response lost: the retry publishes nothing twice, replaces the
-// body naming the new head under its closing line, and a further pass writes
-// nothing.
+// A correction after a send-back replaces the open pull request's branch
+// head with the worker's exact head, with the push's response lost: the retry
+// pushes nothing twice, replaces the body naming the new head under its
+// closing line, and a further pass writes nothing.
 func TestFactorydPublishesACorrectionOnItsPullRequest(t *testing.T) {
 	fixture, c, source, app, checkout := publishFixture(t, 2, false)
 	ctx := context.Background()
 	root, git := filepath.Dir(source), change.TrustedGitExecutable
-	app.tip = c.Head // the first publication's tree, as the branch carries it
+	tip := c.Head // the first publication
+	app.tip = tip
 	if err := os.WriteFile(filepath.Join(root, "f00.txt"), []byte("corrected\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	supervisorGit(t, git, "-C", root, "-c", "user.name=fixture", "-c", "user.email=fixture@example.invalid", "commit", "-q", "-am", "correct")
 	c.Head, c.Pull = strings.TrimSpace(supervisorGitOutput(t, git, "-C", root, "rev-parse", "HEAD")), 31
-	tip := app.tip
-	withTip := func(ctx context.Context, ref, head string) (string, func(), error) {
-		gitDir, cleanup, err := checkout(ctx, ref, head)
-		if err == nil {
-			_, err = gitOutput(ctx, gitDir, "-c", "protocol.file.allow=always", "fetch", "--quiet", source, tip)
-		}
-		return gitDir, cleanup, err
-	}
 	app.loseNext = true
-	if err := fixture.daemon.publishChange(ctx, c, "team/repo", source, app.call, withTip); err == nil {
+	if err := fixture.daemon.publishChange(ctx, c, "team/repo", source, app.call, checkout); err == nil {
 		t.Fatal("a lost response reported publication")
 	}
 	for range 2 {
-		if err := fixture.daemon.publishChange(ctx, c, "team/repo", source, app.call, withTip); err != nil {
+		if err := fixture.daemon.publishChange(ctx, c, "team/repo", source, app.call, checkout); err != nil {
 			t.Fatal(err)
 		}
 	}
-	if len(app.writes) != 2 || app.writes[0]["name"] != "publish_commit" || app.writes[1]["name"] != "update_pull_request_body" {
+	if len(app.writes) != 2 || app.writes[0]["name"] != "publish_pack" || app.writes[1]["name"] != "update_pull_request_body" {
 		t.Fatalf("writes = %+v", app.writes)
 	}
-	commit, body := app.writes[0]["arguments"].(map[string]any), app.writes[1]["arguments"].(map[string]any)
-	changes := commit["changes"].([]map[string]any)
-	if commit["operation_id"] != uuid5("dark-factory:"+c.Change.String()+":publish-"+c.Head[:8]+"-1") || commit["expected_head_sha"] != tip || commit["merge_parent_sha"] != nil ||
-		commit["branch"] != "factory/"+c.Change.String()[:12] || len(changes) != 1 || changes[0]["path"] != "f00.txt" {
-		t.Fatalf("correction commit = %+v", commit)
+	push, body := app.writes[0]["arguments"].(map[string]any), app.writes[1]["arguments"].(map[string]any)
+	if push["operation_id"] != uuid5("dark-factory:"+c.Change.String()+":pack-"+c.Head[:8]) || push["expected_head_sha"] != tip || push["branch"] != "factory/"+c.Change.String()[:12] {
+		t.Fatalf("correction push = %+v", push)
 	}
+	publishedExactly(t, app, source, c.Head)
 	text := body["body"].(string)
-	if body["operation_id"] != uuid5("dark-factory:"+c.Change.String()+":body-"+app.tip[:8]+"-3") || body["pull_number"] != uint64(31) ||
-		!strings.Contains(text, "at "+app.tip+": +2 -1 across 3 files from "+c.Base) || !strings.HasSuffix(text, "\n\nCloses #9") {
+	if body["operation_id"] != uuid5("dark-factory:"+c.Change.String()+":body-"+c.Head[:8]+"-3") || body["pull_number"] != uint64(31) ||
+		!strings.Contains(text, "at "+c.Head+": +2 -1 across 3 files from "+c.Base) || !strings.HasSuffix(text, "\n\nCloses #9") {
 		t.Fatalf("corrected body = %+v", body)
 	}
 }
 
-// A correction may merge main twice after the worker's path was first
-// published.  The current main content must survive while the correction's
-// own path is applied, including a deliberate merge resolution.
-func TestFactorydPublishesCorrectionFromThePRTip(t *testing.T) {
+// #1819: a correction rebased onto a main that moved under its pull request,
+// resolving a conflict, is pushed as it is, so the pull request's history has
+// that main and stays mergeable; no commit is built on the old tip without it.
+func TestACorrectionRebasedOntoAMovedMainLeavesItsPullRequestMergeable(t *testing.T) {
 	fixture, c, source, app, checkout := publishFixture(t, 1, false)
 	ctx := context.Background()
 	root, git := filepath.Dir(source), change.TrustedGitExecutable
+	commit := func(dir string, args ...string) {
+		supervisorGit(t, git, append([]string{"-C", dir, "-c", "user.name=fixture", "-c", "user.email=fixture@example.invalid"}, args...)...)
+	}
 	registered := strings.TrimSpace(supervisorGitOutput(t, git, "-C", root, "remote", "get-url", "origin"))
-
 	if err := os.WriteFile(filepath.Join(root, "a.txt"), []byte("worker\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	supervisorGit(t, git, "-C", root, "-c", "user.name=fixture", "-c", "user.email=fixture@example.invalid", "add", "a.txt")
-	supervisorGit(t, git, "-C", root, "-c", "user.name=fixture", "-c", "user.email=fixture@example.invalid", "commit", "-q", "-m", "worker")
-	worker := strings.TrimSpace(supervisorGitOutput(t, git, "-C", root, "rev-parse", "HEAD"))
-
-	if err := os.WriteFile(filepath.Join(registered, "a.txt"), []byte("main one\n"), 0o644); err != nil {
+	commit(root, "add", "a.txt")
+	commit(root, "commit", "-q", "-m", "worker")
+	app.tip, c.Pull = strings.TrimSpace(supervisorGitOutput(t, git, "-C", root, "rev-parse", "HEAD")), 31
+	tip := app.tip
+	// main moves with a conflicting a.txt; the worker rebases onto it.
+	if err := os.WriteFile(filepath.Join(registered, "a.txt"), []byte("main\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	supervisorGit(t, git, "-C", registered, "-c", "user.name=fixture", "-c", "user.email=fixture@example.invalid", "add", "a.txt")
-	supervisorGit(t, git, "-C", registered, "-c", "user.name=fixture", "-c", "user.email=fixture@example.invalid", "commit", "-q", "-m", "main one")
-	supervisorGit(t, git, "-C", root, "fetch", "-q", "origin", "main")
-	supervisorGit(t, git, "-C", root, "merge", "-q", "--no-ff", "-s", "ours", "FETCH_HEAD", "-m", "import main")
-	if err := os.WriteFile(filepath.Join(root, "fix.txt"), []byte("correction\n"), 0o644); err != nil {
+	commit(registered, "add", "a.txt")
+	commit(registered, "commit", "-q", "-m", "main moved")
+	app.main = strings.TrimSpace(supervisorGitOutput(t, git, "-C", registered, "rev-parse", "HEAD"))
+	commit(root, "fetch", "-q", "origin", "main")
+	if err := exec.Command(git, "-C", root, "-c", "user.name=fixture", "-c", "user.email=fixture@example.invalid", "rebase", "-q", "FETCH_HEAD").Run(); err == nil {
+		t.Fatal("the fixture's rebase did not conflict")
+	}
+	if err := os.WriteFile(filepath.Join(root, "a.txt"), []byte("main\nworker\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	supervisorGit(t, git, "-C", root, "add", "fix.txt")
-	supervisorGit(t, git, "-C", root, "-c", "user.name=fixture", "-c", "user.email=fixture@example.invalid", "commit", "-q", "--amend", "--no-edit")
+	commit(root, "add", "a.txt")
+	commit(root, "-c", "core.editor=true", "rebase", "--continue")
 	c.Head = strings.TrimSpace(supervisorGitOutput(t, git, "-C", root, "rev-parse", "HEAD"))
 
-	if err := os.WriteFile(filepath.Join(registered, "a.txt"), []byte("main two\n"), 0o644); err != nil {
+	if err := fixture.daemon.publishChange(ctx, c, "team/repo", source, app.call, checkout); err != nil {
 		t.Fatal(err)
 	}
-	supervisorGit(t, git, "-C", registered, "-c", "user.name=fixture", "-c", "user.email=fixture@example.invalid", "commit", "-q", "-am", "main two")
-	app.main = strings.TrimSpace(supervisorGitOutput(t, git, "-C", registered, "rev-parse", "HEAD"))
-	app.tip, c.Pull = worker, 31
-	withTip := func(ctx context.Context, ref, head string) (string, func(), error) {
-		gitDir, cleanup, err := checkout(ctx, ref, head)
-		if err == nil {
-			_, err = gitOutput(ctx, gitDir, "-c", "protocol.file.allow=always", "fetch", "--quiet", source, worker)
-		}
-		return gitDir, cleanup, err
-	}
-
-	if err := fixture.daemon.publishChange(ctx, c, "team/repo", source, app.call, withTip); err != nil {
-		t.Fatal(err)
-	}
-	if len(app.writes) != 2 || app.writes[0]["name"] != "publish_commit" || app.writes[1]["name"] != "update_pull_request_body" {
+	if len(app.writes) != 2 || app.writes[0]["name"] != "publish_pack" || app.writes[0]["arguments"].(map[string]any)["expected_head_sha"] != tip || app.writes[1]["name"] != "update_pull_request_body" {
 		t.Fatalf("writes = %+v", app.writes)
 	}
-	changes := app.writes[0]["arguments"].(map[string]any)["changes"].([]map[string]any)
-	var content []byte
-	var err error
-	if len(changes) == 1 {
-		content, err = base64.StdEncoding.DecodeString(changes[0]["content_base64"].(string))
-	}
-	if err != nil || len(changes) != 1 || changes[0]["path"] != "fix.txt" || string(content) != "correction\n" {
-		t.Fatalf("correction changes = %+v", changes)
-	}
+	publishedExactly(t, app, source, c.Head)
+	supervisorGit(t, git, "--git-dir", app.bare, "merge-base", "--is-ancestor", app.main, c.Head) // mergeable: main is in its history
 }
 
 // A worker answering a verdict with evidence and no file change (#1706)
@@ -431,16 +430,9 @@ func TestFactorydPublishesCorrectionFromThePRTip(t *testing.T) {
 func TestAnEvidenceOnlyCorrectionReplacesOnlyTheBody(t *testing.T) {
 	fixture, c, source, app, checkout := publishFixture(t, 1, false)
 	ctx := context.Background()
-	app.tip, c.Pull = c.Head, 31 // the branch already carries the worker's tree
+	app.tip, c.Pull = c.Head, 31 // the branch already is the worker's head
 	c.Task.Result = "Premise not reproduced: the cited line already guards it."
-	withTip := func(ctx context.Context, ref, head string) (string, func(), error) {
-		gitDir, cleanup, err := checkout(ctx, ref, head)
-		if err == nil {
-			_, err = gitOutput(ctx, gitDir, "-c", "protocol.file.allow=always", "fetch", "--quiet", source, head)
-		}
-		return gitDir, cleanup, err
-	}
-	if err := fixture.daemon.publishChange(ctx, c, "team/repo", source, app.call, withTip); err != nil {
+	if err := fixture.daemon.publishChange(ctx, c, "team/repo", source, app.call, checkout); err != nil {
 		t.Fatal(err)
 	}
 	if len(app.writes) != 1 || app.writes[0]["name"] != "update_pull_request_body" || !strings.Contains(app.writes[0]["arguments"].(map[string]any)["body"].(string), "Premise not reproduced") {
@@ -613,8 +605,7 @@ func TestACorrectionNeverTurnsAnUnfinishedIntakeIntoAClose(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			fixture, c, source, app, checkout := publishFixture(t, 1, false)
 			root, git := filepath.Dir(source), change.TrustedGitExecutable
-			tip := c.Head
-			app.tip, c.Pull = tip, 31
+			app.tip, c.Pull = c.Head, 31
 			app.body = "Implemented items 1 and 5.\n\nRefs #9\n\n<!-- dark-factory:operation -->"
 			if revert {
 				app.body = "Implemented it.\n\nCloses #9"
@@ -626,14 +617,7 @@ func TestACorrectionNeverTurnsAnUnfinishedIntakeIntoAClose(t *testing.T) {
 			}
 			c.Head = strings.TrimSpace(supervisorGitOutput(t, git, "-C", root, "rev-parse", "HEAD"))
 			c.Task.Result = "Answered the review.\n\nCloses #9"
-			withTip := func(ctx context.Context, ref, head string) (string, func(), error) {
-				gitDir, cleanup, err := checkout(ctx, ref, head)
-				if err == nil {
-					_, err = gitOutput(ctx, gitDir, "-c", "protocol.file.allow=always", "fetch", "--quiet", source, tip)
-				}
-				return gitDir, cleanup, err
-			}
-			if err := fixture.daemon.publishChange(context.Background(), c, "team/repo", source, app.call, withTip); err != nil {
+			if err := fixture.daemon.publishChange(context.Background(), c, "team/repo", source, app.call, checkout); err != nil {
 				t.Fatal(err)
 			}
 			body := app.writes[len(app.writes)-1]
@@ -669,14 +653,15 @@ func TestReferencingDisarmsEveryClosingKeywordForTheIssue(t *testing.T) {
 // checks the digest, the branch precondition and the objects' connectivity in
 // a bare repository standing in for GitHub.
 type packMaintainer struct {
-	t        *testing.T
-	bare     string // GitHub's repository
-	branch   string // the factory branch's head, "" while absent
-	fields   string
-	chunks   []string
-	pushes   int
-	loseNext bool            // the push lands but its response is lost
-	result   json.RawMessage // the completed operation's journaled result
+	t         *testing.T
+	operation string
+	bare      string // GitHub's repository
+	branch    string // the factory branch's head, "" while absent
+	fields    string
+	chunks    []string
+	pushes    int
+	loseNext  bool            // the push lands but its response is lost
+	result    json.RawMessage // the completed operation's journaled result
 }
 
 func (m *packMaintainer) call(_ context.Context, name string, arguments map[string]any) (json.RawMessage, error) {
