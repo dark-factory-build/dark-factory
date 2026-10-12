@@ -14,6 +14,10 @@ import (
 // receipts stay in the hot database before ArchiveHistory moves them.
 const HistoryRetention = 7 * 24 * 60 * 60 * 1000
 
+// archiveCopiedHook is package-local deterministic fault instrumentation
+// between the archive commit and the hot one. Production has no hook.
+var archiveCopiedHook func() error
+
 // The archive is an append-only SQLite file beside the hot database. Its rows
 // carry the run identity readers join on, so they never need the hot run and
 // nothing in either file holds a foreign key across the boundary.
@@ -91,16 +95,38 @@ func (store *Store) beginHistoryRead(ctx context.Context) (*readTx, bool, error)
 	return tx, archived, nil
 }
 
-// verifyArchive fails unless the archive holds every generation the hot
-// database committed, with its row count and digest.
+// verifyArchive fails unless the rows of every generation the hot database
+// committed hash, in the archive, to the digest and count it committed.
+// ponytail: this rehashes the whole archive per crossing read, as those reads
+// already scan the receipts; keep a verified high-water mark if it grows slow.
 func verifyArchive(ctx context.Context, connection *sql.Conn) error {
-	var missing int64
-	if err := connection.QueryRowContext(ctx, `SELECT count(*) FROM main.archive_batches AS h LEFT JOIN archive.batches AS a ON a.generation = h.generation AND a.rows = h.rows AND a.digest = h.digest
-		WHERE a.generation IS NULL OR h.rows <> (SELECT count(*) FROM archive.content_accesses AS c WHERE c.generation = h.generation)`).Scan(&missing); err != nil {
+	rows, err := connection.QueryContext(ctx, `SELECT generation, rows, digest FROM main.archive_batches ORDER BY generation`)
+	if err != nil {
 		return err
 	}
-	if missing != 0 {
-		return fmt.Errorf("%d committed generations are missing or changed", missing)
+	type batch struct {
+		generation, rows int64
+		digest           []byte
+	}
+	var batches []batch
+	for rows.Next() {
+		var b batch
+		if err := rows.Scan(&b.generation, &b.rows, &b.digest); err != nil {
+			return errors.Join(err, rows.Close())
+		}
+		batches = append(batches, b)
+	}
+	if err := errors.Join(rows.Err(), rows.Close()); err != nil {
+		return err
+	}
+	for _, b := range batches {
+		digest, count, err := digestRows(ctx, connection, archiveGeneration, b.generation)
+		if err != nil {
+			return err
+		}
+		if int64(count) != b.rows || !bytes.Equal(digest, b.digest) {
+			return fmt.Errorf("committed generation %d is missing or changed", b.generation)
+		}
 	}
 	return nil
 }
@@ -181,6 +207,11 @@ func archiveBatch(ctx context.Context, tx *writeTx, cutoff, at int64) (int, erro
 	})
 	if err != nil || rows == 0 {
 		return 0, err
+	}
+	if archiveCopiedHook != nil {
+		if err := archiveCopiedHook(); err != nil {
+			return 0, err
+		}
 	}
 	err = tx.within(ctx, func() error {
 		hot, count, err := digestRows(ctx, connection, archiveSelection, cutoff)

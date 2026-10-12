@@ -10,28 +10,24 @@ import (
 	"testing"
 )
 
-// A terminal run's receipts move to the archive only after HistoryRetention,
-// once; content history and the report read the same across the boundary and
-// a restart; an uncommitted generation is invisible and discarded; and a
-// missing or altered committed generation fails crossing reads and the next
-// pass closed while hot reads go on.
-func TestArchiveHistoryMovesReceiptsAndReadsAcrossTheBoundary(t *testing.T) {
-	t.Parallel()
+// archiveFixture is a store with one run terminal at 80 and three receipts of
+// it, and the content history and report that must read the same across the
+// archive boundary.
+func archiveFixture(t *testing.T) (*Store, string, Run, func(*Store) (string, error)) {
+	t.Helper()
 	ctx := context.Background()
 	proposal, _ := NewSuccessProposal("verified result")
 	store, finalizing := finalizingReleasedRun(t, RoleOrchestrator, proposal)
-	path := storePath(t, store)
-	defer func() { store.Close() }()
 	run, err := store.FinalizeRun(ctx, finalizing.ID, finalizing.Revision, mustTime(t, 80))
 	if err != nil {
-		t.Fatal(err)
+		t.Fatal(errors.Join(err, store.Close()))
 	}
 	spec := contentSpec(t, run.ProjectID, 46, "lesson")
 	spec.Kind, spec.Author = ContentLesson, "operator:local"
 	spec.SourceReferences = `{"status":"current","evidence":["source"],"verification":"go test ./internal/kernel"}`
 	lesson, err := store.CreateContent(ctx, spec, mustTime(t, 40))
 	if err != nil {
-		t.Fatal(err)
+		t.Fatal(errors.Join(err, store.Close()))
 	}
 	corruptSQLUnvalidated(t, store, `INSERT INTO content_accesses(run_id, content_id, content_revision, kind, byte_offset, byte_length, created_at_ms) VALUES
 		(?1, NULL, NULL, 'snapshot', 0, 0, 41), (?1, ?2, 1, 'read', 0, 4, 42), (?1, ?2, 1, 'read', 4, 4, 43)`, run.ID.Bytes(), lesson.ID.Bytes())
@@ -47,17 +43,68 @@ func TestArchiveHistoryMovesReceiptsAndReadsAcrossTheBoundary(t *testing.T) {
 		report, err := store.Report(ctx, &run.ProjectID, 0, 3600000)
 		return fmt.Sprintf("%+v %+v %q", activity, accesses, report), err
 	}
+	return store, storePath(t, store), run, history
+}
+
+func hotReceipts(t *testing.T, store *Store) (count int) {
+	t.Helper()
+	if err := store.writer.QueryRowContext(context.Background(), `SELECT count(*) FROM content_accesses`).Scan(&count); err != nil {
+		t.Fatal(err)
+	}
+	return count
+}
+
+// A crash between the archive commit and the hot one loses nothing: the
+// receipts stay hot and read the same before and after a restart, and the
+// next pass copies them again and commits.
+func TestArchiveHistoryRetriesACopyInterruptedBeforeItsHotCommit(t *testing.T) {
+	// Not parallel: archiveCopiedHook is package state.
+	ctx := context.Background()
+	store, path, _, history := archiveFixture(t)
+	defer func() { store.Close() }()
 	before, err := history(store)
 	if err != nil {
 		t.Fatal(err)
 	}
-	hotReceipts := func() (count int) {
-		t.Helper()
-		if err := store.writer.QueryRowContext(ctx, `SELECT count(*) FROM content_accesses`).Scan(&count); err != nil {
-			t.Fatal(err)
-		}
-		return count
+	crash := errors.New("crash after the archive commit")
+	archiveCopiedHook = func() error { return crash }
+	moved, err := store.ArchiveHistory(ctx, mustTime(t, 81+HistoryRetention))
+	archiveCopiedHook = nil
+	if !errors.Is(err, crash) || moved != 0 || hotReceipts(t, store) != 3 {
+		t.Fatalf("interrupted archive = %d, %v", moved, err)
 	}
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if store, err = Open(ctx, path); err != nil {
+		t.Fatal(err)
+	}
+	if after, err := history(store); err != nil || after != before {
+		t.Fatalf("history after an interrupted copy = %s, %v", after, err)
+	}
+	if moved, err := store.ArchiveHistory(ctx, mustTime(t, 82+HistoryRetention)); err != nil || moved != 3 || hotReceipts(t, store) != 0 {
+		t.Fatalf("retried archive = %d, %v", moved, err)
+	}
+	if after, err := history(store); err != nil || after != before {
+		t.Fatalf("history after the retried copy = %s, %v", after, err)
+	}
+}
+
+// A terminal run's receipts move to the archive only after HistoryRetention,
+// once; content history and the report read the same across the boundary and
+// a restart; an uncommitted generation is invisible and discarded; and a
+// missing or altered committed generation fails crossing reads and the next
+// pass closed while hot reads go on.
+func TestArchiveHistoryMovesReceiptsAndReadsAcrossTheBoundary(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	store, path, run, history := archiveFixture(t)
+	defer func() { store.Close() }()
+	before, err := history(store)
+	if err != nil {
+		t.Fatal(err)
+	}
+	hotReceipts := func() int { return hotReceipts(t, store) }
 
 	if moved, err := store.ArchiveHistory(ctx, mustTime(t, 80+HistoryRetention)); err != nil || moved != 0 || hotReceipts() != 3 {
 		t.Fatalf("archive within retention = %d, %v", moved, err)
@@ -125,6 +172,16 @@ func TestArchiveHistoryMovesReceiptsAndReadsAcrossTheBoundary(t *testing.T) {
 		if _, _, err := store.Run(ctx, run.ID); err != nil {
 			t.Fatalf("hot read with %s = %v", cause, err)
 		}
+	}
+	if _, err := archive.ExecContext(ctx, `UPDATE content_accesses SET byte_length = byte_length + 1 WHERE kind = 'read'`); err != nil {
+		t.Fatal(err)
+	}
+	failsClosed("an altered receipt")
+	if _, err := archive.ExecContext(ctx, `UPDATE content_accesses SET byte_length = byte_length - 1 WHERE kind = 'read'`); err != nil {
+		t.Fatal(err)
+	}
+	if after, err := history(store); err != nil || after != before {
+		t.Fatalf("history with the receipt restored = %s, %v", after, err)
 	}
 	if _, err := archive.ExecContext(ctx, `DELETE FROM content_accesses WHERE kind = 'snapshot'`); err != nil {
 		t.Fatal(err)

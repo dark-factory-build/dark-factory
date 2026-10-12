@@ -30,7 +30,6 @@ type fakePublishMaintainer struct {
 	externalRefuse bool             // the Maintainer refuses before the App can apply it
 	unavailable    bool             // the Maintainer authority is temporarily unavailable
 	loseNext       bool             // the next write lands but its response is lost
-	body           string           // the open pull request's stored body
 }
 
 func TestRepairPublicationUsesTaskTitle(t *testing.T) {
@@ -56,8 +55,6 @@ func (f *fakePublishMaintainer) call(_ context.Context, name string, arguments m
 			return json.Marshal(map[string]any{"operation_id": id, "state": "planned"})
 		}
 		return json.Marshal(map[string]any{"operation_id": id, "state": "missing"})
-	case "list_pull_requests":
-		return json.Marshal(map[string]any{"pull_requests": []any{map[string]any{"number": arguments["pull_number"], "head_sha": f.tip, "body": f.body}}})
 	}
 	if _, replay := f.journal[id]; replay || f.planned[id] {
 		return nil, fmt.Errorf("conflict: operation %s replayed", id)
@@ -585,77 +582,5 @@ func TestDisabledAcceptedRepositoryEscalatesOnce(t *testing.T) {
 		if failures != 1 {
 			t.Fatalf("failure records = %d, want 1", failures)
 		}
-	}
-}
-
-// Only a Change completing its intake issue closes it on merge: one whose
-// result says it is partial (Refs #N) publishes as a reference (#1795),
-// even when that marker lies past what the body shows.
-func TestAPartialIntakeChangeReferencesItsIssue(t *testing.T) {
-	fixture, c, source, app, checkout := publishFixture(t, 1, false)
-	c.Task.Result = "Partial: items 1 and 5. Fixes #9 once item 2 lands.\n" + strings.Repeat("report line\n", 3000) + "Refs #9" // beyond the 24000-byte body
-	if err := fixture.daemon.publishChange(context.Background(), c, "team/repo", source, app.call, checkout); err != nil {
-		t.Fatal(err)
-	}
-	if pull := app.writes[len(app.writes)-1]["arguments"].(map[string]any); pull["close_on_merge"] != false || pull["issue_number"] != uint64(9) || strings.Contains(pull["body"].(string), "Fixes #9") {
-		t.Fatalf("pull request = %+v", pull)
-	}
-}
-
-// A correction keeps a referencing pull request referencing, and one that
-// leaves the Change changing no file (#1796) stops closing the issue.
-func TestACorrectionNeverTurnsAnUnfinishedIntakeIntoAClose(t *testing.T) {
-	for name, revert := range map[string]bool{"partial pull request": false, "zero-file Change": true} {
-		t.Run(name, func(t *testing.T) {
-			fixture, c, source, app, checkout := publishFixture(t, 1, false)
-			root, git := filepath.Dir(source), change.TrustedGitExecutable
-			tip := c.Head
-			app.tip, c.Pull = tip, 31
-			app.body = "Implemented items 1 and 5.\n\nRefs #9\n\n<!-- dark-factory:operation -->"
-			if revert {
-				app.body = "Implemented it.\n\nCloses #9"
-				supervisorGit(t, git, "-C", root, "-c", "user.name=fixture", "-c", "user.email=fixture@example.invalid", "revert", "--no-edit", "HEAD")
-			} else if err := os.WriteFile(filepath.Join(root, "f00.txt"), []byte("corrected\n"), 0o644); err != nil {
-				t.Fatal(err)
-			} else {
-				supervisorGit(t, git, "-C", root, "-c", "user.name=fixture", "-c", "user.email=fixture@example.invalid", "commit", "-q", "-am", "correct")
-			}
-			c.Head = strings.TrimSpace(supervisorGitOutput(t, git, "-C", root, "rev-parse", "HEAD"))
-			c.Task.Result = "Answered the review.\n\nCloses #9"
-			withTip := func(ctx context.Context, ref, head string) (string, func(), error) {
-				gitDir, cleanup, err := checkout(ctx, ref, head)
-				if err == nil {
-					_, err = gitOutput(ctx, gitDir, "-c", "protocol.file.allow=always", "fetch", "--quiet", source, tip)
-				}
-				return gitDir, cleanup, err
-			}
-			if err := fixture.daemon.publishChange(context.Background(), c, "team/repo", source, app.call, withTip); err != nil {
-				t.Fatal(err)
-			}
-			body := app.writes[len(app.writes)-1]
-			if text, _ := body["arguments"].(map[string]any)["body"].(string); body["name"] != "update_pull_request_body" || !strings.HasPrefix(text, "Answered the review.\n\nRefs #9\n\nPublished by factoryd") ||
-				!strings.HasSuffix(text, "The merge queue runs the gate.\n\nRefs #9") || strings.Contains(strings.ToLower(text), "closes") {
-				t.Fatalf("writes = %+v", app.writes)
-			}
-		})
-	}
-}
-
-func TestClosesIssueOnlyForACompletingChange(t *testing.T) {
-	for _, tc := range []struct {
-		text  string
-		files int
-		want  bool
-	}{{"Done.", 2, true}, {"Done.", 0, false}, {"refs #9, partial", 2, false}, {"Refs #90 is separate.", 2, true}, {"Body\n\nRefs #9\n", 1, false}} {
-		if got := closesIssue(tc.text, 9, tc.files); got != tc.want {
-			t.Errorf("closesIssue(%q, 9, %d) = %v", tc.text, tc.files, got)
-		}
-	}
-}
-
-func TestReferencingDisarmsEveryClosingKeywordForTheIssue(t *testing.T) {
-	in := "Closes #9\nfixed: team/repo#9, Resolves https://github.com/team/repo/issues/9 and closes #90."
-	if got, want := referencing(in, 9), "Refs #9\nRefs team/repo#9, Refs https://github.com/team/repo/issues/9 and closes #90."; got != want {
-		t.Fatalf("referencing = %q, want %q", got, want)
 	}
 }

@@ -361,8 +361,7 @@ is in the destination repository and you delegated it to exactly one worker
 task (one issue, one worker; a Linear or cross-repository source, or work
 split over several tasks, is yours): when that task succeeds at work
 revision 1 with a settled head, it runs sections 3 and 4 with the same
-operation ids, opens the pull request from the accepted source (`Closes #N`, or `Refs #N`
-when the head changes no file or the worker's result says `Refs #N`),
+operation ids, opens the pull request from the accepted source (`Closes #N`),
 records it against the worker task and reviews it; when it succeeds again
 after a send-back, it publishes the correction on that pull request's branch
 and replaces its body. The App refuses your `publish_commit` and
