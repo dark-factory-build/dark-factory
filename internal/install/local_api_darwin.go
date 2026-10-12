@@ -583,6 +583,14 @@ func (state *localAPIState) accept(protocol *LocalAPIProtocol) (*LocalAPIConnect
 			return nil, ErrClosed
 		}
 		if err := localAPISetListenerDeadline(listener, time.Now().Add(localAPIAcceptPoll)); err != nil {
+			// close may close the listener between the check above and this
+			// call: that is a stop, not lost authority (a merge-queue flake).
+			state.mu.Lock()
+			stopped = state.closing || state.closed
+			state.mu.Unlock()
+			if stopped {
+				return nil, ErrClosed
+			}
 			return nil, state.poison(errors.New("local API accept deadline failed"))
 		}
 		raw, err := listener.AcceptUnix()
