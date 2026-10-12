@@ -37,6 +37,7 @@ type fakePublishMaintainer struct {
 	landBodyIndeterminate   bool
 	bodyWrites              int
 	extraPull               bool
+	paginatePull            bool
 	dirty                   bool
 	queued                  bool
 	closed                  bool
@@ -79,6 +80,7 @@ func (f *fakePublishMaintainer) call(_ context.Context, name string, arguments m
 		if number == nil {
 			number = uint64(31)
 		}
+		page, _ := arguments["page"].(int)
 		state, mergeable, mergeState := "open", true, "clean"
 		if f.closed {
 			state, mergeable, mergeState = "closed", true, "unknown"
@@ -87,10 +89,18 @@ func (f *fakePublishMaintainer) call(_ context.Context, name string, arguments m
 		}
 		pull := map[string]any{"number": number, "url": "https://github.com/team/repo/pull/31", "head_sha": f.tip, "head_ref": f.headRef, "base_sha": f.main, "base_ref": "main", "state": state, "mergeable": mergeable, "merge_state_status": mergeState, "body": f.body}
 		pulls := []any{pull}
+		var nextPage any
+		if f.paginatePull && page == 1 {
+			pulls = make([]any, 100)
+			for i := range pulls {
+				pulls[i] = map[string]any{"number": uint64(i + 100), "head_sha": f.tip, "head_ref": fmt.Sprintf("factory/older-%d", i), "base_sha": f.main, "base_ref": "main", "state": "open", "mergeable": true, "merge_state_status": "clean"}
+			}
+			nextPage = 2
+		}
 		if f.extraPull {
 			pulls = []any{map[string]any{"number": uint64(29), "url": "https://github.com/team/repo/pull/29", "head_sha": f.tip, "head_ref": "factory/other", "base_sha": f.main, "base_ref": "main", "state": "open", "mergeable": true, "merge_state_status": "clean"}, pull}
 		}
-		return json.Marshal(map[string]any{"pull_requests": pulls})
+		return json.Marshal(map[string]any{"pull_requests": pulls, "next_page": nextPage})
 	case "observe_pull_request_merge":
 		mergeState := "INACTIVE"
 		if f.queued {
@@ -656,6 +666,17 @@ func TestIndeterminateCreateThatLandedIsRecorded(t *testing.T) {
 	}
 	if open, err := fixture.store.OpenPulls(context.Background()); err != nil || len(open) != 1 {
 		t.Fatalf("landed create was not recorded: %+v %v", open, err)
+	}
+}
+
+func TestIndeterminateCreateThatLandedOnLaterPageIsRecorded(t *testing.T) {
+	fixture, c, source, app, checkout := publishFixture(t, 1, false)
+	app.landCreateIndeterminate, app.paginatePull = true, true
+	if err := fixture.daemon.publishChange(context.Background(), c, "team/repo", source, app.call, checkout); err != nil {
+		t.Fatal(err)
+	}
+	if len(app.writes) != 2 || app.writes[1]["name"] != "create_pull_request" {
+		t.Fatalf("later-page landed create writes = %+v", app.writes)
 	}
 }
 

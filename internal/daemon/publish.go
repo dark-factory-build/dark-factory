@@ -267,25 +267,35 @@ func (daemon *Daemon) publishPull(ctx context.Context, c kernel.PublishableChang
 			return observedPublication{}, err
 		}
 		observed := observedPublication{ref: ref}
-		args := map[string]any{"repository": repo, "page": 1, "per_page": 100}
-		if pull != 0 {
-			args["pull_number"] = pull
-		}
-		response, err := call(ctx, "list_pull_requests", args)
-		if err != nil {
-			return observed, err
-		}
-		var page struct {
-			PullRequests []observedPull `json:"pull_requests"`
-		}
-		if err := json.Unmarshal(response, &page); err != nil {
-			return observed, err
-		}
-		for i := range page.PullRequests {
-			if pull != 0 && page.PullRequests[i].Number == pull || pull == 0 && page.PullRequests[i].HeadRef == branch {
-				observed.pull = &page.PullRequests[i]
+		for pageNumber := 1; ; {
+			args := map[string]any{"repository": repo, "page": pageNumber, "per_page": 100}
+			if pull != 0 {
+				args["pull_number"] = pull
+			}
+			response, err := call(ctx, "list_pull_requests", args)
+			if err != nil {
+				return observed, err
+			}
+			var page struct {
+				PullRequests []observedPull `json:"pull_requests"`
+				NextPage     *int           `json:"next_page"`
+			}
+			if err := json.Unmarshal(response, &page); err != nil {
+				return observed, err
+			}
+			for i := range page.PullRequests {
+				if pull != 0 && page.PullRequests[i].Number == pull || pull == 0 && page.PullRequests[i].HeadRef == branch {
+					observed.pull = &page.PullRequests[i]
+					break
+				}
+			}
+			if observed.pull != nil || page.NextPage == nil {
 				break
 			}
+			if *page.NextPage <= pageNumber || *page.NextPage > 1000 {
+				return observed, errors.New("publication: invalid pull request page")
+			}
+			pageNumber = *page.NextPage
 		}
 		if observed.pull != nil && observed.pull.State == "open" {
 			response, err := call(ctx, "observe_pull_request_merge", map[string]any{"repository": repo, "pull_number": observed.pull.Number, "head_sha": observed.pull.Head, "base": "main"})
@@ -340,12 +350,21 @@ func (daemon *Daemon) publishPull(ctx context.Context, c kernel.PublishableChang
 			if err != nil {
 				return errors.Join(err, errPublishLater)
 			}
+			found := false
 			for _, open := range pulls {
 				if open.Repository != repo || open.Pull.Number != c.Pull {
 					continue
 				}
+				found = true
 				var op review.Operation
-				if len(open.Operations) != 0 && json.Unmarshal(open.Operations[len(open.Operations)-1], &op) == nil {
+				if len(open.Operations) != 0 {
+					if json.Unmarshal(open.Operations[len(open.Operations)-1], &op) != nil {
+						continue
+					}
+				} else {
+					op = review.Operation{ID: uuid5(fmt.Sprintf("dark-factory:publish:%s#%d", c.Change, c.Pull)), Request: review.Request{Repository: repo, PullNumber: c.Pull, Head: observed.pull.Head, BaseRef: "main"}}
+				}
+				if op.ID != "" {
 					task := c.Task
 					if open.Task != (kernel.TaskID{}) {
 						if stored, found, taskErr := daemon.store.Task(ctx, open.Task); taskErr == nil && found {
@@ -355,6 +374,10 @@ func (daemon *Daemon) publishPull(ctx context.Context, c kernel.PublishableChang
 					return errors.Join(daemon.sendBackPull(ctx, open, task, op, observationDetail(observed)), errPublishLater)
 				}
 			}
+			if found {
+				return errors.New("publication observed a correction pull without a routable review operation: " + observationDetail(observed))
+			}
+			return errors.New("publication observed an unroutable correction pull: " + observationDetail(observed))
 		}
 		return errPublishLater
 	}
