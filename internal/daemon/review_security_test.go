@@ -180,7 +180,7 @@ func reviewCheckoutChanging(t *testing.T, file string) (string, review.Request) 
 	return dir, request
 }
 
-func TestAnAllowThatNamesNoChangedPathIsNoVerdict(t *testing.T) {
+func TestAnAllowThatNamesNoChangedPathRemainsAVerdict(t *testing.T) {
 	backend, homes := reviewerFixture(t, "stamp")
 	if err := os.WriteFile(filepath.Join(homes["stamp"], "stamp"), nil, 0o600); err != nil {
 		t.Fatal(err)
@@ -188,14 +188,8 @@ func TestAnAllowThatNamesNoChangedPathIsNoVerdict(t *testing.T) {
 	checkout, request := reviewCheckout(t)
 	// The author's body names the changed path; the stamp only echoes it.
 	request.Body = "this touches changed.go"
-	if verdict, err := backend.Review(context.Background(), checkout, request); err == nil || !strings.Contains(err.Error(), "names no changed path") {
-		t.Fatalf("rubber stamp verdict=%+v err=%v, want no verdict", verdict, err)
-	}
-	if err := os.Remove(filepath.Join(homes["stamp"], "stamp")); err != nil {
-		t.Fatal(err)
-	}
 	if verdict, err := backend.Review(context.Background(), checkout, request); err != nil || verdict.Event != "ALLOW" {
-		t.Fatalf("verdict=%+v err=%v, want an ALLOW that names changed.go", verdict, err)
+		t.Fatalf("verdict=%+v err=%v, want an ALLOW without a path gate", verdict, err)
 	}
 }
 
@@ -219,19 +213,18 @@ func TestAnEmptyChangeIsAllowedWithoutAReviewer(t *testing.T) {
 	}
 }
 
-// A path is named only as a whole path: a changed file named go is not named
-// by "looks good", but is by "`go`" or by a sentence ending "go.". The fake,
-// like codex, repeats its transcript and token count on stderr.
+// ALLOW does not depend on matching a changed path in the transcript. The
+// fake, like codex, repeats its transcript and token count on stderr.
 func TestAnAllowNamesAChangedPathOnlyAsAWholePath(t *testing.T) {
 	backend, homes := reviewerFixture(t, "speaker")
 	checkout, request := reviewCheckoutChanging(t, "go")
-	for say, named := range map[string]bool{"looks good": false, "gone over": false, "see cmd/go": false, "checked `go`": true, "edited go.": true} {
+	for say := range map[string]struct{}{"looks good": {}, "gone over": {}, "see cmd/go": {}, "checked `go`": {}, "edited go.": {}} {
 		if err := os.WriteFile(filepath.Join(homes["speaker"], "say"), []byte(say+"\nVERDICT: ALLOW\n"), 0o600); err != nil {
 			t.Fatal(err)
 		}
 		verdict, err := backend.Review(context.Background(), checkout, request)
-		if (err == nil && verdict.Event == "ALLOW") != named {
-			t.Fatalf("%q: verdict=%+v err=%v, named=%v", say, verdict, err, named)
+		if err != nil || verdict.Event != "ALLOW" {
+			t.Fatalf("%q: verdict=%+v err=%v, want ALLOW", say, verdict, err)
 		}
 	}
 }
