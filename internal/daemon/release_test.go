@@ -12,7 +12,6 @@ import (
 	"path/filepath"
 	"strings"
 	"sync/atomic"
-	"syscall"
 	"testing"
 	"time"
 
@@ -504,25 +503,38 @@ func TestBootFailsTheInterruptedReleaseAndTheNextPassStartsIt(t *testing.T) {
 	sha := strings.Repeat("7", 40)
 	releaseHead = func(context.Context, *Daemon, string) (string, error) { return sha, nil }
 	releasePoll, releaseBatch = 0, time.Hour
-	orphan := exec.Command("/bin/sleep", "60")
-	orphan.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
-	if err := orphan.Start(); err != nil {
-		t.Fatal(err)
+	build, died := releaseBuild, make(chan error, 1)
+	var builds atomic.Int32
+	releaseBuild = func(ctx context.Context, daemon *Daemon, root string, source change.RepositorySourceIdentity, sha, directory string, run func(*exec.Cmd) ([]byte, error)) (buildinfo.Identity, error) {
+		if builds.Add(1) > 1 {
+			return build(ctx, daemon, root, source, sha, directory, run)
+		}
+		// The first factoryd dies mid-build: its command outlives it, and
+		// it records nothing more.
+		_, err := run(exec.CommandContext(ctx, "/bin/sleep", "60"))
+		died <- err
+		<-ctx.Done()
+		return buildinfo.Identity{}, ctx.Err()
 	}
-	t.Cleanup(func() { _ = orphan.Process.Kill() })
 	ctx := context.Background()
-	project, _, _, err := fixture.daemon.selfRepositorySource(ctx)
-	interrupted := kernel.ProductionDelivery{ID: "release:" + sha, Kind: "runtime", Destination: "factoryd", Revision: sha, State: "running", Phase: "build", PullRequests: []uint64{}, Group: orphan.Process.Pid}
-	if err == nil {
-		err = fixture.daemon.writeRelease(ctx, project, &interrupted)
-	}
-	if err == nil {
-		err = fixture.daemon.FailInterruptedRelease(ctx)
-	}
-	if err != nil {
+	if _, err := fixture.daemon.Release(ctx, sha, true); err != nil {
 		t.Fatal(err)
 	}
-	if err := orphan.Wait(); err == nil || !strings.Contains(err.Error(), "killed") {
+	for deadline := time.Now().Add(5 * time.Second); ; time.Sleep(5 * time.Millisecond) {
+		_, delivery, _, err := fixture.store.Delivery(ctx, "release:"+sha)
+		if err == nil && delivery.Group > 0 {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("the build's process group was never recorded: %+v, %v", delivery, err)
+		}
+	}
+	// The next factoryd boots with only the durable record.
+	fixture.daemon.releaseBusy.Store(false)
+	if err := fixture.daemon.FailInterruptedRelease(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if err := <-died; err == nil || !strings.Contains(err.Error(), "killed") {
 		t.Fatalf("the interrupted build's group survived: %v", err)
 	}
 	if delivery, err := fixture.daemon.Release(ctx, sha, false); err != nil || delivery.State != "failed" || delivery.Reason != releaseInterrupted || delivery.Group != 0 {
