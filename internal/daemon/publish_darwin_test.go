@@ -478,6 +478,8 @@ func TestExternalPublicationRefusalRetriesWhenItClears(t *testing.T) {
 	fixture, c, source, app, checkout := publishFixture(t, 1, false)
 	app.refuse, app.externalRefuse = "f00.txt", true
 	ctx := context.Background()
+	var log strings.Builder
+	fixture.daemon.log = &log
 	if err := fixture.daemon.publishChange(ctx, c, "team/repo", source, app.call, checkout); err != nil {
 		t.Fatal(err)
 	}
@@ -486,12 +488,19 @@ func TestExternalPublicationRefusalRetriesWhenItClears(t *testing.T) {
 	if err != nil || !found || json.Unmarshal(document, &op) != nil || !op.Retryable {
 		t.Fatalf("external refusal = %s %v %v", document, found, err)
 	}
+	// #1800: each attempt's own outcome is logged, a recorded refusal included.
+	if attempt := "factoryd: publish change " + c.Change.String() + " at " + c.Head + " for task " + c.Task.ID.String() + ": "; !strings.Contains(log.String(), attempt) || !strings.Contains(log.String(), "UNPROCESSABLE") || strings.Contains(log.String(), "factoryd: published") {
+		t.Fatalf("refused attempt logged %q", log.String())
+	}
 	app.refuse, app.externalRefuse = "", false
 	if err := fixture.daemon.publishChange(ctx, c, "team/repo", source, app.call, checkout); err != nil {
 		t.Fatal(err)
 	}
 	if len(app.writes) != 3 {
 		t.Fatalf("writes after refusal cleared = %d, want 3", len(app.writes))
+	}
+	if !strings.Contains(log.String(), "factoryd: published change "+c.Change.String()+" at "+c.Head) {
+		t.Fatalf("publication logged %q", log.String())
 	}
 }
 

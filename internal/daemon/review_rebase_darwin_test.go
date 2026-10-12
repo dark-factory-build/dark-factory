@@ -125,12 +125,33 @@ func TestConflictRepairRebasesAnAppPublishedPullsChangeOnce(t *testing.T) {
 	}
 
 	// #1800: the App's commit of the rebased head is no new work; a pull
-	// request still at the old tree lacks the settled head.
+	// request still at the old tree lacks the settled head. A retryable
+	// publish failure holds the pass's publication back, not its reconciler's.
+	settledState, _, err := fixture.store.Change(ctx, changeState.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	failure := kernel.PublishFailureID(changeState.ID, settledState.Revision)
+	if err := fixture.store.RecordReviewOperation(ctx, changeState.ProjectID, "team/repo", failure, map[string]any{"id": failure, "state": "publish_failed", "retryable": true, "handled": true, "request": map[string]any{}}, mustKernelTime(t, 10_000)); err != nil {
+		t.Fatal(err)
+	}
+	if fixture.daemon.publishSettledChanges(ctx, kernel.TaskID{}) {
+		t.Fatal("a pass published inside its retry window")
+	}
 	for _, c := range []struct{ tree, want string }{{head, ""}, {local, head}} {
 		app := strings.TrimSpace(settlementGit(t, git, path, "commit-tree", c.tree+"^{tree}", "-p", main, "-m", "app"))
 		backend := &checkoutReviewBackend{dir: path}
 		if settled, err := fixture.daemon.unpublishedHead(ctx, backend, open, review.Request{Head: app}); err != nil || settled != c.want {
 			t.Fatalf("pull request at the tree of %s: unpublished head %q err=%v, want %q", c.tree, settled, err, c.want)
+		}
+		// The pull request's own task's Change is published at once instead
+		// of the head being judged an answer, and the attempt is logged.
+		var log strings.Builder
+		fixture.daemon.log = &log
+		lacks, why, err := fixture.daemon.publishUnanswered(ctx, backend, open, review.Request{Head: app})
+		attempted := strings.Contains(log.String(), "factoryd: publish change "+changeState.ID.String()+" at "+head+" for task "+task.ID.String()+": its repository has no bound publication target")
+		if err != nil || why != "" || lacks != (c.want != "") || attempted != lacks {
+			t.Fatalf("pull request at the tree of %s: lacks=%v why=%q err=%v log=%q", c.tree, lacks, why, err, log.String())
 		}
 	}
 }

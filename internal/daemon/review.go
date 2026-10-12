@@ -130,7 +130,7 @@ func (daemon *Daemon) advanceMergePipeline(ctx context.Context) {
 	if !daemon.customerMaintainer() {
 		return
 	}
-	daemon.publishSettledChanges(ctx)
+	daemon.publishSettledChanges(ctx, kernel.TaskID{})
 	projects, _ := daemon.store.PublishingProjects(ctx)
 	for _, project := range projects {
 		if err := daemon.refreshProduction(ctx, project); err != nil {
@@ -269,13 +269,13 @@ func (daemon *Daemon) reconcilePull(ctx context.Context, open kernel.OpenPull, u
 			action = review.Wait // its task's next head decides
 		}
 		if answered && (action == review.Escalate || action == review.Review) {
-			// Settled work whose tree the pull request lacks is no answer (#1800).
-			var settled string
-			if settled, err = daemon.unpublishedHead(ctx, coordinator.Backend, open, op.Request); err != nil || settled != "" {
-				action, note = review.Wait, ""
+			var lacks bool
+			var why string
+			if lacks, why, err = daemon.publishUnanswered(ctx, coordinator.Backend, open, op.Request); err != nil || lacks {
+				action, note = review.Wait, "" // its next head is reviewed
 			}
-			if settled != "" {
-				LogFactoryd(daemon.log, "factoryd: reconcile %s#%d: its task settled head %s, whose tree head %s lacks: waiting for its publication\n", open.Repository, open.Pull.Number, settled, op.Request.Head)
+			if why != "" {
+				action, note = review.Escalate, why
 			}
 		}
 		switch action {
@@ -298,7 +298,7 @@ func (daemon *Daemon) reconcilePull(ctx context.Context, open kernel.OpenPull, u
 			var moved bool
 			if moved, err = daemon.rebaseChange(ctx, open); err == nil && moved {
 				op.Rebased = true
-				daemon.publishSettledChanges(ctx)
+				daemon.publishSettledChanges(ctx, kernel.TaskID{})
 			} else if err == nil {
 				op.Rebased = true
 				err = daemon.sendBackPull(ctx, open, task, op, note)
@@ -373,6 +373,17 @@ func (daemon *Daemon) sendBackPull(ctx context.Context, open kernel.OpenPull, ta
 		err = nil
 	}
 	return err
+}
+
+// publishUnanswered reports whether the pull request lacks the tree of the
+// Change head its task settled, which is then no answer (#1800): that head is
+// published at once, or why says factoryd does not publish it.
+func (daemon *Daemon) publishUnanswered(ctx context.Context, backend review.Backend, open kernel.OpenPull, request review.Request) (bool, string, error) {
+	settled, err := daemon.unpublishedHead(ctx, backend, open, request)
+	if err != nil || settled == "" || daemon.publishSettledChanges(ctx, open.Task) {
+		return settled != "", "", err
+	}
+	return true, "its task settled head " + settled + ", whose tree head " + request.Head + " lacks, and factoryd does not publish it: its task did not succeed, its publication failed for good, or its work is not factoryd's to publish", nil
 }
 
 // unpublishedHead is the head of the retained Change published on the pull

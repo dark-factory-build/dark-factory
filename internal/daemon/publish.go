@@ -37,9 +37,14 @@ var errPublishLater, errRepositoryDisabled = errors.New("publication waits for t
 // or, changing nothing, is an answer reviewed once more at the same head. A
 // Change it cannot publish is escalated to the overseer once and retried at
 // that revision only after kernel.PublishRetryAfter; an unreachable
-// connection waits for the next pass.
-func (daemon *Daemon) publishSettledChanges(ctx context.Context) {
+// connection waits for the next pass. Given a task, it publishes only that
+// task's Change, at once even inside its retry window: the task's pull
+// request waits on it (#1800). It reports whether it tried one.
+func (daemon *Daemon) publishSettledChanges(ctx context.Context, task kernel.TaskID) bool {
 	at, err := daemon.timestamp()
+	if err == nil && task != (kernel.TaskID{}) {
+		at, err = kernel.NewUnixMillis(at.Int64() + kernel.PublishRetryAfter.Milliseconds())
+	}
 	var candidates []kernel.PublishableChange
 	if err == nil {
 		candidates, err = daemon.store.PublishableChanges(ctx, at)
@@ -47,13 +52,17 @@ func (daemon *Daemon) publishSettledChanges(ctx context.Context) {
 	if err != nil {
 		LogFactoryd(daemon.log, "factoryd: publishable changes: %v\n", err)
 	}
+	tried := false
 	for _, candidate := range candidates {
-		outcome := "published"
-		if err := daemon.publishSettledChange(ctx, candidate); err != nil {
-			outcome = err.Error()
+		if task != (kernel.TaskID{}) && candidate.Task.ID != task {
+			continue
 		}
-		LogFactoryd(daemon.log, "factoryd: publish change %s at %s for task %s onto #%d: %s\n", candidate.Change, candidate.Head, candidate.Task.ID, candidate.Pull, outcome)
+		tried = true
+		if err := daemon.publishSettledChange(ctx, candidate); err != nil {
+			LogFactoryd(daemon.log, "factoryd: publish change %s at %s for task %s: %v\n", candidate.Change, candidate.Head, candidate.Task.ID, err)
+		}
 	}
+	return tried
 }
 
 func (daemon *Daemon) publishSettledChange(ctx context.Context, c kernel.PublishableChange) error {
@@ -127,9 +136,13 @@ func (daemon *Daemon) publishChange(ctx context.Context, c kernel.PublishableCha
 // publishFailed records why c cannot be published: the reviewer record
 // kernel.PublishFailureID, handled, whose escalation is due to the overseer
 // the first time; a repeat refreshes it without one. A failure the next pass
-// may not repeat is only returned.
+// may not repeat is only returned. Both outcomes it settles are logged.
 func (daemon *Daemon) publishFailed(ctx context.Context, c kernel.PublishableChange, repo string, err error) error {
-	if err == nil || ctx.Err() != nil || errors.Is(err, errPublishLater) || errors.Is(err, maintainer.ErrUnavailable) || errors.Is(err, maintainer.ErrDenied) {
+	if err == nil {
+		LogFactoryd(daemon.log, "factoryd: published change %s at %s for task %s\n", c.Change, c.Head, c.Task.ID)
+		return nil
+	}
+	if ctx.Err() != nil || errors.Is(err, errPublishLater) || errors.Is(err, maintainer.ErrUnavailable) || errors.Is(err, maintainer.ErrDenied) {
 		return err
 	}
 	why := err.Error()
@@ -143,6 +156,7 @@ func (daemon *Daemon) publishFailed(ctx context.Context, c kernel.PublishableCha
 	if !repeat {
 		failed.Escalation = fmt.Sprintf("factoryd cannot publish change %s for task %s: %s", c.Change, c.Task.ID, why)
 	}
+	LogFactoryd(daemon.log, "factoryd: publish change %s at %s for task %s: %s\n", c.Change, c.Head, c.Task.ID, why)
 	return durableReviewStore{store: daemon.store, project: c.Task.ProjectID, repository: repo, now: daemon.now}.Create(ctx, failed)
 }
 
