@@ -375,6 +375,12 @@ pub(crate) struct ObserveRepository {
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
+pub(crate) struct ObserveRepositoryChecks {
+    pub(crate) repository: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
 pub(crate) struct ObservePullRequestChecks {
     pub(crate) repository: String,
     pub(crate) pull_number: i64,
@@ -394,6 +400,12 @@ pub(crate) struct RepositoryResult {
     pub(crate) repository_id: i64,
     pub(crate) default_branch: String,
     pub(crate) default_sha: String,
+}
+
+#[derive(Debug, Serialize)]
+pub(crate) struct RepositoryChecksResult {
+    pub(crate) revision: String,
+    pub(crate) checks: Vec<CheckResult>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -609,8 +621,6 @@ pub(crate) struct PullRequestMergeResult {
     pub(crate) queue_state: Option<String>,
     pub(crate) merge_commit_sha: Option<String>,
     pub(crate) merge_group: Option<MergeGroupRun>,
-    pub(crate) main_revision: Option<String>,
-    pub(crate) main_checks: Vec<CheckResult>,
 }
 
 /// The newest completed merge-group run that built an open, no longer queued
@@ -883,6 +893,61 @@ impl AppAuthority {
             )
             .await?;
         self.0.repository_snapshot(&token).await
+    }
+
+    #[cfg(target_arch = "wasm32")]
+    pub(crate) async fn observe_repository_checks(
+        &self,
+        mut request: ObserveRepositoryChecks,
+    ) -> Result<RepositoryChecksResult, OperationError> {
+        let mut name = request.repository.clone();
+        let repository = RepositoryName::requested(&mut request.repository)?;
+        let token = self
+            .0
+            .installation_token(
+                repository,
+                BTreeMap::from([
+                    ("checks", "read"),
+                    ("contents", "read"),
+                    ("metadata", "read"),
+                ]),
+            )
+            .await?;
+        let metadata = self.0.repository_metadata(&token).await?;
+        let reference = self.0.read_ref(&token, &metadata.default_branch).await?;
+        if reference.object.kind != "commit" {
+            return Err(OperationError::Unavailable);
+        }
+        valid_sha(&reference.object.sha)?;
+        let actions = self
+            .0
+            .installation_token(
+                RepositoryName::requested(&mut name)?,
+                BTreeMap::from([("actions", "read"), ("metadata", "read")]),
+            )
+            .await
+            .ok();
+        let checks = self
+            .0
+            .checks(
+                &token,
+                ObservePullRequestChecks {
+                    repository: request.repository,
+                    pull_number: 0,
+                    head_sha: reference.object.sha.clone(),
+                },
+                &metadata.default_branch,
+                actions.as_ref(),
+            )
+            .await?;
+        Ok(RepositoryChecksResult {
+            revision: reference.object.sha,
+            checks: checks
+                .checks
+                .into_iter()
+                .filter(|check| check.status == "completed")
+                .collect(),
+        })
     }
 
     #[cfg(target_arch = "wasm32")]
@@ -1691,7 +1756,6 @@ impl AppAuthority {
                 repository,
                 BTreeMap::from([
                     ("contents", "read"),
-                    ("checks", "read"),
                     ("merge_queues", "read"),
                     ("metadata", "read"),
                     ("pull_requests", "read"),
@@ -1721,8 +1785,6 @@ impl AppAuthority {
             queue_state: None,
             merge_commit_sha: None,
             merge_group: None,
-            main_revision: None,
-            main_checks: Vec::new(),
         };
         if pull.merged {
             result.state = MergeObservationState::Merged;
@@ -1757,32 +1819,6 @@ impl AppAuthority {
             }
             None if result.pull_state == "open" => {
                 result.merge_group = self.0.merge_group_run(&request).await;
-                if let Ok(reference) = self.0.read_ref(&token, &request.base).await {
-                    if reference.object.kind == "commit" && valid_sha(&reference.object.sha).is_ok()
-                    {
-                        result.main_revision = Some(reference.object.sha.clone());
-                        if let Ok(checks) = self
-                            .0
-                            .checks(
-                                &token,
-                                ObservePullRequestChecks {
-                                    repository: request.repository.clone(),
-                                    pull_number: 0,
-                                    head_sha: reference.object.sha,
-                                },
-                                &request.base,
-                                None,
-                            )
-                            .await
-                        {
-                            result.main_checks = checks
-                                .checks
-                                .into_iter()
-                                .filter(|check| check.status == "completed")
-                                .collect();
-                        }
-                    }
-                }
             }
             None => {}
         }

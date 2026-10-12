@@ -12,9 +12,9 @@ use crate::{
     github_app::{
         AppAuthority, CreateIssue, CreatePullRequest, EnqueuePullRequest, ListDeployments,
         ListIssues, ListPullRequests, ObserveFile, ObserveIssue, ObservePullRequestChecks,
-        ObservePullRequestMerge, ObserveRef, ObserveRepository, ObserveTree, OperationError,
-        PublishCommit, PublishPack, SubmitPullRequestReview, UpdatePullRequestBody,
-        canonical_operation_id,
+        ObservePullRequestMerge, ObserveRef, ObserveRepository, ObserveRepositoryChecks,
+        ObserveTree, OperationError, PublishCommit, PublishPack, SubmitPullRequestReview,
+        UpdatePullRequestBody, canonical_operation_id,
     },
     journal::DeliveryJournal,
 };
@@ -192,6 +192,21 @@ fn tools() -> Value {
                 "default_sha": {"type": "string"}
             },
             "required": ["repository", "repository_id", "permission_revision", "default_branch", "default_sha"],
+            "additionalProperties": false
+        },
+        "annotations": {"readOnlyHint": true, "destructiveHint": false, "openWorldHint": true}
+    }, {
+        "name": "observe_repository_checks",
+        "title": "Observe completed default-branch checks",
+        "description": "Return completed check runs on the repository's exact default-branch head, including best-effort failure lines.",
+        "inputSchema": {"type": "object", "properties": {"repository": {"type": "string", "pattern": "^[A-Za-z0-9-]{1,39}/[A-Za-z0-9._-]{1,100}$"}}, "required": ["repository"], "additionalProperties": false},
+        "outputSchema": {
+            "type": "object",
+            "properties": {
+                "revision": {"type": "string"},
+                "checks": {"type": "array", "maxItems": 100, "items": {"type": "object", "properties": {"name": {"type": "string"}, "status": {"type": "string"}, "conclusion": {"type": ["string", "null"]}, "url": {"type": "string"}, "required": {"type": "boolean"}, "annotations": {"type": "array", "maxItems": 40, "items": {"type": "string", "maxLength": 240}}}, "required": ["name", "status", "conclusion", "url", "required", "annotations"], "additionalProperties": false}}
+            },
+            "required": ["revision", "checks"],
             "additionalProperties": false
         },
         "annotations": {"readOnlyHint": true, "destructiveHint": false, "openWorldHint": true}
@@ -632,22 +647,8 @@ fn tools() -> Value {
                     "required": ["run_id", "url", "conclusion", "failed_jobs"],
                     "additionalProperties": false
                 },
-                "main_revision": {"type": ["string", "null"]},
-                "main_checks": {"type": "array", "maxItems": 100, "items": {
-                    "type": "object",
-                    "properties": {
-                        "name": {"type": "string"},
-                        "status": {"type": "string"},
-                        "conclusion": {"type": ["string", "null"]},
-                        "url": {"type": "string"},
-                        "required": {"type": "boolean"},
-                        "annotations": {"type": "array", "maxItems": 40, "items": {"type": "string", "maxLength": 240}}
-                    },
-                    "required": ["name", "status", "conclusion", "url", "required", "annotations"],
-                    "additionalProperties": false
-                }}
             },
-            "required": ["pull_number", "head_sha", "base", "pull_state", "state", "queue_state", "merge_commit_sha", "merge_group", "main_revision", "main_checks"],
+            "required": ["pull_number", "head_sha", "base", "pull_state", "state", "queue_state", "merge_commit_sha", "merge_group"],
             "additionalProperties": false
         },
         "annotations": {"readOnlyHint": true, "destructiveHint": false, "openWorldHint": true}
@@ -781,6 +782,19 @@ async fn call_tool(id: Value, request: &Map<String, Value>, mcp: &McpState) -> R
                         "default_sha": result.default_sha
                     }),
                     "Dark Factory Maintainer authority and default head are ready.",
+                ),
+                Err(error) => operation_error(id, error),
+            }
+        }
+        Some("observe_repository_checks") => {
+            let Ok(arguments) = serde_json::from_value::<ObserveRepositoryChecks>(arguments) else {
+                return json_rpc_error(id, -32602, "Invalid params");
+            };
+            match mcp.app.observe_repository_checks(arguments).await {
+                Ok(result) => serialized_tool_result(
+                    id,
+                    &result,
+                    "Completed default-branch checks were observed.",
                 ),
                 Err(error) => operation_error(id, error),
             }

@@ -39,7 +39,7 @@ func failureLedger(ctx context.Context, c *sql.Conn, scope []byte, since int64) 
 		FROM runs AS r JOIN tasks AS t ON t.id = r.task_id JOIN agents AS a ON a.id = r.agent_id
 		WHERE (?1 IS NULL OR r.project_id = ?1) AND r.terminal_kind IN ('failed', 'blocked') AND r.terminal_at_ms IS NOT NULL AND NOT `+specialistCarrierSQL+`
 		UNION ALL SELECT 'check', json_extract(document, '$.name'), NULL, NULL, NULL,
-			'pull request #' || json_extract(document, '$.pull_requests[0]') || ' at ' || substr(json_extract(document, '$.revision'), 1, 8) || COALESCE(' ' || (SELECT group_concat(json_extract(j.value, '$.name') || ' ' || json_extract(j.value, '$.annotations')) FROM json_each(production_records.document, '$.jobs') j), ''), observed_at_ms, ''
+			CASE WHEN json_extract(document, '$.pull_requests[0]') IS NULL THEN 'main' ELSE 'pull request #' || json_extract(document, '$.pull_requests[0]') END || ' at ' || substr(json_extract(document, '$.revision'), 1, 8) || COALESCE(' ' || (SELECT group_concat(json_extract(j.value, '$.name') || ' ' || json_extract(j.value, '$.annotations')) FROM json_each(production_records.document, '$.jobs') j), ''), observed_at_ms, ''
 		FROM production_records WHERE (?1 IS NULL OR project_id = ?1) AND kind = 'check' AND json_extract(document, '$.conclusion') IN ('failure', 'timed_out', 'startup_failure')`, project)
 	if err != nil {
 		return nil, err

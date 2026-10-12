@@ -1014,16 +1014,14 @@ func (b *daemonReviewBackend) ObservePull(ctx context.Context, operation review.
 }
 
 type observePullRequestMergeResponse struct {
-	PullNumber   uint64                `json:"pull_number"`
-	Head         string                `json:"head_sha"`
-	Base         string                `json:"base"`
-	PullState    string                `json:"pull_state"`
-	State        string                `json:"state"`
-	QueueState   *string               `json:"queue_state"`
-	MergeCommit  *string               `json:"merge_commit_sha"`
-	Group        *review.GroupRun      `json:"merge_group"`
-	MainChecks   []maintainerMainCheck `json:"main_checks"`
-	MainRevision string                `json:"main_revision"`
+	PullNumber  uint64           `json:"pull_number"`
+	Head        string           `json:"head_sha"`
+	Base        string           `json:"base"`
+	PullState   string           `json:"pull_state"`
+	State       string           `json:"state"`
+	QueueState  *string          `json:"queue_state"`
+	MergeCommit *string          `json:"merge_commit_sha"`
+	Group       *review.GroupRun `json:"merge_group"`
 }
 
 func observePullRequestMergeArguments(repository string, pullNumber uint64, head, base string) map[string]any {
