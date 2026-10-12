@@ -295,9 +295,6 @@ func (o *terminalOwner) serve() (bool, error) {
 			if _, err := o.child.FinishAfterExit(8 * time.Second); err != nil {
 				return o.daemonOpen, err
 			}
-			if err := o.awaitFirstCredit(); err != nil {
-				return o.daemonOpen, err
-			}
 			if err := o.drainPTY(); err != nil {
 				return o.daemonOpen, err
 			}
@@ -863,13 +860,13 @@ func (o *terminalOwner) consumePTY(data []byte, readErr error) error {
 }
 
 // awaitFirstCredit gives the daemon a bounded chance to grant its first
-// output credit when the provider exits before it arrived: a refusal or an
-// early exit otherwise ends with its output unsent and its run's
-// diagnostics empty. Only credit is applied; the daemon reads no other
-// command's answer once the provider has exited.
+// output credit when the PTY ends before it arrived: a refusal or an early
+// exit otherwise ends with its output unsent and its run's diagnostics
+// empty. Only credit is applied; the daemon reads no other command's answer
+// once the PTY has ended.
 func (o *terminalOwner) awaitFirstCredit() error {
 	deadline := time.Now().Add(time.Second)
-	for o.credit == 0 && o.sent == 0 && o.daemonOpen && !o.detached && time.Now().Before(deadline) {
+	for o.credit == 0 && o.sent == 0 && o.daemonOpen && o.daemonDecoder != nil && !o.detached && time.Now().Before(deadline) {
 		fds := []unix.PollFd{{Fd: int32(o.daemon.Fd()), Events: unix.POLLIN}}
 		if n, err := unix.Poll(fds, 50); n == 0 || errors.Is(err, unix.EINTR) {
 			continue
@@ -1081,6 +1078,13 @@ func (o *terminalOwner) emitPTYEOF() error {
 	}
 	if o.ptyEOF {
 		return nil
+	}
+	// EOF ends live output, so send what was retained before it first.
+	if err := o.awaitFirstCredit(); err != nil {
+		return err
+	}
+	if err := o.flush(); err != nil {
+		return err
 	}
 	o.ptyEOF = true
 	o.inputActive = false
