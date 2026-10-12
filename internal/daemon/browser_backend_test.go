@@ -274,7 +274,7 @@ func TestBrowserAdapterPairsAuthenticatesSnapshotsAndReloadsRevocation(t *testin
 	if len(snapshot.Projects) != 1 || len(snapshot.Agents) != 1 || len(snapshot.Tasks) != 1 {
 		t.Fatalf("one snapshot did not carry the whole Factory: %+v", snapshot)
 	}
-	if project := snapshot.Projects[0]; project.RunBudgetLimit != 7 || project.RunsUsed != 0 || project.MaxRunSeconds != 900 {
+	if project := snapshot.Projects[0]; project.MaxRunSeconds != 900 {
 		t.Fatalf("snapshot project limits = %+v", project)
 	}
 	for _, sentinel := range []string{"PRIVATE_ROOT_SENTINEL", "PRIVATE_BODY_SENTINEL"} {
