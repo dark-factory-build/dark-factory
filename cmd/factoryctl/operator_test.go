@@ -6,10 +6,14 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
 	"github.com/dark-factory-build/dark-factory/internal/api"
+	"github.com/dark-factory-build/dark-factory/internal/install"
+	"github.com/dark-factory-build/dark-factory/internal/runner"
 )
 
 func TestParseExactOperatorCommands(t *testing.T) {
@@ -241,14 +245,19 @@ func TestOperatorCommandsRequireExactEnvironmentBeforeDialing(t *testing.T) {
 // An absent socket under its home is a daemon that is down or restarting,
 // not a misconfigured shell (#1830).
 func TestOperatorCommandReportsAbsentSocketAsDaemonDown(t *testing.T) {
-	fixture := newAPIFixture(t)
-	defer fixture.close(t)
-	if err := fixture.listener.Close(); err != nil {
+	directory, err := os.MkdirTemp(runner.ShortTempDir(), "dark-factory-factoryctl-down-")
+	if err != nil {
 		t.Fatal(err)
 	}
-	fixture.listener = nil
-	environment := map[string]string{"DARK_FACTORY_SOCKET": fixture.socket, "DARK_FACTORY_OPERATOR_TOKEN_FILE": fixture.directory + "/home/operator.token"}
-	for _, args := range [][]string{{"dispatch", "on"}, {"release"}} {
+	defer os.RemoveAll(directory)
+	home := filepath.Join(directory, "home")
+	if _, err := install.Init(context.Background(), home); err != nil {
+		t.Fatal(err)
+	}
+	token := filepath.Join(home, "operator.token")
+	writeToken(t, token, bytes.Repeat([]byte{'O'}, 32))
+	environment := map[string]string{"DARK_FACTORY_SOCKET": install.LocalAPISocketPath(home), "DARK_FACTORY_OPERATOR_TOKEN_FILE": token}
+	for _, args := range [][]string{{"dispatch", "on"}, {"release", strings.Repeat("a", 40)}} {
 		var stdout, stderr bytes.Buffer
 		exit := run(context.Background(), args, func(name string) string { return environment[name] }, &stdout, &stderr)
 		if exit != exitFailure || stdout.Len() != 0 || stderr.String() != "factoryctl: factoryd is not running or is restarting\n" {
