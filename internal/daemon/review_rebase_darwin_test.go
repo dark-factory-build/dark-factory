@@ -2,7 +2,9 @@ package daemon
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/hex"
+	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -12,6 +14,7 @@ import (
 
 	"github.com/dark-factory-build/dark-factory/internal/change"
 	"github.com/dark-factory-build/dark-factory/internal/kernel"
+	"github.com/dark-factory-build/dark-factory/internal/maintainer"
 	"github.com/dark-factory-build/dark-factory/internal/review"
 	"github.com/dark-factory-build/dark-factory/internal/runner"
 )
@@ -72,12 +75,14 @@ func TestConflictRepairRebasesAnAppPublishedPullsChangeOnce(t *testing.T) {
 	settlementGit(t, git, repository, "commit", "-q", "-m", "main moved")
 	origin := filepath.Join(filepath.Dir(repository), "origin.git")
 	settlementGit(t, git, repository, "clone", "-q", "--bare", repository, origin)
+	settlementGit(t, git, origin, "update-ref", "refs/heads/main", "HEAD") // the published base branch
 	settlementGit(t, git, repository, "remote", "add", "origin", origin)
 	settlementGit(t, git, repository, "config", "protocol.file.allow", "always")
 	source, err := inspectRegisteredRepository(ctx, repository, "HEAD")
 	if err != nil {
 		t.Fatal(err)
 	}
+	source.PublicationRepository = "team/repo"
 	if err := fixture.store.BindRepositorySource(ctx, kernel.RepositoryID(changeState.ProjectID), source); err != nil {
 		t.Fatal(err)
 	}
@@ -144,16 +149,67 @@ func TestConflictRepairRebasesAnAppPublishedPullsChangeOnce(t *testing.T) {
 		if settled, err := fixture.daemon.unpublishedHead(ctx, backend, open, review.Request{Head: app}); err != nil || settled != c.want {
 			t.Fatalf("pull request at the tree of %s: unpublished head %q err=%v, want %q", c.tree, settled, err, c.want)
 		}
-		// The pull request's own task's Change is published at once instead
-		// of the head being judged an answer, and the attempt is logged.
-		var log strings.Builder
-		fixture.daemon.log = &log
-		lacks, why, err := fixture.daemon.publishUnanswered(ctx, backend, open, review.Request{Head: app})
-		attempted := strings.Contains(log.String(), "factoryd: publish change "+changeState.ID.String()+" at "+head+" for task "+task.ID.String()+": its repository has no bound publication target")
-		if err != nil || why != "" || lacks != (c.want != "") || attempted != lacks {
-			t.Fatalf("pull request at the tree of %s: lacks=%v why=%q err=%v log=%q", c.tree, lacks, why, err, log.String())
+	}
+
+	// Its reconciler, while the stale head's checks are still pending,
+	// publishes the settled head before judging that head: a refusal leaves
+	// it unescalated for the next pass, which publishes the settled tree.
+	if err := fixture.store.BindRepositoryGitHubID(ctx, kernel.RepositoryID(changeState.ProjectID), 42); err != nil {
+		t.Fatal(err)
+	}
+	if err := fixture.home.WriteMaintainerCredential([]byte(`{"disabled":true}`)); err != nil {
+		t.Fatal(err)
+	}
+	if fixture.daemon.github, err = maintainer.OpenHost(fixture.home); err != nil || !fixture.daemon.customerMaintainer() {
+		t.Fatalf("customer host: %v", err)
+	}
+	stale := strings.TrimSpace(settlementGit(t, git, path, "commit-tree", local+"^{tree}", "-p", main, "-m", "app"))
+	app := &fakePublishMaintainer{main: main, journal: map[string]json.RawMessage{}, refuse: "made.txt", externalRefuse: true}
+	backend := &publishingReviewBackend{checkoutReviewBackend{dir: path}, app}
+	backend.pull = &review.Pull{Head: stale, State: "open", Pending: true}
+	fixture.daemon.reviewBackend = func(string, uint64) review.Backend { return backend }
+	op := review.Operation{ID: "op-1800", Request: review.Request{Repository: "team/repo", PullNumber: 12, Head: stale, Base: main, BaseRef: "main"}, State: "completed", CreatedAt: time.UnixMilli(100), UpdatedAt: time.UnixMilli(100)}
+	document, err := json.Marshal(op)
+	if err != nil {
+		t.Fatal(err)
+	}
+	stalePull := open
+	stalePull.Pull.Head, stalePull.Operations = stale, []json.RawMessage{document}
+	var log strings.Builder
+	fixture.daemon.log = &log
+	pass := func() {
+		t.Helper()
+		if _, err := fixture.daemon.reconcilePull(ctx, stalePull, false, false); err != nil {
+			t.Fatal(err)
+		}
+		if document, found, err := fixture.store.ReviewOperation(ctx, changeState.ProjectID, op.ID); err != nil || found && strings.Contains(string(document), "escalation") {
+			t.Fatalf("stale head record = %s %v", document, err)
 		}
 	}
+	attempt := "factoryd: publish change " + changeState.ID.String() + " at " + head + " for task " + task.ID.String() + ": "
+	pass()
+	if len(app.writes) != 1 || !strings.Contains(log.String(), attempt) || !strings.Contains(log.String(), "UNPROCESSABLE") {
+		t.Fatalf("refused pass: writes %d, log %q", len(app.writes), log.String())
+	}
+	app.refuse = ""
+	pass()
+	commit := app.writes[len(app.writes)-1]["arguments"].(map[string]any)
+	made := false
+	for _, entry := range commit["changes"].([]map[string]any) {
+		made = made || entry["path"] == "made.txt" && entry["content_base64"] == base64.StdEncoding.EncodeToString([]byte("made\n"))
+	}
+	if !made || !strings.Contains(log.String(), "factoryd: published change "+changeState.ID.String()+" at "+head) {
+		t.Fatalf("published pass: commit %+v, log %q", commit, log.String())
+	}
+	if found, err := fixture.store.PublishableChanges(ctx, mustKernelTime(t, 1<<40)); err != nil || len(found) != 0 {
+		t.Fatalf("published correction still unpublished: %+v %v", found, err)
+	}
+}
+
+// publishingReviewBackend is also the Maintainer factoryd publishes through.
+type publishingReviewBackend struct {
+	checkoutReviewBackend
+	*fakePublishMaintainer
 }
 
 // checkoutReviewBackend checks every pull request out at dir.

@@ -265,17 +265,22 @@ func (daemon *Daemon) reconcilePull(ctx context.Context, open kernel.OpenPull, u
 		}
 		ops[len(ops)-1] = op
 		answered := !working && strings.Contains(kernel.TaskFeedback(task), "review-operation: "+op.ID+"\n")
-		if action, note = review.Decide(pull, ops, answered); working && (action == review.Rebase || action == review.SendBack) {
-			action = review.Wait // its task's next head decides
+		// Work its task settled after this head was recorded is published
+		// before the head is judged (#1800). ponytail: a head left stuck
+		// (escalated) is checked out again each pass; record the compared
+		// tree on the operation if that cost shows.
+		lacks, why := false, ""
+		if !working && task.CompletedAt != nil && task.CompletedAt.Int64() > op.CreatedAt.UnixMilli() {
+			lacks, why, err = daemon.publishUnanswered(ctx, coordinator.Backend, open, op.Request)
 		}
-		if answered && (action == review.Escalate || action == review.Review) {
-			var lacks bool
-			var why string
-			if lacks, why, err = daemon.publishUnanswered(ctx, coordinator.Backend, open, op.Request); err != nil || lacks {
-				action, note = review.Wait, "" // its next head is reviewed
-			}
-			if why != "" {
-				action, note = review.Escalate, why
+		switch {
+		case why != "" && !op.Handled:
+			action, note = review.Escalate, why
+		case err != nil || lacks:
+			// its next head is reviewed
+		default:
+			if action, note = review.Decide(pull, ops, answered); working && (action == review.Rebase || action == review.SendBack) {
+				action = review.Wait // its task's next head decides
 			}
 		}
 		switch action {

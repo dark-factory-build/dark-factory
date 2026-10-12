@@ -96,7 +96,15 @@ func (daemon *Daemon) publishSettledChange(ctx context.Context, c kernel.Publish
 	if err != nil {
 		return daemon.publishFailed(ctx, c, repo, err)
 	}
-	return daemon.publishChange(ctx, c, repo, source, backend.callResponse, checkout)
+	call := backend.callResponse
+	if daemon.reviewBackend != nil { // a test's Maintainer, when it publishes
+		if fake, ok := daemon.reviewBackend(repo, id).(interface {
+			call(context.Context, string, map[string]any) (json.RawMessage, error)
+		}); ok {
+			call = fake.call
+		}
+	}
+	return daemon.publishChange(ctx, c, repo, source, call, checkout)
 }
 
 // settledChangeGitDirectory is the verified private Git directory holding the
