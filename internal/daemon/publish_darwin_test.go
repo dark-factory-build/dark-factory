@@ -34,6 +34,7 @@ type fakePublishMaintainer struct {
 	landCreateIndeterminate bool             // create_pull_request lands before losing its response
 	headRef                 string
 	bodyIndeterminate       bool
+	landBodyIndeterminate   bool
 	bodyWrites              int
 	extraPull               bool
 	dirty                   bool
@@ -41,6 +42,7 @@ type fakePublishMaintainer struct {
 	closed                  bool
 	landSecondCommit        bool
 	landFirstCommit         bool
+	landedCommit            string
 	commitWrites            int
 	loseNext                bool   // the next write lands but its response is lost
 	body                    string // the open pull request's stored body
@@ -102,17 +104,18 @@ func (f *fakePublishMaintainer) call(_ context.Context, name string, arguments m
 	priorWrites := len(f.writes)
 	f.writes = append(f.writes, map[string]any{"name": name, "arguments": arguments})
 	landCreate := f.landCreateIndeterminate && name == "create_pull_request"
-	landCommit := name == "publish_commit" && (f.landFirstCommit && f.commitWrites == 1 || f.landSecondCommit && f.commitWrites == 2)
 	if name == "publish_commit" {
 		f.commitWrites++
 	}
 	if name == "update_pull_request_body" && f.bodyIndeterminate {
 		f.bodyWrites++
 	}
-	if f.unavailable || landCreate || (f.indeterminateAgain && priorWrites > 0) || (name == "update_pull_request_body" && f.bodyIndeterminate) || (landCommit && f.commitWrites == 2) {
+	landCommit := name == "publish_commit" && (f.landFirstCommit && f.commitWrites == 1 || f.landSecondCommit && f.commitWrites == 2)
+	landBody := name == "update_pull_request_body" && f.landBodyIndeterminate && f.bodyWrites == 2
+	if f.unavailable || landCreate || (f.indeterminateAgain && priorWrites > 0) || (name == "update_pull_request_body" && f.bodyIndeterminate) || landCommit || landBody {
 		f.unavailable = false
 		f.indeterminate[id] = true
-		if !landCreate && !landCommit {
+		if !landCreate && !landCommit && !landBody {
 			return nil, maintainerRejection("unavailable: Maintainer authority is unavailable.")
 		}
 	}
@@ -130,17 +133,22 @@ func (f *fakePublishMaintainer) call(_ context.Context, name string, arguments m
 				return nil, fmt.Errorf("refused: %s cannot be written", f.refuse)
 			}
 		}
-		f.tip = fmt.Sprintf("%x", sha1.Sum([]byte(id)))
+		if landCommit && f.landedCommit != "" {
+			f.tip = f.landedCommit
+		} else {
+			f.tip = fmt.Sprintf("%x", sha1.Sum([]byte(id)))
+		}
 		result, _ = json.Marshal(map[string]any{"branch": arguments["branch"], "commit_sha": f.tip, "parent_sha": arguments["expected_head_sha"]})
 	case "create_pull_request":
 		result, _ = json.Marshal(map[string]any{"number": 31, "url": "https://github.com/team/repo/pull/31", "head_sha": arguments["head_sha"], "base_sha": arguments["base_sha"]})
 	case "update_pull_request_body":
+		f.body = arguments["body"].(string)
 		result, _ = json.Marshal(map[string]any{"number": arguments["pull_number"], "head_sha": f.tip})
 	default:
 		return nil, fmt.Errorf("unexpected tool %s", name)
 	}
 	f.journal[id] = result
-	if landCreate || landCommit && f.commitWrites == 2 {
+	if landCreate || landCommit || landBody {
 		f.landCreateIndeterminate = false
 		f.landSecondCommit = false
 		f.landFirstCommit = false
@@ -615,9 +623,18 @@ func TestIndeterminatePublicationEscalatesOnceAfterFreshOperation(t *testing.T) 
 
 func TestIndeterminateLandedFirstCommitIsRecorded(t *testing.T) {
 	fixture, c, source, app, checkout := publishFixture(t, 1, false)
-	app.landFirstCommit = true
-	if err := fixture.daemon.publishChange(context.Background(), c, "team/repo", source, app.call, checkout); err != nil {
-		t.Fatal(err)
+	app.tip, app.landFirstCommit, app.landedCommit = c.Base, true, c.Head
+	withTip := func(ctx context.Context, ref, head string) (string, func(), error) {
+		gitDir, cleanup, err := checkout(ctx, ref, head)
+		if err == nil {
+			_, err = gitOutput(ctx, gitDir, "-c", "protocol.file.allow=always", "fetch", "--quiet", source, head)
+		}
+		return gitDir, cleanup, err
+	}
+	for range 2 {
+		if err := fixture.daemon.publishChange(context.Background(), c, "team/repo", source, app.call, withTip); err != nil {
+			t.Fatal(err)
+		}
 	}
 	if len(app.writes) != 2 || app.writes[0]["name"] != "publish_commit" || app.writes[1]["name"] != "create_pull_request" {
 		t.Fatalf("landed first commit writes = %+v", app.writes)
@@ -660,6 +677,19 @@ func TestIndeterminateBodyRetryIsObservedAndNotReplayed(t *testing.T) {
 	}
 	if app.bodyWrites != 2 || len(app.writes) != 3 {
 		t.Fatalf("body retry writes = %d / %+v", app.bodyWrites, app.writes)
+	}
+}
+
+func TestIndeterminateLandedBodyUpdateIsRecorded(t *testing.T) {
+	fixture, c, source, app, checkout := publishFixture(t, 1, false)
+	app.tip, c.Pull, app.bodyIndeterminate, app.landBodyIndeterminate = c.Head, 31, true, true
+	for range 3 {
+		if err := fixture.daemon.publishChange(context.Background(), c, "team/repo", source, app.call, checkout); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if app.bodyWrites != 2 || len(app.writes) != 2 {
+		t.Fatalf("landed body writes = %d / %+v", app.bodyWrites, app.writes)
 	}
 }
 

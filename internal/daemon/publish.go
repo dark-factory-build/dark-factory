@@ -406,7 +406,7 @@ func (daemon *Daemon) publishPull(ctx context.Context, c kernel.PublishableChang
 	if err == nil {
 		done, err = completed(prefix+"1", &first)
 		if indeterminate, ok := err.(publishIndeterminate); ok {
-			observed, retry, landed, observeErr := recover(indeterminate.step, tip, c.Pull, false)
+			observed, retry, landed, observeErr := recover(indeterminate.step, main, c.Pull, false)
 			if observeErr != nil {
 				return observeErr
 			}
@@ -520,6 +520,7 @@ func (daemon *Daemon) publishPull(ctx context.Context, c kernel.PublishableChang
 			step := fmt.Sprintf("body-%s-%d", head[:8], c.Revision.Int64())
 			done, err := completed(step, new(json.RawMessage))
 			retryStep, varObserved := step, (*observedPull)(nil)
+			var observedErr error
 			if indeterminate, ok := err.(publishIndeterminate); ok {
 				observed, retry, _, observeErr := recover(indeterminate.step, head, c.Pull, false)
 				if observeErr != nil {
@@ -527,6 +528,12 @@ func (daemon *Daemon) publishPull(ctx context.Context, c kernel.PublishableChang
 				}
 				retryStep, varObserved, done, err = retry, observed.pull, false, nil
 				done, err = retryCompleted(retryStep, new(json.RawMessage), observed)
+				if err != nil {
+					var unresolved publishIndeterminate
+					if errors.As(err, &unresolved) && varObserved != nil {
+						observedErr, err = err, nil
+					}
+				}
 			}
 			var current struct {
 				PullRequests []struct {
@@ -550,6 +557,8 @@ func (daemon *Daemon) publishPull(ctx context.Context, c kernel.PublishableChang
 				wanted := fmt.Sprintf("%s\n\n%s #%d", body, footer, issue)
 				if varObserved != nil && varObserved.Body == wanted {
 					done = true
+				} else if observedErr != nil {
+					err = observedErr
 				} else {
 					_, err = call(ctx, "update_pull_request_body", map[string]any{"repository": repo, "operation_id": operation(retryStep), "pull_number": c.Pull, "body": wanted})
 				}
