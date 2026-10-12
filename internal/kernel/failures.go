@@ -75,7 +75,9 @@ func failureLedger(ctx context.Context, c *sql.Conn, scope []byte, since int64) 
 			ledger = append(ledger, *entry)
 		}
 	}
-	slices.SortFunc(ledger, func(a, b failure) int { return cmp.Or(cmp.Compare(b.last, a.last), strings.Compare(a.signature, b.signature)) })
+	slices.SortFunc(ledger, func(a, b failure) int {
+		return cmp.Or(cmp.Compare(b.last, a.last), strings.Compare(a.signature, b.signature))
+	})
 	return ledger, nil
 }
 
