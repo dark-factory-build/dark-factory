@@ -127,6 +127,95 @@ func TestAdmissionWaitsForExactProducerWorkRevision(t *testing.T) {
 	}
 }
 
+func TestCancelledProducerCancelsItsQueuedConsumers(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	store, _, project, agent := newAdmissionStore(t, RoleWorker, 2)
+	defer store.Close()
+	producer, err := store.EnqueueTask(ctx, NewTask{ID: taskID(t, 216), ProjectID: project.ID, AssignedAgentID: agent.ID, IncarnationID: incarnationID(t, 217), Title: "producer"}, mustTime(t, 5))
+	if err != nil {
+		t.Fatal(err)
+	}
+	consumer, err := store.EnqueueTask(ctx, NewTask{ID: taskID(t, 218), ProjectID: project.ID, AssignedAgentID: agent.ID, IncarnationID: incarnationID(t, 219), Title: "consumer", Prerequisites: []TaskPrerequisite{{TaskID: producer.ID, WorkRevision: mustRevision(t, 1)}}}, mustTime(t, 6))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.EnqueueTask(ctx, NewTask{ID: taskID(t, 220), ProjectID: project.ID, IncarnationID: incarnationID(t, 221), Title: "shared consumer", Prerequisites: []TaskPrerequisite{{TaskID: consumer.ID, WorkRevision: mustRevision(t, 1)}}}, mustTime(t, 7)); err != nil {
+		t.Fatal(err)
+	}
+	if cancelled, err := store.CancelOrphanedTasks(ctx, mustTime(t, 8)); err != nil || len(cancelled) != 0 {
+		t.Fatalf("cancelled before the producer ended = %v, %v", cancelled, err)
+	}
+	if lines, err := store.Why(ctx, nil, 0, consumer.ID); err != nil || lines[len(lines)-1] != "waits on: prerequisite: task "+producer.ID.String()+" is queued at work revision 1; it needs revision 1 to succeed" {
+		t.Fatalf("why = %q, %v", lines, err)
+	}
+	if _, err := store.UpdateTaskForOperator(ctx, producer.ID, producer.Revision, TaskPatch{Cancel: true}, mustTime(t, 9)); err != nil {
+		t.Fatal(err)
+	}
+	cancelled, err := store.CancelOrphanedTasks(ctx, mustTime(t, 10))
+	if err != nil || len(cancelled) != 2 || cancelled[0] != consumer.ID || cancelled[1] != taskID(t, 220) {
+		t.Fatalf("cancelled = %v, %v", cancelled, err)
+	}
+	if err := store.Validate(ctx); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// Full worker slots hold worker work, not an overseer's, which takes its
+// project's own slot.
+func TestWhyCapacityFollowsTheTasksRole(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	store, _, project, overseer := newAdmissionStore(t, RoleOrchestrator, 1)
+	defer store.Close()
+	worker, err := store.CreateAgent(ctx, NewAgent{ID: agentID(t, 215), ProjectID: project.ID, Name: "worker", Role: RoleWorker, Provider: ProviderCodex, ToolBudgetLimit: 5}, mustTime(t, 4))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.EnqueueTask(ctx, NewTask{ID: taskID(t, 216), ProjectID: project.ID, AssignedAgentID: worker.ID, IncarnationID: incarnationID(t, 217), Title: "running"}, mustTime(t, 5)); err != nil {
+		t.Fatal(err)
+	}
+	if admitted, err := store.AdmitNext(ctx, admissionKeys(t, 220, nil), mustTime(t, 6)); err != nil || !admitted.Admitted() {
+		t.Fatalf("worker admission = %+v, %v", admitted, err)
+	}
+	shared, err := store.EnqueueTask(ctx, NewTask{ID: taskID(t, 218), ProjectID: project.ID, IncarnationID: incarnationID(t, 219), Title: "shared"}, mustTime(t, 7))
+	if err != nil {
+		t.Fatal(err)
+	}
+	overseerTask, err := store.EnqueueTask(ctx, NewTask{ID: taskID(t, 221), ProjectID: project.ID, AssignedAgentID: overseer.ID, IncarnationID: incarnationID(t, 222), Title: "overseer"}, mustTime(t, 8))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for id, want := range map[TaskID]string{shared.ID: "waits on: agent: worker has a run in progress", overseerTask.ID: "waits on: worker: its task is queued for the next admission"} {
+		if lines, err := store.Why(ctx, nil, 0, id); err != nil || lines[len(lines)-1] != want {
+			t.Fatalf("why %s = %q, %v", id, lines, err)
+		}
+	}
+}
+
+// Shared work waits on every worker that would take it, as AdmitNext does.
+func TestWhySharedTaskNamesItsPausedWorker(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	store, _, project, worker := newAdmissionStore(t, RoleWorker, 2)
+	defer store.Close()
+	shared, err := store.EnqueueTask(ctx, NewTask{ID: taskID(t, 216), ProjectID: project.ID, IncarnationID: incarnationID(t, 217), Title: "shared"}, mustTime(t, 4))
+	if err != nil {
+		t.Fatal(err)
+	}
+	worker = pauseAgent(t, store, worker, true, 5)
+	if admitted, err := store.AdmitNext(ctx, admissionKeys(t, 220, nil), mustTime(t, 6)); err != nil || admitted.Admitted() {
+		t.Fatalf("admission = %+v, %v", admitted, err)
+	}
+	if lines, err := store.Why(ctx, nil, 0, shared.ID); err != nil || lines[len(lines)-1] != "waits on: agent: a is paused" {
+		t.Fatalf("why = %q, %v", lines, err)
+	}
+	pauseAgent(t, store, worker, false, 7)
+	if lines, err := store.Why(ctx, nil, 0, shared.ID); err != nil || lines[len(lines)-1] != "waits on: worker: its task is queued for the next admission" {
+		t.Fatalf("why = %q, %v", lines, err)
+	}
+}
+
 func TestAdmissionConsumesExactSuccessfulProducerRevision(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()

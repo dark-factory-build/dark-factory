@@ -232,11 +232,15 @@ func TestSpecialistAdmission(t *testing.T) {
 	if admission, err := store.AdmitNext(ctx, admissionKeys(t, 40, nil), mustTime(t, 10)); err != nil || !admission.Admitted() || admission.Run.TaskID != shared.ID || admission.Run.AgentID != worker.ID {
 		t.Fatalf("shared admission = %+v, %v", admission, err)
 	}
-	if bodies := wakeBodies(t, store, 11); len(bodies) != 1 {
-		t.Fatalf("carrier = %q", bodies)
+	carriers, err := store.EnqueueOverseerWakeups(ctx, mustTime(t, 11))
+	if err != nil || len(carriers) != 1 {
+		t.Fatalf("carrier = %+v, %v", carriers, err)
 	}
 	if admission, err := store.AdmitNext(ctx, admissionKeys(t, 50, nil), mustTime(t, 12)); err != nil || admission.Admitted() || admission.Reason != NoAdmissionAtCapacity {
 		t.Fatalf("carrier took the spare slot: %+v, %v", admission, err)
+	}
+	if lines, err := store.Why(ctx, nil, 0, carriers[0].ID); err != nil || !strings.HasPrefix(lines[len(lines)-1], "waits on: capacity: a specialist waits") {
+		t.Fatalf("why carrier = %q, %v", lines, err)
 	}
 	explicit, err := store.EnqueueTask(ctx, NewTask{ID: taskID(t, 60), ProjectID: project.ID, AssignedAgentID: specialist.ID, IncarnationID: incarnationID(t, 61), Title: "explicit"}, mustTime(t, 13))
 	if err != nil {

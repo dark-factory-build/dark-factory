@@ -85,12 +85,12 @@ func TestReportAndWhyReadTheReconcilersState(t *testing.T) {
 		t.Fatalf("why checks = %q", line)
 	}
 	// A failing check outranks a pending one and a missing verdict, as in review.Decide.
-	if waits := whyPullWaits(ProductionPullRequest{State: "open"}, false, Task{}, nil, 1, 1); waits != "factoryd: failing checks send it back on its next pass" {
+	if waits := whyPullWaits(ProductionPullRequest{State: "open"}, false, Task{}, "", nil, 1, 1); waits != "factoryd: failing checks send it back on its next pass" {
 		t.Fatalf("failing and pending checks wait on %q", waits)
 	}
 	// An allowed, green, unqueued head whose task was cancelled: the reconciler
 	// leaves it, so it waits on no factoryd pass.
-	if waits := whyPullWaits(ProductionPullRequest{State: "open"}, true, Task{Status: TaskCancelled}, &review.Operation{State: "enqueued", Verdict: "allow"}, 0, 0); waits != "operator: its task was cancelled, so factoryd no longer advances it" {
+	if waits := whyPullWaits(ProductionPullRequest{State: "open"}, true, Task{Status: TaskCancelled}, "", &review.Operation{State: "enqueued", Verdict: "allow"}, 0, 0); waits != "operator: its task was cancelled, so factoryd no longer advances it" {
 		t.Fatalf("a cancelled task's pull waits on %q", waits)
 	}
 }
