@@ -145,6 +145,121 @@ func TestReviewDiffBytesComputesActualGitDiff(t *testing.T) {
 	}
 }
 
+type realDiffReviewBackend struct {
+	publicReviewBackend
+	checkout string
+	request  review.Request
+	reviewed chan struct{}
+}
+
+func (b *realDiffReviewBackend) StoredPull(context.Context, uint64, string) (review.Request, error) {
+	return b.request, nil
+}
+
+func (b *realDiffReviewBackend) CloneReadOnly(context.Context, review.Request) (string, func(), error) {
+	return b.checkout, func() {}, nil
+}
+
+func (b *realDiffReviewBackend) DiffID(ctx context.Context, request review.Request) (string, error) {
+	diff, err := reviewDiffBytes(ctx, b.checkout, request.Base)
+	if err != nil {
+		return "", err
+	}
+	return diffID(diff), nil
+}
+
+func (b *realDiffReviewBackend) Review(ctx context.Context, checkout string, request review.Request) (review.Verdict, error) {
+	if b.reviewed != nil {
+		select {
+		case <-b.reviewed:
+		default:
+			close(b.reviewed)
+		}
+	}
+	return b.publicReviewBackend.Review(ctx, checkout, request)
+}
+
+func realRebasedReviewCheckout(t *testing.T) (string, string, string, string) {
+	t.Helper()
+	dir, err := os.MkdirTemp(".", ".review-rebase-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(dir) })
+	git := func(args ...string) string {
+		command := exec.Command("git", append([]string{"-C", dir, "-c", "user.name=review", "-c", "user.email=review@example.invalid"}, args...)...)
+		output, err := command.Output()
+		if err != nil {
+			t.Fatalf("git %v: %v", args, err)
+		}
+		return strings.TrimSpace(string(output))
+	}
+	git("init", "-q")
+	git("commit", "-q", "--allow-empty", "-m", "base")
+	baseBefore := git("rev-parse", "HEAD")
+	if err := os.WriteFile(filepath.Join(dir, "changed.go"), []byte("v1\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	git("add", "changed.go")
+	git("commit", "-q", "-m", "feature")
+	feature := git("rev-parse", "HEAD")
+	priorBytes, err := reviewDiffBytes(context.Background(), dir, baseBefore)
+	if err != nil {
+		t.Fatal(err)
+	}
+	git("branch", "main", baseBefore)
+	git("checkout", "-q", "main")
+	if err := os.WriteFile(filepath.Join(dir, "unrelated.txt"), []byte("base moved\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	git("add", "unrelated.txt")
+	git("commit", "-q", "-m", "base moved")
+	baseAfter := git("rev-parse", "HEAD")
+	git("checkout", "-q", "-b", "feature-rebased", feature)
+	git("rebase", "main")
+	return dir, baseBefore, baseAfter, diffID(priorBytes)
+}
+
+func TestReviewHeadCarriesRealRebasedDiffAndReviewsChangedDiff(t *testing.T) {
+	fixture, project := reviewPublicFixture(t)
+	checkout, baseBefore, baseAfter, priorDiff := realRebasedReviewCheckout(t)
+	backend := &realDiffReviewBackend{checkout: checkout, request: review.Request{Repository: "team/repo", PullNumber: 12, Head: strings.Repeat("c", 40), Base: baseAfter, BaseRef: "main", Body: "fixture", Provider: "codex"}}
+	fixture.daemon.reviewBackend = func(string, uint64) review.Backend { return backend }
+	coordinator := review.Coordinator{Store: durableReviewStore{store: fixture.store, project: project, repository: "team/repo", now: fixture.daemon.now}, Backend: backend, Now: fixture.daemon.now}
+	prior := review.Operation{ID: "prior", Request: review.Request{Repository: "team/repo", PullNumber: 12, Head: strings.Repeat("a", 40), Base: baseBefore, BaseRef: "main"}, Verdict: "allow", DiffID: priorDiff}
+	document, err := json.Marshal(prior)
+	if err != nil {
+		t.Fatal(err)
+	}
+	open := kernel.OpenPull{Project: project, Repository: "team/repo", Pull: kernel.ProductionPullRequest{Number: 12, Head: backend.request.Head, Base: "main", State: "open"}, History: []json.RawMessage{document}}
+	if err := fixture.daemon.reviewHead(context.Background(), coordinator, open, ""); err != nil {
+		t.Fatal(err)
+	}
+	if backend.publicReviewBackend.reviews != 0 || backend.publicReviewBackend.submits != 1 {
+		t.Fatalf("unchanged rebased diff was reviewed: reviews=%d submits=%d", backend.publicReviewBackend.reviews, backend.publicReviewBackend.submits)
+	}
+	if err := os.WriteFile(filepath.Join(checkout, "changed.go"), []byte("v2\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	command := exec.Command("git", "-C", checkout, "add", "changed.go")
+	if output, err := command.CombinedOutput(); err != nil {
+		t.Fatalf("git add: %v %s", err, output)
+	}
+	command = exec.Command("git", "-C", checkout, "-c", "user.name=review", "-c", "user.email=review@example.invalid", "commit", "-q", "-m", "change")
+	if output, err := command.CombinedOutput(); err != nil {
+		t.Fatalf("git commit: %v %s", err, output)
+	}
+	backend.reviewed = make(chan struct{})
+	if err := fixture.daemon.reviewHead(context.Background(), coordinator, open, ""); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-backend.reviewed:
+	case <-time.After(2 * time.Second):
+		t.Fatal("changed diff did not enter provider review")
+	}
+}
+
 func mustJSON(t *testing.T, value any) json.RawMessage {
 	t.Helper()
 	document, err := json.Marshal(value)
