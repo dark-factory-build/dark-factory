@@ -298,8 +298,13 @@ func (store *Store) ReclaimableChanges(ctx context.Context, at UnixMillis) ([]Re
 		return nil, err
 	}
 	defer tx.Close()
-	rows, err := tx.connection.QueryContext(ctx, `SELECT `+changeColumns+`, EXISTS (SELECT 1 FROM changes c JOIN tasks t ON t.id = c.task_id WHERE c.id = changes.id AND `+reclaimEnded+` AND `+reclaimGivenUp+`)
-		FROM changes WHERE id IN (SELECT c.id FROM changes c JOIN tasks t ON t.id = c.task_id WHERE `+reclaimEnded+` AND (c.head_commit = c.base_commit OR `+reclaimGivenUp+`)) ORDER BY updated_at_ms, id`, reclaimCutoffs(at)...)
+	rows, err := tx.connection.QueryContext(ctx, `SELECT c.id, c.project_id, c.task_id, c.task_incarnation_id, c.phase,
+		c.object_format, c.base_commit, c.repository_dev, c.repository_inode, c.head_commit,
+		c.prepared_at_ms, c.available_at_ms, c.settled_run_id, c.revision, c.created_at_ms, c.updated_at_ms,
+		`+reclaimGivenUp+`
+		FROM changes AS c JOIN tasks AS t ON t.id = c.task_id
+		WHERE `+reclaimEnded+` AND (c.head_commit = c.base_commit OR `+reclaimGivenUp+`)
+		ORDER BY c.updated_at_ms, c.id`, reclaimCutoffs(at)...)
 	if err != nil {
 		return nil, err
 	}
