@@ -145,7 +145,40 @@ func (store *Store) Why(ctx context.Context, project *ProjectID, pull uint64, ta
 		return nil, err
 	}
 	defer read.Close()
+	if project == nil {
+		project, err = singletonProject(ctx, read.connection)
+		if err != nil {
+			return nil, err
+		}
+	}
 	return why(ctx, read.connection, project, "", pull, task)
+}
+
+func singletonProject(ctx context.Context, c *sql.Conn) (*ProjectID, error) {
+	rows, err := c.QueryContext(ctx, `SELECT id FROM projects ORDER BY id LIMIT 2`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var ids []ProjectID
+	for rows.Next() {
+		var raw []byte
+		if err := rows.Scan(&raw); err != nil {
+			return nil, err
+		}
+		id, err := ProjectIDFromBytes(raw)
+		if err != nil {
+			return nil, fmt.Errorf("%w: invalid singleton project", ErrCorruptState)
+		}
+		ids = append(ids, id)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	if len(ids) != 1 {
+		return nil, nil
+	}
+	return &ids[0], nil
 }
 
 // why reads pull in repository, or in any repository of the project when it is
