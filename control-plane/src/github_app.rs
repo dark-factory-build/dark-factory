@@ -108,6 +108,12 @@ pub(crate) enum OperationError {
     InvalidFooter(String),
     #[error("operation ID is already bound to a different request")]
     Conflict,
+    #[error("enqueue {binding} binding did not match: expected {expected}, observed {observed}")]
+    EnqueueBinding {
+        binding: &'static str,
+        expected: String,
+        observed: String,
+    },
     /// The request was refused determinately. Distinct from `Indeterminate`,
     /// which means the outcome is genuinely unknown. Most refusals leave the
     /// operation ID retryable once the precondition the reason names actually
@@ -1703,7 +1709,11 @@ impl AppAuthority {
             .await?;
         let repository = self.0.repository_metadata(&token).await?;
         if request.base != repository.default_branch {
-            return Err(OperationError::Conflict);
+            return Err(OperationError::EnqueueBinding {
+                binding: "base",
+                expected: request.base.clone(),
+                observed: repository.default_branch,
+            });
         }
         let queueless = match self.0.reconcile_enqueue(&token, &request).await {
             Ok(Some(result)) => return Ok(result),
@@ -1807,6 +1817,8 @@ impl AppAuthority {
             .await?;
         let repository = self.0.repository_metadata(&token).await?;
         if request.base != repository.default_branch {
+            // A non-default target branch is a request restriction, not stale
+            // pull-request state that the daemon can refresh.
             return Err(OperationError::Conflict);
         }
         let pull = self
@@ -1814,7 +1826,11 @@ impl AppAuthority {
             .verify_pull_request_head(&token, request.pull_number, &request.head_sha)
             .await?;
         if pull.base.name != request.base {
-            return Err(OperationError::Conflict);
+            return Err(OperationError::EnqueueBinding {
+                binding: "base",
+                expected: request.base,
+                observed: pull.base.name,
+            });
         }
         if !matches!(pull.state.as_str(), "open" | "closed") {
             return Err(OperationError::Unavailable);
@@ -4101,7 +4117,11 @@ impl Authority {
         )
         .await?;
         if pull.number != pull_number || pull.head.sha != expected_sha {
-            return Err(OperationError::Conflict);
+            return Err(OperationError::EnqueueBinding {
+                binding: "head",
+                expected: expected_sha.to_owned(),
+                observed: pull.head.sha,
+            });
         }
         Ok(pull)
     }
@@ -5042,11 +5062,20 @@ fn revalidate_enqueue_pull(
     pull: &PullRequest,
     request: &EnqueuePullRequest,
 ) -> Result<(), OperationError> {
-    if pull.base.name != request.base
-        || pull.body.as_deref().map(text_digest).as_deref()
-            != Some(request.reviewed_body_digest.as_str())
-    {
-        return Err(OperationError::Conflict);
+    if pull.base.name != request.base {
+        return Err(OperationError::EnqueueBinding {
+            binding: "base",
+            expected: request.base.clone(),
+            observed: pull.base.name.clone(),
+        });
+    }
+    let observed = pull.body.as_deref().map(text_digest).unwrap_or_default();
+    if observed != request.reviewed_body_digest {
+        return Err(OperationError::EnqueueBinding {
+            binding: "body_digest",
+            expected: request.reviewed_body_digest.clone(),
+            observed,
+        });
     }
     Ok(())
 }
@@ -7358,10 +7387,13 @@ mod tests {
             revalidate_enqueue_pull(&pull("reviewed body"), &request),
             Ok(())
         );
-        assert_eq!(
+        assert!(matches!(
             revalidate_enqueue_pull(&pull("edited after review"), &request),
-            Err(OperationError::Conflict)
-        );
+            Err(OperationError::EnqueueBinding {
+                binding: "body_digest",
+                ..
+            })
+        ));
 
         // Repeating a queueless enqueue after its direct merge landed still
         // revalidates and answers the merge without a second mutation.

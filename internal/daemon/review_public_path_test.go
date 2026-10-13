@@ -3,6 +3,8 @@ package daemon
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -22,6 +24,10 @@ type publicReviewBackend struct {
 	queued                                  bool
 	checks                                  []string
 	enqueueRefusal                          string // the broker's refusal class, if any
+	defaultBranch                           string
+	liveBaseRef                             string
+	liveBody                                string
+	bodyEditAfterReview                     string
 	leaveUnqueued                           int
 	reviews, submits, enqueues              int
 	requests                                []review.Request
@@ -38,7 +44,11 @@ func (b *publicReviewBackend) StoredPull(_ context.Context, pull uint64, head st
 	if b.storedErr != nil {
 		return review.Request{}, b.storedErr
 	}
-	return review.Request{Repository: "team/repo", PullNumber: pull, Head: head, Base: strings.Repeat("f", 40), BaseRef: "main", Body: "fixture body\n", Provider: "codex"}, nil
+	body := b.liveBody
+	if body == "" {
+		body = "fixture body\n"
+	}
+	return review.Request{Repository: "team/repo", PullNumber: pull, Head: head, Base: strings.Repeat("f", 40), BaseRef: "main", Body: body, Provider: "codex"}, nil
 }
 func (b *publicReviewBackend) CloneReadOnly(context.Context, review.Request) (string, func(), error) {
 	return "/fixture-review", func() {}, nil
@@ -71,6 +81,22 @@ func (b *publicReviewBackend) Enqueue(_ context.Context, operation review.Operat
 	b.enqueues++
 	b.enqueueSignal.Add(1)
 	b.enqueuedBase, b.enqueuedSHA, b.enqueuedBody = operation.Request.BaseRef, operation.Request.Base, operation.Request.Body
+	if b.liveBody == "" && b.bodyEditAfterReview != "" {
+		b.liveBody = b.bodyEditAfterReview
+	}
+	if b.defaultBranch != "" && operation.Request.BaseRef != b.defaultBranch {
+		return maintainerRejection("conflict: The exact-head, operation, or observed-object binding did not match.")
+	}
+	if b.liveBaseRef != "" && operation.Request.BaseRef != b.liveBaseRef {
+		return maintainerConflict("base", operation.Request.BaseRef, b.liveBaseRef)
+	}
+	liveBody := b.liveBody
+	if liveBody == "" {
+		liveBody = "fixture body\n"
+	}
+	if observed := digestText(liveBody); observed != reviewedBodyDigest(operation) {
+		return maintainerConflict("body_digest", reviewedBodyDigest(operation), observed)
+	}
 	if b.enqueueRefusal != "" {
 		return maintainerRejection("refused: The request was refused: rejected before execution as " + b.enqueueRefusal + ".")
 	}
@@ -82,9 +108,81 @@ func (b *publicReviewBackend) Enqueue(_ context.Context, operation review.Operat
 	return nil
 }
 
+func maintainerConflict(binding, expected, observed string) error {
+	response, _ := json.Marshal(map[string]any{
+		"jsonrpc": "2.0",
+		"id":      1,
+		"result": map[string]any{
+			"isError": true,
+			"content": []map[string]string{{"type": "text", "text": "conflict: enqueue " + binding + " binding did not match: expected " + expected + ", observed " + observed + "."}},
+		},
+	})
+	_, err := reviewResponseStructuredContent(maintainerRequest{JSONRPC: "2.0", ID: json.RawMessage(`1`)}, response)
+	return err
+}
+
+func digestText(value string) string {
+	digest := sha256.Sum256([]byte(value))
+	return "sha256:" + hex.EncodeToString(digest[:])
+}
+
+func TestEnqueueBodyBindingStartsAFreshSameHeadReview(t *testing.T) {
+	fixture, project, _, settle := publishedTask(t)
+	settle()
+	customerMode(t, fixture)
+	ctx := context.Background()
+	newBody := "edited body\n"
+	backend := &publicReviewBackend{}
+	backend.bodyEditAfterReview = newBody
+	fixture.daemon.reviewBackend = func(string, uint64) review.Backend { return backend }
+	if _, err := reviewNow(ctx, fixture.daemon, project, publishedReviewRequest()); err != nil {
+		t.Fatal(err)
+	}
+	waitForMergePipeline(t, fixture.daemon)
+	op := waitForDurableReviewMatching(t, fixture.store, project, func(op review.Operation) bool {
+		return op.Request.Body == newBody && op.State == "enqueued" && op.Enqueues == 1
+	})
+	if backend.enqueues < 2 || backend.reviews < 2 || op.Request.Head != publishedReviewRequest().Head || op.Request.Body != newBody {
+		t.Fatalf("body binding did not start a fresh same-head review: operation=%+v reviews=%d enqueues=%d", op, backend.reviews, backend.enqueues)
+	}
+}
+
+func TestObservedNonDefaultBranchDoesNotRetryUntilEscalation(t *testing.T) {
+	fixture, project, _, settle := publishedTask(t)
+	settle()
+	customerMode(t, fixture)
+	ctx := context.Background()
+	backend := &publicReviewBackend{defaultBranch: "main"}
+	fixture.daemon.reviewBackend = func(string, uint64) review.Backend { return backend }
+	if _, err := reviewNow(ctx, fixture.daemon, project, publishedReviewRequest()); err != nil {
+		t.Fatal(err)
+	}
+	backend.liveBaseRef = "release"
+	waitForMergePipeline(t, fixture.daemon)
+	op := lastDurableReview(t, fixture.store, project)
+	if op.Request.BaseRef != "release" || backend.enqueues != 0 {
+		t.Fatalf("stale branch was incorrectly treated as enqueueable: %+v enqueues=%d", op, backend.enqueues)
+	}
+	for range review.FailuresBeforeEscalation {
+		if _, err := fixture.daemon.advanceReviewOperations(ctx, false); err != nil {
+			t.Fatal(err)
+		}
+	}
+	op = lastDurableReview(t, fixture.store, project)
+	if op.Escalation == "" || backend.enqueues != 0 {
+		t.Fatalf("non-default branch conflict did not escalate without enqueue: %+v enqueues=%d", op, backend.enqueues)
+	}
+}
+
 // ObservePull defaults to the pull request open at the operation's head with
 // every check passed, queued once it has been enqueued.
 func (b *publicReviewBackend) ObservePull(_ context.Context, operation review.Operation) (review.Pull, error) {
+	if b.defaultBranch != "" && operation.Request.BaseRef != b.defaultBranch {
+		return review.Pull{}, maintainerRejection("conflict: The exact-head, operation, or observed-object binding did not match.")
+	}
+	if b.liveBaseRef != "" && operation.Request.BaseRef != b.liveBaseRef {
+		return review.Pull{}, maintainerConflict("base", operation.Request.BaseRef, b.liveBaseRef)
+	}
 	if b.pull != nil {
 		return *b.pull, nil
 	}
@@ -596,6 +694,29 @@ func waitForDurableReview(t *testing.T, store *kernel.Store, project kernel.Proj
 		time.Sleep(5 * time.Millisecond)
 	}
 	return lastDurableReview(t, store, project)
+}
+
+func waitForDurableReviewMatching(t *testing.T, store *kernel.Store, project kernel.ProjectID, ready func(review.Operation) bool) review.Operation {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		page, err := store.Production(context.Background(), project, 0, 8, kernel.UnixMillis{})
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, record := range page.Records {
+			if record.Kind != "reviewer" {
+				continue
+			}
+			var op review.Operation
+			if json.Unmarshal(record.Document, &op) == nil && ready(op) {
+				return op
+			}
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	t.Fatalf("no matching durable review")
+	return review.Operation{}
 }
 
 func publishedReviewRequest() api.ReviewRequest {

@@ -35,7 +35,7 @@ func TestPublishedFixtureEnqueuesWithBaseRef(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	backend := &publicReviewBackend{}
+	backend := &publicReviewBackend{liveBody: "fixture body"}
 	fixture.daemon.reviewBackend = func(string, uint64) review.Backend { return backend }
 	customerMode(t, fixture)
 	head, base := strings.Repeat("a", 40), strings.Repeat("b", 40)

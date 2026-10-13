@@ -1065,6 +1065,17 @@ fn operation_error(id: Value, error: OperationError) -> Response {
             "conflict",
             "The exact-head, operation, or observed-object binding did not match.",
         ),
+        OperationError::EnqueueBinding {
+            binding,
+            expected,
+            observed,
+        } => tool_error(
+            id,
+            "conflict",
+            &format!(
+                "enqueue {binding} binding did not match: expected {expected}, observed {observed}."
+            ),
+        ),
         // The reason names the fact; the wrapper must not promise more than the
         // reason supports. Some refusals are preconditions that can come to
         // hold, and some -- a tree GitHub cannot return whole -- are permanent
