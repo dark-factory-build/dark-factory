@@ -28,6 +28,7 @@ import (
 	"github.com/dark-factory-build/dark-factory/internal/changeworker"
 	"github.com/dark-factory-build/dark-factory/internal/install"
 	"github.com/dark-factory-build/dark-factory/internal/kernel"
+	"github.com/dark-factory-build/dark-factory/internal/maintainer"
 	"github.com/dark-factory-build/dark-factory/internal/provider"
 	"github.com/dark-factory-build/dark-factory/internal/runner"
 	"golang.org/x/sys/unix"
@@ -2628,6 +2629,86 @@ func (fixture *supervisorFixture) assertOneWitness(t *testing.T) {
 	t.Helper()
 	if err := exactOneWitness(fixture.witness); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestSupervisorLaunchesImportedIssueEditThroughFD11(t *testing.T) {
+	fixture := newSupervisorFixture(t, "set -eu\nprintf unused > __WITNESS__\n")
+	ctx := context.Background()
+	projectID := supervisorProjectID(t, 1)
+	sourceID, err := kernel.IntakeSourceIDFromBytes(bytes.Repeat([]byte{223}, kernel.IDBytes))
+	if err != nil {
+		t.Fatal(err)
+	}
+	source, err := fixture.store.CreateIntakeSource(ctx, kernel.NewIntakeSource{
+		ID: sourceID, ProjectID: projectID, TargetRepositoryID: kernel.RepositoryID(projectID),
+		GitHubRepositoryID: 42, GitHubRepositoryName: "team/issues",
+		Policy: kernel.IntakePolicyManual, PollSeconds: 60, AdmissionLimit: 1,
+	}, supervisorTime())
+	if err != nil {
+		t.Fatal(err)
+	}
+	witnessPath := quoteShell(fixture.witness)
+	executable := quoteShell(supervisorTestExecutable(t))
+	originalBody := "set -eu\nprintf 'Original scope' > " + witnessPath + "\n" + executable + " --supervisor-attempt-succeed typed-success\n"
+	editedBody := "set -eu\nprintf 'Edited scope' > " + witnessPath + "\n" + executable + " --supervisor-attempt-succeed typed-success\n"
+	issue := maintainer.Issue{ID: 81, NodeID: "I_fd11", Number: 9, Title: "Original title", Body: originalBody, State: "open", URL: "https://github.com/team/issues/issues/9"}
+	issue.Author.Login, issue.Author.Type = "outsider", "User"
+	accepted, err := fixture.store.AcceptIntakeSnapshot(ctx, source.ID, intakeSnapshot(source, issue), supervisorTime(), source.Revision)
+	if err != nil {
+		t.Fatal(err)
+	}
+	imported, err := fixture.store.ImportIntakeAcceptance(ctx, accepted.ID, supervisorTime(), source)
+	if err != nil {
+		t.Fatal(err)
+	}
+	original, found, err := fixture.store.Task(ctx, fixture.taskID)
+	if err != nil || !found {
+		t.Fatalf("original task = %+v found=%v err=%v", original, found, err)
+	}
+	if _, err := fixture.store.UpdateTask(ctx, fixture.taskID, original.Revision, kernel.TaskPatch{Cancel: true}, supervisorTime()); err != nil {
+		t.Fatal(err)
+	}
+	imported, err = fixture.store.UpdateTask(ctx, imported.ID, imported.Revision, kernel.TaskPatch{AssignedAgentID: &fixture.agentID}, supervisorTime())
+	if err != nil {
+		t.Fatal(err)
+	}
+	fixture.taskID = imported.ID
+
+	if err := fixture.apiHome.WriteMaintainerCredential([]byte(`{"disabled":true}`)); err != nil {
+		t.Fatal(err)
+	}
+	host, err := maintainer.OpenHost(fixture.apiHome)
+	if err != nil {
+		t.Fatal(err)
+	}
+	fixture.daemon.github = host
+	issue.Body = editedBody
+	fixture.daemon.githubMCP = func(_ context.Context, request json.RawMessage, repositories map[string]uint64) (json.RawMessage, error) {
+		var call struct {
+			Params struct {
+				Arguments struct {
+					Repository string `json:"repository"`
+					Issue      uint64 `json:"issue_number"`
+				} `json:"arguments"`
+			} `json:"params"`
+		}
+		if err := json.Unmarshal(request, &call); err != nil || call.Params.Arguments.Repository != source.GitHubRepositoryName || call.Params.Arguments.Issue != issue.Number || repositories[source.GitHubRepositoryName] != source.GitHubRepositoryID {
+			t.Fatalf("live issue request = %s repositories=%v", request, repositories)
+		}
+		return json.Marshal(map[string]any{"jsonrpc": "2.0", "id": 1, "result": map[string]any{"structuredContent": map[string]any{
+			"number": issue.Number, "url": issue.URL, "title": issue.Title, "body": issue.Body, "labels": []string{}, "updated_at": "2026-10-13T00:00:00Z", "state": "open", "state_reason": nil,
+		}, "content": []map[string]string{{"type": "text", "text": issue.Body}}, "isError": false}})
+	}
+	if _, err := fixture.daemon.RunNext(ctx, fixture.spec); err != nil {
+		t.Fatal(err)
+	}
+	witness, err := os.ReadFile(fixture.witness)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(witness), "Edited scope") || strings.Contains(string(witness), "Original scope") {
+		t.Fatalf("provider FD11 task = %q", witness)
 	}
 }
 

@@ -157,7 +157,7 @@ func TestMaintainerAcceptsAndDropsClientMeta(t *testing.T) {
 	}
 }
 
-func TestAcceptedIssueObservationReturnsOnlyFrozenSnapshot(t *testing.T) {
+func TestAcceptedIssueObservationReturnsCurrentIssue(t *testing.T) {
 	accepted := kernel.IntakeAcceptance{SourceRepository: "feed/original", Snapshot: kernel.IntakeIssueSnapshot{IssueNumber: 9, Title: "reviewed", Body: "safe snapshot"}}
 	// A broker response can carry revised instructions in content even when
 	// structuredContent still happens to resemble the accepted issue.
@@ -171,9 +171,6 @@ func TestAcceptedIssueObservationReturnsOnlyFrozenSnapshot(t *testing.T) {
 	}
 	if _, err := currentAcceptedIssueMetadata(maintainerRequest{JSONRPC: "2.0", ID: json.RawMessage(`1.0`)}, accepted, upstream); err != nil {
 		t.Fatalf("equivalent observed response ID rejected: %v", err)
-	}
-	if bytes.Contains(response, []byte("revised untrusted instructions")) {
-		t.Fatalf("frozen response exposed broker content: %s", response)
 	}
 	var reply struct {
 		JSONRPC string          `json:"jsonrpc"`
@@ -194,8 +191,8 @@ func TestAcceptedIssueObservationReturnsOnlyFrozenSnapshot(t *testing.T) {
 		t.Fatalf("frozen envelope = %s", response)
 	}
 	issue := reply.Result.Issue
-	if issue.Number != accepted.Snapshot.IssueNumber || issue.URL != "https://github.com/feed/original/issues/9" || issue.Title != accepted.Snapshot.Title || issue.Body != accepted.Snapshot.Body || len(issue.Labels) != 1 || issue.Labels[0] != "regression" || issue.UpdatedAt != "2026-09-18T20:00:00Z" || issue.State != "closed" || issue.StateReason == nil || *issue.StateReason != "completed" {
-		t.Fatalf("frozen response = %s", response)
+	if issue.Number != accepted.Snapshot.IssueNumber || issue.URL != "https://github.com/feed/original/issues/9" || issue.Title != "revised instructions" || issue.Body != "revised untrusted instructions" || len(issue.Labels) != 1 || issue.Labels[0] != "regression" || issue.UpdatedAt != "2026-09-18T20:00:00Z" || issue.State != "closed" || issue.StateReason == nil || *issue.StateReason != "completed" {
+		t.Fatalf("current response = %s", response)
 	}
 	for _, malformed := range []json.RawMessage{
 		bytes.Replace(upstream, []byte(`"labels":["regression"]`), []byte(`"labels":[],"labels":["regression"]`), 1),
@@ -204,6 +201,32 @@ func TestAcceptedIssueObservationReturnsOnlyFrozenSnapshot(t *testing.T) {
 		if _, err := frozenAcceptedIssueResponse(maintainerRequest{JSONRPC: "2.0", ID: json.RawMessage(`1`)}, accepted, malformed); err == nil {
 			t.Fatalf("malformed broker response accepted: %s", malformed)
 		}
+	}
+}
+
+func TestLiveIntakeInstructionPreservesCorrectionFeedback(t *testing.T) {
+	accepted := kernel.IntakeAcceptance{SourceRepository: "feed/original", Snapshot: kernel.IntakeIssueSnapshot{IssueNumber: 9, Title: "Current title", Body: "Current scope"}}
+	feedback := "\n\n## Sent back for work revision 2\n\nKeep the cited finding."
+	offset := int64(len("Old scope"))
+	task := kernel.Task{Title: "Current title", Body: "Old scope" + feedback, SentBackInstructionBytes: &offset}
+	instruction, _ := kernel.TaskBodyWithInstruction(task, kernel.IntakeTaskBody(accepted, accepted.Snapshot.Title, accepted.Snapshot.Body))
+	if !strings.HasPrefix(instruction, "Current scope\n\nSource: ") || !strings.HasSuffix(instruction, feedback) || strings.Contains(instruction, "Old scope") {
+		t.Fatalf("live intake instruction = %q", instruction)
+	}
+}
+
+func TestReviewCallResponseUnwrapsObservedIssue(t *testing.T) {
+	response := json.RawMessage(`{"jsonrpc":"2.0","id":1,"result":{"structuredContent":{"number":9,"body":"Current scope"},"isError":false}}`)
+	got, err := reviewResponseStructuredContent(maintainerRequest{JSONRPC: "2.0", ID: json.RawMessage(`1`)}, response)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var issue struct {
+		Number uint64 `json:"number"`
+		Body   string `json:"body"`
+	}
+	if err := json.Unmarshal(got, &issue); err != nil || issue.Number != 9 || issue.Body != "Current scope" {
+		t.Fatalf("unwrapped issue = %s (%v)", got, err)
 	}
 }
 

@@ -17,8 +17,60 @@ import (
 	"time"
 
 	"github.com/dark-factory-build/dark-factory/internal/kernel"
+	"github.com/dark-factory-build/dark-factory/internal/maintainer"
 	"github.com/dark-factory-build/dark-factory/internal/review"
 )
+
+func TestReviewContextUsesCurrentAcceptedIssue(t *testing.T) {
+	fixture, project := reviewPublicFixture(t)
+	ctx := context.Background()
+	customerMode(t, fixture)
+	sourceID, err := kernel.IntakeSourceIDFromBytes(mustIDBytes(t, testID(231)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	source, err := fixture.store.CreateIntakeSource(ctx, kernel.NewIntakeSource{ID: sourceID, ProjectID: project, TargetRepositoryID: kernel.RepositoryID(project), GitHubRepositoryID: 42, GitHubRepositoryName: "team/issues", Policy: kernel.IntakePolicyManual, PollSeconds: 60, AdmissionLimit: 1}, mustKernelTime(t, 100))
+	if err != nil {
+		t.Fatal(err)
+	}
+	issue := maintainer.Issue{NodeID: "I_review", Number: 9, Title: "Original title", Body: "Original scope", URL: "https://github.com/team/issues/issues/9", State: "open"}
+	issue.Author.Login, issue.Author.Type = "outsider", "User"
+	snapshot := intakeSnapshot(source, issue)
+	accepted, err := fixture.store.AcceptIntakeSnapshot(ctx, source.ID, snapshot, mustKernelTime(t, 101), source.Revision)
+	if err != nil {
+		t.Fatal(err)
+	}
+	task, err := fixture.store.ImportIntakeAcceptance(ctx, accepted.ID, mustKernelTime(t, 102))
+	if err != nil {
+		t.Fatal(err)
+	}
+	head := strings.Repeat("e", 40)
+	if err := fixture.store.RecordPublication(ctx, project, task.ID, "team/repo", kernel.ProductionPullRequest{Number: 12, Title: "Ship it", URL: "https://github.com/team/repo/pull/12", Head: head, Branch: "feature/ship", Base: "main", State: "open", Review: kernel.ProductionReview{Head: head, State: "unknown"}}, mustKernelTime(t, 103)); err != nil {
+		t.Fatal(err)
+	}
+	feedback := "retry this operation"
+	feedbackBody := task.Body + "\n\n## Sent back for work revision 2\n\n" + feedback
+	if _, err := fixture.store.UpdateTask(ctx, task.ID, task.Revision, kernel.TaskPatch{Body: &feedbackBody}, mustKernelTime(t, 104)); err != nil {
+		t.Fatal(err)
+	}
+	fixture.daemon.githubMCP = func(_ context.Context, _ json.RawMessage, _ map[string]uint64) (json.RawMessage, error) {
+		return json.RawMessage(`{"jsonrpc":"2.0","id":1,"result":{"structuredContent":{"number":9,"url":"https://github.com/team/issues/issues/9","title":"Current title","body":"","labels":[],"updated_at":"2026-10-13T00:00:00Z","state":"open","state_reason":null},"content":[{"type":"text","text":"Current title"}],"isError":false}}`), nil
+	}
+	backend := &daemonReviewBackend{daemon: fixture.daemon, project: project, repository: "team/repo", repositoryID: 42}
+	checkout, request := reviewCheckout(t)
+	request.PullNumber = 12
+	contextText := backend.reviewContext(ctx, checkout, request)
+	if !strings.Contains(contextText, "Current title") || strings.Contains(contextText, "Original scope") || strings.Contains(contextText, "Current scope") || strings.Contains(contextText, feedback) {
+		t.Fatalf("review context = %q", contextText)
+	}
+	fixture.daemon.githubMCP = func(context.Context, json.RawMessage, map[string]uint64) (json.RawMessage, error) {
+		return nil, errors.New("issue observation unavailable")
+	}
+	failedContext := backend.reviewContext(ctx, checkout, request)
+	if !strings.Contains(failedContext, "Current accepted issue scope unavailable") || strings.Contains(failedContext, "Original scope") || strings.Contains(failedContext, feedback) {
+		t.Fatalf("failed review context = %q", failedContext)
+	}
+}
 
 func TestReviewProviderEnvironmentExcludesProviderAndGitCredentials(t *testing.T) {
 	t.Setenv("OPENAI_API_KEY", "openai-secret")

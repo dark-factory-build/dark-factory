@@ -366,7 +366,11 @@ func (daemon *Daemon) runNext(ctx context.Context, spec SupervisorSpec) (resultR
 		}
 		return daemon.failRunBeforeRuntime(daemon.cleanupCtx, run, keys.resources.RuntimeRoot, kernel.FailureInternal, err)
 	}
-	rawProviderTask := []byte(kernel.EffectiveTaskText(run.Provider, task.Title, task.Body))
+	rawTask, err := daemon.currentTaskText(ctx, run.Provider, task)
+	if err != nil {
+		return daemon.failRunBeforeRuntime(daemon.cleanupCtx, run, keys.resources.RuntimeRoot, kernel.FailureSpawn, err)
+	}
+	rawProviderTask := []byte(rawTask)
 	attachments, err := daemon.store.TaskAttachments(ctx, run.TaskID)
 	if err != nil {
 		return daemon.failRunBeforeRuntime(daemon.cleanupCtx, run, keys.resources.RuntimeRoot, kernel.FailureInternal, err)

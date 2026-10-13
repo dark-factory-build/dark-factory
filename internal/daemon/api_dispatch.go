@@ -5,6 +5,7 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -61,6 +62,9 @@ type Daemon struct {
 	releaseSince atomic.Int64
 	// intakeIssues is a package-test-only remote failure/race seam.
 	intakeIssues func(context.Context, string, uint64, uint32, string, uint64) (maintainer.IssuePage, error)
+	// githubMCP is a package-test-only transport seam for GitHub Maintainer
+	// calls; production uses github.MCP directly.
+	githubMCP func(context.Context, json.RawMessage, map[string]uint64) (json.RawMessage, error)
 	// browserRemote is a package-test-only seam for operator calls that wait
 	// outside a paired client's gate.
 	browserRemote       func(context.Context, string)
@@ -936,12 +940,24 @@ func (daemon *Daemon) attemptTask(ctx context.Context, call api.Call) api.Reply 
 	if err != nil {
 		return newErrorReply(remoteErrorCode(err))
 	}
+	instructionText := authority.Task()
+	accepted, found, err := daemon.store.IntakeAcceptanceForTask(ctx, authority.TaskID)
+	if err != nil {
+		return newErrorReply(remoteErrorCode(err))
+	}
+	if current, taskFound, taskErr := daemon.store.Task(ctx, authority.TaskID); taskErr != nil {
+		return newErrorReply(remoteErrorCode(taskErr))
+	} else if !taskFound {
+		return newErrorReply(api.RemoteInternal)
+	} else if instructionText, taskErr = daemon.currentTaskText(ctx, authority.Provider, current); taskErr != nil {
+		return newErrorReply(remoteErrorCode(taskErr))
+	}
 	attachments, err := daemon.store.TaskAttachments(ctx, authority.TaskID)
 	mark("attachments")
 	if err != nil {
 		return newErrorReply(remoteErrorCode(err))
 	}
-	instruction, err := kernel.TaskAttachmentInstruction(authority.Task(), attachments)
+	instruction, err := kernel.TaskAttachmentInstruction(instructionText, attachments)
 	if err != nil {
 		return newErrorReply(api.RemoteInternal)
 	}
@@ -957,11 +973,7 @@ func (daemon *Daemon) attemptTask(ctx context.Context, call api.Call) api.Reply 
 		}
 	}
 	assignment := api.AttemptTask{Task: string(task)}
-	accepted, found, err := daemon.store.IntakeAcceptanceForTask(ctx, authority.TaskID)
 	mark("intake")
-	if err != nil {
-		return newErrorReply(remoteErrorCode(err))
-	}
 	if found {
 		hash := accepted.Snapshot.ContentHash()
 		assignment.Intake = &api.IntakeTaskSource{LinearTeamID: accepted.Snapshot.LinearTeamID, SourceURL: accepted.Snapshot.URL, AcceptanceID: accepted.ID.String(), Repository: accepted.SourceRepository, RepositoryID: accepted.Snapshot.GitHubRepositoryID, IssueNumber: accepted.Snapshot.IssueNumber, TargetRepositoryID: accepted.RepositoryID.String(), ContentHash: hex.EncodeToString(hash[:])}

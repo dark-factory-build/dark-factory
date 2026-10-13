@@ -435,15 +435,13 @@ func (daemon *Daemon) projectMaintainerRepositories(ctx context.Context, project
 	return targets, sources, unbound, nil
 }
 
-// frozenAcceptedIssueResponse keeps reviewed instructions immutable while
-// retaining only schema-validated current issue metadata from the broker.
+// frozenAcceptedIssueResponse retains schema-validated current issue content
+// from the broker. The acceptance pins issue identity, not a stale body.
 func frozenAcceptedIssueResponse(request maintainerRequest, accepted kernel.IntakeAcceptance, response json.RawMessage) (json.RawMessage, error) {
 	issue, err := currentAcceptedIssueMetadata(request, accepted, response)
 	if err != nil {
 		return nil, err
 	}
-	issue.Title = accepted.Snapshot.Title
-	issue.Body = accepted.Snapshot.Body
 	return json.Marshal(frozenIssueResponse{
 		JSONRPC: request.JSONRPC,
 		ID:      request.ID,
@@ -452,6 +450,38 @@ func frozenAcceptedIssueResponse(request maintainerRequest, accepted kernel.Inta
 			Content: []mcpTextContent{{Type: "text", Text: "Accepted issue snapshot and current issue metadata were observed."}},
 		},
 	})
+}
+
+func (daemon *Daemon) liveAcceptedIssue(ctx context.Context, accepted kernel.IntakeAcceptance) (frozenIssue, error) {
+	if accepted.Snapshot.LinearTeamID != "" || daemon.github == nil && daemon.githubMCP == nil {
+		return frozenIssue{}, errors.New("live issue source unavailable")
+	}
+	request := maintainerRequest{JSONRPC: "2.0", ID: json.RawMessage("1"), Method: "tools/call"}
+	params, err := json.Marshal(map[string]any{"name": "observe_issue", "arguments": map[string]any{
+		"repository": accepted.SourceRepository, "issue_number": accepted.Snapshot.IssueNumber,
+	}})
+	if err != nil {
+		return frozenIssue{}, err
+	}
+	request.Params = params
+	encoded, err := json.Marshal(request)
+	if err != nil {
+		return frozenIssue{}, err
+	}
+	var response json.RawMessage
+	if daemon.githubMCP != nil {
+		response, err = daemon.githubMCP(ctx, encoded, map[string]uint64{accepted.SourceRepository: accepted.Snapshot.GitHubRepositoryID})
+	} else {
+		response, err = daemon.github.MCP(ctx, encoded, map[string]uint64{accepted.SourceRepository: accepted.Snapshot.GitHubRepositoryID})
+	}
+	if err != nil {
+		return frozenIssue{}, err
+	}
+	issue, err := currentAcceptedIssueMetadata(request, accepted, response)
+	if err != nil {
+		return frozenIssue{}, err
+	}
+	return issue, nil
 }
 
 func currentAcceptedIssueMetadata(request maintainerRequest, accepted kernel.IntakeAcceptance, response json.RawMessage) (frozenIssue, error) {

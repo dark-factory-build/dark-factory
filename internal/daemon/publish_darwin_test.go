@@ -25,19 +25,22 @@ import (
 // fakePublishMaintainer is the App's journal: one result per operation id,
 // a replay of a completed id answered from it.
 type fakePublishMaintainer struct {
-	t              *testing.T
-	bare           string // GitHub's repository, for publish_pack
-	pack           *packMaintainer
-	main           string
-	tip            string // the pull request branch's head
-	journal        map[string]json.RawMessage
-	planned        map[string]bool  // ids a write stopped before GitHub
-	writes         []map[string]any // every write sent
-	refuse         string           // a path whose push GitHub refuses
-	externalRefuse bool             // the Maintainer refuses before the App can apply it
-	unavailable    bool             // the Maintainer authority is temporarily unavailable
-	loseNext       bool             // the next write lands but its response is lost
-	body           string           // the open pull request's stored body
+	t               *testing.T
+	bare            string // GitHub's repository, for publish_pack
+	pack            *packMaintainer
+	main            string
+	tip             string // the pull request branch's head
+	journal         map[string]json.RawMessage
+	planned         map[string]bool  // ids a write stopped before GitHub
+	writes          []map[string]any // every write sent
+	refuse          string           // a path whose push GitHub refuses
+	externalRefuse  bool             // the Maintainer refuses before the App can apply it
+	unavailable     bool             // the Maintainer authority is temporarily unavailable
+	loseNext        bool             // the next write lands but its response is lost
+	body            string           // the open pull request's stored body
+	issueBody       string           // the current source issue body
+	issueTitle      string           // the current source issue title
+	issueRepository string           // repository used for the current source issue
 }
 
 func TestRepairPublicationUsesTaskTitle(t *testing.T) {
@@ -65,6 +68,9 @@ func (f *fakePublishMaintainer) call(_ context.Context, name string, arguments m
 		return json.Marshal(map[string]any{"operation_id": id, "state": "missing"})
 	case "list_pull_requests":
 		return json.Marshal(map[string]any{"pull_requests": []any{map[string]any{"number": arguments["pull_number"], "head_sha": f.tip, "body": f.body}}})
+	case "observe_issue":
+		f.issueRepository, _ = arguments["repository"].(string)
+		return json.Marshal(map[string]any{"number": arguments["issue_number"], "title": f.issueTitle, "body": f.issueBody})
 	}
 	if _, replay := f.journal[id]; replay || f.planned[id] {
 		return nil, fmt.Errorf("conflict: operation %s replayed", id)
@@ -180,7 +186,7 @@ func publishFixture(t *testing.T, files int, workflow bool) (*dispatchFixture, k
 	}
 	bare := filepath.Join(t.TempDir(), "github.git")
 	supervisorGit(t, git, "clone", "-q", "--bare", "--shared", registered, bare)
-	return fixture, candidate, filepath.Join(root, ".git"), &fakePublishMaintainer{t: t, bare: bare, main: base, journal: map[string]json.RawMessage{}}, checkout
+	return fixture, candidate, filepath.Join(root, ".git"), &fakePublishMaintainer{t: t, bare: bare, main: base, journal: map[string]json.RawMessage{}, issueTitle: "Fix  the\nthing"}, checkout
 }
 
 // publishedExactly fails unless GitHub's branch is the worker's head and holds
@@ -203,6 +209,8 @@ func publishedExactly(t *testing.T, app *fakePublishMaintainer, source, head str
 func TestFactorydPublishesASettledIntakeChange(t *testing.T) {
 	fixture, c, source, app, checkout := publishFixture(t, 51, false)
 	ctx := context.Background()
+	app.issueBody = "Current operator scope"
+	c.Accepted.SourceRepository = "feed/issues"
 	app.loseNext = true
 	if err := fixture.daemon.publishChange(ctx, c, "team/repo", source, app.call, checkout); err == nil {
 		t.Fatal("a lost response reported publication")
@@ -213,6 +221,9 @@ func TestFactorydPublishesASettledIntakeChange(t *testing.T) {
 	if len(app.writes) != 2 || app.writes[0]["name"] != "publish_pack" || app.writes[1]["name"] != "create_pull_request" {
 		t.Fatalf("writes = %+v", app.writes)
 	}
+	if app.issueRepository != c.Accepted.SourceRepository {
+		t.Fatalf("observed issue repository = %q, want %q", app.issueRepository, c.Accepted.SourceRepository)
+	}
 	push, pull := app.writes[0]["arguments"].(map[string]any), app.writes[1]["arguments"].(map[string]any)
 	if push["operation_id"] != uuid5("dark-factory:"+c.Change.String()+":pack-"+c.Head[:8]) || push["expected_head_sha"] != nil || push["head_sha"] != c.Head || push["branch"] != "factory/"+c.Change.String()[:12] ||
 		pull["operation_id"] != uuid5("dark-factory:"+c.Change.String()+":pr-"+c.Head[:8]) || pull["title"] != "Fix the thing" {
@@ -221,7 +232,7 @@ func TestFactorydPublishesASettledIntakeChange(t *testing.T) {
 	publishedExactly(t, app, source, c.Head)
 	body := pull["body"].(string)
 	if pull["head_sha"] != c.Head || pull["issue_number"] != uint64(9) || pull["source_repository"] != nil || pull["close_on_merge"] != false || pull["base_sha"] != c.Base ||
-		strings.Contains(body, "example.com") || strings.Contains(body, "/Users/") || !strings.Contains(body, "Implemented it") || !strings.Contains(body, c.Head) || !strings.Contains(body, "+51 -1 across 52 files") || !strings.HasSuffix(body, "The merge queue runs the gate.\n\nRefs #9") {
+		strings.Contains(body, "example.com") || strings.Contains(body, "/Users/") || !strings.Contains(body, "Current operator scope") || strings.Contains(body, "Implemented it") || !strings.Contains(body, c.Head) || !strings.Contains(body, "+51 -1 across 52 files") || !strings.HasSuffix(body, "The merge queue runs the gate.\n\nRefs #9") {
 		t.Fatalf("pull request = %+v", pull)
 	}
 	if pr := readProductionPull(t, fixture.store, c.Task.ProjectID, 31); pr.Head != c.Head || pr.Branch != "factory/"+c.Change.String()[:12] {
@@ -238,6 +249,24 @@ func TestFactorydPublishesASettledIntakeChange(t *testing.T) {
 	}
 	if op := waitForDurableReview(t, fixture.store, c.Task.ProjectID, func(op review.Operation) bool { return op.State == "enqueued" }); op.State != "enqueued" || op.Request.PullNumber != 31 || op.Request.Head != c.Head {
 		t.Fatalf("review = %+v", op)
+	}
+}
+
+func TestIntakePublicationSurfacesCurrentIssueObservationFailure(t *testing.T) {
+	fixture, c, source, app, checkout := publishFixture(t, 1, false)
+	c.Accepted.SourceRepository = "feed/issues"
+	call := func(ctx context.Context, name string, arguments map[string]any) (json.RawMessage, error) {
+		if name == "observe_issue" {
+			return nil, errors.New("issue observation unavailable")
+		}
+		return app.call(ctx, name, arguments)
+	}
+	if err := fixture.daemon.publishChange(context.Background(), c, "team/repo", source, call, checkout); err != nil {
+		t.Fatal(err)
+	}
+	document, found, err := fixture.store.ReviewOperation(context.Background(), c.Task.ProjectID, kernel.PublishFailureID(c.Change, c.Revision))
+	if err != nil || !found || !strings.Contains(string(document), "observe accepted issue #9: issue observation unavailable") {
+		t.Fatalf("issue observation failure was not surfaced: found=%v err=%v document=%s", found, err, document)
 	}
 }
 
@@ -431,11 +460,13 @@ func TestAnEvidenceOnlyCorrectionReplacesOnlyTheBody(t *testing.T) {
 	fixture, c, source, app, checkout := publishFixture(t, 1, false)
 	ctx := context.Background()
 	app.tip, c.Pull = c.Head, 31 // the branch already is the worker's head
+	app.issueBody = "Current operator scope"
 	c.Task.Result = "Premise not reproduced: the cited line already guards it."
 	if err := fixture.daemon.publishChange(ctx, c, "team/repo", source, app.call, checkout); err != nil {
 		t.Fatal(err)
 	}
-	if len(app.writes) != 1 || app.writes[0]["name"] != "update_pull_request_body" || !strings.Contains(app.writes[0]["arguments"].(map[string]any)["body"].(string), "Premise not reproduced") {
+	body := app.writes[0]["arguments"].(map[string]any)["body"].(string)
+	if len(app.writes) != 1 || app.writes[0]["name"] != "update_pull_request_body" || !strings.Contains(body, "Premise not reproduced") || !strings.Contains(body, "Current operator scope") {
 		t.Fatalf("writes = %+v", app.writes)
 	}
 }
@@ -589,12 +620,25 @@ func TestDisabledAcceptedRepositoryEscalatesOnce(t *testing.T) {
 // even when that marker lies past what the body shows.
 func TestAPartialIntakeChangeReferencesItsIssue(t *testing.T) {
 	fixture, c, source, app, checkout := publishFixture(t, 1, false)
+	app.issueBody = "Current operator scope"
 	c.Task.Result = "Partial: items 1 and 5. Fixes #9 once item 2 lands.\n" + strings.Repeat("report line\n", 3000) + "Refs #9" // beyond the 24000-byte body
 	if err := fixture.daemon.publishChange(context.Background(), c, "team/repo", source, app.call, checkout); err != nil {
 		t.Fatal(err)
 	}
-	if pull := app.writes[len(app.writes)-1]["arguments"].(map[string]any); pull["close_on_merge"] != false || pull["issue_number"] != uint64(9) || strings.Contains(pull["body"].(string), "Fixes #9") {
+	if pull := app.writes[len(app.writes)-1]["arguments"].(map[string]any); pull["close_on_merge"] != false || pull["issue_number"] != uint64(9) || !strings.Contains(pull["body"].(string), "Current operator scope") || strings.Contains(pull["body"].(string), "Fixes #9") {
 		t.Fatalf("pull request = %+v", pull)
+	}
+}
+
+func TestTitleOnlyIntakePublicationUsesObservedTitle(t *testing.T) {
+	fixture, c, source, app, checkout := publishFixture(t, 1, false)
+	c.Task.Result = "worker result must not replace the title"
+	if err := fixture.daemon.publishChange(context.Background(), c, "team/repo", source, app.call, checkout); err != nil {
+		t.Fatal(err)
+	}
+	body := app.writes[len(app.writes)-1]["arguments"].(map[string]any)["body"].(string)
+	if !strings.Contains(body, c.Accepted.Snapshot.Title) || strings.Contains(body, c.Task.Result) {
+		t.Fatalf("title-only body = %q", body)
 	}
 }
 
@@ -621,7 +665,7 @@ func TestACorrectionNeverTurnsAnUnfinishedIntakeIntoAClose(t *testing.T) {
 				t.Fatal(err)
 			}
 			body := app.writes[len(app.writes)-1]
-			if text, _ := body["arguments"].(map[string]any)["body"].(string); body["name"] != "update_pull_request_body" || !strings.HasPrefix(text, "Answered the review.\n\nRefs #9\n\nPublished by factoryd") ||
+			if text, _ := body["arguments"].(map[string]any)["body"].(string); body["name"] != "update_pull_request_body" || !strings.HasPrefix(text, "Fix  the\nthing\n\nCorrection result:\nAnswered the review.\n\nRefs #9\n\nPublished by factoryd") ||
 				!strings.HasSuffix(text, "The merge queue runs the gate.\n\nRefs #9") || strings.Contains(strings.ToLower(text), "closes") {
 				t.Fatalf("writes = %+v", app.writes)
 			}

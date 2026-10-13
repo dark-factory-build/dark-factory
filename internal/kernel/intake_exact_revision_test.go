@@ -56,7 +56,7 @@ func TestIntakeEditAfterAcceptanceNeverChangesQueuedOrRunningTaskBody(t *testing
 	unreviewed := reviewed
 	unreviewed.Body = "unreviewed edit"
 	if got := PreviewIntake(source, unreviewed, &accepted); got != IntakeContentChanged {
-		t.Fatalf("unreviewed edit preview = %q", got)
+		t.Fatalf("edited issue preview = %q", got)
 	}
 	// Even an explicitly accepted edit is a new receipt for new work: the
 	// queued task keeps the bytes it was created from, including on replay.
@@ -108,7 +108,6 @@ func TestIntakeStaleSnapshotCannotReimportOrAmendAcceptedWork(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-
 	// The older hash, never imported, is superseded and cannot materialize.
 	if _, err := store.ImportIntakeAcceptance(ctx, first.ID, mustTime(t, 12), source); !errors.Is(err, ErrConflict) {
 		t.Fatalf("superseded receipt imported: %v", err)

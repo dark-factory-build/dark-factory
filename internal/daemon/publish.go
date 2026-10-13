@@ -262,10 +262,39 @@ func (daemon *Daemon) publishPull(ctx context.Context, c kernel.PublishableChang
 			return err
 		}
 	}
-	result := string(redactTerminalText([]byte(c.Task.Result)))
-	result = strings.ToValidUTF8(result[:min(len(result), 24000)], "")
-	body := fmt.Sprintf("%s\n\nPublished by factoryd from Change %s at %s: +%d -%d across %d files from %s.\n\nThe merge queue runs the gate.", result, c.Change, c.Head, added, deleted, files, from)
 	issue := c.Accepted.Snapshot.IssueNumber
+	issueTitle := c.Accepted.Snapshot.Title
+	issueBody := c.Accepted.Snapshot.Body
+	if sourceRepository := c.Accepted.SourceRepository; sourceRepository != "" {
+		response, observeErr := call(ctx, "observe_issue", map[string]any{"repository": sourceRepository, "issue_number": issue})
+		if observeErr != nil {
+			return fmt.Errorf("observe accepted issue #%d: %w", issue, observeErr)
+		}
+		var observed struct {
+			Number uint64 `json:"number"`
+			Title  string `json:"title"`
+			Body   string `json:"body"`
+		}
+		if err := json.Unmarshal(response, &observed); err != nil {
+			return fmt.Errorf("decode accepted issue #%d: %w", issue, err)
+		}
+		if observed.Number != issue {
+			return fmt.Errorf("observe accepted issue #%d: response was issue #%d", issue, observed.Number)
+		}
+		issueTitle, issueBody = observed.Title, observed.Body
+	}
+	if strings.TrimSpace(issueBody) == "" {
+		issueBody = issueTitle
+		if strings.TrimSpace(issueBody) == "" {
+			issueBody = c.Task.Result
+		}
+	}
+	if c.Pull != 0 && strings.TrimSpace(c.Task.Result) != "" && issueBody != c.Task.Result {
+		issueBody += "\n\nCorrection result:\n" + c.Task.Result
+	}
+	issueBody = string(redactTerminalText([]byte(issueBody)))
+	issueBody = strings.ToValidUTF8(issueBody[:min(len(issueBody), 24000)], "")
+	body := fmt.Sprintf("%s\n\nPublished by factoryd from Change %s at %s: +%d -%d across %d files from %s.\n\nThe merge queue runs the gate.", issueBody, c.Change, c.Head, added, deleted, files, from)
 	if c.Pull != 0 {
 		// The corrected body keeps the issue referenced while the steward waits
 		// for live acceptance. One settlement's body is written once.
