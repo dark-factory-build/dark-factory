@@ -394,6 +394,9 @@ func priorAllowedOperation(open kernel.OpenPull, request review.Request) (review
 		if json.Unmarshal(document, &operation) != nil {
 			continue
 		}
+		if operation.State == "failed" {
+			continue
+		}
 		if operation.Verdict == "request_changes" {
 			prior = review.Operation{}
 			continue
