@@ -935,18 +935,24 @@ impl AppAuthority {
             .await
             .ok();
         let current = reference.object.sha;
-        let runs: WorkflowRuns = github_json(
-            &format!(
-                "https://api.github.com/repos/{}/actions/runs?branch={}&per_page=20",
-                request.repository,
-                percent_encode(&metadata.default_branch)
-            ),
-            token.as_str(),
-        )
-        .await
-        .unwrap_or(WorkflowRuns {
-            workflow_runs: Vec::new(),
-        });
+        let runs = if let Some(actions) = actions.as_ref() {
+            github_json(
+                &format!(
+                    "https://api.github.com/repos/{}/actions/runs?branch={}&per_page=20",
+                    request.repository,
+                    percent_encode(&metadata.default_branch)
+                ),
+                actions.as_str(),
+            )
+            .await
+            .unwrap_or(WorkflowRuns {
+                workflow_runs: Vec::new(),
+            })
+        } else {
+            WorkflowRuns {
+                workflow_runs: Vec::new(),
+            }
+        };
         let revisions = default_branch_check_revisions(&current, runs.workflow_runs);
         let mut all_checks = Vec::new();
         for (index, revision) in revisions.into_iter().enumerate() {

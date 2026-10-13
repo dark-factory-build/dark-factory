@@ -31,6 +31,11 @@ func TestFailureSignatureKeepsNodeAndTAPTestsDistinct(t *testing.T) {
 	if node == tap || !strings.Contains(node, "test renders") || !strings.Contains(tap, "test console") {
 		t.Fatalf("signatures = %q / %q", node, tap)
 	}
+	first := failureSignature("check", "merge_group", sql.NullInt64{}, sql.NullInt64{}, sql.NullInt64{}, "Failing step: Run tests: ✖ TestQueue1")
+	second := failureSignature("check", "merge_group", sql.NullInt64{}, sql.NullInt64{}, sql.NullInt64{}, "Failing step: Run tests: ✖ TestQueue2")
+	if first == second || !strings.Contains(first, "test testqueue1") || !strings.Contains(second, "test testqueue2") {
+		t.Fatalf("numeric signatures = %q / %q", first, second)
+	}
 }
 
 // One failure is enough: the first run of a signature is reported as new, an

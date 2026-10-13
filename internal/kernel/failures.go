@@ -108,8 +108,11 @@ func failureSignature(kind, code string, exit, signal, runner sql.NullInt64, det
 				fields = fields[1:]
 			}
 			for _, field := range fields {
-				word := strings.ToLower(strings.TrimFunc(field, func(r rune) bool { return !unicode.IsLetter(r) }))
-				if word != "" && !strings.ContainsFunc(word, unicode.IsDigit) {
+				if strings.HasPrefix(field, "(") {
+					continue
+				}
+				word := strings.ToLower(strings.TrimFunc(field, func(r rune) bool { return !unicode.IsLetter(r) && !unicode.IsDigit(r) }))
+				if word != "" && strings.TrimFunc(word, unicode.IsDigit) != "" {
 					if !slices.Contains(words, "test") {
 						words = append(words, "test")
 					}
