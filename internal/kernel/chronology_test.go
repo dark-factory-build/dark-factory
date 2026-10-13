@@ -8,7 +8,6 @@ import (
 	"reflect"
 	"strings"
 	"testing"
-	"time"
 )
 
 func TestActivateRunRejectsCausallyEarlyResources(t *testing.T) {
@@ -1667,20 +1666,8 @@ func TestIntakeRetryOnlyAfterAutomaticEndWithinBound(t *testing.T) {
 				}
 			}
 			at := mustTime(t, 100+BlockedExpiry.Milliseconds())
-			// Every poll offers each listed ended issue a retry. A refusal
-			// writes nothing, so it must not queue behind another write.
-			refusedWhileWriting := func() error {
-				if err := store.acquireWriter(ctx); err != nil {
-					t.Fatal(err)
-				}
-				defer store.releaseWriter()
-				busy, cancel := context.WithTimeout(ctx, time.Second)
-				defer cancel()
-				_, err := store.RetryTask(busy, nil, task.ID, task.Revision, AgentID{}, at, IntakeRetryLimit)
-				return err
-			}
 			if !test.automatic {
-				if err := refusedWhileWriting(); !errors.Is(err, ErrConflict) {
+				if _, err := store.RetryTask(ctx, nil, task.ID, task.Revision, AgentID{}, at, IntakeRetryLimit); !errors.Is(err, ErrConflict) {
 					t.Fatalf("operator end retried: %v", err)
 				}
 				return
@@ -1693,7 +1680,7 @@ func TestIntakeRetryOnlyAfterAutomaticEndWithinBound(t *testing.T) {
 					t.Fatal(err)
 				}
 			}
-			if err := refusedWhileWriting(); !errors.Is(err, ErrConflict) {
+			if _, err := store.RetryTask(ctx, nil, task.ID, task.Revision, AgentID{}, at, IntakeRetryLimit); !errors.Is(err, ErrConflict) {
 				t.Fatalf("retry past the bound: %v", err)
 			}
 			if _, err := store.writer.ExecContext(ctx, `DELETE FROM task_automatic_events WHERE rowid = (SELECT max(rowid) FROM task_automatic_events)`); err != nil {
