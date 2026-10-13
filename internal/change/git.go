@@ -129,7 +129,7 @@ func BranchName(changeID string) string { return "factory/" + changeID[:min(12, 
 type WorktreeFacts struct {
 	head         ObjectID
 	branch       string
-	dirty        bool
+	dirty        string // the first path Git status names, empty when clean
 	gitDirectory string
 }
 
@@ -140,7 +140,11 @@ func (f WorktreeFacts) Head() ObjectID { return f.head }
 func (f WorktreeFacts) Branch() string { return f.branch }
 
 // Dirty reports uncommitted or untracked work in the worktree.
-func (f WorktreeFacts) Dirty() bool { return f.dirty }
+func (f WorktreeFacts) Dirty() bool { return f.dirty != "" }
+
+// DirtyPath names the first uncommitted or untracked path, so a worker can
+// find what to commit or remove; an untracked directory is named whole.
+func (f WorktreeFacts) DirtyPath() string { return f.dirty }
 
 // GitDirectory returns the administration used by this worktree.
 func (f WorktreeFacts) GitDirectory() string { return f.gitDirectory }

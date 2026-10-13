@@ -144,7 +144,7 @@ func (daemon *Daemon) retainedSettlement(ctx context.Context, changeParent strin
 	}
 	if success, _ := ctx.Value(successSettlementContextKey{}).(bool); success {
 		if facts.Dirty() {
-			return kernel.NewRefusedChangeSettlement(changeState.Revision, fmt.Sprintf("%s: commit it or clean it up before reporting success", errDirtyWorkerChange))
+			return kernel.NewRefusedChangeSettlement(changeState.Revision, fmt.Sprintf("%s: %q", errDirtyWorkerChange, facts.DirtyPath()))
 		}
 	}
 	head, err := kernelCommit(facts.Head())

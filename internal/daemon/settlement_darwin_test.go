@@ -13,6 +13,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"reflect"
 	"slices"
 	"strings"
 	"sync/atomic"
@@ -261,6 +262,44 @@ func TestSuccessfulWorkerOutcomeRefusesDirtySourceUntilCorrection(t *testing.T) 
 	settlementGit(t, change.TrustedGitExecutable, path, "commit", "-q", "-m", "corrected")
 	if err := fixture.daemon.validateSuccessSource(ctx, live, success); err != nil {
 		t.Fatalf("corrected success refused: %v", err)
+	}
+}
+
+// Issue #1878: a worker left Go's module cache, read-only and too large for
+// one Git status, untracked in its checkout. Inspection failed outright, so
+// the run stayed finalizing and release drain waited on it. The cache must be
+// named both to the live worker and in the settlement that refuses it.
+func TestSuccessfulWorkerOutcomeNamesUntrackedCache(t *testing.T) {
+	fixture := newRecoveryFixtureWithRole(t, 0x6f, kernel.RoleWorker)
+	ctx := context.Background()
+	worktreeChange, path := fixture.settlementWorktree(t)
+	cache := filepath.Join(path, ".gomodcache", "example.com", "module@v1.0.0")
+	if err := os.MkdirAll(cache, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	// 20000 names overflow the 1 MiB status bound file by file.
+	for i := range 20000 {
+		if err := os.WriteFile(filepath.Join(cache, fmt.Sprintf("generated_source_file_%06d.go", i)), nil, 0o444); err != nil {
+			t.Fatal(err)
+		}
+	}
+	t.Cleanup(func() { _ = exec.Command("/bin/chmod", "-R", "u+w", path).Run() })
+	success, err := kernel.NewSuccessProposal("done")
+	if err != nil {
+		t.Fatal(err)
+	}
+	refused := fixture.daemon.validateSuccessSource(ctx, &liveAttempt{daemon: fixture.daemon, runID: fixture.run.ID}, success)
+	var refusal *kernel.OutcomeRefusal
+	if !errors.Is(refused, errDirtyWorkerChange) || !errors.As(refused, &refusal) || !strings.Contains(boundedDetail(refusal.Unwrap()), `".gomodcache/"`) {
+		t.Fatalf("untracked cache success refusal = %v", refused)
+	}
+	want, err := kernel.NewRefusedChangeSettlement(worktreeChange.Revision, errDirtyWorkerChange.Error()+`: ".gomodcache/"`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	settlement, err := fixture.daemon.retainedSettlement(context.WithValue(ctx, successSettlementContextKey{}, true), filepath.Dir(path), worktreeChange)
+	if err != nil || !reflect.DeepEqual(settlement, want) {
+		t.Fatalf("untracked cache settlement = %+v, %v", settlement, err)
 	}
 }
 
