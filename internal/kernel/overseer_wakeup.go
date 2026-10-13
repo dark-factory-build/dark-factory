@@ -227,8 +227,20 @@ func (store *Store) EnqueueOverseerWakeups(ctx context.Context, at UnixMillis, h
 			}
 			priority = specialistWakePriority
 		} else {
-			if err := raiseStalledItems(ctx, tx, agent, at, health); err != nil {
+			// Stalled items only change when the durable store changes. Avoid
+			// rebuilding the full item CTE on quiet scheduler ticks. An open
+			// card remains a cheap exception: production records are outside
+			// the invalidation head and may close that card.
+			var cardOpen int
+			if err := tx.connection.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1
+				FROM human_requests AS h JOIN runs AS r ON r.id = h.run_id JOIN tasks AS t ON t.id = r.task_id
+				WHERE h.idempotency_key = ? AND h.status = 'open' AND t.assigned_agent_id = ?)`, stalledItemKey[:], agent.ID.Bytes()).Scan(&cardOpen); err != nil {
 				return nil, tx.Rollback(err)
+			}
+			if cursor != factory.Head.Int64() || !found || cardOpen != 0 {
+				if err := raiseStalledItems(ctx, tx, agent, at, health); err != nil {
+					return nil, tx.Rollback(err)
+				}
 			}
 			var err error
 			if body, due, err = overseerWake(ctx, tx.connection, agent, at.Int64(), health); err != nil {
