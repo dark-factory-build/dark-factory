@@ -187,6 +187,7 @@ type OpenPull struct {
 	Pull       ProductionPullRequest
 	Task       TaskID // zero when no task published it
 	Operations []json.RawMessage
+	History    []json.RawMessage
 }
 
 // PublishingProjects lists the projects that have published a pull request.
@@ -953,12 +954,15 @@ func (store *Store) OpenPulls(ctx context.Context) ([]OpenPull, error) {
 		return nil, err
 	}
 	defer tx.Close()
-	rows, err := tx.connection.QueryContext(ctx, `SELECT project_id, repository, document, task, operations FROM (SELECT p.project_id, p.repository, p.document,
+	rows, err := tx.connection.QueryContext(ctx, `SELECT project_id, repository, document, task, operations, history FROM (SELECT p.project_id, p.repository, p.document,
 	    (SELECT t.task_id FROM publication_tasks t WHERE t.project_id = p.project_id AND t.repository = p.repository AND CAST(t.pull_number AS TEXT) = p.identity
 	        ORDER BY t.change_id IS NOT NULL DESC, t.created_at_ms DESC LIMIT 1) AS task,
 	    (SELECT json_group_array(json(r.document)) FROM production_records r WHERE r.project_id = p.project_id AND r.repository = p.repository AND r.kind = 'reviewer'
 	        AND json_type(r.document, '$.request') = 'object' AND CAST(json_extract(r.document, '$.request.PullNumber') AS TEXT) = p.identity
 	        AND lower(json_extract(r.document, '$.request.Head')) = lower(json_extract(p.document, '$.head'))) AS operations,
+	    (SELECT json_group_array(json(history_record.document)) FROM (SELECT r.document FROM production_records r WHERE r.project_id = p.project_id AND r.repository = p.repository AND r.kind = 'reviewer'
+	        AND json_type(r.document, '$.request') = 'object' AND CAST(json_extract(r.document, '$.request.PullNumber') AS TEXT) = p.identity
+	        ORDER BY r.observed_at_ms ASC, r.identity ASC) AS history_record) AS history,
 	    EXISTS (SELECT 1 FROM production_records r WHERE r.project_id = p.project_id AND r.repository = p.repository AND r.kind = 'reviewer'
 	        AND CAST(json_extract(r.document, '$.request.PullNumber') AS TEXT) = p.identity) AS reviewed
 	  FROM production_records p WHERE p.kind = 'pull_request' AND json_extract(p.document, '$.state') = 'open')
@@ -971,8 +975,8 @@ func (store *Store) OpenPulls(ctx context.Context) ([]OpenPull, error) {
 	for rows.Next() {
 		var projectBytes, taskBytes []byte
 		var pull OpenPull
-		var document, operations string
-		if err := rows.Scan(&projectBytes, &pull.Repository, &document, &taskBytes, &operations); err != nil {
+		var document, operations, history string
+		if err := rows.Scan(&projectBytes, &pull.Repository, &document, &taskBytes, &operations, &history); err != nil {
 			return nil, err
 		}
 		if pull.Project, err = ProjectIDFromBytes(projectBytes); err != nil {
@@ -983,7 +987,7 @@ func (store *Store) OpenPulls(ctx context.Context) ([]OpenPull, error) {
 				return nil, err
 			}
 		}
-		if json.Unmarshal([]byte(document), &pull.Pull) != nil || json.Unmarshal([]byte(operations), &pull.Operations) != nil || !productionSHA(pull.Pull.Head) {
+		if json.Unmarshal([]byte(document), &pull.Pull) != nil || json.Unmarshal([]byte(operations), &pull.Operations) != nil || json.Unmarshal([]byte(history), &pull.History) != nil || !productionSHA(pull.Pull.Head) {
 			return nil, fmt.Errorf("%w: open pull request", ErrCorruptState)
 		}
 		pulls = append(pulls, pull)

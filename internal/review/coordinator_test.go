@@ -116,6 +116,17 @@ func TestStartPersistsBeforeProviderAndEndsAtTheVerdict(t *testing.T) {
 	}
 }
 
+func TestCarryForwardSubmitsPriorAllowWithoutProviderReview(t *testing.T) {
+	store, backend := &memoryStore{}, &fakeBackend{}
+	c := Coordinator{Store: store, Backend: backend, Now: func() time.Time { return time.Unix(10, 0) }}
+	prior := Operation{ID: "prior", Verdict: "allow", Detail: "independent", DiffID: "same-diff"}
+	request := reviewRequest()
+	op, err := c.CarryForward(context.Background(), request, prior)
+	if err != nil || op.State != "enqueued" || op.DiffID != "same-diff" || backend.reviews != 0 || !backend.submitted {
+		t.Fatalf("operation=%+v err=%v backend=%+v", op, err, backend)
+	}
+}
+
 func TestStartRecordsProviderFailureForRetry(t *testing.T) {
 	store, backend := &memoryStore{}, &fakeBackend{killed: true}
 	c := Coordinator{Store: store, Backend: backend, Now: time.Now}
