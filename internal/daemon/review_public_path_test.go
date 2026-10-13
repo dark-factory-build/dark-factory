@@ -183,6 +183,27 @@ func reviewNow(ctx context.Context, daemon *Daemon, project kernel.ProjectID, re
 	return op.ID, err
 }
 
+func TestReconciliationPersistsMergeGroupFailureForReport(t *testing.T) {
+	fixture, project := reviewPublicFixture(t)
+	customerMode(t, fixture)
+	request := publishedReviewRequest()
+	backend := &publicReviewBackend{pull: &review.Pull{
+		Head: request.Head, State: "open", Checks: []string{"required=success"},
+		Group: &review.GroupRun{ID: 12, URL: "https://github.com/o/r/actions/runs/12", Conclusion: "failure", Jobs: []review.GroupJob{{Name: "go", Conclusion: "failure", Annotations: []string{"--- FAIL: TestQueue (0.01s)"}}}},
+	}}
+	fixture.daemon.reviewBackend = func(string, uint64) review.Backend { return backend }
+	if _, err := reviewNow(context.Background(), fixture.daemon, project, request); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := fixture.daemon.advanceReviewOperations(context.Background(), false); err != nil {
+		t.Fatal(err)
+	}
+	lines, err := fixture.store.Report(context.Background(), &project, 0, 3600000)
+	if err != nil || !strings.Contains(strings.Join(lines, "\n"), "failure new") || !strings.Contains(strings.Join(lines, "\n"), "TestQueue") {
+		t.Fatalf("reconciled merge-group report = %q, %v", lines, err)
+	}
+}
+
 func waitForMergePipeline(t *testing.T, daemon *Daemon) {
 	t.Helper()
 	// The issue's verdict wake is production behavior; finish that merge pass
