@@ -124,67 +124,71 @@ func TestPrepareGoModuleCacheCreatesTrustedTree(t *testing.T) {
 	}
 }
 
-func TestPrepareWebDependenciesProvisionsPinnedCorepackPnpm(t *testing.T) {
+func TestPrepareWebDependenciesInstallsOnlyFromTheRegistry(t *testing.T) {
 	root := t.TempDir()
 	toolDir := filepath.Join(root, "tools")
 	if err := os.Mkdir(toolDir, 0o700); err != nil {
 		t.Fatal(err)
 	}
 	node := filepath.Join(toolDir, "node")
-	if err := os.WriteFile(node, []byte("#!/bin/sh\ncase \"$*\" in *--config.ignorePnpmfile=true*--config.confirmModulesPurge=false*--config.storeDir=*--config.modulesDir=*--config.virtualStoreDir=*--config.stateDir=*) exit 0 ;; *) printf ran > .pnpmfile-ran; exit 1 ;; esac\n"), 0o755); err != nil {
+	if err := os.WriteFile(node, []byte("#!/bin/sh\ncase \"$*\" in *--offline*) exit 1 ;; *--config.ignorePnpmfile=true*--config.confirmModulesPurge=false*--config.storeDir=*--config.modulesDir=*--config.virtualStoreDir=*--config.stateDir=*) printf '%s' \"$COREPACK_NPM_REGISTRY $npm_config_registry\" > .registry; exit 0 ;; *) printf ran > .pnpmfile-ran; exit 1 ;; esac\n"), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	account := filepath.Join(root, "account")
-	corepackPnpm := filepath.Join(account, "Library", "Caches", "dark-factory", "local-ci", "trusted", "corepack", "v1", "pnpm", pnpmVersion)
-	if err := os.MkdirAll(corepackPnpm, 0o700); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(corepackPnpm, "package.json"), []byte(`{"name":"pnpm","version":"11.19.0"}`), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(corepackPnpm, "bin.mjs"), []byte("pinned"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.MkdirAll(pnpmStorePath(account), 0o700); err != nil {
-		t.Fatal(err)
-	}
-	runtime := runtimeFixture(t, toolDir, account)
+	runtime := runtimeFixture(t, toolDir, filepath.Join(root, "account"))
 	working := filepath.Join(root, "change")
-	if err := os.MkdirAll(filepath.Join(working, "web"), 0o700); err != nil {
+	web := filepath.Join(working, "web")
+	if err := os.MkdirAll(web, 0o700); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(working, "web", "package.json"), []byte(`{"packageManager":"pnpm@11.19.0"}`), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(working, "web", ".pnpmfile.cjs"), []byte("require('fs').writeFileSync('.pnpmfile-ran', 'ran')"), 0o600); err != nil {
-		t.Fatal(err)
+	for name, content := range map[string]string{
+		"package.json":   `{"packageManager":"pnpm@11.19.0"}`,
+		"pnpm-lock.yaml": "packages:\n  x@1.0.0:\n    resolution: {integrity: sha512-AAAA+/=}\n",
+		".pnpmfile.cjs":  "require('fs').writeFileSync('.pnpmfile-ran', 'ran')",
+	} {
+		if err := os.WriteFile(filepath.Join(web, name), []byte(content), 0o600); err != nil {
+			t.Fatal(err)
+		}
 	}
 	if err := runtime.PrepareWebDependencies(context.Background(), working); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := os.Stat(filepath.Join(working, "web", ".pnpmfile-ran")); !errors.Is(err, os.ErrNotExist) {
+	if _, err := os.Stat(filepath.Join(web, ".pnpmfile-ran")); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("pnpmfile ran: %v", err)
 	}
-	got, err := os.ReadFile(filepath.Join(runtime.home, ".cache", "corepack", "v1", "pnpm", pnpmVersion, "bin.mjs"))
-	if err != nil || string(got) != "pinned" {
-		t.Fatalf("private Corepack pnpm = %q, %v", got, err)
+	if got, err := os.ReadFile(filepath.Join(web, ".registry")); err != nil || string(got) != "https://registry.npmjs.org https://registry.npmjs.org" {
+		t.Fatalf("install registry = %q, %v", got, err)
+	}
+	for name, content := range map[string]string{
+		".npmrc":              "@cloudflare:registry=https://unlisted.example\n",
+		"pnpm-workspace.yaml": "'@cloudflare:registry': https://unlisted.example\n",
+		"pnpm-lock.yaml":      "    resolution: {tarball: https://unlisted.example/x.tgz}\n",
+	} {
+		original, _ := os.ReadFile(filepath.Join(web, name))
+		if err := os.WriteFile(filepath.Join(web, name), []byte(content), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if err := runtime.PrepareWebDependencies(context.Background(), working); err == nil {
+			t.Fatalf("accepted unlisted source in %s", name)
+		}
+		restore := func() error { return os.Remove(filepath.Join(web, name)) }
+		if original != nil {
+			restore = func() error { return os.WriteFile(filepath.Join(web, name), original, 0o600) }
+		}
+		if err := restore(); err != nil {
+			t.Fatal(err)
+		}
+	}
+}
+
+func TestCommittedWebWorkspaceUsesOnlyTheRegistry(t *testing.T) {
+	if err := validatePnpmSources(filepath.Join("..", "..", "web")); err != nil {
+		t.Fatal(err)
 	}
 }
 
 func TestPrepareWebDependenciesRejectsSymlinkedWebWorkspace(t *testing.T) {
 	root := t.TempDir()
-	account := filepath.Join(root, "account")
-	corepackPnpm := filepath.Join(account, "Library", "Caches", "dark-factory", "local-ci", "trusted", "corepack", "v1", "pnpm", pnpmVersion)
-	if err := os.MkdirAll(corepackPnpm, 0o700); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(corepackPnpm, "package.json"), []byte(`{"name":"pnpm","version":"11.19.0"}`), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.MkdirAll(pnpmStorePath(account), 0o700); err != nil {
-		t.Fatal(err)
-	}
-	runtime := runtimeFixture(t, "/usr/bin:/bin", account)
+	runtime := runtimeFixture(t, "/usr/bin:/bin", filepath.Join(root, "account"))
 	working := filepath.Join(root, "change")
 	outside := filepath.Join(root, "outside")
 	if err := os.MkdirAll(working, 0o700); err != nil {
@@ -1520,7 +1524,7 @@ func TestCodexToolchainRootsAndCachesStaySeparateFromAccount(t *testing.T) {
 	if _, err := runner.PrepareCommittedExecSpec(launch.Executable(), launch.Argv(), launch.Environment(), t.TempDir()); err != nil {
 		t.Fatalf("generated Codex environment rejected by runner: %v", err)
 	}
-	for _, prefix := range []string{"GOCACHE=", "GOPATH=", "CARGO_HOME=", "COREPACK_HOME=", "npm_config_cache=", "XDG_CACHE_HOME="} {
+	for _, prefix := range []string{"GOCACHE=", "GOPATH=", "CARGO_HOME=", "COREPACK_HOME=", "npm_config_cache=", "pnpm_config_store_dir=", "XDG_CACHE_HOME="} {
 		found := false
 		for _, value := range launch.Environment() {
 			if strings.HasPrefix(value, prefix+runtime.home+"/") {
@@ -1531,12 +1535,14 @@ func TestCodexToolchainRootsAndCachesStaySeparateFromAccount(t *testing.T) {
 			t.Fatalf("cache %s not private", prefix)
 		}
 	}
-	sharedModuleCache := "DF_CI_GO_MODULE_CACHE=" + goModuleCachePath(runtime.accountHome)
-	if !slices.Contains(launch.Environment(), sharedModuleCache) || !slices.Contains(launch.Environment(), "GOMODCACHE="+goModuleCachePath(runtime.accountHome)) {
-		t.Fatalf("Go module cache was not projected to the trusted shared path: %q", launch.Environment())
+	sharedModuleCache := goModuleCachePath(runtime.accountHome)
+	if !slices.Contains(launch.Environment(), "DF_CI_GO_MODULE_CACHE="+sharedModuleCache) || slices.ContainsFunc(launch.Environment(), func(entry string) bool { return strings.HasPrefix(entry, "GOMODCACHE=") }) {
+		t.Fatalf("worker Go downloads must land in the private GOPATH, reading the shared cache only as a proxy: %q", launch.Environment())
 	}
-	if !slices.Contains(launch.Environment(), "GOPROXY=off") || !slices.Contains(launch.Environment(), "GOSUMDB=off") {
-		t.Fatal("native Go launches must not depend on sandbox TLS or network")
+	for _, want := range []string{"GOPROXY=file://" + sharedModuleCache + "/cache/download,https://proxy.golang.org", "GOSUMDB=sum.golang.org", "COREPACK_ENABLE_NETWORK=1", "COREPACK_ENV_FILE=0", "COREPACK_NPM_REGISTRY=https://registry.npmjs.org", "npm_config_registry=https://registry.npmjs.org"} {
+		if !slices.Contains(launch.Environment(), want) {
+			t.Fatalf("native launch lacks public-registry setting %s: %q", want, launch.Environment())
+		}
 	}
 	if !strings.Contains(policy, tomlBasicString(goModuleCachePath(runtime.accountHome))+`="read"`) || strings.Contains(policy, tomlBasicString(goModuleCachePath(runtime.accountHome))+`="write"`) {
 		t.Fatalf("shared Go module cache grant is not read-only: %s", policy)

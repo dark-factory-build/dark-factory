@@ -4,6 +4,7 @@ set -eu
 script_dir=$(CDPATH= cd -- "$(/usr/bin/dirname "$0")" && pwd -P)
 repository_root=$(CDPATH= cd -- "$script_dir/.." && pwd -P)
 . "$script_dir/go-e2e-tools.sh"
+. "$script_dir/locked-dependency-env.sh"
 case "$#" in
     0) ;;
     *) echo "usage: $0" >&2; exit 2 ;;
@@ -35,7 +36,8 @@ cleanup() {
 trap cleanup EXIT HUP INT TERM
 
 CDPATH= cd -- "$repository_root"
-export GOTOOLCHAIN=local GOPROXY=off GOSUMDB=off
+df_locked_dependency_env
+export GOTOOLCHAIN=local
 # All three binaries share one directory: the installed service is exactly
 # the sibling set the invoking factoryctl shipped with.
 go=$(go_e2e_resolve_tool go "${DARK_FACTORY_E2E_GO-}")

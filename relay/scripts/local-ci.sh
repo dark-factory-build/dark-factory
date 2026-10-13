@@ -7,6 +7,9 @@ set -eu
 script_dir=$(CDPATH='' cd -- "$(dirname "$0")" && pwd)
 relay_root=$(CDPATH='' cd -- "$script_dir/.." && pwd)
 cd "$relay_root"
+. "$relay_root/../scripts/locked-dependency-env.sh"
+df_locked_dependency_env
+df_verify_dependency_lockfiles package-lock.json
 
 if find . -maxdepth 1 -type f \( -name '.env*' -o -name '.dev.vars*' \) | grep -q .; then
     echo "local environment files are forbidden in the relay tree" >&2
@@ -20,7 +23,7 @@ case "$node_executable" in
     *) echo "Node did not report an absolute executable path" >&2; exit 1 ;;
 esac
 
-npm ci --ignore-scripts
+npm ci --ignore-scripts --registry "$npm_config_registry"
 npx tsc --noEmit
 
 dry_run_dir=$(mktemp -d "${TMPDIR:-/tmp}/df-relay-dry-run.XXXXXX")

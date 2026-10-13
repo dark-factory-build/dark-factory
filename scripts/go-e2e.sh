@@ -4,6 +4,7 @@ set -eu
 script_dir=$(CDPATH= cd -- "$(/usr/bin/dirname "$0")" && pwd -P)
 repository_root=$(CDPATH= cd -- "$script_dir/.." && pwd -P)
 . "$script_dir/go-e2e-tools.sh"
+. "$script_dir/locked-dependency-env.sh"
 mode=${1-all}
 case "$mode" in
     browser|browser-race|daemon|all) ;;
@@ -24,7 +25,8 @@ trap cleanup EXIT HUP INT TERM
 go=$(go_e2e_resolve_tool go "${DARK_FACTORY_E2E_GO-}")
 
 CDPATH= cd -- "$repository_root"
-export GOTOOLCHAIN=local GOPROXY=off GOSUMDB=off
+df_locked_dependency_env
+export GOTOOLCHAIN=local
 unset DARK_FACTORY_BROWSER_E2E DARK_FACTORY_DAEMON_E2E DARK_FACTORY_SERVICE_E2E
 set -- ./cmd/factory-runner ./cmd/factoryctl
 case "$mode" in
@@ -47,8 +49,9 @@ if [ "$mode" != daemon ]; then
     if [ "$client_built" != --client-built ]; then
         (
             CDPATH= cd -- "$repository_root/web"
-            export COREPACK_ENABLE_NETWORK=0 CI=true
-            "$node" "$corepack" pnpm install --offline --frozen-lockfile --ignore-scripts
+            export CI=true
+            df_verify_dependency_lockfiles pnpm-lock.yaml
+            "$node" "$corepack" pnpm install --frozen-lockfile --ignore-scripts --registry "$npm_config_registry"
             "$node" "$corepack" pnpm --filter @dark-factory/client run build
         )
     fi

@@ -9,6 +9,9 @@ esac
 script_dir=$(CDPATH= cd -- "$(/usr/bin/dirname "$0")" && pwd -P)
 repository_root=$(CDPATH= cd -- "$script_dir/.." && pwd)
 CDPATH= cd -- "$repository_root"
+. "$script_dir/locked-dependency-env.sh"
+df_locked_dependency_env
+df_verify_dependency_lockfiles web/pnpm-lock.yaml
 go=${DF_CI_GO-}
 [ -n "$go" ] || go=$(command -v go 2>/dev/null || true)
 [ -n "$go" ] || {
@@ -38,7 +41,7 @@ esac
 }
 
 echo "go-check: download and verify Go modules"
-"$go" mod download
+df_go_mod_download "$go"
 "$go" mod verify
 
 if [ "$go_check_mode" = source ]; then
@@ -88,9 +91,9 @@ else
 echo "go-check: TypeScript install, build, and tests"
 (
     CDPATH= cd -- web
-    COREPACK_ENABLE_NETWORK=1 CI=true "$DF_CI_NODE" "$DF_CI_COREPACK" pnpm install --frozen-lockfile --ignore-scripts
-    COREPACK_ENABLE_NETWORK=0 CI=true "$DF_CI_NODE" "$DF_CI_COREPACK" pnpm --filter @dark-factory/client build
-    COREPACK_ENABLE_NETWORK=0 CI=true "$DF_CI_NODE" "$DF_CI_COREPACK" pnpm --filter @dark-factory/ui build
+    CI=true "$DF_CI_NODE" "$DF_CI_COREPACK" pnpm install --frozen-lockfile --ignore-scripts --registry "$npm_config_registry"
+    CI=true "$DF_CI_NODE" "$DF_CI_COREPACK" pnpm --filter @dark-factory/client build
+    CI=true "$DF_CI_NODE" "$DF_CI_COREPACK" pnpm --filter @dark-factory/ui build
     "$DF_CI_NODE" --test --test-reporter=spec packages/client/test/*.test.mjs packages/ui/test/*.test.mjs packages/ui/src/factory-scene/*.test.mjs packages/ui/src/production-*.test.mjs
 )
 fi

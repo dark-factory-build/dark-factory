@@ -14,6 +14,7 @@ import (
 	"os/exec"
 	"os/user"
 	"path/filepath"
+	"regexp"
 	"slices"
 	"strconv"
 	"strings"
@@ -36,6 +37,7 @@ const (
 	maxPathBytes     = 4096
 	claudeConfigDir  = ".claude"
 	codexConfigDir   = ".codex"
+	npmRegistry      = "https://registry.npmjs.org"
 	pnpmVersion      = "11.19.0"
 	// bootstrapPrompt is both native providers' fixed positional prompt: the
 	// exact task is read through the attempt API, never typed into the PTY.
@@ -804,13 +806,11 @@ func sandboxGrants(request Request) []grant {
 	// Node/Corepack reads the system OpenSSL configuration before dispatch.
 	// Permit this file, not the surrounding directory or operator configuration.
 	grants = append(grants, grant{"/System/Library/OpenSSL/openssl.cnf", false})
-	// Go downloads are prepared by the trusted local-CI boundary. Workers may
-	// consume that cache, but never mutate the operator home or the cache that
-	// belongs to another trust context.
+	// Workers read the trusted local-CI Go module cache as a module proxy,
+	// but never mutate the operator home or the cache that belongs to another
+	// trust context; their own downloads land in the private runtime home.
 	if request.role == kernel.RoleWorker && request.installation.provider != kernel.ProviderShell {
-		grants = append(grants,
-			grant{goModuleCachePath(request.runtime.accountHome), false},
-			grant{pnpmStorePath(request.runtime.accountHome), false})
+		grants = append(grants, grant{goModuleCachePath(request.runtime.accountHome), false})
 	}
 	for _, root := range filepath.SplitList(request.runtime.toolchainReadRoots) {
 		grants = append(grants, grant{root, false})
@@ -1252,24 +1252,32 @@ func (runtime RuntimePaths) environmentForRole(kind kernel.Provider, role kernel
 	// Both native providers confine local commands to the grants above, so
 	// build caches live in the private runtime home rather than the account's.
 	if kind != kernel.ProviderShell {
+		// Dependencies come only from the public registries, checked by
+		// go.sum and the lockfiles; a worker's trusted module cache is served
+		// read-only ahead of the Go proxy.
+		goProxy := "https://proxy.golang.org"
+		if role == kernel.RoleWorker {
+			goProxy = "file://" + goModuleCachePath(runtime.accountHome) + "/cache/download," + goProxy
+		}
 		environment = append(environment,
 			"GOENV=off",
 			"GOTOOLCHAIN=local",
 			"GOCACHE="+filepath.Join(runtime.home, ".cache", "go-build"),
 			"GOPATH="+filepath.Join(runtime.home, "go"),
-			"GOPROXY=off",
-			"GOSUMDB=off",
+			"GOPROXY="+goProxy,
+			"GOSUMDB=sum.golang.org",
 			"CARGO_HOME="+filepath.Join(runtime.home, ".cargo"),
 			"RUSTUP_HOME="+filepath.Join(runtime.accountHome, ".rustup"),
 			"COREPACK_HOME="+filepath.Join(runtime.home, ".cache", "corepack"),
-			"COREPACK_ENABLE_NETWORK=0",
-			"pnpm_config_store_dir="+pnpmStorePath(runtime.accountHome),
+			"COREPACK_ENABLE_NETWORK=1",
+			"COREPACK_ENV_FILE=0",
+			"COREPACK_NPM_REGISTRY="+npmRegistry,
+			"npm_config_registry="+npmRegistry,
+			"pnpm_config_store_dir="+filepath.Join(runtime.home, ".cache", "pnpm-store"),
 			"npm_config_cache="+filepath.Join(runtime.home, ".cache", "npm"),
 			"XDG_CACHE_HOME="+filepath.Join(runtime.home, ".cache"))
 		if role == kernel.RoleWorker {
-			environment = append(environment,
-				"GOMODCACHE="+goModuleCachePath(runtime.accountHome),
-				"DF_CI_GO_MODULE_CACHE="+goModuleCachePath(runtime.accountHome))
+			environment = append(environment, "DF_CI_GO_MODULE_CACHE="+goModuleCachePath(runtime.accountHome))
 			// Code under test that is OTel-instrumented lights up the plant.
 			// The agent CLI's own metrics and logs carry the run id in their
 			// resource, the only thing factoryd attributes them by.
@@ -1354,7 +1362,7 @@ func AccountEnvironment(kind kernel.Provider, accountHome, accountConfig string)
 // PrepareWebDependencies is the Change-introduced host preparation path for
 // the locked web workspace. It runs before the provider sandbox is built so
 // pnpm can create the Change's node_modules tree, while every pnpm destination
-// is explicitly bound to the Change, private runtime, or trusted store; the
+// is explicitly bound to the Change or private runtime; the
 // checkout's pnpm configuration cannot redirect host writes elsewhere.
 func (runtime RuntimePaths) PrepareWebDependencies(ctx context.Context, workingDirectory string) error {
 	if !runtime.valid() || !validAbsolute(workingDirectory, maxPathBytes) {
@@ -1382,10 +1390,7 @@ func (runtime RuntimePaths) PrepareWebDependencies(ctx context.Context, workingD
 	if packageInfo.Mode()&os.ModeSymlink != 0 || !packageInfo.Mode().IsRegular() {
 		return fmt.Errorf("provider: web package manifest is not a regular file")
 	}
-	if err := validatePnpmStoreDirectory(runtime.accountHome); err != nil {
-		return err
-	}
-	if err := prepareCorepackPnpm(runtime.accountHome, runtime.home); err != nil {
+	if err := validatePnpmSources(web); err != nil {
 		return err
 	}
 	toolPath := ""
@@ -1398,9 +1403,9 @@ func (runtime RuntimePaths) PrepareWebDependencies(ctx context.Context, workingD
 	if toolPath == "" {
 		return fmt.Errorf("provider: Node tool is unavailable")
 	}
-	store := pnpmStorePath(runtime.accountHome)
+	store := filepath.Join(runtime.home, ".cache", "pnpm-store")
 	modules := filepath.Join(web, "node_modules")
-	command := exec.CommandContext(ctx, filepath.Join(toolPath, "node"), filepath.Join(toolPath, "corepack"), "pnpm", "install", "--offline", "--frozen-lockfile", "--ignore-scripts", "--config.ignorePnpmfile=true", "--config.confirmModulesPurge=false", "--config.storeDir="+store, "--config.modulesDir="+modules, "--config.virtualStoreDir="+filepath.Join(modules, ".pnpm"), "--config.stateDir="+filepath.Join(runtime.home, ".cache", "pnpm-state"))
+	command := exec.CommandContext(ctx, filepath.Join(toolPath, "node"), filepath.Join(toolPath, "corepack"), "pnpm", "install", "--frozen-lockfile", "--ignore-scripts", "--config.ignorePnpmfile=true", "--config.confirmModulesPurge=false", "--config.storeDir="+store, "--config.modulesDir="+modules, "--config.virtualStoreDir="+filepath.Join(modules, ".pnpm"), "--config.stateDir="+filepath.Join(runtime.home, ".cache", "pnpm-state"))
 	command.Dir = web
 	command.Env = runtime.environmentForRole(kernel.ProviderCodex, kernel.RoleWorker)
 	if output, err := command.CombinedOutput(); err != nil {
@@ -1409,6 +1414,40 @@ func (runtime RuntimePaths) PrepareWebDependencies(ctx context.Context, workingD
 	return nil
 }
 
+var (
+	pnpmSourceLine         = regexp.MustCompile(`\\|://|(resolution|tarball|repo):`)
+	pnpmRegistryResolution = regexp.MustCompile(`^\s*resolution:\s*\{integrity:\s*[A-Za-z0-9+/=-]+\}\s*$`)
+)
+
+// validatePnpmSources refuses checkout inputs that could send the networked
+// install anywhere but npmjs: a project .npmrc, registry settings in
+// pnpm-workspace.yaml, and lockfile sources other than integrity-only
+// registry resolutions.
+func validatePnpmSources(web string) error {
+	if _, err := os.Lstat(filepath.Join(web, ".npmrc")); !errors.Is(err, os.ErrNotExist) {
+		return fmt.Errorf("provider: project .npmrc is refused")
+	}
+	workspace, err := os.ReadFile(filepath.Join(web, "pnpm-workspace.yaml"))
+	if err != nil && !errors.Is(err, os.ErrNotExist) {
+		return err
+	}
+	if bytes.Contains(workspace, []byte("registr")) || bytes.Contains(workspace, []byte("://")) || bytes.ContainsRune(workspace, '\\') {
+		return fmt.Errorf("provider: pnpm workspace registry configuration is refused")
+	}
+	lockfile, err := os.ReadFile(filepath.Join(web, "pnpm-lock.yaml"))
+	if err != nil {
+		return fmt.Errorf("provider: read pnpm lockfile: %w", err)
+	}
+	for _, line := range strings.Split(string(lockfile), "\n") {
+		if pnpmSourceLine.MatchString(line) && !pnpmRegistryResolution.MatchString(line) {
+			return fmt.Errorf("provider: unlisted pnpm lockfile source: %s", strings.TrimSpace(line))
+		}
+	}
+	return nil
+}
+
+// prepareCorepackPnpm copies the trusted, pinned Corepack pnpm into an
+// offline review home; workers fetch their own from the registry.
 func prepareCorepackPnpm(accountHome, runtimeHome string) error {
 	source := filepath.Join(accountHome, "Library", "Caches", "dark-factory", "local-ci", "trusted", "corepack", "v1", "pnpm", pnpmVersion)
 	packagePath := filepath.Join(source, "package.json")
@@ -1477,22 +1516,6 @@ func goModuleCachePath(accountHome string) string {
 
 func pnpmStorePath(accountHome string) string {
 	return filepath.Join(accountHome, "Library", "Caches", "dark-factory", "local-ci", "trusted", "pnpm-store")
-}
-
-func validatePnpmStoreDirectory(accountHome string) error {
-	path := pnpmStorePath(accountHome)
-	info, err := os.Lstat(path)
-	if err != nil {
-		return fmt.Errorf("provider: inspect trusted pnpm store: %w", err)
-	}
-	if info.Mode()&os.ModeSymlink != 0 || !info.IsDir() {
-		return fmt.Errorf("provider: trusted pnpm store is not a directory")
-	}
-	stat, ok := info.Sys().(*syscall.Stat_t)
-	if !ok || uint64(stat.Uid) != uint64(os.Geteuid()) || info.Mode().Perm()&0o022 != 0 {
-		return fmt.Errorf("provider: trusted pnpm store has unsafe ownership or mode")
-	}
-	return nil
 }
 
 // PrepareGoModuleCache provisions the exact trusted directory that native

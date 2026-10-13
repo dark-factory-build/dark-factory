@@ -249,12 +249,15 @@ for untrusted code. Factory runtime homes remain separate trust contexts under
 their existing filesystem grants. Test homes, generated outputs and XDG
 data/state remain local or temporary; `git clean -ffdx` still removes them.
 
-Native workers consume only the trusted `go-mod` subtree from that cache as a
-read-only `GOMODCACHE` with `GOPROXY=off`; their Go build cache remains in the
-disposable runtime home. The local-CI environment accepts this projection only
-when the path is an existing, canonical directory outside the checkout, so an
-empty or unsafe shared module cache fails closed instead of falling back to
-proxy TLS or operator state.
+Native workers see only the trusted `go-mod` subtree from that cache, read-only.
+Their launch environment and the dependency gates
+(`scripts/locked-dependency-env.sh`) serve it as a `file://` module proxy ahead
+of `https://proxy.golang.org` and download misses into the disposable runtime
+home, so the shared cache is never written. Corepack, npm and the worker's
+pnpm store fetch only from `https://registry.npmjs.org` into the runtime home,
+after the lockfiles are checked. The local-CI environment accepts this
+projection only when the path is an existing, canonical directory outside the
+checkout.
 
 Actions restores only the reusable directories under `RUNNER_TEMP` using
 `actions/cache`, keyed by platform, actual Go version, Node version and dependency
