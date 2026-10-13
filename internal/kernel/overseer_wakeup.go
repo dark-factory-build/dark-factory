@@ -62,7 +62,7 @@ ORDER BY version LIMIT 33`
 // since any wake named it. It takes the wake query's arguments; ?7 and ?8 are
 // named only so the counts agree.
 const overseerStalledItems = overseerItems + `SELECT last, CASE WHEN id IS NULL THEN detail || CASE WHEN instr(detail, ' [reviewer:') > 0 THEN '' ELSE ' ' || item_key END ELSE (` + overseerWakeLine + `) END,
-	named_at + ?6 <= ?3 FROM counted AS due WHERE wakes > rewakes AND ?7 + ?8 >= 0 ORDER BY last, version`
+	named_at + ?6 <= ?3, named_at + ?6 FROM counted AS due WHERE wakes > rewakes AND ?7 + ?8 >= 0 ORDER BY last, version`
 
 const overseerItems = `WITH carrier AS MATERIALIZED (SELECT t.id AS task, t.created_at_ms AS at, substr(t.body, instr(t.body, 'Factory causal wake: ')) AS names,
 	instr(t.body, 'wake: mode=targeted;') > 0 AS targeted,
@@ -143,6 +143,11 @@ type OverseerHealth struct {
 	Project     ProjectID
 	Key, Detail string
 	Since       UnixMillis
+}
+
+type overseerStalledState struct {
+	head, nextAt int64
+	health       string
 }
 
 // overseerWakeNames is a carrier since the item's version that named it, by
@@ -227,20 +232,27 @@ func (store *Store) EnqueueOverseerWakeups(ctx context.Context, at UnixMillis, h
 			}
 			priority = specialistWakePriority
 		} else {
-			// Stalled items only change when the durable store changes. Avoid
-			// rebuilding the full item CTE on quiet scheduler ticks. An open
-			// card remains a cheap exception: production records are outside
-			// the invalidation head and may close that card.
+			// Stalled items usually change when the durable store changes. Keep
+			// the next clock boundary too: readiness is time-based even when
+			// the factory is quiet. An open card remains a cheap exception:
+			// production records are outside the invalidation head and may close it.
 			var cardOpen int
 			if err := tx.connection.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1
 				FROM human_requests AS h JOIN runs AS r ON r.id = h.run_id JOIN tasks AS t ON t.id = r.task_id
 				WHERE h.idempotency_key = ? AND h.status = 'open' AND t.assigned_agent_id = ?)`, stalledItemKey[:], agent.ID.Bytes()).Scan(&cardOpen); err != nil {
 				return nil, tx.Rollback(err)
 			}
-			if cursor != factory.Head.Int64() || !found || cardOpen != 0 {
-				if err := raiseStalledItems(ctx, tx, agent, at, health); err != nil {
+			healthBytes, _ := json.Marshal(health)
+			if store.overseerStalled == nil {
+				store.overseerStalled = make(map[string]overseerStalledState)
+			}
+			state, known := store.overseerStalled[agent.ID.String()]
+			if !known || state.health != string(healthBytes) || cursor != factory.Head.Int64() || !found || cardOpen != 0 || state.nextAt != 0 && at.Int64() >= state.nextAt {
+				nextAt, err := raiseStalledItems(ctx, tx, agent, at, health)
+				if err != nil {
 					return nil, tx.Rollback(err)
 				}
+				store.overseerStalled[agent.ID.String()] = overseerStalledState{head: factory.Head.Int64(), nextAt: nextAt, health: string(healthBytes)}
 			}
 			var err error
 			if body, due, err = overseerWake(ctx, tx.connection, agent, at.Int64(), health); err != nil {
@@ -318,19 +330,24 @@ var stalledItemKey = [IDBytes]byte([]byte("stalled item key"))
 // most one such card; one still unfinished, or already carrying a request,
 // waits. A card closes only once none of its carrier's items is stalled, so
 // a later wake that moves an item's timing never strands it uncarded.
-func raiseStalledItems(ctx context.Context, tx *writeTx, agent Agent, at UnixMillis, health []OverseerHealth) error {
+func raiseStalledItems(ctx context.Context, tx *writeTx, agent Agent, at UnixMillis, health []OverseerHealth) (int64, error) {
 	connection := tx.connection
 	rows, err := connection.QueryContext(ctx, overseerStalledItems, overseerItemArgs(agent, at.Int64(), health)...)
 	if err != nil {
-		return err
+		return 0, err
 	}
 	lines, stalled := map[string][]string{}, map[string]bool{}
+	var nextAt int64
 	for rows.Next() {
 		var carrier []byte
 		var line string
 		var ripe bool
-		if err := rows.Scan(&carrier, &line, &ripe); err != nil {
-			return errors.Join(err, rows.Close())
+		var readyAt int64
+		if err := rows.Scan(&carrier, &line, &ripe, &readyAt); err != nil {
+			return 0, errors.Join(err, rows.Close())
+		}
+		if nextAt == 0 || readyAt < nextAt {
+			nextAt = readyAt
 		}
 		stalled[string(carrier)] = true
 		if ripe {
@@ -338,16 +355,16 @@ func raiseStalledItems(ctx context.Context, tx *writeTx, agent Agent, at UnixMil
 		}
 	}
 	if err := errors.Join(rows.Err(), rows.Close()); err != nil {
-		return err
+		return 0, err
 	}
 	for _, carrier := range slices.Sorted(maps.Keys(lines)) {
 		id, err := TaskIDFromBytes([]byte(carrier))
 		if err != nil {
-			return err
+			return 0, err
 		}
 		task, found, err := taskByID(ctx, connection, id)
 		if err != nil {
-			return err
+			return 0, err
 		}
 		if !found || task.Status == TaskQueued || task.Status == TaskRunning {
 			continue
@@ -362,53 +379,53 @@ func raiseStalledItems(ctx context.Context, tx *writeTx, agent Agent, at UnixMil
 			continue
 		}
 		if err != nil {
-			return err
+			return 0, err
 		}
 		question := "The overseer was woken and left these unresolved. Reply to wake it with your decision, or cancel to leave them to you.\n" + strings.Join(lines[carrier], "\n")
 		var request [IDBytes]byte
 		if _, err := rand.Read(request[:]); err != nil {
-			return err
+			return 0, err
 		}
 		if _, err := connection.ExecContext(ctx, `INSERT INTO human_requests(id, run_id, idempotency_key, kind, reason_code, question_text, options_json, status, revision, created_at_ms, updated_at_ms, continuation) VALUES(?, ?, ?, 'question', 'provider_question', ?, '[]', 'open', 1, ?, ?, 'waiting')`,
 			request[:], run, stalledItemKey[:], strings.ToValidUTF8(question[:min(len(question), MaxHumanRequestQuestionBytes)], ""), at.Int64(), at.Int64()); err != nil {
-			return err
+			return 0, err
 		}
 		if err := appendInvalidations(ctx, connection, at, []pendingInvalidation{{kind: EntityHumanRequest, id: request[:], revision: 1}}); err != nil {
-			return err
+			return 0, err
 		}
 	}
 	cards, err := connection.QueryContext(ctx, `SELECT h.id, r.task_id FROM human_requests AS h JOIN runs AS r ON r.id = h.run_id JOIN tasks AS t ON t.id = r.task_id
 		WHERE h.idempotency_key = ? AND h.status = 'open' AND t.assigned_agent_id = ?`, stalledItemKey[:], agent.ID.Bytes())
 	if err != nil {
-		return err
+		return 0, err
 	}
 	var resolved []HumanRequestID
 	for cards.Next() {
 		var raw, carrier []byte
 		if err := cards.Scan(&raw, &carrier); err != nil {
-			return errors.Join(err, cards.Close())
+			return 0, errors.Join(err, cards.Close())
 		}
 		if !stalled[string(carrier)] {
 			id, err := HumanRequestIDFromBytes(raw)
 			if err != nil {
-				return errors.Join(err, cards.Close())
+				return 0, errors.Join(err, cards.Close())
 			}
 			resolved = append(resolved, id)
 		}
 	}
 	if err := errors.Join(cards.Err(), cards.Close()); err != nil {
-		return err
+		return 0, err
 	}
 	for _, id := range resolved {
 		request, found, err := humanRequestByID(ctx, connection, id)
 		if err != nil || !found {
-			return errors.Join(err, ErrCorruptState)
+			return 0, errors.Join(err, ErrCorruptState)
 		}
 		if err := cancelHumanContinuationOnConnection(ctx, tx, request, at); err != nil {
-			return err
+			return 0, err
 		}
 	}
-	return nil
+	return nextAt, nil
 }
 
 // OverseerItem is one of an overseer's items as the operator sees it: Due in
@@ -462,7 +479,8 @@ func (store *Store) OverseerItems(ctx context.Context, project ProjectID, at Uni
 				if due {
 					err = rows.Scan(&escalation, &item.Line, &key, &counts)
 				} else {
-					err = rows.Scan(&item.Carrier, &item.Line, &ripe)
+					var readyAt int64
+					err = rows.Scan(&item.Carrier, &item.Line, &ripe, &readyAt)
 				}
 				if err != nil {
 					return nil, errors.Join(err, rows.Close())
