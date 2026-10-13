@@ -51,8 +51,9 @@ func ReviewEnvironment(root string) []string {
 // policy. Provider selection, account selection, environment construction,
 // process-group lifetime, and usage-limit handling live here with ordinary
 // provider launches; callers do not assemble provider command lines. The
-// Reviewers read the toolchain roots and trusted caches, offline, so they can
-// run focused Go, Rust, or web tests; builds write only disposable roots.
+// Codex reviewer also reads the toolchain roots and the operator's trusted Go
+// module cache, offline, so it can run the changed packages' tests; their
+// builds write only the review's disposable home and temporary directory.
 func RunReview(ctx context.Context, kind kernel.Provider, toolPath, toolchainRoots, operatorHome string, accountHomes []string, checkout, prompt string, readable []string) (ReviewResult, error) {
 	toolName := "codex"
 	if kind == kernel.ProviderClaudeCode {
@@ -64,26 +65,17 @@ func RunReview(ctx context.Context, kind kernel.Provider, toolPath, toolchainRoo
 	}
 	root := filepath.Dir(checkout)
 	home, tmp := filepath.Join(root, ".review-home"), filepath.Join(root, ".review-tmp")
-	golang := []string{"PATH=" + toolPath, "GOENV=off", "GOCACHE=" + filepath.Join(home, "go-build"), "GOPATH=" + filepath.Join(home, "go"), "GOFLAGS=-mod=readonly", "GOPROXY=off", "GOSUMDB=off", "GOTOOLCHAIN=local", "CGO_ENABLED=0", "CARGO_HOME=" + filepath.Join(home, ".cargo"), "COREPACK_HOME=" + filepath.Join(home, ".cache", "corepack"), "COREPACK_ENABLE_NETWORK=0", "npm_config_cache=" + filepath.Join(home, ".cache", "npm"), "XDG_CACHE_HOME=" + filepath.Join(home, ".cache"), "CLAUDE_CODE_TMPDIR=" + tmp}
+	golang := []string{"PATH=" + toolPath, "GOCACHE=" + filepath.Join(home, "go-build"), "GOPATH=" + filepath.Join(home, "go"), "GOFLAGS=-mod=readonly", "GOPROXY=off", "GOSUMDB=off", "GOTOOLCHAIN=local", "CGO_ENABLED=0"}
 	readable = append(readable, filepath.SplitList(toolchainRoots)...)
-	readable = append(readable, "/System/Library/OpenSSL/openssl.cnf")
 	if operatorHome != "" {
-		if _, err := os.Stat(filepath.Join(checkout, "web", "package.json")); err == nil {
-			if err := prepareCorepackPnpm(operatorHome, home); err != nil {
-				return ReviewResult{}, err
-			}
-		} else if !errors.Is(err, os.ErrNotExist) {
-			return ReviewResult{}, err
-		}
-		cargoHome := filepath.Join(operatorHome, ".cargo")
-		readable = append(readable, goModuleCachePath(operatorHome), pnpmStorePath(operatorHome), filepath.Join(operatorHome, ".rustup"), filepath.Join(cargoHome, "registry"), filepath.Join(cargoHome, "git"))
-		golang = append(golang, "GOMODCACHE="+goModuleCachePath(operatorHome), "RUSTUP_HOME="+filepath.Join(operatorHome, ".rustup"), "CARGO_HOME="+cargoHome, "CARGO_NET_OFFLINE=true", "CARGO_TARGET_DIR="+tmp, "pnpm_config_store_dir="+pnpmStorePath(operatorHome))
+		readable = append(readable, goModuleCachePath(operatorHome))
+		golang = append(golang, "GOMODCACHE="+goModuleCachePath(operatorHome))
 	}
-	// Claude's tools get the same grants:
+	// Claude's file tools get the worker's confinement over the same grants:
 	// untrusted task, pull request, diff and dispute text reach the prompt.
 	var settings string
 	if kind == kernel.ProviderClaudeCode {
-		if settings, err = ClaudeReview([]string{home, tmp}, readable...); err != nil {
+		if settings, err = ClaudeReview(readable...); err != nil {
 			return ReviewResult{}, err
 		}
 	}
@@ -91,7 +83,7 @@ func RunReview(ctx context.Context, kind kernel.Provider, toolPath, toolchainRoo
 		environment := append(append(ReviewEnvironment(root), AccountEnvironment(kind, filepath.Dir(account), account)...), golang...)
 		var argv []string
 		if kind == kernel.ProviderClaudeCode {
-			argv = []string{"-p", prompt, "--permission-mode", "dontAsk", "--safe-mode", "--restricted", "--setting-sources", "", "--strict-mcp-config", "--settings", settings, "--tools", "Read,Grep,Glob,Bash"}
+			argv = []string{"-p", prompt, "--permission-mode", "dontAsk", "--safe-mode", "--restricted", "--setting-sources", "", "--strict-mcp-config", "--settings", settings, "--tools", "Read,Grep,Glob"}
 		} else {
 			argv = []string{"exec", "--disable", "computer_use", "--disable", "browser_use", "--disable", "plugins", "--ephemeral", "--ignore-user-config", "--strict-config", "-c", "approval_policy={ granular={sandbox_approval=false,rules=false,mcp_elicitations=false,request_permissions=false,skill_approval=false}}", "--ignore-rules", "--skip-git-repo-check"}
 			argv = append(argv, CodexReview([]string{home, tmp}, readable...)...)

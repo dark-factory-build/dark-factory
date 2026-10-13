@@ -915,119 +915,43 @@ func claudeSettings(request Request, servers []string) (string, error) {
 	return claudeConfinement(grants, allow, map[string]any{"Stop": []any{map[string]any{"hooks": []any{map[string]any{"type": "command", "command": stop}}}}})
 }
 
-// ClaudeReview is claudeSettings for a review: Bash may run inside the
-// review's private writable roots, while repository and cache grants remain
-// read-only and no hook runs.
-func ClaudeReview(writable []string, readable ...string) (string, error) {
+// ClaudeReview is claudeSettings for a review: the file tools read only
+// readable, nothing is writable and no hook runs.
+func ClaudeReview(readable ...string) (string, error) {
 	var grants []grant
-	for _, path := range writable {
-		grants = append(grants, grant{path, true})
-	}
 	for _, path := range readable {
 		grants = append(grants, grant{path, false})
 	}
-	return claudeConfinement(grants, []string{"Bash"}, map[string]any{}, filepath.Join("/private/tmp", fmt.Sprintf("claude-%d", os.Getuid())))
+	return claudeConfinement(grants, nil, map[string]any{})
 }
 
-func claudeConfinement(grants []grant, allow []string, hooks map[string]any, extraDenyWrites ...string) (string, error) {
-	read, write, denyWrite := []string{}, []string{}, []string{}
-	var redundantReadOnly, redundantWritable, originalReadOnly []string
+func claudeConfinement(grants []grant, allow []string, hooks map[string]any) (string, error) {
+	read, write := []string{}, []string{}
 	// Claude names files by their resolved path, and a Change is reached
-	// through a link. Writable roots need both spellings; read-only roots keep
-	// one read grant and deny writes under both spellings to stay within the
-	// launch argument limit.
+	// through a link, so each grant is allowed under both spellings.
 	for _, given := range slices.Clone(grants) {
-		resolved, err := filepath.EvalSymlinks(given.path)
-		if err != nil {
-			if parent, parentErr := filepath.EvalSymlinks(filepath.Dir(given.path)); parentErr == nil {
-				resolved = filepath.Join(parent, filepath.Base(given.path))
-			}
+		if resolved, err := filepath.EvalSymlinks(given.path); err == nil && resolved != given.path {
+			grants = append(grants, grant{resolved, given.write})
 		}
-		if resolved != "" && resolved != given.path {
-			if given.write {
-				rule := "/" + resolved
-				redundantWritable = append(redundantWritable, "/"+given.path)
-				read = append(read, rule)
-				write = append(write, rule)
-				allow = append(allow, "Read("+rule+"/**)")
-				allow = append(allow, "Edit("+rule+"/**)")
-			} else {
-				rule := "/" + resolved
-				redundantReadOnly = append(redundantReadOnly, "/"+given.path)
-				read = append(read, rule)
-				allow = append(allow, "Read("+rule+"/**)")
-				denyWrite = append(denyWrite, "/"+resolved)
-			}
-		}
-	}
-	for _, path := range extraDenyWrites {
-		denyWrite = append(denyWrite, "/"+path)
 	}
 	for _, grant := range grants {
 		rule := "/" + grant.path // a leading "//" is Claude's absolute path
 		read = append(read, rule)
-		allow = append(allow, "Read("+rule+"/**)")
+		allow = append(allow, "Read("+rule+")", "Read("+rule+"/**)")
 		if grant.write {
 			write = append(write, rule)
 			allow = append(allow, "Edit("+rule+"/**)")
-		} else {
-			originalReadOnly = append(originalReadOnly, rule)
-			denyWrite = append(denyWrite, rule)
 		}
 	}
-	baseRead, baseAllow := slices.Clone(read), slices.Clone(allow)
-	baseDenyWrite := slices.Clone(denyWrite)
-	baseWrite := slices.Clone(write)
-	includeSharedTempRead := len(extraDenyWrites) == 0
-	marshal := func(read, write, allow, denyWrite []string) ([]byte, error) {
-		allowRead := slices.Clone(read)
-		if includeSharedTempRead {
-			allowRead = append(allowRead, fmt.Sprintf("//private/tmp/claude-%d", os.Getuid()))
-		}
-		return json.Marshal(map[string]any{
-			"hooks":       hooks,
-			"permissions": map[string]any{"allow": allow},
-			"sandbox": map[string]any{
-				"enabled": true, "failIfUnavailable": true, "allowUnsandboxedCommands": false, "autoAllowBashIfSandboxed": true,
-				"filesystem": map[string]any{"allowWrite": write, "denyWrite": denyWrite, "denyRead": claudeDeniedReads, "allowRead": allowRead},
-				"network":    map[string]any{"allowedDomains": []string{"*"}, "allowLocalBinding": true},
-			},
-		})
-	}
-	settings, err := marshal(baseRead, baseWrite, baseAllow, baseDenyWrite)
-	if len(settings) > runner.MaxArgumentBytes {
-		// Keep resolved read-only grants for Claude's file tools. Drop only
-		// original spellings that have a distinct resolved alias; both spellings
-		// address the same filesystem object.
-		original := make(map[string]struct{}, len(originalReadOnly)+len(redundantWritable))
-		for _, rule := range redundantReadOnly {
-			original[rule] = struct{}{}
-		}
-		for _, rule := range redundantWritable {
-			original[rule] = struct{}{}
-		}
-		compactRead := slices.DeleteFunc(slices.Clone(baseRead), func(rule string) bool {
-			_, ok := original[rule]
-			return ok
-		})
-		compactAllow := slices.DeleteFunc(slices.Clone(baseAllow), func(permission string) bool {
-			for rule := range original {
-				if permission == "Read("+rule+"/**)" {
-					return true
-				}
-			}
-			return false
-		})
-		compactWrite := slices.DeleteFunc(slices.Clone(baseWrite), func(rule string) bool {
-			_, ok := original[rule]
-			return ok
-		})
-		compactDenyWrite := slices.DeleteFunc(slices.Clone(baseDenyWrite), func(rule string) bool {
-			_, ok := original[rule]
-			return ok
-		})
-		settings, err = marshal(compactRead, compactWrite, compactAllow, compactDenyWrite)
-	}
+	settings, err := json.Marshal(map[string]any{
+		"hooks":       hooks,
+		"permissions": map[string]any{"allow": allow},
+		"sandbox": map[string]any{
+			"enabled": true, "failIfUnavailable": true, "allowUnsandboxedCommands": false, "autoAllowBashIfSandboxed": true,
+			"filesystem": map[string]any{"allowWrite": write, "denyRead": claudeDeniedReads, "allowRead": append(read, fmt.Sprintf("//private/tmp/claude-%d", os.Getuid()))},
+			"network":    map[string]any{"allowedDomains": []string{"*"}, "allowLocalBinding": true},
+		},
+	})
 	if err != nil || len(settings) > runner.MaxArgumentBytes {
 		return "", ErrInvalid
 	}
