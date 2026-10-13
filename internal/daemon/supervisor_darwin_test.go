@@ -2633,8 +2633,7 @@ func (fixture *supervisorFixture) assertOneWitness(t *testing.T) {
 }
 
 func TestSupervisorLaunchesImportedIssueEditThroughFD11(t *testing.T) {
-	program := "set -eu\ncat /dev/fd/11 > __WITNESS__\n" + quoteShell(supervisorTestExecutable(t)) + " --supervisor-attempt-succeed typed-success\n"
-	fixture := newSupervisorFixture(t, program)
+	fixture := newSupervisorFixture(t, "set -eu\nprintf unused > __WITNESS__\n")
 	ctx := context.Background()
 	projectID := supervisorProjectID(t, 1)
 	sourceID, err := kernel.IntakeSourceIDFromBytes(bytes.Repeat([]byte{223}, kernel.IDBytes))
@@ -2649,7 +2648,11 @@ func TestSupervisorLaunchesImportedIssueEditThroughFD11(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	issue := maintainer.Issue{ID: 81, NodeID: "I_fd11", Number: 9, Title: "Original title", Body: "Original scope", State: "open", URL: "https://github.com/team/issues/issues/9"}
+	witnessPath := quoteShell(fixture.witness)
+	executable := quoteShell(supervisorTestExecutable(t))
+	originalBody := "set -eu\nprintf 'Original scope' > " + witnessPath + "\n" + executable + " --supervisor-attempt-succeed typed-success\n"
+	editedBody := "set -eu\nprintf 'Edited scope' > " + witnessPath + "\n" + executable + " --supervisor-attempt-succeed typed-success\n"
+	issue := maintainer.Issue{ID: 81, NodeID: "I_fd11", Number: 9, Title: "Original title", Body: originalBody, State: "open", URL: "https://github.com/team/issues/issues/9"}
 	issue.Author.Login, issue.Author.Type = "outsider", "User"
 	accepted, err := fixture.store.AcceptIntakeSnapshot(ctx, source.ID, intakeSnapshot(source, issue), supervisorTime(), source.Revision)
 	if err != nil {
@@ -2680,7 +2683,7 @@ func TestSupervisorLaunchesImportedIssueEditThroughFD11(t *testing.T) {
 		t.Fatal(err)
 	}
 	fixture.daemon.github = host
-	issue.Body = "Edited scope"
+	issue.Body = editedBody
 	fixture.daemon.githubMCP = func(_ context.Context, request json.RawMessage, repositories map[string]uint64) (json.RawMessage, error) {
 		var call struct {
 			Params struct {
