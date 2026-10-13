@@ -258,6 +258,16 @@ func (daemon *Daemon) reconcilePull(ctx context.Context, open kernel.OpenPull, u
 	switch {
 	case err != nil:
 		op.Observation = ""
+		if binding, observed := enqueueBinding(err); binding == "base" {
+			if review.HeadRE.MatchString(observed) {
+				op.Request.Base = observed
+			} else if observed != "" {
+				op.Request.BaseRef = observed
+			}
+			op.Failures = 0
+			op.LastAction = "observed base binding changed; re-observe before enqueue"
+			action, err = review.Wait, nil
+		}
 	case !strings.EqualFold(pull.Head, op.Request.Head):
 		return false, nil // the refresh records the new head
 	case pull.State != "open":

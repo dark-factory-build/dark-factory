@@ -1711,14 +1711,22 @@ impl AppAuthority {
             .await?;
         let repository = self.0.repository_metadata(&token).await?;
         if request.base != repository.default_branch {
-            return Err(OperationError::Conflict);
+            return Err(OperationError::EnqueueBinding {
+                binding: "base",
+                expected: request.base.clone(),
+                observed: repository.default_branch,
+            });
         }
         let pull = self
             .0
             .verify_pull_request_head(&token, request.pull_number, &request.head_sha)
             .await?;
         if pull.base.name != request.base {
-            return Err(OperationError::Conflict);
+            return Err(OperationError::EnqueueBinding {
+                binding: "base",
+                expected: request.base,
+                observed: pull.base.name,
+            });
         }
         if !matches!(pull.state.as_str(), "open" | "closed") {
             return Err(OperationError::Unavailable);
