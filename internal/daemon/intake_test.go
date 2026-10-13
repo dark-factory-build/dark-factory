@@ -1,10 +1,12 @@
 package daemon
 
 import (
+	"bytes"
 	"context"
 	"database/sql"
 	"encoding/hex"
 	"fmt"
+	"path/filepath"
 	"sort"
 	"strings"
 	"testing"
@@ -464,10 +466,23 @@ func TestIntakeOperatorCancelSticksAndImportRetries(t *testing.T) {
 
 // The headline: an open, labelled issue retries its own task after an
 // automatic end. Here the task's run fails (its runner vanished before any
-// session), and the next tick queues the task again.
+// session), and the next tick queues the task again, up to the issue's bound.
 func TestIntakeTickRetriesAnAutomaticEnd(t *testing.T) {
-	fixture := newDispatchFixture(t)
 	ctx := context.Background()
+	// No operator API: the tick is called directly, so no socket is bound.
+	fixture := &dispatchFixture{databasePath: filepath.Join(t.TempDir(), "kernel.sqlite")}
+	var err error
+	if fixture.store, err = createTestStore(ctx, fixture.databasePath, kernel.FactoryConfig{Capacity: 2}, mustKernelTime(t, 100)); err != nil {
+		t.Fatal(err)
+	}
+	defer fixture.store.Close()
+	if err := fixture.store.InitializeRepositoryBase(ctx, "HEAD"); err != nil {
+		t.Fatal(err)
+	}
+	clock := int64(1000)
+	if fixture.daemon, err = newDaemon(fixture.store, func() time.Time { return time.UnixMilli(clock) }); err != nil {
+		t.Fatal(err)
+	}
 	project := mustProjectID(t, testID(192))
 	if _, err := fixture.store.CreateProject(ctx, kernel.NewProject{ID: project, Name: "automatic", Root: "/automatic"}, mustKernelTime(t, 101)); err != nil {
 		t.Fatal(err)
@@ -499,27 +514,69 @@ func TestIntakeTickRetriesAnAutomaticEnd(t *testing.T) {
 	if got := fixture.daemon.Intake(ctx, tick); len(got.ImportedTasks) != 1 {
 		t.Fatalf("import: %+v, receipt %+v", got, receipt)
 	}
-	failIntakeRun(t, fixture)
 	task, _, err := fixture.store.Task(ctx, mustTaskID(t, receipt.TaskID))
-	if err != nil || task.Status != kernel.TaskFailed {
-		t.Fatalf("settled task = %+v, %v", task, err)
+	if err != nil {
+		t.Fatal(err)
 	}
-	fixture.daemon.now = func() time.Time { return time.Unix(2000, 0) }
-	exactReads = 0
-	fixture.daemon.Intake(ctx, tick)
-	if task, _, err = fixture.store.Task(ctx, task.ID); err != nil || task.Status != kernel.TaskQueued || task.WorkRevision.Int64() != 2 {
-		t.Fatalf("automatic end not retried: %+v, %v", task, err)
+	failAndTick := func(seed byte) kernel.Task {
+		t.Helper()
+		clock += 1000
+		failIntakeRun(t, fixture, seed)
+		if task, _, err = fixture.store.Task(ctx, task.ID); err != nil || task.Status != kernel.TaskFailed {
+			t.Fatalf("settled task = %+v, %v", task, err)
+		}
+		clock += 1000
+		exactReads = 0
+		fixture.daemon.Intake(ctx, tick)
+		// The tick reuses the issue it listed; one read per accepted issue per
+		// tick spent the connection's GitHub quota.
+		if exactReads != 0 {
+			t.Fatalf("tick re-read the listed issue %d times", exactReads)
+		}
+		if task, _, err = fixture.store.Task(ctx, task.ID); err != nil {
+			t.Fatal(err)
+		}
+		return task
 	}
-	// The tick reuses the issue it listed; one read per accepted issue per
-	// tick spent the connection's GitHub quota.
-	if exactReads != 0 {
-		t.Fatalf("tick re-read the listed issue %d times", exactReads)
+	for retry := range int64(kernel.IntakeRetryLimit) {
+		if task = failAndTick(200 + 10*byte(retry)); task.Status != kernel.TaskQueued || task.WorkRevision.Int64() != retry+2 {
+			t.Fatalf("automatic end %d not retried: %+v", retry+1, task)
+		}
+	}
+	if task = failAndTick(240); task.Status != kernel.TaskFailed {
+		t.Fatalf("retry past the bound: %+v", task)
+	}
+
+	// Every tick offers the spent issue a retry again. The refusal writes
+	// nothing, so a pass must answer it while another write holds the store,
+	// not queue on the writer once per such issue.
+	lock, err := sql.Open("sqlite3", "file:"+fixture.databasePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer lock.Close()
+	lock.SetMaxOpenConns(1)
+	if _, err := lock.Exec("BEGIN IMMEDIATE"); err != nil {
+		t.Fatal(err)
+	}
+	defer lock.Exec("ROLLBACK")
+	clock += 1000
+	busy, cancel := context.WithTimeout(ctx, time.Second)
+	defer cancel()
+	got := fixture.daemon.Intake(busy, tick)
+	if got.State != "ok" || busy.Err() != nil {
+		t.Fatalf("tick while another write holds the store = %+v, %v", got, busy.Err())
+	}
+	t.Log(got.Timing)
+	if task, _, err = fixture.store.Task(ctx, task.ID); err != nil || task.Status != kernel.TaskFailed || task.WorkRevision.Int64() != kernel.IntakeRetryLimit+1 {
+		t.Fatalf("spent issue's task = %+v, %v", task, err)
 	}
 }
 
 // failIntakeRun admits the queued worker task and fails its run as recovery
-// does when the runner vanished before a session, abandoning its Change.
-func failIntakeRun(t *testing.T, fixture *dispatchFixture) {
+// does when the runner vanished before a session, abandoning its Change. Its
+// run and resources take the IDs from seed to seed+8.
+func failIntakeRun(t *testing.T, fixture *dispatchFixture, seed byte) {
 	t.Helper()
 	ctx := context.Background()
 	at, err := fixture.daemon.timestamp()
@@ -534,30 +591,30 @@ func failIntakeRun(t *testing.T, fixture *dispatchFixture) {
 	if _, err := fixture.store.SetDispatch(ctx, factory.Revision, true, mustKernelTime(t, base)); err != nil {
 		t.Fatal(err)
 	}
-	id := func(value byte) []byte { return mustIDBytes(t, testID(value)) }
-	keys := kernel.AdmissionKeys{RuntimeRoot: "/runtime/intake"}
-	keys.RunID, _ = kernel.RunIDFromBytes(id(230))
-	keys.TerminalSessionID, _ = kernel.TerminalSessionIDFromBytes(id(231))
-	keys.CandidateChangeID, _ = kernel.ChangeIDFromBytes(id(234))
-	keys.Resources.RuntimeRoot, _ = kernel.ResourceIDFromBytes(id(235))
-	keys.Resources.RunnerProcess, _ = kernel.ResourceIDFromBytes(id(236))
-	keys.Resources.ProviderProcess, _ = kernel.ResourceIDFromBytes(id(237))
-	keys.Resources.ProviderGroup, _ = kernel.ResourceIDFromBytes(id(238))
-	if keys.AttemptDigest, err = kernel.AttemptDigestFromBytes([]byte(strings.Repeat("c", kernel.DigestBytes))); err != nil {
+	id := func(offset byte) []byte { return mustIDBytes(t, testID(seed+offset)) }
+	keys := kernel.AdmissionKeys{RuntimeRoot: fmt.Sprint("/runtime/intake-", seed)}
+	keys.RunID, _ = kernel.RunIDFromBytes(id(0))
+	keys.TerminalSessionID, _ = kernel.TerminalSessionIDFromBytes(id(1))
+	keys.CandidateChangeID, _ = kernel.ChangeIDFromBytes(id(4))
+	keys.Resources.RuntimeRoot, _ = kernel.ResourceIDFromBytes(id(5))
+	keys.Resources.RunnerProcess, _ = kernel.ResourceIDFromBytes(id(6))
+	keys.Resources.ProviderProcess, _ = kernel.ResourceIDFromBytes(id(7))
+	keys.Resources.ProviderGroup, _ = kernel.ResourceIDFromBytes(id(8))
+	if keys.AttemptDigest, err = kernel.AttemptDigestFromBytes(bytes.Repeat([]byte{seed}, kernel.DigestBytes)); err != nil {
 		t.Fatal(err)
 	}
-	if keys.ResultProofDigest, err = kernel.ResultProofDigestFromBytes([]byte(strings.Repeat("d", kernel.DigestBytes))); err != nil {
+	if keys.ResultProofDigest, err = kernel.ResultProofDigestFromBytes(bytes.Repeat([]byte{seed + 1}, kernel.DigestBytes)); err != nil {
 		t.Fatal(err)
 	}
 	admission, err := fixture.store.AdmitNext(ctx, keys, mustKernelTime(t, base+1))
 	if err != nil || !admission.Admitted() {
-		t.Fatalf("admission = %+v, %v", admission, err)
+		t.Fatalf("admission %d = %+v, %v", seed, admission, err)
 	}
 	run := *admission.Run
 	one, _ := kernel.NewRevision(1)
-	runtimeIdentity, _ := kernel.NewPathResourceIdentity(1, 2)
-	birth, _ := kernel.BirthDigestFromBytes([]byte(strings.Repeat("a", kernel.DigestBytes)))
-	processIdentity, _ := kernel.NewProcessResourceIdentity(300, 301, birth)
+	runtimeIdentity, _ := kernel.NewPathResourceIdentity(1, int64(seed))
+	birth, _ := kernel.BirthDigestFromBytes(bytes.Repeat([]byte{seed + 2}, kernel.DigestBytes))
+	processIdentity, _ := kernel.NewProcessResourceIdentity(int64(seed)+1000, int64(seed)+1001, birth)
 	runtime, err := fixture.store.ActivateResource(ctx, run.ID, keys.Resources.RuntimeRoot, one, runtimeIdentity, mustKernelTime(t, base+2))
 	if err != nil {
 		t.Fatal(err)
