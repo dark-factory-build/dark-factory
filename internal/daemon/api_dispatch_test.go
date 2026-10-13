@@ -1119,6 +1119,10 @@ func TestAttemptTaskUsesCurrentAcceptedIssueBody(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	liveShell, err := fixture.daemon.currentTaskText(ctx, kernel.ProviderShell, queued)
+	if err != nil || !strings.Contains(liveShell, "Edited scope") || strings.Contains(liveShell, "Original scope") {
+		t.Fatalf("shell task text = %q, err=%v", liveShell, err)
+	}
 	active := prepareActiveAttemptInProjectWithProviderAndTask(t, fixture, 220, project.String(), "orchestrator", "shell", receipt.TaskID, func() {})
 	done := fixture.serve(t)
 	assignment, err := active.client.Task(ctx)

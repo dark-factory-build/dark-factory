@@ -940,24 +940,17 @@ func (daemon *Daemon) attemptTask(ctx context.Context, call api.Call) api.Reply 
 	if err != nil {
 		return newErrorReply(remoteErrorCode(err))
 	}
+	instructionText := authority.Task()
 	accepted, found, err := daemon.store.IntakeAcceptanceForTask(ctx, authority.TaskID)
 	if err != nil {
 		return newErrorReply(remoteErrorCode(err))
 	}
-	instructionText := authority.Task()
-	if found && accepted.Snapshot.LinearTeamID == "" && daemon.github != nil && daemon.github.CustomerMode() {
-		if issue, liveErr := daemon.liveAcceptedIssue(ctx, accepted); liveErr == nil {
-			current, taskFound, taskErr := daemon.store.Task(ctx, authority.TaskID)
-			if taskErr != nil {
-				return newErrorReply(remoteErrorCode(taskErr))
-			}
-			if !taskFound {
-				return newErrorReply(api.RemoteInternal)
-			}
-			instructionText, _ = kernel.TaskBodyWithInstruction(current, kernel.IntakeTaskBody(accepted, issue.Title, issue.Body))
-		} else {
-			return newErrorReply(remoteErrorCode(liveErr))
-		}
+	if current, taskFound, taskErr := daemon.store.Task(ctx, authority.TaskID); taskErr != nil {
+		return newErrorReply(remoteErrorCode(taskErr))
+	} else if !taskFound {
+		return newErrorReply(api.RemoteInternal)
+	} else if instructionText, taskErr = daemon.currentTaskText(ctx, authority.Provider, current); taskErr != nil {
+		return newErrorReply(remoteErrorCode(taskErr))
 	}
 	attachments, err := daemon.store.TaskAttachments(ctx, authority.TaskID)
 	mark("attachments")

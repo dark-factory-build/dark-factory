@@ -601,11 +601,12 @@ func TestDisabledAcceptedRepositoryEscalatesOnce(t *testing.T) {
 // even when that marker lies past what the body shows.
 func TestAPartialIntakeChangeReferencesItsIssue(t *testing.T) {
 	fixture, c, source, app, checkout := publishFixture(t, 1, false)
+	app.issueBody = "Current operator scope"
 	c.Task.Result = "Partial: items 1 and 5. Fixes #9 once item 2 lands.\n" + strings.Repeat("report line\n", 3000) + "Refs #9" // beyond the 24000-byte body
 	if err := fixture.daemon.publishChange(context.Background(), c, "team/repo", source, app.call, checkout); err != nil {
 		t.Fatal(err)
 	}
-	if pull := app.writes[len(app.writes)-1]["arguments"].(map[string]any); pull["close_on_merge"] != false || pull["issue_number"] != uint64(9) || strings.Contains(pull["body"].(string), "Fixes #9") {
+	if pull := app.writes[len(app.writes)-1]["arguments"].(map[string]any); pull["close_on_merge"] != false || pull["issue_number"] != uint64(9) || !strings.Contains(pull["body"].(string), "Current operator scope") || strings.Contains(pull["body"].(string), "Fixes #9") {
 		t.Fatalf("pull request = %+v", pull)
 	}
 }
