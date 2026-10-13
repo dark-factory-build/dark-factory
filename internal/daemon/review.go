@@ -622,12 +622,50 @@ type durableReviewStore struct {
 	now        func() time.Time
 }
 
+// productionRecordOnConnection applies the tighter 32 KiB projection limit
+// after RecordReviewOperation's 64 KiB lifecycle check.
+const maxDurableReviewOperationJSON = 32768 - 512
+
+func trimReviewTextToSuffix(value string, keep int) string {
+	if keep <= 0 {
+		return ""
+	}
+	if len(value) <= keep {
+		return value
+	}
+	return strings.ToValidUTF8(value[len(value)-keep:], "")
+}
+
+// boundDurableReviewOperation keeps the request and its later verdict within
+// the production projection's document limit. Prior findings are the least
+// authoritative part of a retry record, so they are reduced before the
+// provider detail and pull-request body.
+func boundDurableReviewOperation(operation review.Operation) review.Operation {
+	for {
+		body, err := json.Marshal(operation)
+		if err != nil || len(body) <= maxDurableReviewOperationJSON {
+			return operation
+		}
+		excess := len(body) - maxDurableReviewOperationJSON
+		switch {
+		case operation.Request.PriorFindings != "":
+			operation.Request.PriorFindings = trimReviewTextToSuffix(operation.Request.PriorFindings, len(operation.Request.PriorFindings)-excess-1)
+		case operation.Detail != "":
+			operation.Detail = trimReviewTextToSuffix(operation.Detail, len(operation.Detail)-excess-1)
+		case operation.Request.Body != "":
+			operation.Request.Body = trimReviewTextToSuffix(operation.Request.Body, len(operation.Request.Body)-excess-1)
+		default:
+			return operation
+		}
+	}
+}
+
 func (s durableReviewStore) write(ctx context.Context, op review.Operation) error {
 	at, err := kernel.NewUnixMillis(s.now().UnixMilli())
 	if err != nil {
 		return err
 	}
-	return s.store.RecordReviewOperation(ctx, s.project, s.repository, op.ID, op, at)
+	return s.store.RecordReviewOperation(ctx, s.project, s.repository, op.ID, boundDurableReviewOperation(op), at)
 }
 func (s durableReviewStore) Create(ctx context.Context, op review.Operation) error {
 	return s.write(ctx, op)

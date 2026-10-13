@@ -292,6 +292,45 @@ func TestRestartDoesNotRouteRequestChangesBeforeSubmit(t *testing.T) {
 	}
 }
 
+func TestDurableReviewStoreBoundsRequestAndVerdictTogether(t *testing.T) {
+	fixture, project := reviewPublicFixture(t)
+	store := durableReviewStore{store: fixture.store, project: project, repository: "team/repo", now: func() time.Time { return time.Unix(2, 0) }}
+	op := review.Operation{
+		ID:    "large-review-operation",
+		State: "running",
+		Request: review.Request{
+			Repository:    "team/repo",
+			PullNumber:    13,
+			Head:          strings.Repeat("a", 40),
+			Base:          strings.Repeat("b", 40),
+			BaseRef:       "main",
+			Body:          strings.Repeat("body ", 4800),
+			PriorFindings: strings.Repeat("finding ", 4572),
+			Provider:      "codex",
+		},
+	}
+	if err := store.Create(context.Background(), op); err != nil {
+		t.Fatalf("create oversized review operation: %v", err)
+	}
+	op.State = "completed"
+	op.Verdict = "REQUEST_CHANGES"
+	op.Detail = strings.Repeat("verdict ", 1715)
+	if err := store.Update(context.Background(), op); err != nil {
+		t.Fatalf("update oversized review operation: %v", err)
+	}
+	recovered := lastDurableReview(t, fixture.store, project)
+	body, err := json.Marshal(recovered)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(body) > 32768 {
+		t.Fatalf("durable review operation length=%d", len(body))
+	}
+	if len(recovered.Request.PriorFindings) >= len(op.Request.PriorFindings) {
+		t.Fatalf("prior findings were not bounded: %d", len(recovered.Request.PriorFindings))
+	}
+}
+
 // publishedTask publishes pull 12 at head eeee… from a task that is running;
 // settle ends its run so a send-back can land.
 func publishedTask(t *testing.T) (fixture *dispatchFixture, project kernel.ProjectID, task kernel.Task, settle func()) {
