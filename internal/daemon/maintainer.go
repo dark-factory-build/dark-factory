@@ -3,7 +3,6 @@ package daemon
 import (
 	"bytes"
 	"context"
-	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -443,8 +442,6 @@ func frozenAcceptedIssueResponse(request maintainerRequest, accepted kernel.Inta
 	if err != nil {
 		return nil, err
 	}
-	issue.Title = accepted.Snapshot.Title
-	issue.Body = accepted.Snapshot.Body
 	return json.Marshal(frozenIssueResponse{
 		JSONRPC: request.JSONRPC,
 		ID:      request.ID,
@@ -484,16 +481,7 @@ func (daemon *Daemon) liveAcceptedIssue(ctx context.Context, accepted kernel.Int
 	if err != nil {
 		return frozenIssue{}, err
 	}
-	return acceptedIssueScope(accepted, issue), nil
-}
-
-func acceptedIssueScope(accepted kernel.IntakeAcceptance, issue frozenIssue) frozenIssue {
-	if issue.Title == accepted.Snapshot.Title && sha256.Sum256([]byte(issue.Body)) == accepted.BodyHash {
-		return issue
-	}
-	issue.Title = accepted.Snapshot.Title
-	issue.Body = accepted.Snapshot.Body
-	return issue
+	return issue, nil
 }
 
 func currentAcceptedIssueMetadata(request maintainerRequest, accepted kernel.IntakeAcceptance, response json.RawMessage) (frozenIssue, error) {

@@ -55,7 +55,7 @@ func TestReviewContextUsesCurrentAcceptedIssue(t *testing.T) {
 	checkout, request := reviewCheckout(t)
 	request.PullNumber = 12
 	contextText := backend.reviewContext(ctx, checkout, request)
-	if !strings.Contains(contextText, "Original scope") || strings.Contains(contextText, "Current title") || strings.Contains(contextText, "Current scope") {
+	if !strings.Contains(contextText, "Current title") || strings.Contains(contextText, "Original scope") || strings.Contains(contextText, "Current scope") {
 		t.Fatalf("review context = %q", contextText)
 	}
 }

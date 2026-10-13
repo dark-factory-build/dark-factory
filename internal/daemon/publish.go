@@ -273,7 +273,7 @@ func (daemon *Daemon) publishPull(ctx context.Context, c kernel.PublishableChang
 				Title  string `json:"title"`
 				Body   string `json:"body"`
 			}
-			if json.Unmarshal(response, &observed) == nil && observed.Number == issue && observed.Title == issueTitle && sha256.Sum256([]byte(observed.Body)) == c.Accepted.BodyHash {
+			if json.Unmarshal(response, &observed) == nil && observed.Number == issue {
 				issueTitle, issueBody = observed.Title, observed.Body
 			}
 		}

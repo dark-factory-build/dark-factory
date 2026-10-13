@@ -232,7 +232,7 @@ func TestFactorydPublishesASettledIntakeChange(t *testing.T) {
 	publishedExactly(t, app, source, c.Head)
 	body := pull["body"].(string)
 	if pull["head_sha"] != c.Head || pull["issue_number"] != uint64(9) || pull["source_repository"] != nil || pull["close_on_merge"] != false || pull["base_sha"] != c.Base ||
-		strings.Contains(body, "example.com") || strings.Contains(body, "/Users/") || strings.Contains(body, "Current operator scope") || !strings.Contains(body, "Fix  the\nthing") || strings.Contains(body, "Implemented it") || !strings.Contains(body, c.Head) || !strings.Contains(body, "+51 -1 across 52 files") || !strings.HasSuffix(body, "The merge queue runs the gate.\n\nRefs #9") {
+		strings.Contains(body, "example.com") || strings.Contains(body, "/Users/") || !strings.Contains(body, "Current operator scope") || strings.Contains(body, "Implemented it") || !strings.Contains(body, c.Head) || !strings.Contains(body, "+51 -1 across 52 files") || !strings.HasSuffix(body, "The merge queue runs the gate.\n\nRefs #9") {
 		t.Fatalf("pull request = %+v", pull)
 	}
 	if pr := readProductionPull(t, fixture.store, c.Task.ProjectID, 31); pr.Head != c.Head || pr.Branch != "factory/"+c.Change.String()[:12] {
@@ -448,7 +448,7 @@ func TestAnEvidenceOnlyCorrectionReplacesOnlyTheBody(t *testing.T) {
 		t.Fatal(err)
 	}
 	body := app.writes[0]["arguments"].(map[string]any)["body"].(string)
-	if len(app.writes) != 1 || app.writes[0]["name"] != "update_pull_request_body" || !strings.Contains(body, "Premise not reproduced") || !strings.Contains(body, "Fix  the\nthing") || strings.Contains(body, "Current operator scope") {
+	if len(app.writes) != 1 || app.writes[0]["name"] != "update_pull_request_body" || !strings.Contains(body, "Premise not reproduced") || !strings.Contains(body, "Current operator scope") {
 		t.Fatalf("writes = %+v", app.writes)
 	}
 }
@@ -602,11 +602,12 @@ func TestDisabledAcceptedRepositoryEscalatesOnce(t *testing.T) {
 // even when that marker lies past what the body shows.
 func TestAPartialIntakeChangeReferencesItsIssue(t *testing.T) {
 	fixture, c, source, app, checkout := publishFixture(t, 1, false)
+	app.issueBody = "Current operator scope"
 	c.Task.Result = "Partial: items 1 and 5. Fixes #9 once item 2 lands.\n" + strings.Repeat("report line\n", 3000) + "Refs #9" // beyond the 24000-byte body
 	if err := fixture.daemon.publishChange(context.Background(), c, "team/repo", source, app.call, checkout); err != nil {
 		t.Fatal(err)
 	}
-	if pull := app.writes[len(app.writes)-1]["arguments"].(map[string]any); pull["close_on_merge"] != false || pull["issue_number"] != uint64(9) || !strings.Contains(pull["body"].(string), "Fix  the\nthing") || strings.Contains(pull["body"].(string), "Fixes #9") {
+	if pull := app.writes[len(app.writes)-1]["arguments"].(map[string]any); pull["close_on_merge"] != false || pull["issue_number"] != uint64(9) || !strings.Contains(pull["body"].(string), "Current operator scope") || strings.Contains(pull["body"].(string), "Fixes #9") {
 		t.Fatalf("pull request = %+v", pull)
 	}
 }
