@@ -911,9 +911,13 @@ func (b *daemonReviewBackend) reviewContext(ctx context.Context, checkout string
 		}
 		if task, found, err := b.daemon.store.Task(ctx, open.Task); err == nil && found {
 			goal = kernel.TaskInstruction(task)
-			if accepted, linked, acceptanceErr := b.daemon.store.IntakeAcceptanceForTask(ctx, task.ID); acceptanceErr == nil && linked && accepted.Snapshot.LinearTeamID == "" && b.daemon.github != nil && b.daemon.github.CustomerMode() {
-				if issue, liveErr := b.daemon.liveAcceptedIssue(ctx, accepted); liveErr == nil {
-					goal, _ = kernel.TaskBodyWithInstruction(task, kernel.IntakeTaskBody(accepted, issue.Title, issue.Body))
+			if accepted, linked, acceptanceErr := b.daemon.store.IntakeAcceptanceForTask(ctx, task.ID); acceptanceErr == nil && linked && accepted.Snapshot.LinearTeamID == "" {
+				if b.daemon.github == nil || !b.daemon.github.CustomerMode() {
+					goal = "Current accepted issue scope unavailable: GitHub Maintainer is not connected."
+				} else if issue, liveErr := b.daemon.liveAcceptedIssue(ctx, accepted); liveErr != nil {
+					goal = "Current accepted issue scope unavailable: " + liveErr.Error()
+				} else {
+					goal = kernel.IntakeTaskBody(accepted, issue.Title, issue.Body)
 				}
 			}
 			goal = strings.ToValidUTF8(goal[:min(len(goal), 8000)], "")

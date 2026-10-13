@@ -252,6 +252,24 @@ func TestFactorydPublishesASettledIntakeChange(t *testing.T) {
 	}
 }
 
+func TestIntakePublicationSurfacesCurrentIssueObservationFailure(t *testing.T) {
+	fixture, c, source, app, checkout := publishFixture(t, 1, false)
+	c.Accepted.SourceRepository = "feed/issues"
+	call := func(ctx context.Context, name string, arguments map[string]any) (json.RawMessage, error) {
+		if name == "observe_issue" {
+			return nil, errors.New("issue observation unavailable")
+		}
+		return app.call(ctx, name, arguments)
+	}
+	if err := fixture.daemon.publishChange(context.Background(), c, "team/repo", source, call, checkout); err != nil {
+		t.Fatal(err)
+	}
+	document, found, err := fixture.store.ReviewOperation(context.Background(), c.Task.ProjectID, kernel.PublishFailureID(c.Change, c.Revision))
+	if err != nil || !found || !strings.Contains(string(document), "observe accepted issue #9: issue observation unavailable") {
+		t.Fatalf("issue observation failure was not surfaced: found=%v err=%v document=%s", found, err, document)
+	}
+}
+
 // A head that changes after an earlier head reached the Change's branch but
 // before its pull request (a retried task) replaces that branch head, a range
 // of two worker commits pushed exactly.

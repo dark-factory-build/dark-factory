@@ -48,6 +48,11 @@ func TestReviewContextUsesCurrentAcceptedIssue(t *testing.T) {
 	if err := fixture.store.RecordPublication(ctx, project, task.ID, "team/repo", kernel.ProductionPullRequest{Number: 12, Title: "Ship it", URL: "https://github.com/team/repo/pull/12", Head: head, Branch: "feature/ship", Base: "main", State: "open", Review: kernel.ProductionReview{Head: head, State: "unknown"}}, mustKernelTime(t, 103)); err != nil {
 		t.Fatal(err)
 	}
+	feedback := "retry this operation"
+	feedbackBody := task.Body + "\n\n## Sent back for work revision 2\n\n" + feedback
+	if _, err := fixture.store.UpdateTask(ctx, task.ID, task.Revision, kernel.TaskPatch{Body: &feedbackBody}, mustKernelTime(t, 104)); err != nil {
+		t.Fatal(err)
+	}
 	fixture.daemon.githubMCP = func(_ context.Context, _ json.RawMessage, _ map[string]uint64) (json.RawMessage, error) {
 		return json.RawMessage(`{"jsonrpc":"2.0","id":1,"result":{"structuredContent":{"number":9,"url":"https://github.com/team/issues/issues/9","title":"Current title","body":"","labels":[],"updated_at":"2026-10-13T00:00:00Z","state":"open","state_reason":null},"content":[{"type":"text","text":"Current title"}],"isError":false}}`), nil
 	}
@@ -55,8 +60,15 @@ func TestReviewContextUsesCurrentAcceptedIssue(t *testing.T) {
 	checkout, request := reviewCheckout(t)
 	request.PullNumber = 12
 	contextText := backend.reviewContext(ctx, checkout, request)
-	if !strings.Contains(contextText, "Current title") || strings.Contains(contextText, "Original scope") || strings.Contains(contextText, "Current scope") {
+	if !strings.Contains(contextText, "Current title") || strings.Contains(contextText, "Original scope") || strings.Contains(contextText, "Current scope") || strings.Contains(contextText, feedback) {
 		t.Fatalf("review context = %q", contextText)
+	}
+	fixture.daemon.githubMCP = func(context.Context, json.RawMessage, map[string]uint64) (json.RawMessage, error) {
+		return nil, errors.New("issue observation unavailable")
+	}
+	failedContext := backend.reviewContext(ctx, checkout, request)
+	if !strings.Contains(failedContext, "Current accepted issue scope unavailable") || strings.Contains(failedContext, "Original scope") || strings.Contains(failedContext, feedback) {
+		t.Fatalf("failed review context = %q", failedContext)
 	}
 }
 

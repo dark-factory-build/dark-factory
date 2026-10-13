@@ -267,16 +267,21 @@ func (daemon *Daemon) publishPull(ctx context.Context, c kernel.PublishableChang
 	issueBody := c.Accepted.Snapshot.Body
 	if sourceRepository := c.Accepted.SourceRepository; sourceRepository != "" {
 		response, observeErr := call(ctx, "observe_issue", map[string]any{"repository": sourceRepository, "issue_number": issue})
-		if observeErr == nil {
-			var observed struct {
-				Number uint64 `json:"number"`
-				Title  string `json:"title"`
-				Body   string `json:"body"`
-			}
-			if json.Unmarshal(response, &observed) == nil && observed.Number == issue {
-				issueTitle, issueBody = observed.Title, observed.Body
-			}
+		if observeErr != nil {
+			return fmt.Errorf("observe accepted issue #%d: %w", issue, observeErr)
 		}
+		var observed struct {
+			Number uint64 `json:"number"`
+			Title  string `json:"title"`
+			Body   string `json:"body"`
+		}
+		if err := json.Unmarshal(response, &observed); err != nil {
+			return fmt.Errorf("decode accepted issue #%d: %w", issue, err)
+		}
+		if observed.Number != issue {
+			return fmt.Errorf("observe accepted issue #%d: response was issue #%d", issue, observed.Number)
+		}
+		issueTitle, issueBody = observed.Title, observed.Body
 	}
 	if strings.TrimSpace(issueBody) == "" {
 		issueBody = issueTitle
