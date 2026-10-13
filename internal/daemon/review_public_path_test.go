@@ -24,13 +24,10 @@ type publicReviewBackend struct {
 	queued                                  bool
 	checks                                  []string
 	enqueueRefusal                          string // the broker's refusal class, if any
-	enqueueBindingRefusal                   string
-	enqueueBindingObserved                  string
-	enqueueBindingBody                      string
-	observeBindingRefusal                   string
-	observeBindingObserved                  string
 	defaultBranch                           string
 	liveBaseRef                             string
+	liveBaseSHA                             string
+	liveBody                                string
 	leaveUnqueued                           int
 	reviews, submits, enqueues              int
 	enqueueSignal                           atomic.Int32
@@ -40,14 +37,13 @@ type publicReviewBackend struct {
 	pull                                    *review.Pull
 	observeFailures                         int
 	storedErr                               error
-	storedBody                              string
 }
 
 func (b *publicReviewBackend) StoredPull(_ context.Context, pull uint64, head string) (review.Request, error) {
 	if b.storedErr != nil {
 		return review.Request{}, b.storedErr
 	}
-	body := b.storedBody
+	body := b.liveBody
 	if body == "" {
 		body = "fixture body\n"
 	}
@@ -83,16 +79,21 @@ func (b *publicReviewBackend) Enqueue(_ context.Context, operation review.Operat
 	if b.defaultBranch != "" && operation.Request.BaseRef != b.defaultBranch {
 		return maintainerRejection("conflict: The exact-head, operation, or observed-object binding did not match.")
 	}
+	if b.liveBaseRef != "" && operation.Request.BaseRef != b.liveBaseRef {
+		return maintainerConflict("base", operation.Request.BaseRef, b.liveBaseRef)
+	}
+	if b.liveBaseSHA != "" && operation.Request.Base != b.liveBaseSHA {
+		return maintainerConflict("base", operation.Request.Base, b.liveBaseSHA)
+	}
+	liveBody := b.liveBody
+	if liveBody == "" {
+		liveBody = "fixture body\n"
+	}
+	if observed := digestText(liveBody); observed != reviewedBodyDigest(operation) {
+		return maintainerConflict("body_digest", reviewedBodyDigest(operation), observed)
+	}
 	if b.enqueueRefusal != "" {
 		return maintainerRejection("refused: The request was refused: rejected before execution as " + b.enqueueRefusal + ".")
-	}
-	if b.enqueueBindingRefusal != "" {
-		binding := b.enqueueBindingRefusal
-		b.enqueueBindingRefusal = ""
-		if b.enqueueBindingBody != "" {
-			b.storedBody = b.enqueueBindingBody
-		}
-		return maintainerConflict(binding, "old", b.enqueueBindingObserved)
 	}
 	if b.leaveUnqueued > 0 {
 		b.leaveUnqueued--
@@ -126,11 +127,12 @@ func TestEnqueueBaseBindingRefreshesTheRequestBeforeRetry(t *testing.T) {
 	customerMode(t, fixture)
 	ctx := context.Background()
 	newBase := strings.Repeat("c", 40)
-	backend := &publicReviewBackend{enqueueBindingRefusal: "base", enqueueBindingObserved: newBase}
+	backend := &publicReviewBackend{}
 	fixture.daemon.reviewBackend = func(string, uint64) review.Backend { return backend }
 	if _, err := reviewNow(ctx, fixture.daemon, project, publishedReviewRequest()); err != nil {
 		t.Fatal(err)
 	}
+	backend.liveBaseSHA = newBase
 	waitForMergePipeline(t, fixture.daemon)
 	if backend.enqueues != 1 {
 		t.Fatalf("initial enqueue count=%d", backend.enqueues)
@@ -154,18 +156,15 @@ func TestEnqueueBodyBindingStartsAFreshSameHeadReview(t *testing.T) {
 	customerMode(t, fixture)
 	ctx := context.Background()
 	newBody := "edited body\n"
-	backend := &publicReviewBackend{
-		enqueueBindingRefusal:  "body_digest",
-		enqueueBindingObserved: digestText(newBody),
-		enqueueBindingBody:     newBody,
-	}
+	backend := &publicReviewBackend{}
 	fixture.daemon.reviewBackend = func(string, uint64) review.Backend { return backend }
 	if _, err := reviewNow(ctx, fixture.daemon, project, publishedReviewRequest()); err != nil {
 		t.Fatal(err)
 	}
+	backend.liveBody = newBody
 	waitForMergePipeline(t, fixture.daemon)
 	op := waitForDurableReviewMatching(t, fixture.store, project, func(op review.Operation) bool {
-		return op.Request.Body == newBody && op.State == "enqueued"
+		return op.Request.Body == newBody && op.State == "enqueued" && op.Enqueues == 1
 	})
 	if backend.enqueues != 2 || backend.reviews != 2 || op.Request.Head != publishedReviewRequest().Head || op.Request.Body != newBody {
 		t.Fatalf("body binding did not start a fresh same-head review: operation=%+v reviews=%d enqueues=%d", op, backend.reviews, backend.enqueues)
@@ -207,11 +206,6 @@ func (b *publicReviewBackend) ObservePull(_ context.Context, operation review.Op
 	}
 	if b.liveBaseRef != "" && operation.Request.BaseRef != b.liveBaseRef {
 		return review.Pull{}, maintainerConflict("base", operation.Request.BaseRef, b.liveBaseRef)
-	}
-	if b.observeBindingRefusal != "" {
-		binding := b.observeBindingRefusal
-		b.observeBindingRefusal = ""
-		return review.Pull{}, maintainerConflict(binding, "old", b.observeBindingObserved)
 	}
 	if b.pull != nil {
 		return *b.pull, nil
