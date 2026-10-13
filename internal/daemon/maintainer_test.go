@@ -191,7 +191,7 @@ func TestAcceptedIssueObservationReturnsCurrentIssue(t *testing.T) {
 		t.Fatalf("frozen envelope = %s", response)
 	}
 	issue := reply.Result.Issue
-	if issue.Number != accepted.Snapshot.IssueNumber || issue.URL != "https://github.com/feed/original/issues/9" || issue.Title != "revised instructions" || issue.Body != "revised untrusted instructions" || len(issue.Labels) != 1 || issue.Labels[0] != "regression" || issue.UpdatedAt != "2026-09-18T20:00:00Z" || issue.State != "closed" || issue.StateReason == nil || *issue.StateReason != "completed" {
+	if issue.Number != accepted.Snapshot.IssueNumber || issue.URL != "https://github.com/feed/original/issues/9" || issue.Title != "reviewed" || issue.Body != "safe snapshot" || len(issue.Labels) != 1 || issue.Labels[0] != "regression" || issue.UpdatedAt != "2026-09-18T20:00:00Z" || issue.State != "closed" || issue.StateReason == nil || *issue.StateReason != "completed" {
 		t.Fatalf("current response = %s", response)
 	}
 	for _, malformed := range []json.RawMessage{

@@ -1048,7 +1048,7 @@ func TestDaemonServesCurrentWorkerAssignmentReceipt(t *testing.T) {
 	}
 }
 
-func TestAttemptTaskUsesCurrentAcceptedIssueBody(t *testing.T) {
+func TestAttemptTaskUsesAcceptedIssueBody(t *testing.T) {
 	fixture := newDispatchFixture(t)
 	ctx := context.Background()
 	project := mustProjectID(t, testID(220))
@@ -1120,7 +1120,7 @@ func TestAttemptTaskUsesCurrentAcceptedIssueBody(t *testing.T) {
 		t.Fatal(err)
 	}
 	liveShell, err := fixture.daemon.currentTaskText(ctx, kernel.ProviderShell, queued)
-	if err != nil || !strings.Contains(liveShell, "Edited scope") || strings.Contains(liveShell, "Original scope") {
+	if err != nil || !strings.Contains(liveShell, "Original scope") || strings.Contains(liveShell, "Edited scope") {
 		t.Fatalf("shell task text = %q, err=%v", liveShell, err)
 	}
 	active := prepareActiveAttemptInProjectWithProviderAndTask(t, fixture, 220, project.String(), "orchestrator", "shell", receipt.TaskID, func() {})
@@ -1130,7 +1130,7 @@ func TestAttemptTaskUsesCurrentAcceptedIssueBody(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(assignment.Task, "Edited scope") || strings.Contains(assignment.Task, "Original scope") {
+	if !strings.Contains(assignment.Task, "Original scope") || strings.Contains(assignment.Task, "Edited scope") {
 		t.Fatalf("attempt task = %q", assignment.Task)
 	}
 }

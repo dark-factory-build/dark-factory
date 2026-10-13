@@ -58,7 +58,7 @@ func TestReviewContextUsesCurrentAcceptedIssue(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(contextText, "Current title") || strings.Contains(contextText, "Original scope") {
+	if !strings.Contains(contextText, "Original scope") || strings.Contains(contextText, "Current title") || strings.Contains(contextText, "Current scope") {
 		t.Fatalf("review context = %q", contextText)
 	}
 }
