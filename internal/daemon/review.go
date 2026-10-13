@@ -623,7 +623,8 @@ type durableReviewStore struct {
 }
 
 // productionRecordOnConnection applies the tighter 32 KiB projection limit
-// after RecordReviewOperation's 64 KiB lifecycle check.
+// after RecordReviewOperation's 64 KiB lifecycle check. The reviewed body is
+// never trimmed: enqueue binds its digest to the exact stored body.
 const maxDurableReviewOperationJSON = 32768 - 512
 
 func trimReviewTextToSuffix(value string, keep int) string {
@@ -652,8 +653,6 @@ func boundDurableReviewOperation(operation review.Operation) review.Operation {
 			operation.Request.PriorFindings = trimReviewTextToSuffix(operation.Request.PriorFindings, len(operation.Request.PriorFindings)-excess-1)
 		case operation.Detail != "":
 			operation.Detail = trimReviewTextToSuffix(operation.Detail, len(operation.Detail)-excess-1)
-		case operation.Request.Body != "":
-			operation.Request.Body = trimReviewTextToSuffix(operation.Request.Body, len(operation.Request.Body)-excess-1)
 		default:
 			return operation
 		}

@@ -309,6 +309,7 @@ func TestDurableReviewStoreBoundsRequestAndVerdictTogether(t *testing.T) {
 			Provider:      "codex",
 		},
 	}
+	expectedBodyDigest := reviewedBodyDigest(op)
 	if err := store.Create(context.Background(), op); err != nil {
 		t.Fatalf("create oversized review operation: %v", err)
 	}
@@ -328,6 +329,9 @@ func TestDurableReviewStoreBoundsRequestAndVerdictTogether(t *testing.T) {
 	}
 	if len(recovered.Request.PriorFindings) >= len(op.Request.PriorFindings) {
 		t.Fatalf("prior findings were not bounded: %d", len(recovered.Request.PriorFindings))
+	}
+	if recovered.Request.Body != op.Request.Body || reviewedBodyDigest(recovered) != expectedBodyDigest {
+		t.Fatalf("reviewed body changed: want digest %s, got %s", expectedBodyDigest, reviewedBodyDigest(recovered))
 	}
 }
 
