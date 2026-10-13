@@ -62,6 +62,15 @@ func TestReviewPromptDelimitsAuthorControlledBodyAsUntrusted(t *testing.T) {
 	if !strings.Contains(prompt[:start], "premise or evidence is wrong") || !strings.Contains(prompt[:start], "previous findings together with the new diff") || !strings.Contains(prompt[:start], "exercises the real affected path and condition") {
 		t.Fatalf("incremental evidence guidance missing before body: %q", prompt)
 	}
+	for _, question := range []string{
+		"which other callers or paths share the condition",
+		"Do the tests exercise the real input",
+		"is there a simpler or deleting alternative",
+	} {
+		if !strings.Contains(prompt, question) {
+			t.Fatalf("review prompt missing %q: %q", question, prompt)
+		}
+	}
 }
 
 func TestReviewPromptCarriesPriorBlockingFindingsToANewHead(t *testing.T) {
@@ -382,9 +391,9 @@ func TestAnAllowThatNamesNoChangedPathRemainsAVerdict(t *testing.T) {
 	}
 }
 
-// A head whose tree equals its base (#1600) is allowed without a reviewer,
-// whose ALLOW could name no changed path and so would exhaust its retries.
-func TestAnEmptyChangeIsAllowedWithoutAReviewer(t *testing.T) {
+// A head whose tree equals its base (#1600) is rejected without a reviewer,
+// because there is no changed path to merge.
+func TestAnEmptyChangeIsRejectedWithoutAReviewer(t *testing.T) {
 	// No daemon: looking up a reviewer login would panic.
 	backend := &daemonReviewBackend{}
 	checkout, request := reviewCheckout(t)
@@ -397,8 +406,8 @@ func TestAnEmptyChangeIsAllowedWithoutAReviewer(t *testing.T) {
 	}
 	request.Base = strings.TrimSpace(string(output))
 	verdict, err := backend.Review(context.Background(), checkout, request)
-	if err != nil || verdict.Event != "ALLOW" || !strings.Contains(verdict.Body, "changes no path") {
-		t.Fatalf("verdict=%+v err=%v, want a reviewerless ALLOW of the empty change", verdict, err)
+	if err != nil || verdict.Event != "REQUEST_CHANGES" || !strings.Contains(verdict.Body, "changes no path") {
+		t.Fatalf("verdict=%+v err=%v, want a reviewerless rejection of the empty change", verdict, err)
 	}
 }
 
