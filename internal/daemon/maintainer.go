@@ -453,10 +453,7 @@ func frozenAcceptedIssueResponse(request maintainerRequest, accepted kernel.Inta
 }
 
 func (daemon *Daemon) liveAcceptedIssue(ctx context.Context, accepted kernel.IntakeAcceptance) (frozenIssue, error) {
-	if daemon.liveIssue != nil {
-		return daemon.liveIssue(ctx, accepted)
-	}
-	if accepted.Snapshot.LinearTeamID != "" || daemon.github == nil {
+	if accepted.Snapshot.LinearTeamID != "" || daemon.github == nil && daemon.githubMCP == nil {
 		return frozenIssue{}, errors.New("live issue source unavailable")
 	}
 	request := maintainerRequest{JSONRPC: "2.0", ID: json.RawMessage("1"), Method: "tools/call"}
@@ -471,7 +468,12 @@ func (daemon *Daemon) liveAcceptedIssue(ctx context.Context, accepted kernel.Int
 	if err != nil {
 		return frozenIssue{}, err
 	}
-	response, err := daemon.github.MCP(ctx, encoded, map[string]uint64{accepted.SourceRepository: accepted.Snapshot.GitHubRepositoryID})
+	var response json.RawMessage
+	if daemon.githubMCP != nil {
+		response, err = daemon.githubMCP(ctx, encoded, map[string]uint64{accepted.SourceRepository: accepted.Snapshot.GitHubRepositoryID})
+	} else {
+		response, err = daemon.github.MCP(ctx, encoded, map[string]uint64{accepted.SourceRepository: accepted.Snapshot.GitHubRepositoryID})
+	}
 	if err != nil {
 		return frozenIssue{}, err
 	}

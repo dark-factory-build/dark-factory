@@ -1089,8 +1089,21 @@ func TestAttemptTaskUsesCurrentAcceptedIssueBody(t *testing.T) {
 		t.Fatalf("import = %+v", imported)
 	}
 	issue.Body = "Edited scope"
-	fixture.daemon.liveIssue = func(context.Context, kernel.IntakeAcceptance) (frozenIssue, error) {
-		return frozenIssue{Number: issue.Number, Title: issue.Title, Body: issue.Body}, nil
+	fixture.daemon.githubMCP = func(_ context.Context, request json.RawMessage, repositories map[string]uint64) (json.RawMessage, error) {
+		var call struct {
+			Params struct {
+				Arguments struct {
+					Repository string `json:"repository"`
+					Issue      uint64 `json:"issue_number"`
+				} `json:"arguments"`
+			} `json:"params"`
+		}
+		if err := json.Unmarshal(request, &call); err != nil || call.Params.Arguments.Repository != "team/issues" || call.Params.Arguments.Issue != issue.Number || repositories["team/issues"] != 42 {
+			t.Fatalf("live issue request = %s repositories=%v", request, repositories)
+		}
+		return json.Marshal(map[string]any{"jsonrpc": "2.0", "id": 1, "result": map[string]any{"structuredContent": map[string]any{
+			"number": issue.Number, "url": issue.URL, "title": issue.Title, "body": issue.Body, "labels": []string{}, "updated_at": "2026-10-13T00:00:00Z", "state": "open", "state_reason": nil,
+		}, "content": []map[string]string{{"type": "text", "text": issue.Body}}, "isError": false}})
 	}
 	customerMode(t, fixture)
 	queuedID, err := decodeID(receipt.TaskID, kernel.TaskIDFromBytes)

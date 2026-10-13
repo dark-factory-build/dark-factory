@@ -5,6 +5,7 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -61,9 +62,9 @@ type Daemon struct {
 	releaseSince atomic.Int64
 	// intakeIssues is a package-test-only remote failure/race seam.
 	intakeIssues func(context.Context, string, uint64, uint32, string, uint64) (maintainer.IssuePage, error)
-	// liveIssue is a package-test-only seam for the accepted issue read used by
-	// the attempt path.
-	liveIssue func(context.Context, kernel.IntakeAcceptance) (frozenIssue, error)
+	// githubMCP is a package-test-only transport seam for GitHub Maintainer
+	// calls; production uses github.MCP directly.
+	githubMCP func(context.Context, json.RawMessage, map[string]uint64) (json.RawMessage, error)
 	// browserRemote is a package-test-only seam for operator calls that wait
 	// outside a paired client's gate.
 	browserRemote       func(context.Context, string)
