@@ -230,12 +230,12 @@ func TestReconciliationPersistsMergeGroupFailureForReport(t *testing.T) {
 		}
 	}
 	backend := &publicReviewBackend{broker: call}
-	customerMode(t, fixture)
-	fixture.daemon.reviewBackend = func(string, uint64) review.Backend { return backend }
-	if _, err := reviewNow(context.Background(), fixture.daemon, project, request); err != nil {
+	observation, err := productionObservation(context.Background(), backend.broker, request.Repository, 42, nil, nil, func(error) {})
+	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := fixture.daemon.advanceReviewOperations(context.Background(), false); err != nil {
+	observation.ObservedAt = 3000
+	if err := fixture.store.RecordProductionObservation(context.Background(), project, observation, mustKernelTime(t, 3000)); err != nil {
 		t.Fatal(err)
 	}
 	lines, err := fixture.store.Report(context.Background(), &project, 0, 3600000)
