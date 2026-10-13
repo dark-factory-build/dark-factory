@@ -91,12 +91,45 @@ type factorydProcess struct {
 	exited chan struct{}
 }
 
+func focusedDaemonE2ESelection(args []string) bool {
+	for i, arg := range args {
+		if arg == "-test.run" {
+			return i+1 < len(args) && args[i+1] != ""
+		}
+		if strings.HasPrefix(arg, "-test.run=") {
+			return len(arg) > len("-test.run=")
+		}
+	}
+	return false
+}
+
+func TestFocusedDaemonE2ESelection(t *testing.T) {
+	for name, test := range map[string]struct {
+		args    []string
+		focused bool
+	}{
+		"broad package run":     {args: []string{"-test.v"}},
+		"focused equals form":   {args: []string{"-test.run=TestBlackBoxDaemonLifecycle"}, focused: true},
+		"focused separate form": {args: []string{"-test.run", "TestBlackBoxDaemonLifecycle"}, focused: true},
+		"empty selection":       {args: []string{"-test.run="}},
+	} {
+		t.Run(name, func(t *testing.T) {
+			if got := focusedDaemonE2ESelection(test.args); got != test.focused {
+				t.Fatalf("focusedDaemonE2ESelection(%q) = %v, want %v", test.args, got, test.focused)
+			}
+		})
+	}
+}
+
 // TestBlackBoxDaemonLifecycle drives the real installed-shape binaries: a
 // factoryctl-initialized temporary home, a real factoryd process, operator
 // subcommands over the real socket, one shell task to a succeeded terminal
 // record, and the SIGKILL crash cuts the recovery matrix proves black-box.
 func TestBlackBoxDaemonLifecycle(t *testing.T) {
 	if os.Getenv("DARK_FACTORY_DAEMON_E2E") != "1" {
+		if !focusedDaemonE2ESelection(os.Args) {
+			t.Skip("daemon E2E requires scripts/go-e2e.sh daemon")
+		}
 		t.Fatal("daemon E2E requires scripts/go-e2e.sh daemon; run that command instead")
 	}
 	fixture := newBlackBoxFixture(t)
