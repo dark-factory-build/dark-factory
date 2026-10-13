@@ -39,6 +39,7 @@ type fakePublishMaintainer struct {
 	loseNext        bool             // the next write lands but its response is lost
 	body            string           // the open pull request's stored body
 	issueBody       string           // the current source issue body
+	issueTitle      string           // the current source issue title
 	issueRepository string           // repository used for the current source issue
 }
 
@@ -69,7 +70,7 @@ func (f *fakePublishMaintainer) call(_ context.Context, name string, arguments m
 		return json.Marshal(map[string]any{"pull_requests": []any{map[string]any{"number": arguments["pull_number"], "head_sha": f.tip, "body": f.body}}})
 	case "observe_issue":
 		f.issueRepository, _ = arguments["repository"].(string)
-		return json.Marshal(map[string]any{"number": arguments["issue_number"], "body": f.issueBody})
+		return json.Marshal(map[string]any{"number": arguments["issue_number"], "title": f.issueTitle, "body": f.issueBody})
 	}
 	if _, replay := f.journal[id]; replay || f.planned[id] {
 		return nil, fmt.Errorf("conflict: operation %s replayed", id)
@@ -185,7 +186,7 @@ func publishFixture(t *testing.T, files int, workflow bool) (*dispatchFixture, k
 	}
 	bare := filepath.Join(t.TempDir(), "github.git")
 	supervisorGit(t, git, "clone", "-q", "--bare", "--shared", registered, bare)
-	return fixture, candidate, filepath.Join(root, ".git"), &fakePublishMaintainer{t: t, bare: bare, main: base, journal: map[string]json.RawMessage{}}, checkout
+	return fixture, candidate, filepath.Join(root, ".git"), &fakePublishMaintainer{t: t, bare: bare, main: base, journal: map[string]json.RawMessage{}, issueTitle: "Fix  the\nthing"}, checkout
 }
 
 // publishedExactly fails unless GitHub's branch is the worker's head and holds
@@ -608,6 +609,18 @@ func TestAPartialIntakeChangeReferencesItsIssue(t *testing.T) {
 	}
 	if pull := app.writes[len(app.writes)-1]["arguments"].(map[string]any); pull["close_on_merge"] != false || pull["issue_number"] != uint64(9) || !strings.Contains(pull["body"].(string), "Current operator scope") || strings.Contains(pull["body"].(string), "Fixes #9") {
 		t.Fatalf("pull request = %+v", pull)
+	}
+}
+
+func TestTitleOnlyIntakePublicationUsesObservedTitle(t *testing.T) {
+	fixture, c, source, app, checkout := publishFixture(t, 1, false)
+	c.Task.Result = "worker result must not replace the title"
+	if err := fixture.daemon.publishChange(context.Background(), c, "team/repo", source, app.call, checkout); err != nil {
+		t.Fatal(err)
+	}
+	body := app.writes[len(app.writes)-1]["arguments"].(map[string]any)["body"].(string)
+	if !strings.Contains(body, c.Accepted.Snapshot.Title) || strings.Contains(body, c.Task.Result) {
+		t.Fatalf("title-only body = %q", body)
 	}
 }
 

@@ -263,6 +263,7 @@ func (daemon *Daemon) publishPull(ctx context.Context, c kernel.PublishableChang
 		}
 	}
 	issue := c.Accepted.Snapshot.IssueNumber
+	issueTitle := c.Accepted.Snapshot.Title
 	issueBody := c.Accepted.Snapshot.Body
 	if sourceRepository := c.Accepted.SourceRepository; sourceRepository != "" {
 		response, observeErr := call(ctx, "observe_issue", map[string]any{"repository": sourceRepository, "issue_number": issue})
@@ -271,15 +272,20 @@ func (daemon *Daemon) publishPull(ctx context.Context, c kernel.PublishableChang
 		}
 		var observed struct {
 			Number uint64 `json:"number"`
+			Title  string `json:"title"`
 			Body   string `json:"body"`
 		}
 		if json.Unmarshal(response, &observed) != nil || observed.Number != issue {
 			return errors.New("observe intake issue returned an invalid issue")
 		}
+		issueTitle = observed.Title
 		issueBody = observed.Body
 	}
 	if strings.TrimSpace(issueBody) == "" {
-		issueBody = c.Task.Result
+		issueBody = issueTitle
+		if strings.TrimSpace(issueBody) == "" {
+			issueBody = c.Task.Result
+		}
 	} else if c.Pull != 0 && strings.TrimSpace(c.Task.Result) != "" {
 		issueBody += "\n\nCorrection result:\n" + c.Task.Result
 	}
