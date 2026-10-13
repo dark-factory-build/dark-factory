@@ -54,10 +54,7 @@ func TestReviewContextUsesCurrentAcceptedIssue(t *testing.T) {
 	backend := &daemonReviewBackend{daemon: fixture.daemon, project: project, repository: "team/repo", repositoryID: 42}
 	checkout, request := reviewCheckout(t)
 	request.PullNumber = 12
-	contextText, err := backend.reviewContext(ctx, checkout, request)
-	if err != nil {
-		t.Fatal(err)
-	}
+	contextText := backend.reviewContext(ctx, checkout, request)
 	if !strings.Contains(contextText, "Original scope") || strings.Contains(contextText, "Current title") || strings.Contains(contextText, "Current scope") {
 		t.Fatalf("review context = %q", contextText)
 	}
@@ -677,10 +674,7 @@ func TestReviewContextSuppliesGoalHistoryAndCurrentKnowledge(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	context, err := backend.reviewContext(ctx, checkout, request)
-	if err != nil {
-		t.Fatal(err)
-	}
+	context := backend.reviewContext(ctx, checkout, request)
 	for _, want := range []string{"the author's goal", "Earlier fix of changed.go (#7)", "current decision about changed.go"} {
 		if !strings.Contains(context, want) {
 			t.Fatalf("review context lacks %q:\n%s", want, context)
