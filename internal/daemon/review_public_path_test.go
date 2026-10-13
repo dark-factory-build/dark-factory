@@ -159,7 +159,7 @@ func TestEnqueueBodyBindingStartsAFreshSameHeadReview(t *testing.T) {
 		t.Fatal(err)
 	}
 	waitForMergePipeline(t, fixture.daemon)
-	op := waitForDurableReview(t, fixture.store, project, func(op review.Operation) bool {
+	op := waitForDurableReviewMatching(t, fixture.store, project, func(op review.Operation) bool {
 		return op.Request.Body == newBody && op.State == "enqueued"
 	})
 	if backend.enqueues != 2 || backend.reviews != 2 || op.Request.Head != publishedReviewRequest().Head || op.Request.Body != newBody {
@@ -630,6 +630,29 @@ func waitForDurableReview(t *testing.T, store *kernel.Store, project kernel.Proj
 		time.Sleep(5 * time.Millisecond)
 	}
 	return lastDurableReview(t, store, project)
+}
+
+func waitForDurableReviewMatching(t *testing.T, store *kernel.Store, project kernel.ProjectID, ready func(review.Operation) bool) review.Operation {
+	t.Helper()
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		page, err := store.Production(context.Background(), project, 0, 8, kernel.UnixMillis{})
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, record := range page.Records {
+			if record.Kind != "reviewer" {
+				continue
+			}
+			var op review.Operation
+			if json.Unmarshal(record.Document, &op) == nil && ready(op) {
+				return op
+			}
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	t.Fatalf("no matching durable review")
+	return review.Operation{}
 }
 
 func publishedReviewRequest() api.ReviewRequest {
