@@ -346,7 +346,7 @@ func raiseStalledItems(ctx context.Context, tx *writeTx, agent Agent, at UnixMil
 		if err := rows.Scan(&carrier, &line, &ripe, &readyAt); err != nil {
 			return 0, errors.Join(err, rows.Close())
 		}
-		if nextAt == 0 || readyAt < nextAt {
+		if readyAt > at.Int64() && (nextAt == 0 || readyAt < nextAt) {
 			nextAt = readyAt
 		}
 		stalled[string(carrier)] = true
