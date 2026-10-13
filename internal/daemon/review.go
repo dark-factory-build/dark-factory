@@ -260,6 +260,11 @@ func (daemon *Daemon) reconcilePull(ctx context.Context, open kernel.OpenPull, u
 	case pull.State != "open":
 		op.State = pull.State
 	default:
+		if pull.Group != nil {
+			if err = daemon.recordReconciledMergeGroup(ctx, open.Project, open.Repository, op.Request.Head, open.Pull.Number, pull.Group); err != nil {
+				return false, err
+			}
+		}
 		if observation := pull.Observation(); observation != op.Observation {
 			op.Observation, op.Failures = observation, 0
 		}
@@ -342,6 +347,18 @@ func (daemon *Daemon) reconcilePull(ctx context.Context, open kernel.OpenPull, u
 		err = errors.Join(err, store.Update(ctx, op))
 	}
 	return action != review.Wait || op.State != before.State, err
+}
+
+func (daemon *Daemon) recordReconciledMergeGroup(ctx context.Context, project kernel.ProjectID, repository, head string, number uint64, group *review.GroupRun) error {
+	at, err := daemon.timestamp()
+	if err != nil {
+		return err
+	}
+	return daemon.store.RecordProductionObservation(ctx, project, kernel.ProductionObservation{
+		Repository: repository,
+		ObservedAt: at.Int64(),
+		Checks:     []kernel.ProductionCheck{mergeGroupCheck(kernel.ProductionPullRequest{Number: number, Head: head}, group)},
+	}, at)
 }
 
 // reviewHead claims and launches a review of the pull request's head as

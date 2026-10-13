@@ -36,6 +36,11 @@ func TestFailureSignatureKeepsNodeAndTAPTestsDistinct(t *testing.T) {
 	if first == second || !strings.Contains(first, "test testqueue1") || !strings.Contains(second, "test testqueue2") {
 		t.Fatalf("numeric signatures = %q / %q", first, second)
 	}
+	pathOne := failureSignature("check", "merge_group", sql.NullInt64{}, sql.NullInt64{}, sql.NullInt64{}, `pull request at go ["--- FAIL: TestQueue", "/tmp/run123/file"]`)
+	pathTwo := failureSignature("check", "merge_group", sql.NullInt64{}, sql.NullInt64{}, sql.NullInt64{}, `pull request at go ["--- FAIL: TestQueue", "/tmp/run456/file"]`)
+	if pathOne != pathTwo || !strings.Contains(pathOne, "test testqueue") {
+		t.Fatalf("diagnostic signatures = %q / %q", pathOne, pathTwo)
+	}
 }
 
 // One failure is enough: the first run of a signature is reported as new, an

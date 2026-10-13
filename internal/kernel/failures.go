@@ -103,7 +103,11 @@ func failureSignature(kind, code string, exit, signal, runner sql.NullInt64, det
 	lower := strings.ToLower(detail)
 	for _, marker := range []string{"--- fail:", "✖", "not ok"} {
 		if offset := strings.Index(lower, marker); offset >= 0 {
-			fields := strings.Fields(detail[offset+len(marker):])
+			tail := strings.SplitN(detail[offset+len(marker):], `",`, 2)[0]
+			fields := strings.Fields(tail)
+			if marker == "--- fail:" && len(fields) > 1 {
+				fields = fields[:1]
+			}
 			if marker == "not ok" && len(fields) > 0 && strings.Trim(fields[0], "0123456789") == "" {
 				fields = fields[1:]
 			}
