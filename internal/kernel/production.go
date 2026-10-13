@@ -960,8 +960,9 @@ func (store *Store) OpenPulls(ctx context.Context) ([]OpenPull, error) {
 	    (SELECT json_group_array(json(r.document)) FROM production_records r WHERE r.project_id = p.project_id AND r.repository = p.repository AND r.kind = 'reviewer'
 	        AND json_type(r.document, '$.request') = 'object' AND CAST(json_extract(r.document, '$.request.PullNumber') AS TEXT) = p.identity
 	        AND lower(json_extract(r.document, '$.request.Head')) = lower(json_extract(p.document, '$.head'))) AS operations,
-	    (SELECT json_group_array(json(r.document)) FROM production_records r WHERE r.project_id = p.project_id AND r.repository = p.repository AND r.kind = 'reviewer'
-	        AND json_type(r.document, '$.request') = 'object' AND CAST(json_extract(r.document, '$.request.PullNumber') AS TEXT) = p.identity) AS history,
+	    (SELECT json_group_array(json(history_record.document)) FROM (SELECT r.document FROM production_records r WHERE r.project_id = p.project_id AND r.repository = p.repository AND r.kind = 'reviewer'
+	        AND json_type(r.document, '$.request') = 'object' AND CAST(json_extract(r.document, '$.request.PullNumber') AS TEXT) = p.identity
+	        ORDER BY r.observed_at_ms ASC, r.identity ASC) AS history_record) AS history,
 	    EXISTS (SELECT 1 FROM production_records r WHERE r.project_id = p.project_id AND r.repository = p.repository AND r.kind = 'reviewer'
 	        AND CAST(json_extract(r.document, '$.request.PullNumber') AS TEXT) = p.identity) AS reviewed
 	  FROM production_records p WHERE p.kind = 'pull_request' AND json_extract(p.document, '$.state') = 'open')

@@ -117,6 +117,34 @@ func TestPriorBlockingFindingsAreBoundedAndIncludeSameHead(t *testing.T) {
 	}
 }
 
+func TestReviewDiffBytesComputesActualGitDiff(t *testing.T) {
+	dir, err := os.MkdirTemp(".", ".review-git-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(dir) })
+	git := func(args ...string) string {
+		command := exec.Command("git", append([]string{"-C", dir, "-c", "user.name=review", "-c", "user.email=review@example.invalid"}, args...)...)
+		output, err := command.Output()
+		if err != nil {
+			t.Fatalf("git %v: %v %s", args, err, output)
+		}
+		return strings.TrimSpace(string(output))
+	}
+	git("init", "-q")
+	git("commit", "-q", "--allow-empty", "-m", "base")
+	base := git("rev-parse", "HEAD")
+	if err := os.WriteFile(filepath.Join(dir, "changed.go"), []byte("changed\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	git("add", "changed.go")
+	git("commit", "-q", "-m", "head")
+	diff, err := reviewDiffBytes(context.Background(), dir, base)
+	if err != nil || !strings.Contains(string(diff), "changed.go") {
+		t.Fatalf("git diff=%q err=%v", diff, err)
+	}
+}
+
 func mustJSON(t *testing.T, value any) json.RawMessage {
 	t.Helper()
 	document, err := json.Marshal(value)

@@ -852,7 +852,11 @@ func diffID(diff []byte) string {
 func reviewDiffBytes(ctx context.Context, checkout, base string) ([]byte, error) {
 	command := exec.CommandContext(ctx, change.TrustedGitExecutable, "-C", checkout, "diff", "--no-ext-diff", "--no-textconv", base+"...HEAD")
 	command.Env = provider.ReviewEnvironment(filepath.Dir(checkout))
-	return command.Output()
+	output, err := command.Output()
+	if err != nil {
+		return nil, err
+	}
+	return output, nil
 }
 
 func terminalReviewVerdict(output string) (string, error) {
