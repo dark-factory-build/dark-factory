@@ -4,11 +4,13 @@ import (
 	"context"
 	"encoding/json"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"slices"
 	"strconv"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/dark-factory-build/dark-factory/internal/kernel"
 )
@@ -270,11 +272,10 @@ func TestRunReviewConfinesClaudeFileReads(t *testing.T) {
 		}
 	}
 	defaultTemp := "/private/tmp/claude-" + strconv.Itoa(os.Getuid())
-	if slices.Contains(filesystem.AllowRead, "/"+defaultTemp) {
-		t.Fatalf("reviewer can read shared Claude temp: %+v", filesystem)
-	}
-	if !slices.Contains(filesystem.DenyWrite, "/"+defaultTemp) {
-		t.Fatalf("missing deny-write grant for Claude default temp: %+v", filesystem.DenyWrite)
+	// Denying the CLI's own scratch directory failed every reviewer Bash
+	// command with exit 1 (#1885).
+	if !slices.Contains(filesystem.AllowRead, "/"+defaultTemp) || slices.Contains(filesystem.DenyWrite, "/"+defaultTemp) {
+		t.Fatalf("reviewer shell cannot use the CLI's scratch directory: %+v", filesystem)
 	}
 	if got, err := os.ReadFile(filepath.Join(filepath.Dir(account), "review-tmp")); err != nil || string(got) != filepath.Join(root, ".review-tmp")+"\n"+cargoHome {
 		t.Fatalf("CLAUDE_CODE_TMPDIR = %q, err=%v", got, err)
@@ -311,5 +312,52 @@ func TestRunReviewConfinesClaudeFileReads(t *testing.T) {
 	argv = review(kernel.ProviderCodex)
 	if slices.Contains(argv, "--settings") || !slices.Contains(argv, `default_permissions="dark-factory-review"`) {
 		t.Fatalf("Codex review changed: %q", argv)
+	}
+}
+
+// A live Claude reviewer's sandboxed Bash runs a command and a focused test
+// writing its profile under $TMPDIR (#1885: denying the CLI's scratch
+// directory failed every command with exit 1). It needs a real login, so it
+// runs only when DARK_FACTORY_LIVE_CLAUDE_REVIEW names that login directory,
+// and the provider's own stderr is shown on failure.
+func TestLiveClaudeReviewerShellRunsFocusedTests(t *testing.T) {
+	account := os.Getenv("DARK_FACTORY_LIVE_CLAUDE_REVIEW")
+	if account == "" {
+		t.Skip("SKIP, not verified: set DARK_FACTORY_LIVE_CLAUDE_REVIEW to a Claude login directory")
+	}
+	claude, err := exec.LookPath("claude")
+	if err != nil {
+		t.Fatal(err)
+	}
+	golang, err := exec.LookPath("go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	goroot, err := exec.Command(golang, "env", "GOROOT").Output()
+	if err != nil {
+		t.Fatal(err)
+	}
+	checkout := filepath.Join(t.TempDir(), "repo")
+	nonce := strconv.FormatInt(time.Now().UnixNano(), 36)
+	files := map[string]string{
+		"go.mod":       "module live\n\ngo 1.21\n",
+		"live.go":      "package live\n\nfunc Mark() string { return \"MARK-\" + \"" + nonce + "\" }\n",
+		"live_test.go": "package live\n\nimport \"testing\"\n\nfunc TestMark(t *testing.T) { t.Log(Mark()) }\n",
+	}
+	if err := os.Mkdir(checkout, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	for name, body := range files {
+		if err := os.WriteFile(filepath.Join(checkout, name), []byte(body), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	toolPath := filepath.Dir(claude) + string(os.PathListSeparator) + filepath.Dir(golang) + string(os.PathListSeparator) + "/usr/bin:/bin"
+	prompt := "Using Bash in the current directory, run `true && echo TRUE-OK`, then `go test -v -coverprofile=\"$TMPDIR/c.out\" . && head -1 \"$TMPDIR/c.out\"`. Print each command's complete output verbatim and nothing else."
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
+	defer cancel()
+	result, err := RunReview(ctx, kernel.ProviderClaudeCode, toolPath, strings.TrimSpace(string(goroot)), "", []string{account}, checkout, prompt, []string{checkout})
+	if err != nil || !strings.Contains(result.Stdout, "TRUE-OK") || !strings.Contains(result.Stdout, "MARK-"+nonce) || !strings.Contains(result.Stdout, "mode: set") {
+		t.Fatalf("err=%v\nstdout:\n%s\nstderr:\n%s", err, result.Stdout, result.Stderr)
 	}
 }

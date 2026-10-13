@@ -687,9 +687,8 @@ func (b *daemonReviewBackend) Review(ctx context.Context, checkout string, reque
 	}
 	ctx, cancel := context.WithTimeout(ctx, reviewDeadline)
 	defer cancel()
-	// The Claude reviewer has no shell and reads only the checkout's grants,
-	// so factoryd writes the complete diff inside the checkout, untracked
-	// under .git.
+	// The Claude reviewer reads only the checkout's grants, so factoryd
+	// writes the complete diff inside the checkout, untracked under .git.
 	diff := filepath.Join(checkout, ".git", "change.diff")
 	command := exec.CommandContext(ctx, change.TrustedGitExecutable, "-C", checkout, "diff", "--no-ext-diff", "--no-textconv", request.Base+"...HEAD")
 	command.Env = provider.ReviewEnvironment(filepath.Dir(checkout))
@@ -721,7 +720,17 @@ func (b *daemonReviewBackend) Review(ctx context.Context, checkout string, reque
 		if result.Limited {
 			return review.Verdict{}, errProviderLimited
 		}
-		return review.Verdict{}, fmt.Errorf("review: provider: %w", err)
+		// A failed review names its cause (#1885): the provider's own error
+		// line, redacted as other quoted evidence is. A cut line could split a
+		// credential past the redactor, so only whole lines are kept.
+		stdout, stderr := result.Stdout, result.Stderr
+		if len(stdout) > 2048 {
+			stdout = stdout[:strings.LastIndexByte(stdout[:2048], '\n')+1]
+		}
+		if len(stderr) > 4096 {
+			_, stderr, _ = strings.Cut(stderr[len(stderr)-4096:], "\n")
+		}
+		return review.Verdict{}, fmt.Errorf("review: provider: %w; stderr: %s; stdout: %s", err, redactTerminalText([]byte(stderr)), redactTerminalText([]byte(stdout)))
 	}
 	text := strings.Replace(result.Stdout, prompt, "", 1)
 	event, err := terminalReviewVerdict(text)

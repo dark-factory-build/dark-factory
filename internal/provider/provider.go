@@ -926,10 +926,10 @@ func ClaudeReview(writable []string, readable ...string) (string, error) {
 	for _, path := range readable {
 		grants = append(grants, grant{path, false})
 	}
-	return claudeConfinement(grants, []string{"Bash"}, map[string]any{}, filepath.Join("/private/tmp", fmt.Sprintf("claude-%d", os.Getuid())))
+	return claudeConfinement(grants, []string{"Bash"}, map[string]any{})
 }
 
-func claudeConfinement(grants []grant, allow []string, hooks map[string]any, extraDenyWrites ...string) (string, error) {
+func claudeConfinement(grants []grant, allow []string, hooks map[string]any) (string, error) {
 	read, write, denyWrite := []string{}, []string{}, []string{}
 	var redundantReadOnly, redundantWritable, originalReadOnly []string
 	// Claude names files by their resolved path, and a Change is reached
@@ -960,9 +960,6 @@ func claudeConfinement(grants []grant, allow []string, hooks map[string]any, ext
 			}
 		}
 	}
-	for _, path := range extraDenyWrites {
-		denyWrite = append(denyWrite, "/"+path)
-	}
 	for _, grant := range grants {
 		rule := "/" + grant.path // a leading "//" is Claude's absolute path
 		read = append(read, rule)
@@ -978,12 +975,11 @@ func claudeConfinement(grants []grant, allow []string, hooks map[string]any, ext
 	baseRead, baseAllow := slices.Clone(read), slices.Clone(allow)
 	baseDenyWrite := slices.Clone(denyWrite)
 	baseWrite := slices.Clone(write)
-	includeSharedTempRead := len(extraDenyWrites) == 0
 	marshal := func(read, write, allow, denyWrite []string) ([]byte, error) {
-		allowRead := slices.Clone(read)
-		if includeSharedTempRead {
-			allowRead = append(allowRead, fmt.Sprintf("//private/tmp/claude-%d", os.Getuid()))
-		}
+		// The CLI's own scratch directory, where its shell wrapper records
+		// each command's cwd and output: denying it fails every Bash
+		// command with exit 1 (#1885), and sandboxed Bash's TMPDIR is it.
+		allowRead := append(slices.Clone(read), fmt.Sprintf("//private/tmp/claude-%d", os.Getuid()))
 		return json.Marshal(map[string]any{
 			"hooks":       hooks,
 			"permissions": map[string]any{"allow": allow},

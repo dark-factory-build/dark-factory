@@ -86,7 +86,7 @@ func reviewerFixture(t *testing.T, reviewers ...string) (*daemonReviewBackend, m
 	fixture, project := reviewPublicFixture(t)
 	ctx := context.Background()
 	bin := t.TempDir()
-	script := "#!/bin/sh\n[ -e \"$CODEX_HOME/limited\" ] && { echo \"■ You've hit your usage limit. Try again later.\"; exit 1; }\n[ -e \"$CODEX_HOME/quoted\" ] && { echo \"the task says: You've hit your usage limit\"; exit 1; }\n[ -e \"$CODEX_HOME/hang\" ] && { sleep 600 & echo $$ > \"$CODEX_HOME/pid\"; wait; }\n[ -e \"$CODEX_HOME/say\" ] && { cat \"$CODEX_HOME/say\" >&2; echo \"tokens used: 12\" >&2; cat \"$CODEX_HOME/say\"; exit 0; }\n[ -e \"$CODEX_HOME/argv\" ] && printf '%s\\0' \"$@\" > \"$CODEX_HOME/argv\"\n[ -e \"$CODEX_HOME/stamp\" ] && { for prompt; do :; done; echo \"$prompt\"; echo \"VERDICT: ALLOW\"; exit 0; }\necho \"read changed.go\"\necho \"VERDICT: ALLOW\"\n"
+	script := "#!/bin/sh\n[ -e \"$CODEX_HOME/fail\" ] && { echo \"partial transcript\"; cat \"$CODEX_HOME/fail\" >&2; exit 1; }\n[ -e \"$CODEX_HOME/limited\" ] && { echo \"■ You've hit your usage limit. Try again later.\"; exit 1; }\n[ -e \"$CODEX_HOME/quoted\" ] && { echo \"the task says: You've hit your usage limit\"; exit 1; }\n[ -e \"$CODEX_HOME/hang\" ] && { sleep 600 & echo $$ > \"$CODEX_HOME/pid\"; wait; }\n[ -e \"$CODEX_HOME/say\" ] && { cat \"$CODEX_HOME/say\" >&2; echo \"tokens used: 12\" >&2; cat \"$CODEX_HOME/say\"; exit 0; }\n[ -e \"$CODEX_HOME/argv\" ] && printf '%s\\0' \"$@\" > \"$CODEX_HOME/argv\"\n[ -e \"$CODEX_HOME/stamp\" ] && { for prompt; do :; done; echo \"$prompt\"; echo \"VERDICT: ALLOW\"; exit 0; }\necho \"read changed.go\"\necho \"VERDICT: ALLOW\"\n"
 	if err := os.WriteFile(filepath.Join(bin, "codex"), []byte(script), 0o700); err != nil {
 		t.Fatal(err)
 	}
@@ -264,6 +264,20 @@ func TestReviewMovesPastALimitedAccountAndFailsRetryablyWhenAllAreLimited(t *tes
 	op, err := coordinator.Start(ctx, request)
 	if err == nil || op.State != "failed" || !op.Retryable || op.Detail != "provider_limited" {
 		t.Fatalf("operation=%+v err=%v, want a retryable provider_limited failure", op, err)
+	}
+}
+
+// A failed review names its cause (#1885): the provider's own error line and
+// the start of its output reach the failure detail, redacted.
+func TestAFailedReviewCarriesTheProvidersError(t *testing.T) {
+	backend, homes := reviewerFixture(t, "failing")
+	if err := os.WriteFile(filepath.Join(homes["failing"], "fail"), []byte("Error: sandbox unavailable in /Users/someone/.cache\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	checkout, request := reviewCheckout(t)
+	_, err := backend.Review(context.Background(), checkout, request)
+	if err == nil || !strings.Contains(err.Error(), "Error: sandbox unavailable in ") || !strings.Contains(err.Error(), "stdout: partial transcript") || strings.Contains(err.Error(), "/Users/someone") {
+		t.Fatalf("err=%v, want the provider's redacted stderr and stdout", err)
 	}
 }
 
