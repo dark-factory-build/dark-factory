@@ -315,7 +315,7 @@ func TestDaemonDispatchesOperatorCallsAndBoundsProjection(t *testing.T) {
 	done = fixture.serve(t)
 	agentResult, err := client.CreateAgent(ctx, api.CreateAgentInput{
 		ID: testID(2), ProjectID: projectInput.ID, Name: "agent", Role: "orchestrator",
-		Provider: "codex", Model: "gpt-5.6-luna", ReasoningEffort: "medium", ToolBudgetLimit: 50,
+		Provider: "codex", Model: "gpt-5.6-luna", ReasoningEffort: "medium",
 	})
 	if err != nil || agentResult.Revision != 1 || agentResult.Head != 4 {
 		t.Fatalf("create agent = %+v, %v", agentResult, err)
@@ -627,7 +627,7 @@ func TestDaemonDispatchesSendBackThroughBothDomains(t *testing.T) {
 	// the kernel would have said about the task.
 	claude, claudeTask := testID(61), testID(62)
 	done = fixture.serve(t)
-	if _, err := operator.CreateAgent(ctx, api.CreateAgentInput{ID: claude, ProjectID: active.run.ProjectID.String(), Name: "typist", Role: "worker", Provider: "claude_code", ToolBudgetLimit: 1}); err != nil {
+	if _, err := operator.CreateAgent(ctx, api.CreateAgentInput{ID: claude, ProjectID: active.run.ProjectID.String(), Name: "typist", Role: "worker", Provider: "claude_code"}); err != nil {
 		t.Fatal(err)
 	}
 	waitDispatch(t, done)
@@ -656,7 +656,7 @@ func TestDaemonDispatchesSendBackThroughBothDomains(t *testing.T) {
 	}
 	waitDispatch(t, done)
 	done = fixture.serve(t)
-	if _, err := operator.CreateAgent(ctx, api.CreateAgentInput{ID: stranger, ProjectID: elsewhere, Name: "stranger", Role: "worker", Provider: "claude_code", ToolBudgetLimit: 1}); err != nil {
+	if _, err := operator.CreateAgent(ctx, api.CreateAgentInput{ID: stranger, ProjectID: elsewhere, Name: "stranger", Role: "worker", Provider: "claude_code"}); err != nil {
 		t.Fatal(err)
 	}
 	waitDispatch(t, done)
@@ -892,7 +892,7 @@ func prepareActiveAttemptInProjectWithProvider(t *testing.T, fixture *dispatchFi
 		})
 	}
 	call(func() error {
-		_, err := operator.CreateAgent(ctx, api.CreateAgentInput{ID: agentID, ProjectID: projectID, Name: "agent", Role: role, Provider: provider, ToolBudgetLimit: 10})
+		_, err := operator.CreateAgent(ctx, api.CreateAgentInput{ID: agentID, ProjectID: projectID, Name: "agent", Role: role, Provider: provider})
 		return err
 	})
 	if len(enqueue) == 1 {
@@ -1097,7 +1097,7 @@ func TestDaemonOverseerTaskRetryRejectsOrchestratorTask(t *testing.T) {
 	replacementID := testID(211)
 	done := fixture.serve(t)
 	if _, err := operator.CreateAgent(ctx, api.CreateAgentInput{
-		ID: replacementID, ProjectID: caller.run.ProjectID.String(), Name: "replacement", Role: "worker", Provider: "shell", ToolBudgetLimit: 1,
+		ID: replacementID, ProjectID: caller.run.ProjectID.String(), Name: "replacement", Role: "worker", Provider: "shell",
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -1247,7 +1247,7 @@ func TestDaemonOperatorTaskReadBindsRevisionAndPagesUTF8(t *testing.T) {
 		return err
 	})
 	call(func() error {
-		_, err := client.CreateAgent(ctx, api.CreateAgentInput{ID: agentID, ProjectID: projectID, Name: "reader", Role: "worker", Provider: "shell", ToolBudgetLimit: 1})
+		_, err := client.CreateAgent(ctx, api.CreateAgentInput{ID: agentID, ProjectID: projectID, Name: "reader", Role: "worker", Provider: "shell"})
 		return err
 	})
 	body := strings.Repeat("🙂", 2050)
@@ -1732,7 +1732,7 @@ func TestTaskEnqueuePreflightPreservesReplayAndOverseerAuthority(t *testing.T) {
 	}
 	workerID := testID(210)
 	done := fixture.serve(t)
-	if _, err := operator.CreateAgent(ctx, api.CreateAgentInput{ID: workerID, ProjectID: active.run.ProjectID.String(), Name: "worker", Role: "worker", Provider: "codex", ToolBudgetLimit: 10}); err != nil {
+	if _, err := operator.CreateAgent(ctx, api.CreateAgentInput{ID: workerID, ProjectID: active.run.ProjectID.String(), Name: "worker", Role: "worker", Provider: "codex"}); err != nil {
 		t.Fatal(err)
 	}
 	waitDispatch(t, done)
@@ -1742,7 +1742,7 @@ func TestTaskEnqueuePreflightPreservesReplayAndOverseerAuthority(t *testing.T) {
 	}
 	waitDispatch(t, done)
 	done = fixture.serve(t)
-	if _, err := operator.CreateAgent(ctx, api.CreateAgentInput{ID: testID(221), ProjectID: testID(220), Name: "foreign", Role: "worker", Provider: "codex", ToolBudgetLimit: 10}); err != nil {
+	if _, err := operator.CreateAgent(ctx, api.CreateAgentInput{ID: testID(221), ProjectID: testID(220), Name: "foreign", Role: "worker", Provider: "codex"}); err != nil {
 		t.Fatal(err)
 	}
 	waitDispatch(t, done)
@@ -1803,8 +1803,8 @@ func TestDaemonSelectAgentModelRequiresWorkerRevisionAndCompatibleControls(t *te
 	}
 	waitDispatch(t, done)
 	for _, input := range []api.CreateAgentInput{
-		{ID: testID(51), ProjectID: project.ID, Name: "worker", Role: "worker", Provider: "codex", ToolBudgetLimit: 1},
-		{ID: testID(52), ProjectID: project.ID, Name: "overseer", Role: "orchestrator", Provider: "codex", ToolBudgetLimit: 1},
+		{ID: testID(51), ProjectID: project.ID, Name: "worker", Role: "worker", Provider: "codex"},
+		{ID: testID(52), ProjectID: project.ID, Name: "overseer", Role: "orchestrator", Provider: "codex"},
 	} {
 		done = fixture.serve(t)
 		if _, err := client.CreateAgent(ctx, input); err != nil {
@@ -1950,7 +1950,7 @@ func TestDaemonSelectOverseerAccountPreservesSelectionGuards(t *testing.T) {
 		t.Fatal(err)
 	}
 	done = fixture.serve(t)
-	_, err = client.CreateAgent(ctx, api.CreateAgentInput{ID: testID(41), ProjectID: project.ID, Name: "overseer", Role: "orchestrator", Provider: "codex", ToolBudgetLimit: 1})
+	_, err = client.CreateAgent(ctx, api.CreateAgentInput{ID: testID(41), ProjectID: project.ID, Name: "overseer", Role: "orchestrator", Provider: "codex"})
 	waitDispatch(t, done)
 	if err != nil {
 		t.Fatal(err)

@@ -266,9 +266,9 @@ func TestServerDecodesClosedMethodMatrix(t *testing.T) {
 				t.Fatalf("literal replacement project input = %+v, %t", input, ok)
 			}
 		}},
-		{name: "create agent", domain: operatorDomain, bearer: operatorBearer, body: `{"method":"create_agent","params":{"id":"` + id('2') + `","project_id":"` + id('1') + `","name":"agent","role":"worker","provider":"codex","model":"gpt-5.6-luna","reasoning_effort":"medium","tool_budget_limit":20}}`, kind: CallCreateAgent, check: func(t *testing.T, call Call) {
+		{name: "create agent", domain: operatorDomain, bearer: operatorBearer, body: `{"method":"create_agent","params":{"id":"` + id('2') + `","project_id":"` + id('1') + `","name":"agent","role":"worker","provider":"codex","model":"gpt-5.6-luna","reasoning_effort":"medium"}}`, kind: CallCreateAgent, check: func(t *testing.T, call Call) {
 			input, ok := call.CreateAgentInput()
-			if !ok || input.Provider != "codex" || input.Model != "gpt-5.6-luna" || input.ReasoningEffort != "medium" || input.ToolBudgetLimit != 20 {
+			if !ok || input.Provider != "codex" || input.Model != "gpt-5.6-luna" || input.ReasoningEffort != "medium" {
 				t.Fatalf("agent input = %+v, %t", input, ok)
 			}
 		}},

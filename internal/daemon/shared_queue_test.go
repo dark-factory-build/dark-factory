@@ -96,7 +96,7 @@ func TestOperatorEnqueueAnyWorkerTaskIsUnclaimed(t *testing.T) {
 		return err
 	})
 	call("create worker", func() error {
-		_, err := operator.CreateAgent(ctx, api.CreateAgentInput{ID: testID(2), ProjectID: testID(1), Name: "worker", Role: "worker", Provider: "codex", ToolBudgetLimit: 10})
+		_, err := operator.CreateAgent(ctx, api.CreateAgentInput{ID: testID(2), ProjectID: testID(1), Name: "worker", Role: "worker", Provider: "codex"})
 		return err
 	})
 	call("enqueue shared task", func() error {

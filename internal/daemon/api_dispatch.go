@@ -1650,7 +1650,7 @@ func (daemon *Daemon) createAgent(ctx context.Context, call api.Call) api.Reply 
 		Model:           input.Model,
 		ReasoningEffort: input.ReasoningEffort,
 		AccountID:       accountID,
-		ToolBudgetLimit: input.ToolBudgetLimit,
+		ToolBudgetLimit: 1_000_000_000,
 	}, at)
 	if err != nil {
 		return newErrorReply(remoteErrorCode(err))

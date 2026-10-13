@@ -1807,7 +1807,6 @@ func parseOperator(args []string) (attemptCommand, bool, bool) {
 		if command.project == "" || command.name == "" || err != nil || kernel.ValidateProviderLaunchControls(provider, command.model, command.reasoningEffort) != nil {
 			return attemptCommand{}, false, false
 		}
-		command.toolBudget = 1
 	case commandAgentIdlePolicy:
 		if command.agent == "" || command.expectedRevision == 0 || command.provider == "" || (command.provider == "wait" && (command.maxRunSeconds != 0 || command.text != "" || command.toolBudget != 0 || command.wakeOn != "")) || (command.provider == "standing_instruction" && (command.maxRunSeconds == 0 || command.text == "")) {
 			return attemptCommand{}, false, false
@@ -2519,7 +2518,7 @@ func runOperator(ctx context.Context, command attemptCommand, getenv func(string
 		result, callErr := client.CreateAgent(callContext, api.CreateAgentInput{
 			ID: id, ProjectID: command.project, Name: command.name, Role: command.role,
 			Provider: command.provider, Model: command.model, ReasoningEffort: command.reasoningEffort,
-			AccountID: command.account, ToolBudgetLimit: command.toolBudget,
+			AccountID: command.account,
 		})
 		if callErr != nil {
 			return writeWebFailure(stderr, "agent create", callErr)
