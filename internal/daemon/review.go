@@ -340,6 +340,8 @@ func (daemon *Daemon) reconcilePull(ctx context.Context, open kernel.OpenPull, u
 				case "base":
 					if review.HeadRE.MatchString(observed) {
 						op.Request.Base = observed
+					} else if observed != "" {
+						op.Request.BaseRef = observed
 					}
 					op.Failures = 0
 					op.LastAction = "enqueue base binding changed; re-observe before enqueue"

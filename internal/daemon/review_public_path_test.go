@@ -3,6 +3,8 @@ package daemon
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -24,6 +26,7 @@ type publicReviewBackend struct {
 	enqueueRefusal                          string // the broker's refusal class, if any
 	enqueueBindingRefusal                   string
 	enqueueBindingObserved                  string
+	enqueueBindingBody                      string
 	leaveUnqueued                           int
 	reviews, submits, enqueues              int
 	enqueueSignal                           atomic.Int32
@@ -33,13 +36,18 @@ type publicReviewBackend struct {
 	pull                                    *review.Pull
 	observeFailures                         int
 	storedErr                               error
+	storedBody                              string
 }
 
 func (b *publicReviewBackend) StoredPull(_ context.Context, pull uint64, head string) (review.Request, error) {
 	if b.storedErr != nil {
 		return review.Request{}, b.storedErr
 	}
-	return review.Request{Repository: "team/repo", PullNumber: pull, Head: head, Base: strings.Repeat("f", 40), BaseRef: "main", Body: "fixture body\n", Provider: "codex"}, nil
+	body := b.storedBody
+	if body == "" {
+		body = "fixture body\n"
+	}
+	return review.Request{Repository: "team/repo", PullNumber: pull, Head: head, Base: strings.Repeat("f", 40), BaseRef: "main", Body: body, Provider: "codex"}, nil
 }
 func (b *publicReviewBackend) CloneReadOnly(context.Context, review.Request) (string, func(), error) {
 	return "/fixture-review", func() {}, nil
@@ -74,7 +82,10 @@ func (b *publicReviewBackend) Enqueue(_ context.Context, operation review.Operat
 	if b.enqueueBindingRefusal != "" {
 		binding := b.enqueueBindingRefusal
 		b.enqueueBindingRefusal = ""
-		return maintainerRejection("conflict: enqueue " + binding + " binding did not match: expected old, observed " + b.enqueueBindingObserved + ".")
+		if b.enqueueBindingBody != "" {
+			b.storedBody = b.enqueueBindingBody
+		}
+		return maintainerConflict(binding, "old", b.enqueueBindingObserved)
 	}
 	if b.leaveUnqueued > 0 {
 		b.leaveUnqueued--
@@ -82,6 +93,24 @@ func (b *publicReviewBackend) Enqueue(_ context.Context, operation review.Operat
 		b.queued = true
 	}
 	return nil
+}
+
+func maintainerConflict(binding, expected, observed string) error {
+	response, _ := json.Marshal(map[string]any{
+		"jsonrpc": "2.0",
+		"id":      1,
+		"result": map[string]any{
+			"isError": true,
+			"content": []map[string]string{{"type": "text", "text": "conflict: enqueue " + binding + " binding did not match: expected " + expected + ", observed " + observed + "."}},
+		},
+	})
+	_, err := reviewResponseStructuredContent(maintainerRequest{JSONRPC: "2.0", ID: json.RawMessage(`1`)}, response)
+	return err
+}
+
+func digestText(value string) string {
+	digest := sha256.Sum256([]byte(value))
+	return "sha256:" + hex.EncodeToString(digest[:])
 }
 
 func TestEnqueueBaseBindingRefreshesTheRequestBeforeRetry(t *testing.T) {
@@ -109,6 +138,52 @@ func TestEnqueueBaseBindingRefreshesTheRequestBeforeRetry(t *testing.T) {
 	op := lastDurableReview(t, fixture.store, project)
 	if backend.enqueues != 2 || backend.enqueuedSHA != newBase || op.Request.Base != newBase || op.Enqueues != 1 || op.Failures != 0 {
 		t.Fatalf("base binding was retried without refresh: operation=%+v enqueues=%d base=%s", op, backend.enqueues, backend.enqueuedSHA)
+	}
+}
+
+func TestEnqueueBodyBindingStartsAFreshSameHeadReview(t *testing.T) {
+	fixture, project, _, settle := publishedTask(t)
+	settle()
+	customerMode(t, fixture)
+	ctx := context.Background()
+	newBody := "edited body\n"
+	backend := &publicReviewBackend{
+		enqueueBindingRefusal:  "body_digest",
+		enqueueBindingObserved: digestText(newBody),
+		enqueueBindingBody:     newBody,
+	}
+	fixture.daemon.reviewBackend = func(string, uint64) review.Backend { return backend }
+	if _, err := reviewNow(ctx, fixture.daemon, project, publishedReviewRequest()); err != nil {
+		t.Fatal(err)
+	}
+	waitForMergePipeline(t, fixture.daemon)
+	op := waitForDurableReview(t, fixture.store, project, func(op review.Operation) bool {
+		return op.Request.Body == newBody && op.State == "enqueued"
+	})
+	if backend.enqueues != 2 || backend.reviews != 2 || op.Request.Head != publishedReviewRequest().Head || op.Request.Body != newBody {
+		t.Fatalf("body binding did not start a fresh same-head review: operation=%+v reviews=%d enqueues=%d", op, backend.reviews, backend.enqueues)
+	}
+}
+
+func TestEnqueueBranchBindingRefreshesTheBaseRefBeforeRetry(t *testing.T) {
+	fixture, project, _, settle := publishedTask(t)
+	settle()
+	customerMode(t, fixture)
+	ctx := context.Background()
+	backend := &publicReviewBackend{enqueueBindingRefusal: "base", enqueueBindingObserved: "release"}
+	fixture.daemon.reviewBackend = func(string, uint64) review.Backend { return backend }
+	if _, err := reviewNow(ctx, fixture.daemon, project, publishedReviewRequest()); err != nil {
+		t.Fatal(err)
+	}
+	waitForMergePipeline(t, fixture.daemon)
+	if op := lastDurableReview(t, fixture.store, project); op.Request.BaseRef != "release" {
+		t.Fatalf("base branch was not refreshed: %+v", op)
+	}
+	if _, err := fixture.daemon.advanceReviewOperations(ctx, false); err != nil {
+		t.Fatal(err)
+	}
+	if backend.enqueues != 2 || backend.enqueuedBase != "release" {
+		t.Fatalf("stale base branch was retried: enqueues=%d base=%s", backend.enqueues, backend.enqueuedBase)
 	}
 }
 
