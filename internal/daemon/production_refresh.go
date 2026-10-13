@@ -379,7 +379,9 @@ func mainChecksToProduction(checks []maintainerMainCheck) []kernel.ProductionChe
 		if check.Conclusion != nil {
 			conclusion = *check.Conclusion
 		}
-		result = append(result, kernel.ProductionCheck{ID: hex.EncodeToString(key[:16]), Name: check.Name, Revision: revision, Scope: "main", State: check.Status, Conclusion: conclusion, URL: check.URL, Required: check.Required, Jobs: []kernel.ProductionJob{{Name: check.Name, State: check.Status, Conclusion: conclusion, URL: check.URL, Annotations: check.Annotations}}})
+		annotations := append([]string(nil), check.Annotations...)
+		redactLines(annotations)
+		result = append(result, kernel.ProductionCheck{ID: hex.EncodeToString(key[:16]), Name: check.Name, Revision: revision, Scope: "main", State: check.Status, Conclusion: conclusion, URL: check.URL, Required: check.Required, Jobs: []kernel.ProductionJob{{Name: check.Name, State: check.Status, Conclusion: conclusion, URL: check.URL, Annotations: annotations}}})
 	}
 	return result
 }

@@ -97,7 +97,7 @@ func (b *publicReviewBackend) ObservePull(ctx context.Context, operation review.
 			for _, job := range check.Jobs {
 				group.Jobs = append(group.Jobs, review.GroupJob{Name: job.Name, Conclusion: job.Conclusion, Annotations: job.Annotations})
 			}
-			return review.Pull{Head: operation.Request.Head, State: "open", Group: group}, nil
+			return review.Pull{Head: operation.Request.Head, State: "open", Checks: []string{"required=success"}, Group: group}, nil
 		}
 	}
 	checks := b.checks
@@ -230,11 +230,12 @@ func TestReconciliationPersistsMergeGroupFailureForReport(t *testing.T) {
 		}
 	}
 	backend := &publicReviewBackend{broker: call}
-	pull, err := backend.ObservePull(context.Background(), review.Operation{Request: review.Request{Repository: request.Repository, PullNumber: request.PullNumber, Head: request.Head, Base: request.Base, BaseRef: request.BaseRef}})
-	if err != nil || pull.Group == nil {
-		t.Fatalf("recorded merge observation = %+v, %v", pull, err)
+	customerMode(t, fixture)
+	fixture.daemon.reviewBackend = func(string, uint64) review.Backend { return backend }
+	if _, err := reviewNow(context.Background(), fixture.daemon, project, request); err != nil {
+		t.Fatal(err)
 	}
-	if err := fixture.daemon.recordReconciledMergeGroup(context.Background(), project, request.Repository, request.Head, request.PullNumber, pull.Group); err != nil {
+	if _, err := fixture.daemon.advanceReviewOperations(context.Background(), false); err != nil {
 		t.Fatal(err)
 	}
 	lines, err := fixture.store.Report(context.Background(), &project, 0, 3600000)

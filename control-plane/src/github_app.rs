@@ -967,6 +967,7 @@ impl AppAuthority {
                     },
                     &metadata.default_branch,
                     actions.as_ref(),
+                    true,
                 )
                 .await;
             let checks = if index == 0 {
@@ -1764,7 +1765,7 @@ impl AppAuthority {
             .await
             .ok();
         self.0
-            .checks(&token, request, &pull.base.name, actions.as_ref())
+            .checks(&token, request, &pull.base.name, actions.as_ref(), false)
             .await
     }
 
@@ -3835,7 +3836,7 @@ impl Authority {
             head_sha: request.head_sha.clone(),
         };
         if self
-            .checks(token, checks, &request.base, None)
+            .checks(token, checks, &request.base, None, false)
             .await?
             .checks
             .iter()
@@ -4245,13 +4246,18 @@ impl Authority {
         request: ObservePullRequestChecks,
         base: &str,
         actions: Option<&RepositoryToken>,
+        historical: bool,
     ) -> Result<ChecksResult, OperationError> {
         let api = format!(
             "https://api.github.com/repos/{}/{}",
             token.repository.owner, token.repository.name
         );
         let response: CheckRuns = github_json(
-            &format!("{api}/commits/{}/check-runs?per_page=100", request.head_sha),
+            &format!(
+                "{api}/commits/{}/check-runs?{}per_page=100",
+                request.head_sha,
+                if historical { "filter=all&" } else { "" }
+            ),
             token.as_str(),
         )
         .await?;
