@@ -364,6 +364,7 @@ func (daemon *Daemon) reviewHead(ctx context.Context, coordinator review.Coordin
 	request.Answer = strings.ToValidUTF8(answer[:min(len(answer), 4000)], "")
 	request.PriorFindings = priorBlockingFindings(open, request.Head)
 	if prior, ok := priorAllowedOperation(open, request); ok {
+		request.PreviousHead = prior.Request.Head
 		if diffBackend, ok := coordinator.Backend.(interface {
 			DiffID(context.Context, review.Request) (string, error)
 		}); ok {
@@ -637,6 +638,16 @@ func trimReviewTextToSuffix(value string, keep int) string {
 	return strings.ToValidUTF8(value[len(value)-keep:], "")
 }
 
+func trimReviewTextToPrefix(value string, keep int) string {
+	if keep <= 0 {
+		return ""
+	}
+	if len(value) <= keep {
+		return value
+	}
+	return strings.ToValidUTF8(value[:keep], "")
+}
+
 // boundDurableReviewOperation keeps the request and its later verdict within
 // the production projection's document limit. Prior findings are the least
 // authoritative part of a retry record, so they are reduced before the
@@ -652,7 +663,7 @@ func boundDurableReviewOperation(operation review.Operation) review.Operation {
 		case operation.Request.PriorFindings != "":
 			operation.Request.PriorFindings = trimReviewTextToSuffix(operation.Request.PriorFindings, len(operation.Request.PriorFindings)-excess-1)
 		case operation.Detail != "":
-			operation.Detail = trimReviewTextToSuffix(operation.Detail, len(operation.Detail)-excess-1)
+			operation.Detail = trimReviewTextToPrefix(operation.Detail, len(operation.Detail)-excess-1)
 		default:
 			return operation
 		}
@@ -774,7 +785,12 @@ func (b *daemonReviewBackend) Review(ctx context.Context, checkout string, reque
 	// so factoryd writes the complete diff inside the checkout, untracked
 	// under .git.
 	diff := filepath.Join(checkout, ".git", "change.diff")
-	diffBytes, err := reviewDiffBytes(ctx, checkout, request.Base)
+	diffBase := request.Base
+	diffBytes, err := reviewDiffBytes(ctx, checkout, diffBase)
+	if request.PreviousHead != "" {
+		diffBase = request.PreviousHead
+		diffBytes, err = reviewIncrementalDiffBytes(ctx, checkout, request.PreviousHead)
+	}
 	if err != nil {
 		return review.Verdict{}, fmt.Errorf("review: diff: %w", err)
 	}
@@ -797,7 +813,7 @@ func (b *daemonReviewBackend) Review(ctx context.Context, checkout string, reque
 	if request.Answer != "" {
 		body += "\n\nThe author disputes the blocking review of this exact head without changing it, answering:\n\n" + request.Answer
 	}
-	prompt := reviewPrompt(checkout, request.Base, body, diff, b.reviewContext(ctx, checkout, request), request.PriorFindings)
+	prompt := reviewPrompt(checkout, diffBase, body, diff, b.reviewContext(ctx, checkout, request), request.PriorFindings)
 	readable := []string{checkout}
 	if alternates, err := os.ReadFile(filepath.Join(checkout, ".git", "objects", "info", "alternates")); err == nil {
 		readable = append(readable, strings.Split(strings.TrimSpace(string(alternates)), "\n")...)
@@ -902,7 +918,15 @@ func diffID(diff []byte) string {
 }
 
 func reviewDiffBytes(ctx context.Context, checkout, base string) ([]byte, error) {
-	command := exec.CommandContext(ctx, change.TrustedGitExecutable, "-C", checkout, "diff", "--no-ext-diff", "--no-textconv", base+"...HEAD")
+	return reviewRangeBytes(ctx, checkout, base+"...HEAD")
+}
+
+func reviewIncrementalDiffBytes(ctx context.Context, checkout, previousHead string) ([]byte, error) {
+	return reviewRangeBytes(ctx, checkout, previousHead+"..HEAD")
+}
+
+func reviewRangeBytes(ctx context.Context, checkout, revisionRange string) ([]byte, error) {
+	command := exec.CommandContext(ctx, change.TrustedGitExecutable, "-C", checkout, "diff", "--no-ext-diff", "--no-textconv", revisionRange)
 	command.Env = provider.ReviewEnvironment(filepath.Dir(checkout))
 	output, err := command.Output()
 	if err != nil {

@@ -315,7 +315,7 @@ func TestDurableReviewStoreBoundsRequestAndVerdictTogether(t *testing.T) {
 	}
 	op.State = "completed"
 	op.Verdict = "REQUEST_CHANGES"
-	op.Detail = strings.Repeat("verdict ", 1715)
+	op.Detail = "first finding\n" + strings.Repeat("verdict ", 1715)
 	if err := store.Update(context.Background(), op); err != nil {
 		t.Fatalf("update oversized review operation: %v", err)
 	}
@@ -332,6 +332,9 @@ func TestDurableReviewStoreBoundsRequestAndVerdictTogether(t *testing.T) {
 	}
 	if recovered.Request.Body != op.Request.Body || reviewedBodyDigest(recovered) != expectedBodyDigest {
 		t.Fatalf("reviewed body changed: want digest %s, got %s", expectedBodyDigest, reviewedBodyDigest(recovered))
+	}
+	if !strings.HasPrefix(recovered.Detail, "first finding\n") {
+		t.Fatalf("authoritative finding was truncated: %q", recovered.Detail[:min(len(recovered.Detail), 80)])
 	}
 }
 
