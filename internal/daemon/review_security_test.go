@@ -189,7 +189,7 @@ func (b *realDiffReviewBackend) Review(ctx context.Context, checkout string, req
 	return b.publicReviewBackend.Review(ctx, checkout, request)
 }
 
-func realRebasedReviewCheckout(t *testing.T) (string, string, string, string, string) {
+func realRebasedReviewCheckout(t *testing.T) (string, string, string, string) {
 	t.Helper()
 	dir, err := os.MkdirTemp(".", ".review-rebase-")
 	if err != nil {
@@ -227,16 +227,16 @@ func realRebasedReviewCheckout(t *testing.T) (string, string, string, string, st
 	baseAfter := git("rev-parse", "HEAD")
 	git("checkout", "-q", "-b", "feature-rebased", feature)
 	git("rebase", "main")
-	return dir, baseBefore, baseAfter, feature, diffID(priorBytes)
+	return dir, baseBefore, baseAfter, diffID(priorBytes)
 }
 
 func TestReviewHeadCarriesRealRebasedDiffAndReviewsChangedDiff(t *testing.T) {
 	fixture, project := reviewPublicFixture(t)
-	checkout, baseBefore, baseAfter, previousHead, priorDiff := realRebasedReviewCheckout(t)
+	checkout, baseBefore, baseAfter, priorDiff := realRebasedReviewCheckout(t)
 	backend := &realDiffReviewBackend{checkout: checkout, request: review.Request{Repository: "team/repo", PullNumber: 12, Head: strings.Repeat("c", 40), Base: baseAfter, BaseRef: "main", Body: "fixture", Provider: "codex"}}
 	fixture.daemon.reviewBackend = func(string, uint64) review.Backend { return backend }
 	coordinator := review.Coordinator{Store: durableReviewStore{store: fixture.store, project: project, repository: "team/repo", now: fixture.daemon.now}, Backend: backend, Now: fixture.daemon.now}
-	prior := review.Operation{ID: "prior", Request: review.Request{Repository: "team/repo", PullNumber: 12, Head: previousHead, Base: baseBefore, BaseRef: "main"}, Verdict: "allow", DiffID: priorDiff}
+	prior := review.Operation{ID: "prior", Request: review.Request{Repository: "team/repo", PullNumber: 12, Head: strings.Repeat("a", 40), Base: baseBefore, BaseRef: "main"}, Verdict: "allow", DiffID: priorDiff}
 	document, err := json.Marshal(prior)
 	if err != nil {
 		t.Fatal(err)
@@ -267,9 +267,6 @@ func TestReviewHeadCarriesRealRebasedDiffAndReviewsChangedDiff(t *testing.T) {
 	case <-backend.reviewed:
 	case <-time.After(2 * time.Second):
 		t.Fatal("changed diff did not enter provider review")
-	}
-	if got := backend.requests[len(backend.requests)-1].PreviousHead; got != previousHead {
-		t.Fatalf("incremental review previous head=%q, want %q", got, previousHead)
 	}
 }
 

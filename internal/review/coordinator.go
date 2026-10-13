@@ -27,7 +27,6 @@ type Request struct {
 	Provider      string
 	Answer        string // its task's answer to the block it disputes, for a review once more
 	PriorFindings string // blocking findings from an earlier head, for an incremental re-review
-	PreviousHead  string // the last reviewed head; a non-empty value scopes the next diff
 }
 
 type Operation struct {

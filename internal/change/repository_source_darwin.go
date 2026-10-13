@@ -41,19 +41,10 @@ func reviewCheckoutSSHArgs(result gitCapture) ([]string, error) {
 // so the repository's refs, config and index are only ever read. An empty ref
 // fetches the base alone and checks out head, which must be merged into it.
 func ReviewCheckout(ctx context.Context, gitExecutable, root string, expected RepositorySourceIdentity, path string, ref, head, base, baseRef string) error {
-	return ReviewCheckoutWithHistory(ctx, gitExecutable, root, expected, path, ref, head, base, baseRef, "")
-}
-
-// ReviewCheckoutWithHistory is ReviewCheckout with an exact prior head made
-// available for an incremental review, even when it is not in the fetched ref.
-func ReviewCheckoutWithHistory(ctx context.Context, gitExecutable, root string, expected RepositorySourceIdentity, path string, ref, head, base, baseRef, previousHead string) error {
 	if err := validateRevision(baseRef); err != nil {
 		return err
 	}
-	for _, value := range []string{head, base, previousHead} {
-		if value == "" {
-			continue
-		}
+	for _, value := range []string{head, base} {
 		if raw, err := hex.DecodeString(value); err != nil || (len(raw) != 20 && len(raw) != 32) || value != strings.ToLower(value) {
 			return &ValidationError{Reason: "review commit must be a full lowercase object ID"}
 		}
@@ -96,9 +87,6 @@ func ReviewCheckoutWithHistory(ctx context.Context, gitExecutable, root string, 
 	if ref != "" {
 		fetch, checkout = append(fetch, "+"+ref+":refs/review/head"), "refs/review/head"
 	}
-	if previousHead != "" {
-		fetch = append(fetch, "+"+previousHead+":refs/review/previous")
-	}
 	if _, err := authority.succeed(ctx, maxGitSelectionOutput, fetch...); err != nil {
 		return reviewCheckoutGitError("fetch", err)
 	}
@@ -110,19 +98,11 @@ func ReviewCheckoutWithHistory(ctx context.Context, gitExecutable, root string, 
 	if _, err := authority.succeed(ctx, maxGitSelectionOutput, "-C", path, "-c", "core.hooksPath=/dev/null", "checkout", "--quiet", "--detach", checkout); err != nil {
 		return reviewCheckoutGitError("checkout", err)
 	}
-	revisions := []string{"HEAD^{commit}", base + "^{commit}"}
-	if previousHead != "" {
-		revisions = append(revisions, previousHead+"^{commit}")
-	}
-	checked, err := authority.run(ctx, maxGitSelectionOutput, append([]string{"-C", path, "rev-parse"}, revisions...)...)
+	checked, err := authority.run(ctx, maxGitSelectionOutput, "-C", path, "rev-parse", "HEAD^{commit}", base+"^{commit}")
 	if err != nil {
 		return reviewCheckoutGitError("rev-parse", err)
 	}
-	expectedOutput := head + "\n" + base + "\n"
-	if previousHead != "" {
-		expectedOutput += previousHead + "\n"
-	}
-	if checked.exitCode != 0 || string(checked.output) != expectedOutput {
+	if checked.exitCode != 0 || string(checked.output) != head+"\n"+base+"\n" {
 		return &ValidationError{Reason: "pull request head or base differs from the requested review"}
 	}
 	return nil
