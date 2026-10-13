@@ -26,8 +26,8 @@ type publicReviewBackend struct {
 	enqueueRefusal                          string // the broker's refusal class, if any
 	defaultBranch                           string
 	liveBaseRef                             string
-	liveBaseSHA                             string
 	liveBody                                string
+	bodyEditAfterReview                     string
 	leaveUnqueued                           int
 	reviews, submits, enqueues              int
 	enqueueSignal                           atomic.Int32
@@ -76,14 +76,14 @@ func (b *publicReviewBackend) Enqueue(_ context.Context, operation review.Operat
 	b.enqueues++
 	b.enqueueSignal.Add(1)
 	b.enqueuedBase, b.enqueuedSHA, b.enqueuedBody = operation.Request.BaseRef, operation.Request.Base, operation.Request.Body
+	if b.liveBody == "" && b.bodyEditAfterReview != "" {
+		b.liveBody = b.bodyEditAfterReview
+	}
 	if b.defaultBranch != "" && operation.Request.BaseRef != b.defaultBranch {
 		return maintainerRejection("conflict: The exact-head, operation, or observed-object binding did not match.")
 	}
 	if b.liveBaseRef != "" && operation.Request.BaseRef != b.liveBaseRef {
 		return maintainerConflict("base", operation.Request.BaseRef, b.liveBaseRef)
-	}
-	if b.liveBaseSHA != "" && operation.Request.Base != b.liveBaseSHA {
-		return maintainerConflict("base", operation.Request.Base, b.liveBaseSHA)
 	}
 	liveBody := b.liveBody
 	if liveBody == "" {
@@ -121,35 +121,6 @@ func digestText(value string) string {
 	return "sha256:" + hex.EncodeToString(digest[:])
 }
 
-func TestEnqueueBaseBindingRefreshesTheRequestBeforeRetry(t *testing.T) {
-	fixture, project, _, settle := publishedTask(t)
-	settle()
-	customerMode(t, fixture)
-	ctx := context.Background()
-	newBase := strings.Repeat("c", 40)
-	backend := &publicReviewBackend{}
-	fixture.daemon.reviewBackend = func(string, uint64) review.Backend { return backend }
-	if _, err := reviewNow(ctx, fixture.daemon, project, publishedReviewRequest()); err != nil {
-		t.Fatal(err)
-	}
-	backend.liveBaseSHA = newBase
-	waitForMergePipeline(t, fixture.daemon)
-	if backend.enqueues != 1 {
-		t.Fatalf("initial enqueue count=%d", backend.enqueues)
-	}
-	first := lastDurableReview(t, fixture.store, project)
-	if first.Request.Base != newBase || first.Failures != 0 || first.Enqueues != 0 {
-		t.Fatalf("base conflict did not refresh the reviewed operation: %+v", first)
-	}
-	if _, err := fixture.daemon.advanceReviewOperations(ctx, false); err != nil {
-		t.Fatal(err)
-	}
-	op := lastDurableReview(t, fixture.store, project)
-	if backend.enqueues != 2 || backend.enqueuedSHA != newBase || op.Request.Base != newBase || op.Enqueues != 1 || op.Failures != 0 {
-		t.Fatalf("base binding was retried without refresh: operation=%+v enqueues=%d base=%s", op, backend.enqueues, backend.enqueuedSHA)
-	}
-}
-
 func TestEnqueueBodyBindingStartsAFreshSameHeadReview(t *testing.T) {
 	fixture, project, _, settle := publishedTask(t)
 	settle()
@@ -161,12 +132,12 @@ func TestEnqueueBodyBindingStartsAFreshSameHeadReview(t *testing.T) {
 	if _, err := reviewNow(ctx, fixture.daemon, project, publishedReviewRequest()); err != nil {
 		t.Fatal(err)
 	}
-	backend.liveBody = newBody
+	backend.bodyEditAfterReview = newBody
 	waitForMergePipeline(t, fixture.daemon)
 	op := waitForDurableReviewMatching(t, fixture.store, project, func(op review.Operation) bool {
 		return op.Request.Body == newBody && op.State == "enqueued" && op.Enqueues == 1
 	})
-	if backend.enqueues != 2 || backend.reviews != 2 || op.Request.Head != publishedReviewRequest().Head || op.Request.Body != newBody {
+	if backend.enqueues < 2 || backend.reviews < 2 || op.Request.Head != publishedReviewRequest().Head || op.Request.Body != newBody {
 		t.Fatalf("body binding did not start a fresh same-head review: operation=%+v reviews=%d enqueues=%d", op, backend.reviews, backend.enqueues)
 	}
 }

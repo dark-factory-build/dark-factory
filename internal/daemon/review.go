@@ -914,7 +914,7 @@ func (b *daemonReviewBackend) Observe(ctx context.Context, operationID string) (
 }
 
 func (b *daemonReviewBackend) Enqueue(ctx context.Context, operation review.Operation) error {
-	err := b.call(ctx, "enqueue_pull_request", map[string]any{"repository": b.repository, "pull_number": operation.Request.PullNumber, "head_sha": operation.Request.Head, "base": operation.Request.BaseRef, "base_sha": operation.Request.Base, "reviewed_body_digest": reviewedBodyDigest(operation)})
+	err := b.call(ctx, "enqueue_pull_request", map[string]any{"repository": b.repository, "pull_number": operation.Request.PullNumber, "head_sha": operation.Request.Head, "base": operation.Request.BaseRef, "reviewed_body_digest": reviewedBodyDigest(operation)})
 	if errors.Is(err, review.ErrOwnerApproval) {
 		err = fmt.Errorf("%w; owned paths: %s", err, b.ownedPaths(ctx, operation.Request))
 	}

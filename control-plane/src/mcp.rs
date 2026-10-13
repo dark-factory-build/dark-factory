@@ -722,10 +722,9 @@ fn tools() -> Value {
                 "pull_number": {"type": "integer", "minimum": 1},
                 "head_sha": {"type": "string", "pattern": "^[0-9a-f]{40}$"},
                 "base": {"type": "string", "minLength": 1, "maxLength": 255},
-                "base_sha": {"type": "string", "pattern": "^[0-9a-f]{40}$"},
                 "reviewed_body_digest": {"type": "string", "pattern": "^sha256:[0-9a-fA-F]{64}$"}
             },
-            "required": ["repository", "pull_number", "head_sha", "base", "base_sha", "reviewed_body_digest"],
+            "required": ["repository", "pull_number", "head_sha", "base", "reviewed_body_digest"],
             "additionalProperties": false
         },
         "outputSchema": {
