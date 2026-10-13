@@ -405,7 +405,14 @@ pub(crate) struct RepositoryResult {
 #[derive(Debug, Serialize)]
 pub(crate) struct RepositoryChecksResult {
     pub(crate) revision: String,
-    pub(crate) checks: Vec<CheckResult>,
+    pub(crate) checks: Vec<RepositoryCheckResult>,
+}
+
+#[derive(Debug, Serialize)]
+pub(crate) struct RepositoryCheckResult {
+    pub(crate) revision: String,
+    #[serde(flatten)]
+    pub(crate) check: CheckResult,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -927,26 +934,55 @@ impl AppAuthority {
             )
             .await
             .ok();
-        let checks = self
-            .0
-            .checks(
-                &token,
-                ObservePullRequestChecks {
-                    repository: request.repository,
-                    pull_number: 0,
-                    head_sha: reference.object.sha.clone(),
-                },
-                &metadata.default_branch,
-                actions.as_ref(),
-            )
-            .await?;
+        let current = reference.object.sha;
+        let runs: WorkflowRuns = github_json(
+            &format!(
+                "https://api.github.com/repos/{}/actions/runs?branch={}&per_page=20",
+                request.repository,
+                percent_encode(&metadata.default_branch)
+            ),
+            token.as_str(),
+        )
+        .await
+        .unwrap_or(WorkflowRuns {
+            workflow_runs: Vec::new(),
+        });
+        let revisions = default_branch_check_revisions(&current, runs.workflow_runs);
+        let mut all_checks = Vec::new();
+        for (index, revision) in revisions.into_iter().enumerate() {
+            let checks = self
+                .0
+                .checks(
+                    &token,
+                    ObservePullRequestChecks {
+                        repository: request.repository.clone(),
+                        pull_number: 0,
+                        head_sha: revision.clone(),
+                    },
+                    &metadata.default_branch,
+                    actions.as_ref(),
+                )
+                .await;
+            let checks = if index == 0 {
+                checks?
+            } else {
+                let Ok(checks) = checks else { continue };
+                checks
+            };
+            let remaining = 100usize.saturating_sub(all_checks.len());
+            all_checks.extend(checks.checks.into_iter().take(remaining).map(|check| {
+                RepositoryCheckResult {
+                    revision: revision.clone(),
+                    check,
+                }
+            }));
+            if all_checks.len() == 100 {
+                break;
+            }
+        }
         Ok(RepositoryChecksResult {
-            revision: reference.object.sha,
-            checks: checks
-                .checks
-                .into_iter()
-                .filter(|check| check.status == "completed")
-                .collect(),
+            revision: current,
+            checks: all_checks,
         })
     }
 
@@ -5175,6 +5211,21 @@ struct WorkflowRun {
     html_url: String,
 }
 
+#[cfg(any(target_arch = "wasm32", test))]
+fn default_branch_check_revisions(current: &str, runs: Vec<WorkflowRun>) -> Vec<String> {
+    let mut revisions = vec![current.to_owned()];
+    for run in runs {
+        if revisions.len() >= 8
+            || !valid_sha(&run.head_sha).is_ok()
+            || revisions.contains(&run.head_sha)
+        {
+            continue;
+        }
+        revisions.push(run.head_sha);
+    }
+    revisions
+}
+
 #[cfg(target_arch = "wasm32")]
 #[derive(Deserialize)]
 struct Comparison {
@@ -8662,6 +8713,23 @@ mod tests {
         );
         // A refused or malformed rules read degrades to "nothing required".
         assert!(required_check_names(Err::<Vec<BranchRule>, _>(Error::Rejected(404))).is_empty());
+    }
+
+    #[test]
+    fn default_branch_checks_keep_previous_unfinished_heads() {
+        let current = "a".repeat(40);
+        let previous = "b".repeat(40);
+        let runs: WorkflowRuns = serde_json::from_value(serde_json::json!({
+			"workflow_runs": [
+				{"id": 1, "head_sha": previous, "conclusion": null, "html_url": "https://github.com/o/r/actions/runs/1"},
+				{"id": 2, "head_sha": current, "conclusion": "success", "html_url": "https://github.com/o/r/actions/runs/2"}
+			]
+		}))
+		.unwrap();
+        assert_eq!(
+            default_branch_check_revisions(&current, runs.workflow_runs),
+            vec![current, "b".repeat(40)]
+        );
     }
 
     #[test]

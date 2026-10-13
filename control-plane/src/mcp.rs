@@ -197,14 +197,14 @@ fn tools() -> Value {
         "annotations": {"readOnlyHint": true, "destructiveHint": false, "openWorldHint": true}
     }, {
         "name": "observe_repository_checks",
-        "title": "Observe completed default-branch checks",
-        "description": "Return completed check runs on the repository's exact default-branch head, including best-effort failure lines.",
+        "title": "Observe recent default-branch checks",
+        "description": "Return recent default-branch check runs, including unfinished runs and best-effort failure lines.",
         "inputSchema": {"type": "object", "properties": {"repository": {"type": "string", "pattern": "^[A-Za-z0-9-]{1,39}/[A-Za-z0-9._-]{1,100}$"}}, "required": ["repository"], "additionalProperties": false},
         "outputSchema": {
             "type": "object",
             "properties": {
                 "revision": {"type": "string"},
-                "checks": {"type": "array", "maxItems": 100, "items": {"type": "object", "properties": {"name": {"type": "string"}, "status": {"type": "string"}, "conclusion": {"type": ["string", "null"]}, "url": {"type": "string"}, "required": {"type": "boolean"}, "annotations": {"type": "array", "maxItems": 40, "items": {"type": "string", "maxLength": 240}}}, "required": ["name", "status", "conclusion", "url", "required", "annotations"], "additionalProperties": false}}
+                "checks": {"type": "array", "maxItems": 100, "items": {"type": "object", "properties": {"revision": {"type": "string"}, "name": {"type": "string"}, "status": {"type": "string"}, "conclusion": {"type": ["string", "null"]}, "url": {"type": "string"}, "required": {"type": "boolean"}, "annotations": {"type": "array", "maxItems": 40, "items": {"type": "string", "maxLength": 240}}}, "required": ["revision", "name", "status", "conclusion", "url", "required", "annotations"], "additionalProperties": false}}
             },
             "required": ["revision", "checks"],
             "additionalProperties": false

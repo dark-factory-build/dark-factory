@@ -97,7 +97,7 @@ func productionObservation(ctx context.Context, call maintainerMCP, repository s
 		return observation, nil
 	}
 	if len(mainChecks) > 0 {
-		converted := mainChecksToProduction(mainChecks, mainChecks[0].Revision)
+		converted := mainChecksToProduction(mainChecks)
 		if len(observation.Checks)+len(converted) > kernel.MaxObservationChecks {
 			observation.Unavailable = "checks"
 		} else {
@@ -361,21 +361,22 @@ func readMaintainerMergeQueue(ctx context.Context, call maintainerMCP, repositor
 	return "none", merge.Group, nil
 }
 
-func mainChecksToProduction(checks []maintainerMainCheck, revision string) []kernel.ProductionCheck {
-	if len(checks) == 0 || len(revision) != 40 || strings.Trim(revision, "0123456789abcdef") != "" {
+func mainChecksToProduction(checks []maintainerMainCheck) []kernel.ProductionCheck {
+	if len(checks) == 0 {
 		return nil
 	}
 	result := make([]kernel.ProductionCheck, 0, len(checks))
 	for _, check := range checks {
-		if check.Status != "completed" {
+		if check.Status != "completed" || len(check.Revision) != 40 || strings.Trim(check.Revision, "0123456789abcdef") != "" {
 			continue
 		}
-		key := sha256.Sum256([]byte(strings.ToLower(revision) + "\x00main\x00" + check.Name))
+		revision := strings.ToLower(check.Revision)
+		key := sha256.Sum256([]byte(revision + "\x00main\x00" + check.Name))
 		conclusion := ""
 		if check.Conclusion != nil {
 			conclusion = *check.Conclusion
 		}
-		result = append(result, kernel.ProductionCheck{ID: hex.EncodeToString(key[:16]), Name: check.Name, Revision: strings.ToLower(revision), Scope: "main", State: check.Status, Conclusion: conclusion, URL: check.URL, Required: check.Required, Jobs: []kernel.ProductionJob{{Name: check.Name, State: check.Status, Conclusion: conclusion, URL: check.URL, Annotations: check.Annotations}}})
+		result = append(result, kernel.ProductionCheck{ID: hex.EncodeToString(key[:16]), Name: check.Name, Revision: revision, Scope: "main", State: check.Status, Conclusion: conclusion, URL: check.URL, Required: check.Required, Jobs: []kernel.ProductionJob{{Name: check.Name, State: check.Status, Conclusion: conclusion, URL: check.URL, Annotations: check.Annotations}}})
 	}
 	return result
 }
@@ -593,7 +594,7 @@ type maintainerPullRequestPage struct {
 }
 
 type maintainerMainCheck struct {
-	Revision    string   `json:"-"`
+	Revision    string   `json:"revision"`
 	Name        string   `json:"name"`
 	Status      string   `json:"status"`
 	Conclusion  *string  `json:"conclusion"`
@@ -615,7 +616,12 @@ func readMaintainerMainChecks(ctx context.Context, call maintainerMCP, repositor
 		return nil, fmt.Errorf("Maintainer returned an invalid main checks response")
 	}
 	for i := range value.Checks {
-		value.Checks[i].Revision = value.Revision
+		if value.Checks[i].Revision == "" {
+			value.Checks[i].Revision = value.Revision
+		}
+		if len(value.Checks[i].Revision) != 40 || strings.Trim(value.Checks[i].Revision, "0123456789abcdef") != "" {
+			return nil, fmt.Errorf("Maintainer returned an invalid main check revision")
+		}
 	}
 	return value.Checks, nil
 }
