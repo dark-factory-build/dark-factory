@@ -62,6 +62,9 @@ func TestReviewPromptDelimitsAuthorControlledBodyAsUntrusted(t *testing.T) {
 	if !strings.Contains(prompt[end:], "name each changed file you reviewed") {
 		t.Fatalf("path-naming instruction missing after body: %q", prompt)
 	}
+	if !strings.Contains(prompt[end:], "A test that reports SKIP is not verification") || !strings.Contains(prompt[end:], "treat that claim as unverified") {
+		t.Fatalf("skip-verification instruction missing after body: %q", prompt)
+	}
 }
 
 // reviewerFixture publishes pull 12 from an author worker on the provider
