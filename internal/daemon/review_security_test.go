@@ -59,8 +59,8 @@ func TestReviewPromptDelimitsAuthorControlledBodyAsUntrusted(t *testing.T) {
 			t.Fatalf("check %q missing after the review context: %q", check, prompt)
 		}
 	}
-	if !strings.Contains(prompt[end:], "premise or evidence is wrong") || !strings.Contains(prompt[end:], "previous findings together with the new diff") || !strings.Contains(prompt[end:], "exercises the real affected path and condition") {
-		t.Fatalf("incremental evidence guidance missing after body: %q", prompt)
+	if !strings.Contains(prompt[:start], "premise or evidence is wrong") || !strings.Contains(prompt[:start], "previous findings together with the new diff") || !strings.Contains(prompt[:start], "exercises the real affected path and condition") {
+		t.Fatalf("incremental evidence guidance missing before body: %q", prompt)
 	}
 }
 
@@ -77,7 +77,8 @@ func TestReviewPromptCarriesPriorBlockingFindingsToANewHead(t *testing.T) {
 	if !strings.Contains(prompt, "the fetch path is never exercised") || !strings.Contains(prompt, "PREVIOUS_BLOCKING_FINDINGS") {
 		t.Fatalf("new-head prompt omitted prior blocking finding: %q", prompt)
 	}
-	if !strings.Contains(prompt[end:], "A test that reports SKIP is not verification") || !strings.Contains(prompt[end:], "treat that claim as unverified") {
+	bodyStart := strings.Index(prompt, "<UNTRUSTED_PULL_REQUEST_BODY>")
+	if !strings.Contains(prompt[:bodyStart], "A test that reports SKIP is not verification") || !strings.Contains(prompt[:bodyStart], "treat that claim as unverified") {
 		t.Fatalf("skip-verification instruction missing after body: %q", prompt)
 	}
 }

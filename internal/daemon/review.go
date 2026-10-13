@@ -362,6 +362,21 @@ func (daemon *Daemon) reviewHead(ctx context.Context, coordinator review.Coordin
 		return err
 	}
 	request.Answer = strings.ToValidUTF8(answer[:min(len(answer), 4000)], "")
+	request.PriorFindings = priorBlockingFindings(open, request.Head)
+	if prior, ok := priorAllowedOperation(open, request); ok {
+		if diffBackend, ok := coordinator.Backend.(interface {
+			DiffID(context.Context, review.Request) (string, error)
+		}); ok {
+			currentDiff, diffErr := diffBackend.DiffID(ctx, request)
+			if diffErr != nil {
+				return diffErr
+			}
+			if currentDiff == prior.DiffID {
+				_, err = coordinator.CarryForward(ctx, request, prior)
+				return err
+			}
+		}
+	}
 	op, err := review.Prepare(request, daemon.now)
 	if err == nil {
 		err = coordinator.Store.Create(ctx, op)
