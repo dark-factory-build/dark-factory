@@ -5,6 +5,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"database/sql"
+	"encoding/binary"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -403,6 +404,61 @@ func TestDaemonDispatchesOperatorCallsAndBoundsProjection(t *testing.T) {
 	task, found, err := fixture.store.Task(ctx, mustTaskID(t, testID(3)))
 	if err != nil || !found || task.Body != "private task body sentinel" {
 		t.Fatalf("durable task = %+v, found=%v, err=%v", task, found, err)
+	}
+}
+
+func TestOperatorStatusUsesBoundedSummaryBeyondSnapshotLimit(t *testing.T) {
+	fixture := newDispatchFixture(t)
+	ctx := context.Background()
+	at := mustKernelTime(t, 2)
+	project, err := fixture.store.CreateProject(ctx, kernel.NewProject{ID: mustProjectID(t, testID(210)), Name: "status", Root: "/status"}, at)
+	if err != nil {
+		t.Fatal(err)
+	}
+	agent, err := fixture.store.CreateAgent(ctx, kernel.NewAgent{ID: mustAgentID(t, testID(211)), ProjectID: project.ID, Name: "worker", Role: kernel.RoleWorker, Provider: kernel.ProviderShell, ToolBudgetLimit: 1}, at)
+	if err != nil {
+		t.Fatal(err)
+	}
+	database, err := sql.Open("sqlite3", "file:"+fixture.databasePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tx, err := database.BeginTx(ctx, nil)
+	if err != nil {
+		database.Close()
+		t.Fatal(err)
+	}
+	const tasks = kernel.SnapshotEntityLimit
+	for index := 1; index <= tasks; index++ {
+		id := make([]byte, kernel.IDBytes)
+		binary.BigEndian.PutUint64(id[8:], uint64(index))
+		incarnation := make([]byte, kernel.IDBytes)
+		binary.BigEndian.PutUint64(incarnation[8:], uint64(index+tasks))
+		if _, err := tx.ExecContext(ctx, `INSERT INTO tasks(id, project_id, assigned_agent_id, incarnation_id, work_revision, title, body, status, priority, completed_at_ms, revision, created_at_ms, updated_at_ms) VALUES(?, ?, ?, ?, 1, ?, '', 'queued', 0, NULL, 1, ?, ?)`, id, project.ID.Bytes(), agent.ID.Bytes(), incarnation, fmt.Sprintf("task-%d", index), index, index); err != nil {
+			tx.Rollback()
+			database.Close()
+			t.Fatal(err)
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		database.Close()
+		t.Fatal(err)
+	}
+	if err := database.Close(); err != nil {
+		t.Fatal(err)
+	}
+	operator, err := api.NewOperatorClient(fixture.socket, fixture.operator)
+	if err != nil {
+		t.Fatal(err)
+	}
+	done := fixture.serve(t)
+	status, err := operator.Health(ctx, "")
+	waitDispatch(t, done)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if status.Summary == nil || status.Summary.Counts.Tasks != tasks || len(status.Summary.Recent) != kernel.StatusRecentLimit || status.Summary.Recent[0].Title != fmt.Sprintf("task-%d", tasks) || status.Summary.Why == "" || status.Summary.Report == "" {
+		t.Fatalf("bounded status = %+v", status)
 	}
 }
 
