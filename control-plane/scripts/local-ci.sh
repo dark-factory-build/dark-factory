@@ -4,6 +4,9 @@ set -eu
 script_dir=$(CDPATH='' cd -- "$(dirname "$0")" && pwd)
 repo_root=$(CDPATH='' cd -- "$script_dir/.." && pwd)
 cd "$repo_root"
+. "$repo_root/../scripts/locked-dependency-env.sh"
+df_locked_dependency_env
+df_verify_dependency_lockfiles package-lock.json Cargo.lock
 
 require_tool() {
     tool=$1
@@ -51,7 +54,7 @@ case "$node_executable" in
     /*) ;;
     *) echo "Node did not report an absolute executable path" >&2; exit 1 ;;
 esac
-npm ci --ignore-scripts
+npm ci --ignore-scripts --registry "$npm_config_registry"
 worker-build --release
 
 clean_wrangler="$repo_root/scripts/with-clean-wrangler-env.sh"
