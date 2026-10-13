@@ -453,6 +453,9 @@ func frozenAcceptedIssueResponse(request maintainerRequest, accepted kernel.Inta
 }
 
 func (daemon *Daemon) liveAcceptedIssue(ctx context.Context, accepted kernel.IntakeAcceptance) (frozenIssue, error) {
+	if daemon.liveIssue != nil {
+		return daemon.liveIssue(ctx, accepted)
+	}
 	if accepted.Snapshot.LinearTeamID != "" || daemon.github == nil {
 		return frozenIssue{}, errors.New("live issue source unavailable")
 	}

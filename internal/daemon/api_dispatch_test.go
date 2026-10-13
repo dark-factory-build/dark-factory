@@ -23,6 +23,7 @@ import (
 	"github.com/dark-factory-build/dark-factory/internal/api"
 	"github.com/dark-factory-build/dark-factory/internal/install"
 	"github.com/dark-factory-build/dark-factory/internal/kernel"
+	"github.com/dark-factory-build/dark-factory/internal/maintainer"
 	"github.com/dark-factory-build/dark-factory/internal/runner"
 )
 
@@ -863,9 +864,13 @@ func prepareActiveAttemptInProject(t *testing.T, fixture *dispatchFixture, seed 
 }
 
 func prepareActiveAttemptInProjectWithProvider(t *testing.T, fixture *dispatchFixture, seed byte, projectID, role, provider string, enqueue ...func()) activeAttempt {
+	return prepareActiveAttemptInProjectWithProviderAndTask(t, fixture, seed, projectID, role, provider, testID(seed+2), enqueue...)
+}
+
+func prepareActiveAttemptInProjectWithProviderAndTask(t *testing.T, fixture *dispatchFixture, seed byte, projectID, role, provider, taskID string, enqueue ...func()) activeAttempt {
 	t.Helper()
 	ctx := context.Background()
-	agentID, taskID, incarnationID := testID(seed+1), testID(seed+2), testID(seed+3)
+	agentID, incarnationID := testID(seed+1), testID(seed+3)
 	operator, err := api.NewOperatorClient(fixture.socket, fixture.operator)
 	if err != nil {
 		t.Fatal(err)
@@ -891,10 +896,14 @@ func prepareActiveAttemptInProjectWithProvider(t *testing.T, fixture *dispatchFi
 			return err
 		})
 	}
-	call(func() error {
-		_, err := operator.CreateAgent(ctx, api.CreateAgentInput{ID: agentID, ProjectID: projectID, Name: "agent", Role: role, Provider: provider})
-		return err
-	})
+	if _, foundAgent, err := fixture.store.Agent(ctx, mustAgentID(t, agentID)); err != nil {
+		t.Fatal(err)
+	} else if !foundAgent {
+		call(func() error {
+			_, err := operator.CreateAgent(ctx, api.CreateAgentInput{ID: agentID, ProjectID: projectID, Name: "agent", Role: role, Provider: provider})
+			return err
+		})
+	}
 	if len(enqueue) == 1 {
 		enqueue[0]()
 	} else {
@@ -1036,6 +1045,76 @@ func TestDaemonServesCurrentWorkerAssignmentReceipt(t *testing.T) {
 	}
 	if receipt.AdmittedChangeRevision == receipt.ChangeRevision {
 		t.Fatalf("worker receipt did not distinguish admitted/current Change revisions: %+v", receipt)
+	}
+}
+
+func TestAttemptTaskUsesCurrentAcceptedIssueBody(t *testing.T) {
+	fixture := newDispatchFixture(t)
+	ctx := context.Background()
+	project := mustProjectID(t, testID(220))
+	agent := mustAgentID(t, testID(221))
+	if _, err := fixture.store.CreateProject(ctx, kernel.NewProject{ID: project, Name: "intake", Root: "/intake/220"}, mustKernelTime(t, 100)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := fixture.store.CreateAgent(ctx, kernel.NewAgent{ID: agent, ProjectID: project, Name: "overseer", Role: kernel.RoleOrchestrator, Provider: kernel.ProviderShell, ToolBudgetLimit: 10}, mustKernelTime(t, 101)); err != nil {
+		t.Fatal(err)
+	}
+	sourceID, err := kernel.IntakeSourceIDFromBytes(bytes.Repeat([]byte{222}, kernel.IDBytes))
+	if err != nil {
+		t.Fatal(err)
+	}
+	source, err := fixture.store.CreateIntakeSource(ctx, kernel.NewIntakeSource{ID: sourceID, ProjectID: project, TargetRepositoryID: kernel.RepositoryID(project), OverseerAgentID: agent, GitHubRepositoryID: 42, GitHubRepositoryName: "team/issues", Policy: kernel.IntakePolicyManual, PollSeconds: 60, AdmissionLimit: 1}, mustKernelTime(t, 102))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := fixture.store.SetIntakeSourceEnabled(ctx, source.ID, source.Revision, true, mustKernelTime(t, 103)); err != nil {
+		t.Fatal(err)
+	}
+	issue := maintainer.Issue{ID: 81, NodeID: "I_attempt", Number: 9, Title: "Original title", Body: "Original scope", State: "open", URL: "https://github.com/team/issues/issues/9"}
+	issue.Author.Login, issue.Author.Type = "outsider", "User"
+	fixture.daemon.intakeIssues = func(_ context.Context, repository string, repositoryID uint64, page uint32, label string, number uint64) (maintainer.IssuePage, error) {
+		return maintainer.IssuePage{RepositoryID: repositoryID, Issues: []maintainer.Issue{issue}}, nil
+	}
+	snapshot := intakeSnapshot(source, issue)
+	hash := snapshot.ContentHash()
+	preview := fixture.daemon.Intake(ctx, api.IntakeInput{Action: "preview", SourceID: source.ID.String(), Page: 1})
+	if preview.State != "ok" || len(preview.Candidates) != 1 {
+		t.Fatalf("preview = %+v", preview)
+	}
+	receipt := fixture.daemon.Intake(ctx, api.IntakeInput{Action: "accept", SourceID: source.ID.String(), ExpectedRevision: uint64(source.Revision.Int64()), IssueNumber: issue.Number, ContentHash: hex.EncodeToString(hash[:])})
+	if receipt.State != "accepted" {
+		t.Fatalf("acceptance = %+v", receipt)
+	}
+	if imported := fixture.daemon.Intake(ctx, api.IntakeInput{Action: "tick", SourceID: source.ID.String(), Page: 1}); imported.State != "ok" || len(imported.ImportedTasks) != 1 {
+		t.Fatalf("import = %+v", imported)
+	}
+	issue.Body = "Edited scope"
+	fixture.daemon.liveIssue = func(context.Context, kernel.IntakeAcceptance) (frozenIssue, error) {
+		return frozenIssue{Number: issue.Number, Title: issue.Title, Body: issue.Body}, nil
+	}
+	customerMode(t, fixture)
+	queuedID, err := decodeID(receipt.TaskID, kernel.TaskIDFromBytes)
+	if err != nil {
+		t.Fatal(err)
+	}
+	queued, found, err := fixture.store.Task(ctx, queuedID)
+	if err != nil || !found {
+		t.Fatalf("queued task = %+v found=%v err=%v", queued, found, err)
+	}
+	assigned := mustAgentID(t, testID(221))
+	queued, err = fixture.store.UpdateTask(ctx, queued.ID, queued.Revision, kernel.TaskPatch{AssignedAgentID: &assigned}, mustKernelTime(t, 1000))
+	if err != nil {
+		t.Fatal(err)
+	}
+	active := prepareActiveAttemptInProjectWithProviderAndTask(t, fixture, 220, project.String(), "orchestrator", "shell", receipt.TaskID, func() {})
+	done := fixture.serve(t)
+	assignment, err := active.client.Task(ctx)
+	waitDispatch(t, done)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(assignment.Task, "Edited scope") || strings.Contains(assignment.Task, "Original scope") {
+		t.Fatalf("attempt task = %q", assignment.Task)
 	}
 }
 

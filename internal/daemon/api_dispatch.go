@@ -61,6 +61,9 @@ type Daemon struct {
 	releaseSince atomic.Int64
 	// intakeIssues is a package-test-only remote failure/race seam.
 	intakeIssues func(context.Context, string, uint64, uint32, string, uint64) (maintainer.IssuePage, error)
+	// liveIssue is a package-test-only seam for the accepted issue read used by
+	// the attempt path.
+	liveIssue func(context.Context, kernel.IntakeAcceptance) (frozenIssue, error)
 	// browserRemote is a package-test-only seam for operator calls that wait
 	// outside a paired client's gate.
 	browserRemote       func(context.Context, string)
