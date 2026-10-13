@@ -90,6 +90,7 @@ type Daemon struct {
 	// time, read only by the scheduler loop, and whether a pass is running.
 	pipelineAt   atomic.Int64 // unix nanoseconds of the next merge-stage pass
 	pipelineBusy atomic.Bool
+	pipelineWake atomic.Bool
 	reconcileMu  sync.Mutex // one reconciler pass at a time: startup's and the tick's
 	bootedAt     time.Time  // wall clock before the listener: startup resumes only older reviews
 	// The scheduler's Change reclaim pass (tickChangeReclaim), alike, and the

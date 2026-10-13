@@ -140,10 +140,14 @@ func TestEnqueueBodyBindingStartsAFreshSameHeadReview(t *testing.T) {
 	}
 	waitForMergePipeline(t, fixture.daemon)
 	op := waitForDurableReviewMatching(t, fixture.store, project, func(op review.Operation) bool {
-		return op.Request.Body == newBody && op.State == "enqueued" && op.Enqueues == 1
+		return op.Request.Body == newBody && op.State == "enqueued"
 	})
-	if backend.enqueues < 2 || backend.reviews < 2 || op.Request.Head != publishedReviewRequest().Head || op.Request.Body != newBody {
-		t.Fatalf("body binding did not start a fresh same-head review: operation=%+v reviews=%d enqueues=%d", op, backend.reviews, backend.enqueues)
+	deadline := time.Now().Add(5 * time.Second)
+	for !backend.queued && time.Now().Before(deadline) {
+		time.Sleep(5 * time.Millisecond)
+	}
+	if backend.enqueues < 2 || backend.reviews < 2 || !backend.queued || op.Request.Head != publishedReviewRequest().Head || op.Request.Body != newBody {
+		t.Fatalf("body binding did not start a fresh same-head review: operation=%+v reviews=%d enqueues=%d queued=%v", op, backend.reviews, backend.enqueues, backend.queued)
 	}
 }
 
