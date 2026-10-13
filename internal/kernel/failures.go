@@ -39,7 +39,7 @@ func failureLedger(ctx context.Context, c *sql.Conn, scope []byte, since int64) 
 		FROM runs AS r JOIN tasks AS t ON t.id = r.task_id JOIN agents AS a ON a.id = r.agent_id
 		WHERE (?1 IS NULL OR r.project_id = ?1) AND r.terminal_kind IN ('failed', 'blocked') AND r.terminal_at_ms IS NOT NULL AND NOT `+specialistCarrierSQL+`
 		UNION ALL SELECT 'check', json_extract(document, '$.name'), NULL, NULL, NULL,
-			'pull request #' || json_extract(document, '$.pull_requests[0]') || ' at ' || substr(json_extract(document, '$.revision'), 1, 8), observed_at_ms, ''
+			CASE WHEN json_extract(document, '$.pull_requests[0]') IS NULL THEN 'main' ELSE 'pull request #' || json_extract(document, '$.pull_requests[0]') END || ' at ' || substr(json_extract(document, '$.revision'), 1, 8) || COALESCE(' ' || (SELECT group_concat(json_extract(j.value, '$.name') || ' ' || json_extract(j.value, '$.annotations')) FROM json_each(production_records.document, '$.jobs') j), ''), observed_at_ms, ''
 		FROM production_records WHERE (?1 IS NULL OR project_id = ?1) AND kind = 'check' AND json_extract(document, '$.conclusion') IN ('failure', 'timed_out', 'startup_failure')`, project)
 	if err != nil {
 		return nil, err
@@ -98,6 +98,32 @@ func failureSignature(kind, code string, exit, signal, runner sql.NullInt64, det
 	for _, word := range strings.Fields(strings.ToLower(head)) {
 		if word = strings.TrimFunc(word, func(r rune) bool { return !unicode.IsLetter(r) }); word != "" && !strings.ContainsFunc(word, unicode.IsDigit) && len(words) < 6 {
 			words = append(words, word)
+		}
+	}
+	lower := strings.ToLower(detail)
+	for _, marker := range []string{"--- fail:", "✖", "not ok"} {
+		if offset := strings.Index(lower, marker); offset >= 0 {
+			tail := strings.SplitN(lower[offset+len(marker):], `",`, 2)[0]
+			fields := strings.Fields(tail)
+			if marker == "--- fail:" && len(fields) > 1 {
+				fields = fields[:1]
+			}
+			if marker == "not ok" && len(fields) > 0 && strings.Trim(fields[0], "0123456789") == "" {
+				fields = fields[1:]
+			}
+			for _, field := range fields {
+				if strings.HasPrefix(field, "(") {
+					continue
+				}
+				word := strings.ToLower(strings.TrimFunc(field, func(r rune) bool { return !unicode.IsLetter(r) && !unicode.IsDigit(r) }))
+				if word != "" && strings.TrimFunc(word, unicode.IsDigit) != "" {
+					if !slices.Contains(words, "test") {
+						words = append(words, "test")
+					}
+					words = append(words, word)
+				}
+			}
+			break
 		}
 	}
 	return strings.Join(parts, "/") + " " + strings.Join(words, " ")

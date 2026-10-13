@@ -188,6 +188,61 @@ func reviewNow(ctx context.Context, daemon *Daemon, project kernel.ProjectID, re
 	return op.ID, err
 }
 
+func TestReconciliationPersistsMergeGroupFailureForReport(t *testing.T) {
+	fixture, project := reviewPublicFixture(t)
+	request := publishedReviewRequest()
+	call := func(_ context.Context, raw json.RawMessage, _ map[string]uint64) (json.RawMessage, error) {
+		var envelope struct {
+			Params struct {
+				Name string `json:"name"`
+			} `json:"params"`
+		}
+		if err := json.Unmarshal(raw, &envelope); err != nil {
+			t.Fatal(err)
+		}
+		reply := func(content string) json.RawMessage {
+			return json.RawMessage(`{"jsonrpc":"2.0","id":1,"result":{"structuredContent":` + content + `}}`)
+		}
+		switch envelope.Params.Name {
+		case "list_pull_requests":
+			return reply(`{"pull_requests":[{"number":12,"title":"Ship it","head_sha":"` + request.Head + `","base_ref":"main","base_sha":"` + request.Base + `","state":"open","review":{"state":"allow"}}],"next_page":null}`), nil
+		case "observe_pull_request_merge":
+			return reply(`{"pull_number":12,"head_sha":"` + request.Head + `","state":"NOT_QUEUED","merge_group":{"run_id":12,"url":"https://github.com/o/r/actions/runs/12","conclusion":"failure","failed_jobs":[{"name":"go","conclusion":"failure","annotations":["--- FAIL: TestQueue"]}]}}`), nil
+		case "observe_pull_request_checks":
+			return reply(`{"pull_number":12,"head_sha":"` + request.Head + `","checks":[]}`), nil
+		case "observe_repository_checks":
+			return reply(`{"revision":"` + request.Base + `","checks":[]}`), nil
+		default:
+			t.Fatalf("unexpected maintainer tool %s", envelope.Params.Name)
+			return nil, nil
+		}
+	}
+	observation, err := productionObservation(context.Background(), call, request.Repository, 42, nil, nil, func(error) {})
+	if err != nil {
+		t.Fatal(err)
+	}
+	observation.ObservedAt = 3000
+	if err := fixture.store.RecordProductionObservation(context.Background(), project, observation, mustKernelTime(t, 3000)); err != nil {
+		t.Fatal(err)
+	}
+	lines, err := fixture.store.Report(context.Background(), &project, 0, 3600000)
+	if err != nil || !strings.Contains(strings.Join(lines, "\n"), "failure new") || !strings.Contains(strings.Join(lines, "\n"), "TestQueue") {
+		t.Fatalf("reconciled merge-group report = %q, %v", lines, err)
+	}
+	overseer, err := fixture.store.CreateAgent(context.Background(), kernel.NewAgent{ID: mustAgentID(t, testID(60)), ProjectID: project, Name: "specialist", Role: kernel.RoleWorker, Provider: kernel.ProviderCodex, ToolBudgetLimit: 2}, mustKernelTime(t, 3001))
+	if err != nil {
+		t.Fatal(err)
+	}
+	policy, after, instruction, wakeOn := kernel.IdleStandingInstruction, uint32(1), "Supervise.", "failures"
+	if _, err := fixture.store.UpdateAgent(context.Background(), overseer.ID, overseer.Revision, kernel.AgentPatch{IdlePolicy: &policy, IdleAfterSeconds: &after, IdleInstruction: &instruction, IdleWakeOn: &wakeOn}, mustKernelTime(t, 3002)); err != nil {
+		t.Fatal(err)
+	}
+	wakes, err := fixture.store.EnqueueOverseerWakeups(context.Background(), mustKernelTime(t, 3003))
+	if err != nil || len(wakes) != 1 {
+		t.Fatalf("reconciled merge-group wake = %+v, %v", wakes, err)
+	}
+}
+
 func waitForMergePipeline(t *testing.T, daemon *Daemon) {
 	t.Helper()
 	// The issue's verdict wake is production behavior; finish that merge pass

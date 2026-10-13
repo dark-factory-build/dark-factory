@@ -173,7 +173,7 @@ func productionRecordOnConnection(ctx context.Context, c *sql.Conn, project Proj
 	}
 	id, body = item.ID, item.Document
 	_, err = c.ExecContext(ctx, `INSERT INTO production_records (project_id, repository, kind, identity, visual_id, document, observed_at_ms) VALUES (?, ?, ?, ?, ?, ?, ?)
-        ON CONFLICT(project_id, repository, kind, identity) DO UPDATE SET document = excluded.document, observed_at_ms = excluded.observed_at_ms
+		ON CONFLICT(project_id, repository, kind, identity) DO UPDATE SET document = excluded.document, observed_at_ms = CASE WHEN production_records.kind = 'check' AND production_records.document = excluded.document THEN production_records.observed_at_ms ELSE excluded.observed_at_ms END
         WHERE excluded.observed_at_ms >= production_records.observed_at_ms`, project.Bytes(), repo, kind, id, visual, string(body), at)
 	return err
 }
@@ -284,12 +284,20 @@ func (store *Store) recordProductionObservation(ctx context.Context, c *sql.Conn
 		}
 	}
 	for _, check := range observation.Checks {
-		if !productionSHA(check.Revision) || !productionURL(check.URL) || !validOutcomeText(check.Name, 256) || !validOutcomeText(check.State, 64) || !validOutcomeText(check.Conclusion, 64) || (check.Scope != "head" && check.Scope != "merge_group") || !productionNumbers(check.PullRequests) || len(check.Jobs) > 32 || check.Overflow < 0 {
+		if !productionSHA(check.Revision) || !productionURL(check.URL) || !validOutcomeText(check.Name, 256) || !validOutcomeText(check.State, 64) || !validOutcomeText(check.Conclusion, 64) || (check.Scope != "head" && check.Scope != "merge_group" && check.Scope != "main") || !productionNumbers(check.PullRequests) || len(check.Jobs) > 32 || check.Overflow < 0 {
 			return ErrInvalidValue
 		}
 		for _, job := range check.Jobs {
 			if !validOutcomeText(job.ID, 256) || !validOutcomeText(job.Name, 256) || !validOutcomeText(job.State, 64) || !validOutcomeText(job.Conclusion, 64) || !productionURL(job.URL) {
 				return ErrInvalidValue
+			}
+			if len(job.Annotations) > 40 {
+				return ErrInvalidValue
+			}
+			for _, annotation := range job.Annotations {
+				if !validOutcomeText(annotation, 960) {
+					return ErrInvalidValue
+				}
 			}
 		}
 		if err := write("check", check.ID, "", check); err != nil {

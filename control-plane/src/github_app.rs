@@ -375,6 +375,12 @@ pub(crate) struct ObserveRepository {
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
+pub(crate) struct ObserveRepositoryChecks {
+    pub(crate) repository: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
 pub(crate) struct ObservePullRequestChecks {
     pub(crate) repository: String,
     pub(crate) pull_number: i64,
@@ -394,6 +400,19 @@ pub(crate) struct RepositoryResult {
     pub(crate) repository_id: i64,
     pub(crate) default_branch: String,
     pub(crate) default_sha: String,
+}
+
+#[derive(Debug, Serialize)]
+pub(crate) struct RepositoryChecksResult {
+    pub(crate) revision: String,
+    pub(crate) checks: Vec<RepositoryCheckResult>,
+}
+
+#[derive(Debug, Serialize)]
+pub(crate) struct RepositoryCheckResult {
+    pub(crate) revision: String,
+    #[serde(flatten)]
+    pub(crate) check: CheckResult,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -881,6 +900,97 @@ impl AppAuthority {
             )
             .await?;
         self.0.repository_snapshot(&token).await
+    }
+
+    #[cfg(target_arch = "wasm32")]
+    pub(crate) async fn observe_repository_checks(
+        &self,
+        mut request: ObserveRepositoryChecks,
+    ) -> Result<RepositoryChecksResult, OperationError> {
+        let mut name = request.repository.clone();
+        let repository = RepositoryName::requested(&mut request.repository)?;
+        let token = self
+            .0
+            .installation_token(
+                repository,
+                BTreeMap::from([
+                    ("checks", "read"),
+                    ("contents", "read"),
+                    ("metadata", "read"),
+                ]),
+            )
+            .await?;
+        let metadata = self.0.repository_metadata(&token).await?;
+        let reference = self.0.read_ref(&token, &metadata.default_branch).await?;
+        if reference.object.kind != "commit" {
+            return Err(OperationError::Unavailable);
+        }
+        valid_sha(&reference.object.sha)?;
+        let actions = self
+            .0
+            .installation_token(
+                RepositoryName::requested(&mut name)?,
+                BTreeMap::from([("actions", "read"), ("metadata", "read")]),
+            )
+            .await
+            .ok();
+        let current = reference.object.sha;
+        let runs = if let Some(actions) = actions.as_ref() {
+            github_json(
+                &format!(
+                    "https://api.github.com/repos/{}/actions/runs?branch={}&per_page=20",
+                    request.repository,
+                    percent_encode(&metadata.default_branch)
+                ),
+                actions.as_str(),
+            )
+            .await
+            .unwrap_or(WorkflowRuns {
+                workflow_runs: Vec::new(),
+            })
+        } else {
+            WorkflowRuns {
+                workflow_runs: Vec::new(),
+            }
+        };
+        let revisions = default_branch_check_revisions(&current, runs.workflow_runs);
+        let mut all_checks = Vec::new();
+        for (index, revision) in revisions.into_iter().enumerate() {
+            let checks = self
+                .0
+                .checks(
+                    &token,
+                    ObservePullRequestChecks {
+                        repository: request.repository.clone(),
+                        pull_number: 0,
+                        head_sha: revision.clone(),
+                    },
+                    &metadata.default_branch,
+                    actions.as_ref(),
+                    true,
+                )
+                .await;
+            let checks = if index == 0 {
+                checks?
+            } else {
+                let Ok(checks) = checks else { continue };
+                checks
+            };
+            let remaining = 100usize.saturating_sub(all_checks.len());
+            all_checks.extend(checks.checks.into_iter().take(remaining).map(|check| {
+                RepositoryCheckResult {
+                    revision: revision.clone(),
+                    check,
+                }
+            }));
+            if all_checks.len() == 100 {
+                break;
+            }
+        }
+        Ok(RepositoryChecksResult {
+            revision: current,
+            checks: all_checks,
+        })
     }
 
     #[cfg(target_arch = "wasm32")]
@@ -1655,7 +1765,7 @@ impl AppAuthority {
             .await
             .ok();
         self.0
-            .checks(&token, request, &pull.base.name, actions.as_ref())
+            .checks(&token, request, &pull.base.name, actions.as_ref(), false)
             .await
     }
 
@@ -3768,7 +3878,7 @@ impl Authority {
             head_sha: request.head_sha.clone(),
         };
         if self
-            .checks(token, checks, &request.base, None)
+            .checks(token, checks, &request.base, None, false)
             .await?
             .checks
             .iter()
@@ -4178,13 +4288,18 @@ impl Authority {
         request: ObservePullRequestChecks,
         base: &str,
         actions: Option<&RepositoryToken>,
+        historical: bool,
     ) -> Result<ChecksResult, OperationError> {
         let api = format!(
             "https://api.github.com/repos/{}/{}",
             token.repository.owner, token.repository.name
         );
         let response: CheckRuns = github_json(
-            &format!("{api}/commits/{}/check-runs?per_page=100", request.head_sha),
+            &format!(
+                "{api}/commits/{}/check-runs?{}per_page=100",
+                request.head_sha,
+                if historical { "filter=all&" } else { "" }
+            ),
             token.as_str(),
         )
         .await?;
@@ -5182,6 +5297,21 @@ struct WorkflowRun {
     head_sha: String,
     conclusion: Option<String>,
     html_url: String,
+}
+
+#[cfg(any(target_arch = "wasm32", test))]
+fn default_branch_check_revisions(current: &str, runs: Vec<WorkflowRun>) -> Vec<String> {
+    let mut revisions = vec![current.to_owned()];
+    for run in runs {
+        if revisions.len() >= 8
+            || valid_sha(&run.head_sha).is_err()
+            || revisions.contains(&run.head_sha)
+        {
+            continue;
+        }
+        revisions.push(run.head_sha);
+    }
+    revisions
 }
 
 #[cfg(target_arch = "wasm32")]
@@ -8671,6 +8801,23 @@ mod tests {
         );
         // A refused or malformed rules read degrades to "nothing required".
         assert!(required_check_names(Err::<Vec<BranchRule>, _>(Error::Rejected(404))).is_empty());
+    }
+
+    #[test]
+    fn default_branch_checks_keep_previous_unfinished_heads() {
+        let current = "a".repeat(40);
+        let previous = "b".repeat(40);
+        let runs: WorkflowRuns = serde_json::from_value(serde_json::json!({
+			"workflow_runs": [
+				{"id": 1, "head_sha": previous, "conclusion": null, "html_url": "https://github.com/o/r/actions/runs/1"},
+				{"id": 2, "head_sha": current, "conclusion": "success", "html_url": "https://github.com/o/r/actions/runs/2"}
+			]
+		}))
+		.unwrap();
+        assert_eq!(
+            default_branch_check_revisions(&current, runs.workflow_runs),
+            vec![current, "b".repeat(40)]
+        );
     }
 
     #[test]

@@ -17,6 +17,7 @@ import (
 	"github.com/dark-factory-build/dark-factory/internal/kernel"
 	"github.com/dark-factory-build/dark-factory/internal/maintainer"
 	"github.com/dark-factory-build/dark-factory/internal/opgraph"
+	"github.com/dark-factory-build/dark-factory/internal/review"
 )
 
 const productionRefreshPRLimit = 100
@@ -58,7 +59,7 @@ func (daemon *Daemon) refreshProduction(ctx context.Context, project kernel.Proj
 		}
 		var observation kernel.ProductionObservation
 		if err == nil {
-			observation, err = pullRequestObservation(ctx, daemon.github.MCP, identity.PublicationRepository, githubID, known, settled, daemon.noteMaintainerFault)
+			observation, err = productionObservation(ctx, daemon.github.MCP, identity.PublicationRepository, githubID, known, settled, daemon.noteMaintainerFault)
 		}
 		if err != nil {
 			LogFactoryd(daemon.log, "factoryd: refresh %s: %v\n", identity.PublicationRepository, err)
@@ -83,6 +84,27 @@ func (daemon *Daemon) refreshProduction(ctx context.Context, project kernel.Proj
 		recordCIObservations(daemon.runtimeStore(), repository.ID.String(), observation, at.Int64())
 	}
 	return nil
+}
+
+func productionObservation(ctx context.Context, call maintainerMCP, repository string, githubID uint64, known []kernel.ProductionPullRequest, settled map[kernel.ProductionHead]bool, fault func(error)) (kernel.ProductionObservation, error) {
+	observation, err := pullRequestObservation(ctx, call, repository, githubID, known, settled, fault)
+	if err != nil {
+		return observation, err
+	}
+	mainChecks, mainErr := readMaintainerMainChecks(ctx, call, repository, githubID)
+	if mainErr != nil {
+		observation.Unavailable = "main_checks"
+		return observation, nil
+	}
+	if len(mainChecks) > 0 {
+		converted := mainChecksToProduction(mainChecks)
+		if len(observation.Checks)+len(converted) > kernel.MaxObservationChecks {
+			observation.Unavailable = "checks"
+		} else {
+			observation.Checks = append(observation.Checks, converted...)
+		}
+	}
+	return observation, nil
 }
 
 // refreshProductionDetached serves the browser's Production read, whose 3s
@@ -279,11 +301,15 @@ func pullRequestObservation(ctx context.Context, call maintainerMCP, repository 
 		}
 		if pr.Review.State == "allow" {
 			pr.MergeQueue = "unknown"
-			if queue, err := readMaintainerMergeQueue(ctx, call, repository, githubID, pr); err != nil {
+			queue, group, err := readMaintainerMergeQueue(ctx, call, repository, githubID, pr)
+			if err != nil {
 				fault(err)
 				result.Unavailable = "merge_queue"
 			} else {
 				pr.MergeQueue = queue
+				if group != nil {
+					result.Checks = append(result.Checks, mergeGroupCheck(pr, group))
+				}
 			}
 		}
 		result.PullRequests = append(result.PullRequests, pr)
@@ -320,19 +346,54 @@ func pullRequestNeedsExactRead(pull maintainerPullRequest, known map[uint64]kern
 	return !ok || prior.Mergeable == nil || !strings.EqualFold(prior.Head, pull.Head) || !strings.EqualFold(prior.Base, pull.Base) || !strings.EqualFold(prior.BaseSHA, pull.BaseSHA)
 }
 
-func readMaintainerMergeQueue(ctx context.Context, call maintainerMCP, repository string, githubID uint64, pr kernel.ProductionPullRequest) (string, error) {
+func readMaintainerMergeQueue(ctx context.Context, call maintainerMCP, repository string, githubID uint64, pr kernel.ProductionPullRequest) (string, *review.GroupRun, error) {
 	content, err := maintainerTool(ctx, call, repository, githubID, "observe_pull_request_merge", observePullRequestMergeArguments(repository, pr.Number, pr.Head, pr.Base))
 	if err != nil {
-		return "", err
+		return "", nil, err
 	}
 	var merge observePullRequestMergeResponse
 	if json.Unmarshal(content, &merge) != nil || merge.PullNumber != pr.Number || merge.Head != pr.Head {
-		return "", errors.New("Maintainer returned an invalid merge observation")
+		return "", nil, errors.New("Maintainer returned an invalid merge observation")
 	}
 	if merge.State == "ACTIVE_QUEUE" {
-		return "active", nil
+		return "active", nil, nil
 	}
-	return "none", nil
+	return "none", merge.Group, nil
+}
+
+func mainChecksToProduction(checks []maintainerMainCheck) []kernel.ProductionCheck {
+	if len(checks) == 0 {
+		return nil
+	}
+	result := make([]kernel.ProductionCheck, 0, len(checks))
+	for _, check := range checks {
+		if check.Status != "completed" || len(check.Revision) != 40 || strings.Trim(check.Revision, "0123456789abcdef") != "" {
+			continue
+		}
+		revision := strings.ToLower(check.Revision)
+		// The workflow URL carries the completed run identity. Keep reruns at
+		// the same revision separate so a later success cannot overwrite the
+		// failure that explains the earlier run.
+		key := sha256.Sum256([]byte(revision + "\x00main\x00" + check.Name + "\x00" + check.URL))
+		conclusion := ""
+		if check.Conclusion != nil {
+			conclusion = *check.Conclusion
+		}
+		annotations := append([]string(nil), check.Annotations...)
+		redactLines(annotations)
+		result = append(result, kernel.ProductionCheck{ID: hex.EncodeToString(key[:16]), Name: check.Name, Revision: revision, Scope: "main", State: check.Status, Conclusion: conclusion, URL: check.URL, Required: check.Required, Jobs: []kernel.ProductionJob{{Name: check.Name, State: check.Status, Conclusion: conclusion, URL: check.URL, Annotations: annotations}}})
+	}
+	return result
+}
+
+func mergeGroupCheck(pr kernel.ProductionPullRequest, group *review.GroupRun) kernel.ProductionCheck {
+	jobs := make([]kernel.ProductionJob, 0, len(group.Jobs))
+	for _, job := range group.Jobs {
+		annotations := append([]string(nil), job.Annotations...)
+		redactLines(annotations)
+		jobs = append(jobs, kernel.ProductionJob{Name: job.Name, State: "completed", Conclusion: job.Conclusion, URL: group.URL, Annotations: annotations})
+	}
+	return kernel.ProductionCheck{ID: fmt.Sprintf("merge-group:%d", group.ID), Name: "merge_group", Revision: strings.ToLower(pr.Head), Scope: "merge_group", State: "completed", Conclusion: group.Conclusion, URL: group.URL, PullRequests: []uint64{pr.Number}, Jobs: jobs}
 }
 
 // recordCIObservations is the github adapter: the checks a refresh read light the jobs of the repository's CI unit, and fail them on a failed
@@ -537,6 +598,39 @@ func productionPullRequest(value maintainerPullRequest) kernel.ProductionPullReq
 type maintainerPullRequestPage struct {
 	PullRequests []maintainerPullRequest `json:"pull_requests"`
 	NextPage     *int                    `json:"next_page"`
+}
+
+type maintainerMainCheck struct {
+	Revision    string   `json:"revision"`
+	Name        string   `json:"name"`
+	Status      string   `json:"status"`
+	Conclusion  *string  `json:"conclusion"`
+	URL         string   `json:"url"`
+	Required    bool     `json:"required"`
+	Annotations []string `json:"annotations"`
+}
+
+func readMaintainerMainChecks(ctx context.Context, call maintainerMCP, repository string, githubID uint64) ([]maintainerMainCheck, error) {
+	content, err := maintainerTool(ctx, call, repository, githubID, "observe_repository_checks", map[string]any{"repository": repository})
+	if err != nil {
+		return nil, err
+	}
+	var value struct {
+		Revision string                `json:"revision"`
+		Checks   []maintainerMainCheck `json:"checks"`
+	}
+	if json.Unmarshal(content, &value) != nil || len(value.Revision) != 40 || strings.Trim(value.Revision, "0123456789abcdef") != "" || len(value.Checks) > 100 {
+		return nil, fmt.Errorf("Maintainer returned an invalid main checks response")
+	}
+	for i := range value.Checks {
+		if value.Checks[i].Revision == "" {
+			value.Checks[i].Revision = value.Revision
+		}
+		if len(value.Checks[i].Revision) != 40 || strings.Trim(value.Checks[i].Revision, "0123456789abcdef") != "" {
+			return nil, fmt.Errorf("Maintainer returned an invalid main check revision")
+		}
+	}
+	return value.Checks, nil
 }
 
 func readMaintainerPullRequests(ctx context.Context, call maintainerMCP, repository string, githubID uint64, arguments map[string]any) (maintainerPullRequestPage, error) {

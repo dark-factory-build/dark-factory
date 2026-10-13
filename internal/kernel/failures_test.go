@@ -25,6 +25,31 @@ func TestFailureSignatureIgnoresIdentifiersAndNumbers(t *testing.T) {
 	}
 }
 
+func TestFailureSignatureHandlesUnicodeBeforeMarker(t *testing.T) {
+	signature := failureSignature("failed", "checks", sql.NullInt64{}, sql.NullInt64{}, sql.NullInt64{}, "Ⱥ not ok TestUnicode")
+	if !strings.Contains(signature, "testunicode") {
+		t.Fatalf("unicode marker signature = %q", signature)
+	}
+}
+
+func TestFailureSignatureKeepsNodeAndTAPTestsDistinct(t *testing.T) {
+	node := failureSignature("check", "main", sql.NullInt64{}, sql.NullInt64{}, sql.NullInt64{}, "Failing step: Run tests: ✖ renders board")
+	tap := failureSignature("check", "main", sql.NullInt64{}, sql.NullInt64{}, sql.NullInt64{}, "Failing step: Run tests: not ok 3 - console loads")
+	if node == tap || !strings.Contains(node, "test renders") || !strings.Contains(tap, "test console") {
+		t.Fatalf("signatures = %q / %q", node, tap)
+	}
+	first := failureSignature("check", "merge_group", sql.NullInt64{}, sql.NullInt64{}, sql.NullInt64{}, "Failing step: Run tests: ✖ TestQueue1")
+	second := failureSignature("check", "merge_group", sql.NullInt64{}, sql.NullInt64{}, sql.NullInt64{}, "Failing step: Run tests: ✖ TestQueue2")
+	if first == second || !strings.Contains(first, "test testqueue1") || !strings.Contains(second, "test testqueue2") {
+		t.Fatalf("numeric signatures = %q / %q", first, second)
+	}
+	pathOne := failureSignature("check", "merge_group", sql.NullInt64{}, sql.NullInt64{}, sql.NullInt64{}, `pull request at go ["--- FAIL: TestQueue", "/tmp/run123/file"]`)
+	pathTwo := failureSignature("check", "merge_group", sql.NullInt64{}, sql.NullInt64{}, sql.NullInt64{}, `pull request at go ["--- FAIL: TestQueue", "/tmp/run456/file"]`)
+	if pathOne != pathTwo || !strings.Contains(pathOne, "test testqueue") {
+		t.Fatalf("diagnostic signatures = %q / %q", pathOne, pathTwo)
+	}
+}
+
 // One failure is enough: the first run of a signature is reported as new, an
 // unscoped report covers every project, and a window after it reports nothing.
 func TestReportListsFailureSignaturesFromTheFirstOccurrence(t *testing.T) {

@@ -3,6 +3,7 @@ package daemon
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strings"
 	"testing"
@@ -87,13 +88,126 @@ func TestRefreshReadsQueueStateForApprovedPulls(t *testing.T) {
 					t.Fatalf("unexpected request %s", request)
 				}
 				content := fmt.Sprintf(`{"pull_number":7,"head_sha":"%s","state":"%s"}`, head, test.state)
+				if test.state == "NOT_QUEUED" {
+					content = fmt.Sprintf(`{"pull_number":7,"head_sha":"%s","state":"NOT_QUEUED","merge_group":{"run_id":12,"url":"https://github.com/o/r/actions/runs/12","conclusion":"failure","failed_jobs":[{"name":"go","conclusion":"failure","annotations":["--- FAIL: TestQueue (0.01s)"]}]}}`, head)
+				}
 				return json.RawMessage(`{"jsonrpc":"2.0","id":1,"result":{"structuredContent":` + content + `}}`), nil
 			}
-			got, err := readMaintainerMergeQueue(context.Background(), call, "o/r", 1, pull)
+			got, group, err := readMaintainerMergeQueue(context.Background(), call, "o/r", 1, pull)
 			if err != nil || got != test.want {
 				t.Fatalf("queue=%q err=%v, want %q", got, err, test.want)
 			}
+			if test.state == "NOT_QUEUED" && (group == nil || group.ID != 12 || group.Jobs[0].Annotations[0] != "--- FAIL: TestQueue (0.01s)") {
+				t.Fatalf("merge group = %+v", group)
+			}
+			if test.state == "ACTIVE_QUEUE" && group != nil {
+				t.Fatalf("active queue unexpectedly had merge group %+v", group)
+			}
 		})
+	}
+}
+
+func TestRefreshProjectsMergeGroupAndMainChecks(t *testing.T) {
+	head, base := strings.Repeat("a", 40), strings.Repeat("b", 40)
+	call := func(_ context.Context, request json.RawMessage, _ map[string]uint64) (json.RawMessage, error) {
+		var value struct {
+			Params struct {
+				Name string `json:"name"`
+			} `json:"params"`
+		}
+		if err := json.Unmarshal(request, &value); err != nil {
+			t.Fatal(err)
+		}
+		switch value.Params.Name {
+		case "list_pull_requests":
+			return json.RawMessage(`{"jsonrpc":"2.0","id":1,"result":{"structuredContent":{"pull_requests":[{"number":7,"head_sha":"` + head + `","base_ref":"main","base_sha":"` + base + `","state":"open","review":{"head":"` + head + `","state":"allow"}}],"next_page":null}}}`), nil
+		case "observe_pull_request_merge":
+			return json.RawMessage(`{"jsonrpc":"2.0","id":1,"result":{"structuredContent":{"pull_number":7,"head_sha":"` + head + `","state":"NOT_QUEUED","merge_group":{"run_id":12,"url":"https://github.com/o/r/actions/runs/12","conclusion":"failure","failed_jobs":[{"name":"go","conclusion":"failure","annotations":["--- FAIL: TestQueue","token=merge-secret"]}]}}}}`), nil
+		case "observe_repository_checks":
+			return json.RawMessage(`{"jsonrpc":"2.0","id":1,"result":{"structuredContent":{"revision":"` + base + `","checks":[{"name":"main","status":"completed","conclusion":"failure","url":"https://github.com/o/r/actions/runs/13","required":false,"annotations":[]}]}}}`), nil
+		case "observe_pull_request_checks":
+			return json.RawMessage(`{"jsonrpc":"2.0","id":1,"result":{"structuredContent":{"pull_number":7,"head_sha":"` + head + `","checks":[]}}}`), nil
+		default:
+			t.Fatalf("unexpected maintainer tool %s", value.Params.Name)
+			return nil, nil
+		}
+	}
+	got, err := productionObservation(context.Background(), call, "o/r", 1, nil, nil, func(error) {})
+	if err != nil || len(got.Checks) != 2 {
+		t.Fatalf("observation = %+v, %v", got, err)
+	}
+	if got.Checks[0].Scope != "merge_group" || got.Checks[0].Jobs[0].Annotations[0] != "--- FAIL: TestQueue" || strings.Contains(strings.Join(got.Checks[0].Jobs[0].Annotations, "\n"), "merge-secret") || got.Checks[1].Scope != "main" || got.Checks[1].Revision != base {
+		t.Fatalf("projected checks = %+v", got.Checks)
+	}
+	withoutMain := func(ctx context.Context, request json.RawMessage, repositories map[string]uint64) (json.RawMessage, error) {
+		if strings.Contains(string(request), "observe_repository_checks") {
+			return nil, errors.New("main checks unavailable")
+		}
+		return call(ctx, request, repositories)
+	}
+	retained, err := productionObservation(context.Background(), withoutMain, "o/r", 1, nil, nil, func(error) {})
+	if err != nil || retained.Unavailable != "main_checks" || len(retained.Checks) != 1 || retained.Checks[0].Scope != "merge_group" {
+		t.Fatalf("retained observation = %+v, %v", retained, err)
+	}
+}
+
+func TestProductionObservationKeepsSameRevisionHeadAndMainChecks(t *testing.T) {
+	revision := strings.Repeat("a", 40)
+	call := func(_ context.Context, request json.RawMessage, _ map[string]uint64) (json.RawMessage, error) {
+		var value struct {
+			Params struct {
+				Name string `json:"name"`
+			} `json:"params"`
+		}
+		if err := json.Unmarshal(request, &value); err != nil {
+			t.Fatal(err)
+		}
+		switch value.Params.Name {
+		case "list_pull_requests":
+			return json.RawMessage(`{"jsonrpc":"2.0","id":1,"result":{"structuredContent":{"pull_requests":[{"number":7,"head_sha":"` + revision + `","base_ref":"main","base_sha":"` + revision + `","state":"open"}],"next_page":null}}}`), nil
+		case "observe_pull_request_checks":
+			return json.RawMessage(`{"jsonrpc":"2.0","id":1,"result":{"structuredContent":{"head_sha":"` + revision + `","checks":[{"name":"build","status":"completed","conclusion":"failure","url":"https://github.com/o/r/actions/runs/13","required":false}]}}}`), nil
+		case "observe_repository_checks":
+			return json.RawMessage(`{"jsonrpc":"2.0","id":1,"result":{"structuredContent":{"revision":"` + revision + `","checks":[{"name":"build","status":"completed","conclusion":"failure","url":"https://github.com/o/r/actions/runs/14","required":false}]}}}`), nil
+		default:
+			t.Fatalf("unexpected maintainer tool %s", value.Params.Name)
+			return nil, nil
+		}
+	}
+	got, err := productionObservation(context.Background(), call, "o/r", 1, nil, nil, func(error) {})
+	if err != nil || len(got.Checks) != 2 {
+		t.Fatalf("observation = %+v, %v", got, err)
+	}
+	if got.Checks[0].Scope != "head" || got.Checks[1].Scope != "main" || got.Checks[0].ID == got.Checks[1].ID {
+		t.Fatalf("same-revision checks = %+v", got.Checks)
+	}
+}
+
+func TestReadMaintainerMainChecksKeepsPerRevisionUnfinishedRuns(t *testing.T) {
+	current, previous := strings.Repeat("a", 40), strings.Repeat("b", 40)
+	call := func(_ context.Context, _ json.RawMessage, _ map[string]uint64) (json.RawMessage, error) {
+		return json.RawMessage(`{"jsonrpc":"2.0","id":1,"result":{"structuredContent":{"revision":"` + current + `","checks":[{"revision":"` + previous + `","name":"build","status":"in_progress","conclusion":null,"url":"https://github.com/o/r/actions/runs/1","required":false},{"revision":"` + previous + `","name":"build","status":"completed","conclusion":"failure","url":"https://github.com/o/r/actions/runs/2","required":false,"annotations":["token=main-secret"]}]}}}`), nil
+	}
+	checks, err := readMaintainerMainChecks(context.Background(), call, "o/r", 1)
+	if err != nil || len(checks) != 2 || checks[0].Revision != previous || checks[0].Status != "in_progress" || checks[1].Revision != previous {
+		t.Fatalf("main checks = %+v, %v", checks, err)
+	}
+	converted := mainChecksToProduction(checks)
+	if len(converted) != 1 || converted[0].Revision != previous || converted[0].Conclusion != "failure" || strings.Contains(strings.Join(converted[0].Jobs[0].Annotations, "\n"), "main-secret") {
+		t.Fatalf("converted main checks = %+v", converted)
+	}
+}
+
+func TestMainCheckRerunsKeepCompletedRunIdentity(t *testing.T) {
+	revision := strings.Repeat("a", 40)
+	failure, success := "failure", "success"
+	checks := []maintainerMainCheck{
+		{Revision: revision, Name: "build", Status: "completed", Conclusion: &failure, URL: "https://github.com/o/r/actions/runs/13"},
+		{Revision: revision, Name: "build", Status: "completed", Conclusion: &success, URL: "https://github.com/o/r/actions/runs/14"},
+	}
+	got := mainChecksToProduction(checks)
+	if len(got) != 2 || got[0].ID == got[1].ID || got[0].Conclusion != "failure" || got[1].Conclusion != "success" {
+		t.Fatalf("main reruns = %+v", got)
 	}
 }
 
@@ -103,7 +217,7 @@ func TestRefreshRejectsStaleQueueObservation(t *testing.T) {
 	call := func(_ context.Context, _ json.RawMessage, _ map[string]uint64) (json.RawMessage, error) {
 		return json.RawMessage(`{"jsonrpc":"2.0","id":1,"result":{"structuredContent":{"pull_number":7,"head_sha":"` + strings.Repeat("b", 40) + `","state":"NOT_QUEUED"}}}`), nil
 	}
-	if _, err := readMaintainerMergeQueue(context.Background(), call, "o/r", 1, pull); err == nil {
+	if _, _, err := readMaintainerMergeQueue(context.Background(), call, "o/r", 1, pull); err == nil {
 		t.Fatal("stale merge observation accepted")
 	}
 }

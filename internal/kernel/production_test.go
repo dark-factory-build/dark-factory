@@ -35,6 +35,20 @@ func TestProductionReviewUpsertsBeforeRefresh(t *testing.T) {
 	}
 }
 
+func TestProductionObservationAcceptsBrokerBoundUnicodeAnnotation(t *testing.T) {
+	t.Parallel()
+	store, _, project, _ := newAdmissionStore(t, RoleOrchestrator, 1)
+	defer store.Close()
+	check := ProductionCheck{
+		ID: "merge-group:12", Name: "merge_group", Revision: strings.Repeat("a", 40), Scope: "merge_group",
+		State: "completed", Conclusion: "failure", URL: "https://github.com/o/r/actions/runs/12",
+		Jobs: []ProductionJob{{Name: "node", State: "completed", Conclusion: "failure", URL: "https://github.com/o/r/actions/runs/12", Annotations: []string{strings.Repeat("✖", 240)}}},
+	}
+	if err := store.RecordProductionObservation(context.Background(), project.ID, ProductionObservation{Repository: "example/factory", ObservedAt: 10, Checks: []ProductionCheck{check}}, mustTime(t, 10)); err != nil {
+		t.Fatal(err)
+	}
+}
+
 // A refresh reads the known reviews, waits on the remote, then writes a
 // snapshot carrying that copy. A verdict recorded during the wait must
 // survive the later write.

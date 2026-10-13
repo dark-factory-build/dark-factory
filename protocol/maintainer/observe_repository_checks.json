@@ -1,0 +1,11 @@
+{
+  "name": "observe_repository_checks",
+  "request": {
+    "required": ["repository"],
+    "properties": {"repository": "string"}
+  },
+  "response": {
+    "required": ["revision", "checks"],
+    "properties": {"revision": "string", "checks": {"type": "array", "items": {"properties": {"revision": "string", "name": "string", "status": "string", "conclusion": ["string", "null"], "url": "string", "required": "boolean", "annotations": "array"}}}}
+  }
+}
