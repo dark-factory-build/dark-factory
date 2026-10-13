@@ -673,7 +673,8 @@ func (b *daemonReviewBackend) registered(ctx context.Context, repo string) (kern
 	return kernel.ProjectRepository{}, kernel.RepositorySourceIdentity{}, errors.New("review: no registered checkout for repository")
 }
 
-// reviewDeadline bounds one review, every account it tries included.
+// reviewDeadline bounds one review, every account it tries and its wait for
+// each account's running review included.
 var reviewDeadline = 20 * time.Minute
 
 // errProviderLimited fails the operation retryably: every eligible account

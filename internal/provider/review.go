@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
@@ -15,6 +16,9 @@ import (
 )
 
 var providerTerminalCSI = regexp.MustCompile(`\x1b\[[0-?]*[ -/]*[@-~]`)
+
+// reviewLanes holds a one-slot lane per account home: the review using it.
+var reviewLanes sync.Map
 
 // ReviewResult is the provider-owned outcome of one read-only review launch.
 // The daemon remains responsible for interpreting the provider's verdict.
@@ -104,7 +108,19 @@ func RunReview(ctx context.Context, kind kernel.Provider, toolPath, toolchainRoo
 		command.WaitDelay = 5 * time.Second
 		var stdout, stderr strings.Builder
 		command.Stdout, command.Stderr = &stdout, &stderr
+		// One review per account at a time (#1893): reviews started together
+		// on one login fail with exit status 1, one at a time they pass. The
+		// wait counts toward the caller's deadline. ponytail: a queue longer
+		// than that deadline fails its tail retryably; order the queue in
+		// factoryd if that shows.
+		lane, _ := reviewLanes.LoadOrStore(account, make(chan struct{}, 1))
+		select {
+		case lane.(chan struct{}) <- struct{}{}:
+		case <-ctx.Done():
+			return ReviewResult{}, ctx.Err()
+		}
 		err := command.Run()
+		<-lane.(chan struct{})
 		result := ReviewResult{Stdout: stdout.String(), Stderr: stderr.String()}
 		if ctx.Err() != nil {
 			return result, ctx.Err()

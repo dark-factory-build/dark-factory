@@ -152,6 +152,36 @@ func TestClaudeConfinementCompactsReadOnlyAliasesWithResolvedReads(t *testing.T)
 	}
 }
 
+// Two reviews started together on one account run one after the other
+// (#1893): the second starts only when the first's provider exits.
+func TestRunReviewRunsOneReviewPerAccountAtATime(t *testing.T) {
+	bin, account, log := t.TempDir(), t.TempDir(), filepath.Join(t.TempDir(), "log")
+	script := "#!/bin/sh\necho start >> " + log + "\nsleep 0.3\necho end >> " + log + "\necho 'VERDICT: ALLOW'\n"
+	if err := os.WriteFile(filepath.Join(bin, "codex"), []byte(script), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	toolPath := bin + string(os.PathListSeparator) + "/usr/bin:/bin"
+	errs := make(chan error, 2)
+	for range 2 {
+		checkout := filepath.Join(t.TempDir(), "checkout")
+		if err := os.Mkdir(checkout, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		go func() {
+			_, err := RunReview(context.Background(), kernel.ProviderCodex, toolPath, "", "", []string{account}, checkout, "prompt", []string{checkout})
+			errs <- err
+		}()
+	}
+	for range 2 {
+		if err := <-errs; err != nil {
+			t.Fatal(err)
+		}
+	}
+	if got, _ := os.ReadFile(log); string(got) != "start\nend\nstart\nend\n" {
+		t.Fatalf("reviews on one account overlapped: %q", got)
+	}
+}
+
 // The prompt carries untrusted task, pull request, diff and dispute text, so
 // a Claude reviewer's file tools get the worker's confinement: user data is
 // denied, the checkout and toolchain are re-allowed, and nothing else is.
