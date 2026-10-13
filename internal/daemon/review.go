@@ -112,22 +112,12 @@ func (daemon *Daemon) customerMaintainer() bool {
 // at a time and at most once per productionRefreshInterval.
 func (daemon *Daemon) tickMergePipeline(ctx context.Context) {
 	now := daemon.now()
-	if now.UnixNano() < daemon.pipelineAt.Load() {
-		return
-	}
-	if !daemon.pipelineBusy.CompareAndSwap(false, true) {
-		daemon.pipelineWake.Store(true)
+	if now.UnixNano() < daemon.pipelineAt.Load() || !daemon.pipelineBusy.CompareAndSwap(false, true) {
 		return
 	}
 	daemon.pipelineAt.Store(now.Add(productionRefreshInterval).UnixNano())
 	go func() {
-		defer func() {
-			daemon.pipelineBusy.Store(false)
-			if daemon.pipelineWake.Swap(false) {
-				daemon.pipelineAt.Store(0)
-				daemon.tickMergePipeline(ctx)
-			}
-		}()
+		defer daemon.pipelineBusy.Store(false)
 		daemon.advanceMergePipeline(ctx)
 	}()
 }
