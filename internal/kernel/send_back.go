@@ -262,6 +262,22 @@ func (store *Store) RetryTask(ctx context.Context, digest *AttemptDigest, id Tas
 	if id.zero() || expected.Int64() < 1 {
 		return Task{}, fmt.Errorf("%w: invalid task retry", ErrInvalidValue)
 	}
+	if intakeLimit > 0 {
+		// Most offers are refused, and a refusal writes nothing: answer it from
+		// a reader, or each listed ended issue queues on the writer every poll.
+		read, err := store.beginRead(ctx)
+		if err != nil {
+			return Task{}, err
+		}
+		task, found, err := taskByID(ctx, read.connection, id)
+		if err == nil && found {
+			err = refuseAutomaticRetry(ctx, read.connection, task, intakeLimit)
+		}
+		read.Close()
+		if err != nil {
+			return Task{}, err
+		}
+	}
 	tx, err := store.beginValidatedWrite(ctx)
 	if err != nil {
 		return Task{}, err
@@ -310,15 +326,8 @@ func (store *Store) retryTaskTx(ctx context.Context, tx *writeTx, digest *Attemp
 	// state: a failure, a run-limit cancel of the run at its work revision, or
 	// a blocked expiry recorded at its row revision. Intake keeps its bound.
 	if digest != nil || intakeLimit > 0 {
-		var automatic, withdrawn bool
-		var retries int64
-		if err := tx.connection.QueryRowContext(ctx, `SELECT `+taskEndedAutomatically+`, `+taskIssueWithdrawn+`,
-			(SELECT count(*) FROM task_automatic_events WHERE task_id = t.id AND kind = 'intake_retried') FROM tasks AS t WHERE t.id = ?`,
-			id.Bytes()).Scan(&automatic, &withdrawn, &retries); err != nil {
+		if err := refuseAutomaticRetry(ctx, tx.connection, task, intakeLimit); err != nil {
 			return Task{}, tx.Rollback(err)
-		}
-		if withdrawn || task.Status == TaskCancelled && !automatic || intakeLimit > 0 && (!automatic || retries >= intakeLimit) {
-			return Task{}, tx.Rollback(ErrConflict)
 		}
 		if intakeLimit > 0 {
 			if _, err := tx.connection.ExecContext(ctx, `INSERT INTO task_automatic_events(task_id, task_revision, kind, at_ms) VALUES (?, ?, 'intake_retried', ?)`, id.Bytes(), task.Revision.Int64(), at.Int64()); err != nil {
@@ -497,6 +506,23 @@ const taskEndedAutomatically = `(t.status = 'failed' OR t.status = 'cancelled' A
 
 // taskIssueWithdrawn holds while task t's intake receipt is withdrawn.
 const taskIssueWithdrawn = `EXISTS (SELECT 1 FROM intake_task_bindings AS b JOIN intake_acceptances AS a ON a.id = b.acceptance_id WHERE b.task_id = t.id AND a.withdrawn_at_ms IS NOT NULL)`
+
+// refuseAutomaticRetry refuses the overseer's or an intake issue's (a positive
+// intakeLimit) retry of task: a withdrawn issue, an operator's cancel, or an
+// intake retry of any other end or past its bound.
+func refuseAutomaticRetry(ctx context.Context, connection *sql.Conn, task Task, intakeLimit int64) error {
+	var automatic, withdrawn bool
+	var retries int64
+	if err := connection.QueryRowContext(ctx, `SELECT `+taskEndedAutomatically+`, `+taskIssueWithdrawn+`,
+		(SELECT count(*) FROM task_automatic_events WHERE task_id = t.id AND kind = 'intake_retried') FROM tasks AS t WHERE t.id = ?`,
+		task.ID.Bytes()).Scan(&automatic, &withdrawn, &retries); err != nil {
+		return err
+	}
+	if withdrawn || task.Status == TaskCancelled && !automatic || intakeLimit > 0 && (!automatic || retries >= intakeLimit) {
+		return ErrConflict
+	}
+	return nil
+}
 
 // refuseAwaitedTask keeps a task's work revision while a continuation (a
 // yield, or a stalled-item card) waits on it: moving it would strand the
