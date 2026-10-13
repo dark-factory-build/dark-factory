@@ -6,6 +6,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"regexp"
 	"slices"
 	"strings"
 	"unicode"
@@ -81,9 +82,39 @@ func failureLedger(ctx context.Context, c *sql.Conn, scope []byte, since int64) 
 	return ledger, nil
 }
 
-// failureSignature names a failure by its structured fields and, for a free
-// text cause, its first clause with identifiers and numbers removed, so the
-// same failure on another task, head or run is the same signature.
+// failureCauses name a failure's cause class: the first rule whose code
+// matches, or whose pattern matches the detail's first 260 bytes, wins. From
+// the #1773 evaluation (29/32 hand-checked, against 13/32 for codes alone);
+// testdata/failure_causes.json is their regression corpus.
+var failureCauses = []struct {
+	class, codes string
+	pattern      *regexp.Regexp
+}{
+	{"provider_crash", "provider_exit", regexp.MustCompile(`(?i)provider (worker \S+ )?exited`)},
+	{"premise_dispute", "", regexp.MustCompile(`(?i)\A\s*premise not reproduced`)},
+	{"usage_limit", "", regexp.MustCompile(`(?i)usage limit|rate.?limit|quota|hit your limit|credits? (exhausted|balance)`)},
+	{"other", "", regexp.MustCompile(`\A\s*(REQUEST_CHANGES|ALLOW|BLOCK\b)`)},
+	{"transport_api", "transient protocol", regexp.MustCompile(`(?i)local API[^.]{0,40}(transport failed|unavailable|unauthori[sz]ed|forbidden|failed internally|rejected)|Maintainer[^.]{0,20}unavailable|transport failed|broken pipe|connection (refused|reset|lost)|\bEOF\b|answered 50\d|GitHub connection unavailable|RemoteInternal|context deadline`)},
+	{"stale_base", "", regexp.MustCompile(`(?i)conflicts? with (origin/)?main|merge conflict|conflict \((content|modify|add|rename)|lacks (origin/)?main|stale (base|head)|behind (origin/)?main|base (has )?moved|cannot (perform the requested )?rebase|rebase (failed|stopped)`)},
+	{"env_toolchain", "spawn activation source", regexp.MustCompile(`(?i)command not found|not installed|not on PATH|no such file|permission denied|operation not permitted|sandbox|toolchain|not a git repository|has no (usable )?(origin|remote)|no \.git|git-free|bad object|read-only file system|executable file not found|cannot read inside|x509:`)},
+	{"real_test_failure", "", regexp.MustCompile(`(?i)--- FAIL|\bFAIL:|(test|gate|check)s? (still )?fail|failing (test|gate|check)s?:|failed at Test|fails at \S+_test\.go|panic:|✖|\bnot ok \d`)},
+}
+
+// failureCause is the cause class of a failure with this code and detail.
+func failureCause(code, detail string) string {
+	lead := detail[:min(len(detail), 260)]
+	for _, rule := range failureCauses {
+		if slices.Contains(strings.Fields(rule.codes), code) || rule.pattern.MatchString(lead) {
+			return rule.class
+		}
+	}
+	return "other"
+}
+
+// failureSignature names a failure by its cause class, its structured fields
+// and, for a free text cause, its first clause with identifiers and numbers
+// removed, so the same failure on another task, head or run is the same
+// signature.
 func failureSignature(kind, code string, exit, signal, runner sql.NullInt64, detail string) string {
 	parts := []string{kind, code}
 	for _, value := range []sql.NullInt64{exit, signal, runner} {
@@ -126,5 +157,5 @@ func failureSignature(kind, code string, exit, signal, runner sql.NullInt64, det
 			break
 		}
 	}
-	return strings.Join(parts, "/") + " " + strings.Join(words, " ")
+	return failureCause(code, detail) + " " + strings.Join(parts, "/") + " " + strings.Join(words, " ")
 }
