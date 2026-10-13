@@ -649,6 +649,36 @@ func TestStalledCardSurvivesANeverStartedWake(t *testing.T) {
 	}
 }
 
+// A stalled item that is not ripe on the first quiet poll is raised when its
+// clock deadline arrives, even though no invalidation advances the store head.
+func TestStalledCardRipensWithAQuietStore(t *testing.T) {
+	t.Parallel()
+	store, worker, _ := wakeFixture(t)
+	head := strings.Repeat("a", 40)
+	escalate(t, store, worker.ProjectID, "7", "open", head, head, 1000)
+	at := 1000 + overseerWakeMaxDelay.Milliseconds()
+	seed := byte(10)
+	next := func() byte { seed += 21; return seed }
+	if bodies := wakeBodies(t, store, at); len(bodies) != 1 {
+		t.Fatalf("first wake = %q", bodies)
+	}
+	settleCarrier(t, store, at+1, next(), NeverStartedRunDetail)
+	settleCarrier(t, store, at+20, next(), NeverStartedRunDetail)
+	at += 40 + OverseerRewakeAfter.Milliseconds()
+	tasks, err := store.EnqueueOverseerWakeups(context.Background(), mustTime(t, at))
+	if err != nil || len(tasks) != 1 {
+		t.Fatalf("started wake = %+v, %v", tasks, err)
+	}
+	settleCarrier(t, store, at+1, next(), "ran")
+	if bodies := wakeBodies(t, store, at+10); len(bodies) != 0 {
+		t.Fatalf("quiet pre-ripe wake = %q", bodies)
+	}
+	wakeBodies(t, store, at+10+OverseerRewakeAfter.Milliseconds())
+	if requests, err := store.OperatorHumanRequests(context.Background()); err != nil || len(requests) != 1 {
+		t.Fatalf("cards after quiet ripening = %d, %v", len(requests), err)
+	}
+}
+
 // A card the operator cancelled is not raised again on the same wake run.
 func TestCancelledStalledCardStaysCancelled(t *testing.T) {
 	t.Parallel()
