@@ -2633,7 +2633,7 @@ func (fixture *supervisorFixture) assertOneWitness(t *testing.T) {
 }
 
 func TestSupervisorLaunchesImportedIssueEditThroughFD11(t *testing.T) {
-	program := "set -eu\nbody=$(cat /dev/fd/11)\ncase $body in *'Edited scope'*) ;; *) exit 81 ;; esac\ncase $body in *'Original scope'*) exit 82 ;; esac\nprintf x >> __WITNESS__\n" + quoteShell(supervisorTestExecutable(t)) + " --supervisor-attempt-succeed typed-success\n"
+	program := "set -eu\ncat /dev/fd/11 > __WITNESS__\n" + quoteShell(supervisorTestExecutable(t)) + " --supervisor-attempt-succeed typed-success\n"
 	fixture := newSupervisorFixture(t, program)
 	ctx := context.Background()
 	projectID := supervisorProjectID(t, 1)
@@ -2700,7 +2700,13 @@ func TestSupervisorLaunchesImportedIssueEditThroughFD11(t *testing.T) {
 	if _, err := fixture.daemon.RunNext(ctx, fixture.spec); err != nil {
 		t.Fatal(err)
 	}
-	fixture.assertOneWitness(t)
+	witness, err := os.ReadFile(fixture.witness)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(witness), "Edited scope") || strings.Contains(string(witness), "Original scope") {
+		t.Fatalf("provider FD11 task = %q", witness)
+	}
 }
 
 func (fixture *supervisorFixture) assertReleased(t *testing.T, run kernel.Run) {
