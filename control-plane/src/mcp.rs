@@ -646,7 +646,7 @@ fn tools() -> Value {
                     },
                     "required": ["run_id", "url", "conclusion", "failed_jobs"],
                     "additionalProperties": false
-                },
+                }
             },
             "required": ["pull_number", "head_sha", "base", "pull_state", "state", "queue_state", "merge_commit_sha", "merge_group"],
             "additionalProperties": false

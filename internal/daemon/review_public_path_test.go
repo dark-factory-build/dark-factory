@@ -29,7 +29,6 @@ type publicReviewBackend struct {
 	journal                                 map[string]string
 	observations                            map[string]review.Receipt
 	pull                                    *review.Pull
-	broker                                  maintainerMCP
 	observeFailures                         int
 	storedErr                               error
 }
@@ -80,25 +79,9 @@ func (b *publicReviewBackend) Enqueue(_ context.Context, operation review.Operat
 
 // ObservePull defaults to the pull request open at the operation's head with
 // every check passed, queued once it has been enqueued.
-func (b *publicReviewBackend) ObservePull(ctx context.Context, operation review.Operation) (review.Pull, error) {
+func (b *publicReviewBackend) ObservePull(_ context.Context, operation review.Operation) (review.Pull, error) {
 	if b.pull != nil {
 		return *b.pull, nil
-	}
-	if b.broker != nil {
-		observation, err := productionObservation(ctx, b.broker, operation.Request.Repository, 42, nil, nil, func(error) {})
-		if err != nil {
-			return review.Pull{}, err
-		}
-		for _, check := range observation.Checks {
-			if check.Scope != "merge_group" {
-				continue
-			}
-			group := &review.GroupRun{ID: 12, URL: check.URL, Conclusion: check.Conclusion}
-			for _, job := range check.Jobs {
-				group.Jobs = append(group.Jobs, review.GroupJob{Name: job.Name, Conclusion: job.Conclusion, Annotations: job.Annotations})
-			}
-			return review.Pull{Head: operation.Request.Head, State: "open", Checks: []string{"required=success"}, Group: group}, nil
-		}
 	}
 	checks := b.checks
 	if checks == nil {
@@ -229,8 +212,7 @@ func TestReconciliationPersistsMergeGroupFailureForReport(t *testing.T) {
 			return nil, nil
 		}
 	}
-	backend := &publicReviewBackend{broker: call}
-	observation, err := productionObservation(context.Background(), backend.broker, request.Repository, 42, nil, nil, func(error) {})
+	observation, err := productionObservation(context.Background(), call, request.Repository, 42, nil, nil, func(error) {})
 	if err != nil {
 		t.Fatal(err)
 	}

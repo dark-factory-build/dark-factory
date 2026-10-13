@@ -25,6 +25,13 @@ func TestFailureSignatureIgnoresIdentifiersAndNumbers(t *testing.T) {
 	}
 }
 
+func TestFailureSignatureHandlesUnicodeBeforeMarker(t *testing.T) {
+	signature := failureSignature("failed", "checks", sql.NullInt64{}, sql.NullInt64{}, sql.NullInt64{}, "Ⱥ not ok TestUnicode")
+	if !strings.Contains(signature, "testunicode") {
+		t.Fatalf("unicode marker signature = %q", signature)
+	}
+}
+
 func TestFailureSignatureKeepsNodeAndTAPTestsDistinct(t *testing.T) {
 	node := failureSignature("check", "main", sql.NullInt64{}, sql.NullInt64{}, sql.NullInt64{}, "Failing step: Run tests: ✖ renders board")
 	tap := failureSignature("check", "main", sql.NullInt64{}, sql.NullInt64{}, sql.NullInt64{}, "Failing step: Run tests: not ok 3 - console loads")
