@@ -65,7 +65,7 @@ func (daemon *Daemon) validateSuccessSource(ctx context.Context, live *liveAttem
 		return unverifiableSuccessSource(fmt.Sprintf("Change worktree facts unavailable: %v", err))
 	}
 	if facts.Dirty() {
-		return kernel.NewOutcomeRefusal(fmt.Errorf("%w: %s (%w)", errDirtyWorkerChange, changeState.ID.String(), kernel.ErrConflict))
+		return kernel.NewOutcomeRefusal(fmt.Errorf("%w: %s %q (%w)", errDirtyWorkerChange, changeState.ID.String(), facts.DirtyPath(), kernel.ErrConflict))
 	}
 	// An accepted issue promises a published Change; an empty one cannot be.
 	if head, err := kernelCommit(facts.Head()); err == nil && kernelCommitEqual(head, changeState.Selection.Commit()) {

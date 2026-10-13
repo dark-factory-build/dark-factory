@@ -1269,7 +1269,7 @@ func (a *gitAuthority) removeUnusedWorktree(ctx context.Context, path, branch st
 	}
 	if _, err := os.Lstat(registered.path); err == nil {
 		facts, err := a.inspectWorktree(ctx, registered.path)
-		if err != nil || !facts.head.equal(base) || facts.branch != branch || facts.dirty {
+		if err != nil || !facts.head.equal(base) || facts.branch != branch || facts.Dirty() {
 			return errors.Join(&ValidationError{Reason: "the Change path holds a worktree with work in it"}, err)
 		}
 	}

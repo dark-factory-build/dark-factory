@@ -1037,11 +1037,13 @@ func runGitCapture(ctx context.Context, spec gitCommandSpec, maximum int) (gitCa
 	if reaped.contextError != nil && (errors.Is(ctx.Err(), context.Canceled) || errors.Is(ctx.Err(), context.DeadlineExceeded)) {
 		return gitCapture{}, newGitContextError(ctx.Err(), true)
 	}
-	if !stdoutDrained || !stderrDrained || closeErr != nil || reaped.cleanup || reaped.observerErr != nil {
-		return gitCapture{}, newGitCleanupError(gitFailurePrivateIO)
-	}
+	// An overflow cancels the read and stops Git, so it is reported before
+	// the cleanup that stop implies.
 	if stdoutResult.overflow {
 		return gitCapture{}, &LimitError{Reason: "Git metadata output exceeded"}
+	}
+	if !stdoutDrained || !stderrDrained || closeErr != nil || reaped.cleanup || reaped.observerErr != nil {
+		return gitCapture{}, newGitCleanupError(gitFailurePrivateIO)
 	}
 	if stdoutResult.err != nil || stderrResult.err != nil || stderrResult.overflow || (reaped.waitErr != nil && !isExitError(reaped.waitErr)) {
 		return gitCapture{}, newGitError(gitFailurePrivateIO)
@@ -2063,8 +2065,10 @@ func (a *gitAuthority) inspectWorktree(ctx context.Context, path string) (Worktr
 	} else if symbolic.exitCode != 1 {
 		return WorktreeFacts{}, newGitError(gitFailureProcess)
 	}
-	status, err := a.run(ctx, maxGitStatusOutput, "-C", path, "status", "--porcelain=v1", "-z", "--untracked-files=all", "--ignore-submodules=all")
-	dirty := true
+	// Untracked directories are named whole, so a cache a worker left in the
+	// tree is one entry, not more file names than the output bound allows.
+	status, err := a.run(ctx, maxGitStatusOutput, "-C", path, "status", "--porcelain=v1", "-z", "--untracked-files=normal", "--ignore-submodules=all")
+	dirty := "(more uncommitted paths than Git status output allows)"
 	var limit *LimitError
 	if errors.As(err, &limit) {
 		err = nil
@@ -2072,7 +2076,8 @@ func (a *gitAuthority) inspectWorktree(ctx context.Context, path string) (Worktr
 		if status.exitCode != 0 {
 			return WorktreeFacts{}, newGitError(gitFailureProcess)
 		}
-		dirty = len(status.output) != 0
+		entry, _, _ := bytes.Cut(status.output, []byte{0})
+		dirty = string(entry[min(3, len(entry)):])
 	}
 	if err != nil {
 		return WorktreeFacts{}, err
