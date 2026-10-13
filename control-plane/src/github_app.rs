@@ -7247,7 +7247,7 @@ mod tests {
             pull_number: 848,
             head_sha: "a".repeat(40),
             base: "main".into(),
-            base_sha: None,
+            base_sha: Some("b".repeat(40)),
             reviewed_body_digest: text_digest("reviewed body"),
         };
         let pull = |body: &str| PullRequest {
@@ -7274,6 +7274,15 @@ mod tests {
             revalidate_enqueue_pull(&pull("reviewed body"), &request),
             Ok(())
         );
+        let mut rebased = pull("reviewed body");
+        rebased.base.sha = "c".repeat(40);
+        assert!(matches!(
+            revalidate_enqueue_pull(&rebased, &request),
+            Err(OperationError::EnqueueBinding {
+                binding: "base",
+                ..
+            })
+        ));
         assert!(matches!(
             revalidate_enqueue_pull(&pull("edited after review"), &request),
             Err(OperationError::EnqueueBinding {

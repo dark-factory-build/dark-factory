@@ -29,6 +29,8 @@ type publicReviewBackend struct {
 	enqueueBindingBody                      string
 	observeBindingRefusal                   string
 	observeBindingObserved                  string
+	defaultBranch                           string
+	liveBaseRef                             string
 	leaveUnqueued                           int
 	reviews, submits, enqueues              int
 	enqueueSignal                           atomic.Int32
@@ -78,6 +80,9 @@ func (b *publicReviewBackend) Enqueue(_ context.Context, operation review.Operat
 	b.enqueues++
 	b.enqueueSignal.Add(1)
 	b.enqueuedBase, b.enqueuedSHA, b.enqueuedBody = operation.Request.BaseRef, operation.Request.Base, operation.Request.Body
+	if b.defaultBranch != "" && operation.Request.BaseRef != b.defaultBranch {
+		return maintainerRejection("conflict: The exact-head, operation, or observed-object binding did not match.")
+	}
 	if b.enqueueRefusal != "" {
 		return maintainerRejection("refused: The request was refused: rejected before execution as " + b.enqueueRefusal + ".")
 	}
@@ -167,31 +172,42 @@ func TestEnqueueBodyBindingStartsAFreshSameHeadReview(t *testing.T) {
 	}
 }
 
-func TestEnqueueBranchBindingRefreshesTheBaseRefBeforeRetry(t *testing.T) {
+func TestObservedNonDefaultBranchDoesNotRetryUntilEscalation(t *testing.T) {
 	fixture, project, _, settle := publishedTask(t)
 	settle()
 	customerMode(t, fixture)
 	ctx := context.Background()
-	backend := &publicReviewBackend{enqueueBindingRefusal: "base", enqueueBindingObserved: "release"}
+	backend := &publicReviewBackend{defaultBranch: "main"}
 	fixture.daemon.reviewBackend = func(string, uint64) review.Backend { return backend }
 	if _, err := reviewNow(ctx, fixture.daemon, project, publishedReviewRequest()); err != nil {
 		t.Fatal(err)
 	}
+	backend.liveBaseRef = "release"
 	waitForMergePipeline(t, fixture.daemon)
-	if op := lastDurableReview(t, fixture.store, project); op.Request.BaseRef != "release" {
-		t.Fatalf("base branch was not refreshed: %+v", op)
+	op := lastDurableReview(t, fixture.store, project)
+	if op.Request.BaseRef != "release" || backend.enqueues != 0 {
+		t.Fatalf("stale branch was incorrectly treated as enqueueable: %+v enqueues=%d", op, backend.enqueues)
 	}
-	if _, err := fixture.daemon.advanceReviewOperations(ctx, false); err != nil {
-		t.Fatal(err)
+	for range review.FailuresBeforeEscalation {
+		if _, err := fixture.daemon.advanceReviewOperations(ctx, false); err != nil {
+			t.Fatal(err)
+		}
 	}
-	if backend.enqueues != 2 || backend.enqueuedBase != "release" {
-		t.Fatalf("stale base branch was retried: enqueues=%d base=%s", backend.enqueues, backend.enqueuedBase)
+	op = lastDurableReview(t, fixture.store, project)
+	if op.Escalation == "" || backend.enqueues != 0 {
+		t.Fatalf("non-default branch conflict did not escalate without enqueue: %+v enqueues=%d", op, backend.enqueues)
 	}
 }
 
 // ObservePull defaults to the pull request open at the operation's head with
 // every check passed, queued once it has been enqueued.
 func (b *publicReviewBackend) ObservePull(_ context.Context, operation review.Operation) (review.Pull, error) {
+	if b.defaultBranch != "" && operation.Request.BaseRef != b.defaultBranch {
+		return review.Pull{}, maintainerRejection("conflict: The exact-head, operation, or observed-object binding did not match.")
+	}
+	if b.liveBaseRef != "" && operation.Request.BaseRef != b.liveBaseRef {
+		return review.Pull{}, maintainerConflict("base", operation.Request.BaseRef, b.liveBaseRef)
+	}
 	if b.observeBindingRefusal != "" {
 		binding := b.observeBindingRefusal
 		b.observeBindingRefusal = ""
@@ -205,29 +221,6 @@ func (b *publicReviewBackend) ObservePull(_ context.Context, operation review.Op
 		checks = []string{"required=success"}
 	}
 	return review.Pull{Head: operation.Request.Head, State: "open", Queued: b.queued, Checks: checks}, nil
-}
-
-func TestObservedBaseBindingRefreshesBeforeEnqueue(t *testing.T) {
-	fixture, project, _, settle := publishedTask(t)
-	settle()
-	customerMode(t, fixture)
-	ctx := context.Background()
-	backend := &publicReviewBackend{}
-	fixture.daemon.reviewBackend = func(string, uint64) review.Backend { return backend }
-	if _, err := reviewNow(ctx, fixture.daemon, project, publishedReviewRequest()); err != nil {
-		t.Fatal(err)
-	}
-	backend.observeBindingRefusal, backend.observeBindingObserved = "base", "release"
-	waitForMergePipeline(t, fixture.daemon)
-	if op := lastDurableReview(t, fixture.store, project); op.Request.BaseRef != "release" || backend.enqueues != 0 {
-		t.Fatalf("observed base binding was not refreshed before enqueue: %+v enqueues=%d", op, backend.enqueues)
-	}
-	if _, err := fixture.daemon.advanceReviewOperations(ctx, false); err != nil {
-		t.Fatal(err)
-	}
-	if backend.enqueues != 1 || backend.enqueuedBase != "release" {
-		t.Fatalf("stale observed base was retried: enqueues=%d base=%s", backend.enqueues, backend.enqueuedBase)
-	}
 }
 
 func (b *publicReviewBackend) Observe(_ context.Context, operationID string) (review.Receipt, error) {
