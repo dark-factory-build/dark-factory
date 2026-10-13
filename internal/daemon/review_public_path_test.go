@@ -22,6 +22,8 @@ type publicReviewBackend struct {
 	queued                                  bool
 	checks                                  []string
 	enqueueRefusal                          string // the broker's refusal class, if any
+	enqueueBindingRefusal                   string
+	enqueueBindingObserved                  string
 	leaveUnqueued                           int
 	reviews, submits, enqueues              int
 	enqueueSignal                           atomic.Int32
@@ -69,12 +71,45 @@ func (b *publicReviewBackend) Enqueue(_ context.Context, operation review.Operat
 	if b.enqueueRefusal != "" {
 		return maintainerRejection("refused: The request was refused: rejected before execution as " + b.enqueueRefusal + ".")
 	}
+	if b.enqueueBindingRefusal != "" {
+		binding := b.enqueueBindingRefusal
+		b.enqueueBindingRefusal = ""
+		return maintainerRejection("conflict: enqueue " + binding + " binding did not match: expected old, observed " + b.enqueueBindingObserved + ".")
+	}
 	if b.leaveUnqueued > 0 {
 		b.leaveUnqueued--
 	} else {
 		b.queued = true
 	}
 	return nil
+}
+
+func TestEnqueueBaseBindingRefreshesTheRequestBeforeRetry(t *testing.T) {
+	fixture, project, _, settle := publishedTask(t)
+	settle()
+	customerMode(t, fixture)
+	ctx := context.Background()
+	newBase := strings.Repeat("c", 40)
+	backend := &publicReviewBackend{enqueueBindingRefusal: "base", enqueueBindingObserved: newBase}
+	fixture.daemon.reviewBackend = func(string, uint64) review.Backend { return backend }
+	if _, err := reviewNow(ctx, fixture.daemon, project, publishedReviewRequest()); err != nil {
+		t.Fatal(err)
+	}
+	waitForMergePipeline(t, fixture.daemon)
+	if backend.enqueues != 1 {
+		t.Fatalf("initial enqueue count=%d", backend.enqueues)
+	}
+	first := lastDurableReview(t, fixture.store, project)
+	if first.Request.Base != newBase || first.Failures != 0 || first.Enqueues != 0 {
+		t.Fatalf("base conflict did not refresh the reviewed operation: %+v", first)
+	}
+	if _, err := fixture.daemon.advanceReviewOperations(ctx, false); err != nil {
+		t.Fatal(err)
+	}
+	op := lastDurableReview(t, fixture.store, project)
+	if backend.enqueues != 2 || backend.enqueuedSHA != newBase || op.Request.Base != newBase || op.Enqueues != 1 || op.Failures != 0 {
+		t.Fatalf("base binding was retried without refresh: operation=%+v enqueues=%d base=%s", op, backend.enqueues, backend.enqueuedSHA)
+	}
 }
 
 // ObservePull defaults to the pull request open at the operation's head with

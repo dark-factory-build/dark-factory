@@ -324,7 +324,7 @@ func (daemon *Daemon) reconcilePull(ctx context.Context, open kernel.OpenPull, u
 					action, note = review.SendBack, op.Conversation
 					err = daemon.sendBackPull(ctx, open, task, op, note)
 				}
-			} else if binding := enqueueBinding(err); binding != "" {
+			} else if binding, observed := enqueueBinding(err); binding != "" {
 				// A binding conflict is a stale observation, not an enqueue
 				// failure. Repeating the same request is exactly the race that
 				// produced it; refresh the pull, or start a new review when its
@@ -333,10 +333,18 @@ func (daemon *Daemon) reconcilePull(ctx context.Context, open kernel.OpenPull, u
 					LogFactoryd(daemon.log, "factoryd: enqueue %s#%d binding %s: %v\n", open.Repository, open.Pull.Number, binding, err)
 				}
 				switch binding {
-				case "body_digest", "operation_id":
+				case "body_digest":
 					err = daemon.reviewHead(ctx, coordinator, open, "")
 					action = review.Review
 					note = "the enqueue binding changed: " + binding
+				case "base":
+					if review.HeadRE.MatchString(observed) {
+						op.Request.Base = observed
+					}
+					op.Failures = 0
+					op.LastAction = "enqueue base binding changed; re-observe before enqueue"
+					err = nil
+					action = review.Wait
 				default:
 					op.Failures = 0
 					op.LastAction = "enqueue " + binding + " binding changed; re-observe before enqueue"
@@ -988,22 +996,26 @@ func (r maintainerRejection) Is(target error) bool {
 		target == review.ErrConversation && refused && strings.Contains(strings.ToLower(why), "conversation must be resolved")
 }
 
-func enqueueBinding(err error) string {
+func enqueueBinding(err error) (string, string) {
 	var rejection maintainerRejection
 	if !errors.As(err, &rejection) {
-		return ""
+		return "", ""
 	}
 	line, _, _ := strings.Cut(string(rejection), "\n")
 	const prefix = "conflict: enqueue "
 	if !strings.HasPrefix(line, prefix) {
-		return ""
+		return "", ""
 	}
 	rest := strings.TrimPrefix(line, prefix)
-	binding, _, ok := strings.Cut(rest, " binding did not match:")
-	if !ok || (binding != "head" && binding != "base" && binding != "body_digest" && binding != "operation_id") {
-		return ""
+	binding, values, ok := strings.Cut(rest, " binding did not match: expected ")
+	if !ok || (binding != "head" && binding != "base" && binding != "body_digest") {
+		return "", ""
 	}
-	return binding
+	_, observed, ok := strings.Cut(values, ", observed ")
+	if !ok {
+		return "", ""
+	}
+	return binding, strings.TrimSuffix(observed, ".")
 }
 
 func reviewedBodyDigest(operation review.Operation) string {
