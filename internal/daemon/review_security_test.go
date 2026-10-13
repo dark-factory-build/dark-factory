@@ -634,7 +634,10 @@ func TestReviewContextSuppliesGoalHistoryAndCurrentKnowledge(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	context := backend.reviewContext(ctx, checkout, request)
+	context, err := backend.reviewContext(ctx, checkout, request)
+	if err != nil {
+		t.Fatal(err)
+	}
 	for _, want := range []string{"the author's goal", "Earlier fix of changed.go (#7)", "current decision about changed.go"} {
 		if !strings.Contains(context, want) {
 			t.Fatalf("review context lacks %q:\n%s", want, context)
