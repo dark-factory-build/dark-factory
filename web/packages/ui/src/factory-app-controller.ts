@@ -524,7 +524,7 @@ export class FactoryAppController {
    * the controls the caller changed are sent; an omitted one is left alone,
    * and an empty change is not a write at all.
    */
-  async updateAgentConfig(config: { model?: string; reasoningEffort?: string; accountId?: string; paused?: boolean; archived?: boolean; idlePolicy?: "wait" | "standing_instruction"; idleAfterSeconds?: number; idleInstruction?: string; idleRunBudget?: number; idleWakeOn?: IdleWakeOn }): Promise<void> {
+  async updateAgentConfig(config: { model?: string; reasoningEffort?: string; accountId?: string; paused?: boolean; archived?: boolean; idlePolicy?: "wait" | "standing_instruction"; idleAfterSeconds?: number; idleInstruction?: string; idleWakeOn?: IdleWakeOn }): Promise<void> {
     const selected = this.#selectedAgent;
     const session = this.#client?.session;
     if (this.#closed || this.#status !== "ready" || selected === undefined || session === undefined || this.#edit?.pending === true) return;
@@ -567,7 +567,7 @@ export class FactoryAppController {
   }
 
   /** Save one project's future allowance against its exact revision. */
-  async updateProjectLimits(project: Pick<ProjectItem, "id" | "revision">, limits: { runBudget: bigint; maxRunSeconds: number }): Promise<void> {
+  async updateProjectLimits(project: Pick<ProjectItem, "id" | "revision">, limits: { maxRunSeconds: number }): Promise<void> {
     const session = this.#client?.session;
     if (this.#closed || this.#status !== "ready" || session === undefined || this.#edit?.pending === true) return;
     const generation = this.#generation;

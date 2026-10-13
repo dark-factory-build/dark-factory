@@ -351,15 +351,13 @@ func whyTaskWaits(ctx context.Context, c *sql.Conn, task Task) (string, error) {
 				JOIN task_repository_bindings AS mr ON mr.task_id = t.id JOIN task_repository_bindings AS ar ON ar.task_id = a.id AND ar.repository_id = mr.repository_id
 				WHERE mine.task_id = t.id),
 			(SELECT CASE WHEN COUNT(g.id) = 0 THEN 'agent: its project has no worker that takes shared work'
-				WHEN COUNT(g.id) > 1 THEN 'agent: every worker that takes shared work is archived, paused, out of tool budget or running'
-				ELSE 'agent: ' || g.name || CASE WHEN g.archived THEN ' is archived' WHEN g.paused THEN ' is paused' WHEN g.role <> 'orchestrator' AND g.tool_calls_used >= g.tool_budget_limit THEN ' has spent its tool budget' ELSE ' has a run in progress' END END
+				WHEN COUNT(g.id) > 1 THEN 'agent: every worker that takes shared work is archived, paused or running'
+				ELSE 'agent: ' || g.name || CASE WHEN g.archived THEN ' is archived' WHEN g.paused THEN ' is paused' ELSE ' has a run in progress' END END
 				FROM tasks AS c LEFT JOIN agents AS g ON g.project_id = c.project_id AND (g.id = c.assigned_agent_id OR c.assigned_agent_id IS NULL AND g.role = 'worker' AND g.idle_policy = 'wait')
-				WHERE c.id = t.id HAVING COUNT(g.id) = COUNT(CASE WHEN g.archived OR g.paused OR g.role <> 'orchestrator' AND g.tool_calls_used >= g.tool_budget_limit OR EXISTS (SELECT 1 FROM runs AS r WHERE r.agent_id = g.id AND r.phase <> 'terminal') THEN 1 END)),
-			(SELECT 'account limit: its project has spent its run budget' FROM projects AS p WHERE p.id = t.project_id AND p.run_budget_limit > 0 AND p.runs_used >= p.run_budget_limit),
-			(SELECT 'account limit: its project has spent its token limit' FROM project_tokens AS k WHERE k.project_id = t.project_id AND k.token_limit > 0 AND k.tokens_used >= k.token_limit),
+				WHERE c.id = t.id HAVING COUNT(g.id) = COUNT(CASE WHEN g.archived OR g.paused OR EXISTS (SELECT 1 FROM runs AS r WHERE r.agent_id = g.id AND r.phase <> 'terminal') THEN 1 END)),
 			(SELECT CASE WHEN a.role = 'orchestrator' THEN 'capacity: its project has an overseer run in progress'
 				WHEN `+workers+` >= ?1 THEN 'capacity: every worker slot is in use'
-				ELSE 'capacity: a specialist waits while it would take the last free worker slot or exceed its project''s specialist_runs' END
+				ELSE 'capacity: a specialist waits while it would take the last free worker slot' END
 				FROM tasks AS c LEFT JOIN agents AS a ON a.id = c.assigned_agent_id WHERE c.id = t.id
 				  AND (a.role = 'orchestrator' AND (SELECT COUNT(*) FROM runs WHERE role = 'orchestrator' AND project_id = t.project_id AND phase <> 'terminal') >= 1
 				    OR a.role IS NOT 'orchestrator' AND (`+workers+` >= ?1 OR `+specialistCarrierSQL+` AND `+specialistCarrierHeldSQL+`))),

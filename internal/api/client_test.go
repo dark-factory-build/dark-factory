@@ -347,8 +347,8 @@ func TestOperatorClientMethodsUseExactPrivateWire(t *testing.T) {
 			_, err := client.CreateProject(context.Background(), CreateProjectInput{ID: id('1'), Name: "project", Root: "/private/project"})
 			return err
 		}},
-		{name: "create agent", response: mutationResponse(), request: `{"method":"create_agent","params":{"id":"` + id('2') + `","project_id":"` + id('1') + `","name":"agent","role":"worker","provider":"codex","model":"gpt-5.6-luna","reasoning_effort":"medium","tool_budget_limit":20}}`, invoke: func(client *OperatorClient) error {
-			_, err := client.CreateAgent(context.Background(), CreateAgentInput{ID: id('2'), ProjectID: id('1'), Name: "agent", Role: "worker", Provider: "codex", Model: "gpt-5.6-luna", ReasoningEffort: "medium", ToolBudgetLimit: 20})
+		{name: "create agent", response: mutationResponse(), request: `{"method":"create_agent","params":{"id":"` + id('2') + `","project_id":"` + id('1') + `","name":"agent","role":"worker","provider":"codex","model":"gpt-5.6-luna","reasoning_effort":"medium"}}`, invoke: func(client *OperatorClient) error {
+			_, err := client.CreateAgent(context.Background(), CreateAgentInput{ID: id('2'), ProjectID: id('1'), Name: "agent", Role: "worker", Provider: "codex", Model: "gpt-5.6-luna", ReasoningEffort: "medium"})
 			return err
 		}},
 		{name: "enqueue task", response: mutationResponse(), request: `{"method":"enqueue_task","params":{"id":"` + id('3') + `","project_id":"` + id('1') + `","assigned_agent_id":"` + id('2') + `","incarnation_id":"` + id('4') + `","title":"task","body":"private body","priority":7}}`, invoke: func(client *OperatorClient) error {
@@ -1603,14 +1603,14 @@ func TestInputBoundsFailBeforeConnection(t *testing.T) {
 		t.Fatalf("invalid ID = %v", err)
 	}
 	for name, input := range map[string]CreateAgentInput{
-		"missing provider": {ID: id('2'), ProjectID: id('1'), Name: "agent", Role: "worker", ToolBudgetLimit: 1},
-		"unknown provider": {ID: id('2'), ProjectID: id('1'), Name: "agent", Role: "worker", Provider: "other", ToolBudgetLimit: 1},
-		"shell model":      {ID: id('2'), ProjectID: id('1'), Name: "agent", Role: "worker", Provider: "shell", Model: "private", ToolBudgetLimit: 1},
-		"claude ultra":     {ID: id('2'), ProjectID: id('1'), Name: "agent", Role: "worker", Provider: "claude_code", ReasoningEffort: "ultra", ToolBudgetLimit: 1},
-		"large model":      {ID: id('2'), ProjectID: id('1'), Name: "agent", Role: "worker", Provider: "codex", Model: strings.Repeat("m", 129), ToolBudgetLimit: 1},
+		"missing provider": {ID: id('2'), ProjectID: id('1'), Name: "agent", Role: "worker"},
+		"unknown provider": {ID: id('2'), ProjectID: id('1'), Name: "agent", Role: "worker", Provider: "other"},
+		"shell model":      {ID: id('2'), ProjectID: id('1'), Name: "agent", Role: "worker", Provider: "shell", Model: "private"},
+		"claude ultra":     {ID: id('2'), ProjectID: id('1'), Name: "agent", Role: "worker", Provider: "claude_code", ReasoningEffort: "ultra"},
+		"large model":      {ID: id('2'), ProjectID: id('1'), Name: "agent", Role: "worker", Provider: "codex", Model: strings.Repeat("m", 129)},
 		// An account is one canonical identity, and shell has no logins to name.
-		"malformed account": {ID: id('2'), ProjectID: id('1'), Name: "agent", Role: "worker", Provider: "codex", AccountID: "nope", ToolBudgetLimit: 1},
-		"shell account":     {ID: id('2'), ProjectID: id('1'), Name: "agent", Role: "worker", Provider: "shell", AccountID: id('3'), ToolBudgetLimit: 1},
+		"malformed account": {ID: id('2'), ProjectID: id('1'), Name: "agent", Role: "worker", Provider: "codex", AccountID: "nope"},
+		"shell account":     {ID: id('2'), ProjectID: id('1'), Name: "agent", Role: "worker", Provider: "shell", AccountID: id('3')},
 	} {
 		t.Run("create agent "+name, func(t *testing.T) {
 			if _, err := operator.CreateAgent(context.Background(), input); !errors.Is(err, ErrInvalidInput) {
@@ -1619,9 +1619,9 @@ func TestInputBoundsFailBeforeConnection(t *testing.T) {
 		})
 	}
 	for name, input := range map[string]AgentIdlePolicyInput{
-		"missing instruction": {AgentID: id('2'), ExpectedRevision: 1, Policy: "standing_instruction", AfterSeconds: 1, RunBudget: 1},
-		"missing cooldown":    {AgentID: id('2'), ExpectedRevision: 1, Policy: "standing_instruction", Instruction: "x", RunBudget: 1},
-		"wait partial":        {AgentID: id('2'), ExpectedRevision: 1, Policy: "wait", RunBudget: 1},
+		"missing instruction": {AgentID: id('2'), ExpectedRevision: 1, Policy: "standing_instruction", AfterSeconds: 1},
+		"missing cooldown":    {AgentID: id('2'), ExpectedRevision: 1, Policy: "standing_instruction", Instruction: "x"},
+		"wait partial":        {AgentID: id('2'), ExpectedRevision: 1, Policy: "wait", WakeOn: "failures"},
 	} {
 		t.Run("idle policy "+name, func(t *testing.T) {
 			if _, err := operator.SetAgentIdlePolicy(context.Background(), input); !errors.Is(err, ErrInvalidInput) {

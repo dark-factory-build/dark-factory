@@ -324,14 +324,14 @@ test("a config save fences immediate START and keeps its draft visible through s
   context.controller.selectAgent(thirdAgent);
   context.controller.setAgentInstructionDraft("Keep this task");
 
-  const saving = context.controller.updateAgentConfig({ idlePolicy: "standing_instruction", idleAfterSeconds: 1, idleInstruction: "Inspect the queue", idleRunBudget: 1 });
+  const saving = context.controller.updateAgentConfig({ idlePolicy: "standing_instruction", idleAfterSeconds: 1, idleInstruction: "Inspect the queue" });
   assert.equal(context.latest().edit.pending, true);
   assert.equal(await context.controller.enqueueAgentInstruction("Keep this task"), false);
   assert.equal(context.calls.some((call) => call.kind === "enqueue"), false, "the stale revision is never sent");
   assert.equal(context.latest().terminal.instructionDraft, "Keep this task");
   assert.equal(context.latest().terminal.instructionError.code, "stale");
 
-  const revised = { ...thirdAgent, revision: thirdAgent.revision + 1n, idle_policy: "standing_instruction", idle_after_seconds: 1, idle_instruction: "Inspect the queue", idle_run_budget: 1 };
+  const revised = { ...thirdAgent, revision: thirdAgent.revision + 1n, idle_policy: "standing_instruction", idle_after_seconds: 1, idle_instruction: "Inspect the queue", idle_run_budget: 0 };
   const agents = new Map(fixtureState.agents);
   agents.set(revised.id, revised);
   const admitted = new Map(initialTasks);
@@ -358,9 +358,9 @@ test("an older config completion cannot clear a newer selected agent edit", asyn
   context.controller.start();
   context.ready();
   context.controller.selectAgent(thirdAgent);
-  const savingA = context.controller.updateAgentConfig({ idlePolicy: "standing_instruction", idleAfterSeconds: 1, idleInstruction: "A", idleRunBudget: 1 });
+  const savingA = context.controller.updateAgentConfig({ idlePolicy: "standing_instruction", idleAfterSeconds: 1, idleInstruction: "A" });
   context.controller.selectAgent(secondAgent);
-  const savingB = context.controller.updateAgentConfig({ idlePolicy: "standing_instruction", idleAfterSeconds: 1, idleInstruction: "B", idleRunBudget: 1 });
+  const savingB = context.controller.updateAgentConfig({ idlePolicy: "standing_instruction", idleAfterSeconds: 1, idleInstruction: "B" });
   assert.deepEqual(context.latest().edit, { target: secondAgent.id, pending: true });
 
   first.resolve({ agentId: thirdAgent.id, revision: thirdAgent.revision + 1n });
@@ -380,7 +380,7 @@ test("a same-agent terminal replacement retains an unsent draft and refusal", as
   context.ready(stateAt(42, { tasks }));
   context.controller.selectAgent(thirdAgent);
   context.controller.setAgentInstructionDraft("Keep this task");
-  void context.controller.updateAgentConfig({ idlePolicy: "standing_instruction", idleAfterSeconds: 1, idleInstruction: "Inspect", idleRunBudget: 1 });
+  void context.controller.updateAgentConfig({ idlePolicy: "standing_instruction", idleAfterSeconds: 1, idleInstruction: "Inspect" });
   assert.equal(await context.controller.enqueueAgentInstruction("Keep this task"), false);
   context.controller.closeAgentTerminal();
   assert.equal(context.latest().terminal.instructionDraft, "Keep this task");

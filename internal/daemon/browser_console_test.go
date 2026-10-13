@@ -125,14 +125,14 @@ func TestBrowserConsoleUpdatesAdvanceTheExactRevision(t *testing.T) {
 	}
 }
 
-func TestBrowserConsoleAcceptsLegacyZeroStandingInstructionBudget(t *testing.T) {
+func TestBrowserConsoleAcceptsStandingInstruction(t *testing.T) {
 	fixture := newConsoleFixture(t, kernel.BrowserCapabilityObserve|kernel.BrowserCapabilityHumanActions, consoleRoot(t))
 	ctx := context.Background()
 	client := rawBrowserClient(fixture.client.ID)
-	policy, after, instruction, budget := "standing_instruction", uint32(1), "inspect worker activity", uint32(0)
+	policy, after, instruction := "standing_instruction", uint32(1), "inspect worker activity"
 	result, err := fixture.backend.UpdateAgent(ctx, client, browserprotocol.AgentUpdate{
 		AgentID: fixture.agent.ID.String(), ExpectedRevision: decimalRevision(fixture.agent.Revision),
-		IdlePolicy: &policy, IdleAfterSeconds: &after, IdleInstruction: &instruction, IdleRunBudget: &budget,
+		IdlePolicy: &policy, IdleAfterSeconds: &after, IdleInstruction: &instruction,
 	})
 	if err != nil || result.Revision != decimalRevision(fixture.agent.Revision)+1 {
 		t.Fatalf("zero standing budget = %+v, %v", result, err)

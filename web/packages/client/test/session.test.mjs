@@ -498,10 +498,10 @@ test("console edits and topology carry exact bodies and correlate their results"
   socket.reply(encodeServerControl({ type: "AGENT_UPDATE_RESULT", id: agentFrame.id, body: { agent_id: agentId, revision: 8n } }));
   assert.deepEqual(await agentPending, { agentId, revision: 8n });
 
-  const limitsPending = session.setProjectLimits({ projectId, expectedRevision: 4n, runBudget: 7n, maxRunSeconds: 900 });
+  const limitsPending = session.setProjectLimits({ projectId, expectedRevision: 4n, maxRunSeconds: 900 });
   const limitsFrame = decodeClientControl(socket.sent.at(-1));
   assert.equal(limitsFrame.type, "PROJECT_LIMITS");
-  assert.deepEqual(limitsFrame.body, { project_id: projectId, expected_revision: 4n, run_budget: 7n, max_run_seconds: 900 });
+  assert.deepEqual(limitsFrame.body, { project_id: projectId, expected_revision: 4n, max_run_seconds: 900 });
   socket.reply(encodeServerControl({ type: "PROJECT_LIMITS_RESULT", id: limitsFrame.id, body: { project_id: projectId, revision: 5n } }));
   assert.deepEqual(await limitsPending, { projectId, revision: 5n });
 
@@ -2060,14 +2060,14 @@ test("unknown errors on a generic STATE_GET refuse only that refresh", async () 
 test("an agent's idle rule travels on AGENT_UPDATE and comes back on the snapshot", async () => {
   const { session, socket } = await openHumanSession();
   const agentId = "7c".repeat(16);
-  const pending = session.updateAgent({ agentId, expectedRevision: 3n, idlePolicy: "standing_instruction", idleAfterSeconds: 600, idleInstruction: "Look for follow-up work.", idleRunBudget: 3 });
+  const pending = session.updateAgent({ agentId, expectedRevision: 3n, idlePolicy: "standing_instruction", idleAfterSeconds: 600, idleInstruction: "Look for follow-up work." });
   const frame = decodeClientControl(socket.sent.at(-1));
-  assert.deepEqual(frame.body, { agent_id: agentId, expected_revision: 3n, idle_policy: "standing_instruction", idle_after_seconds: 600, idle_instruction: "Look for follow-up work.", idle_run_budget: 3 });
+  assert.deepEqual(frame.body, { agent_id: agentId, expected_revision: 3n, idle_policy: "standing_instruction", idle_after_seconds: 600, idle_instruction: "Look for follow-up work." });
   socket.reply(encodeServerControl({ type: "AGENT_UPDATE_RESULT", id: frame.id, body: { agent_id: agentId, revision: 4n } }));
   await pending;
   // Out-of-bounds rules never leave the client.
   const sent = socket.sent.length;
-  for (const bad of [{ idleAfterSeconds: 604801 }, { idleAfterSeconds: -1 }, { idleRunBudget: 1000001 }, { idleInstruction: "x".repeat(32769) }]) {
+  for (const bad of [{ idleAfterSeconds: 604801 }, { idleAfterSeconds: -1 }, { idleInstruction: "x".repeat(32769) }]) {
     await assert.rejects(session.updateAgent({ agentId, expectedRevision: 4n, ...bad }), (error) => error instanceof SessionError && error.code === "invalid_request");
   }
   assert.equal(socket.sent.length, sent);

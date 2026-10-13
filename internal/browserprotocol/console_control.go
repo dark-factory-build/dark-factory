@@ -49,11 +49,10 @@ type AgentUpdate struct {
 	AccountID *string `json:"account_id,omitempty"`
 	Paused    *Bool   `json:"paused,omitempty"`
 	Archived  *Bool   `json:"archived,omitempty"`
-	// The idle rule. A new budget starts the used count again.
+	// The idle rule.
 	IdlePolicy       *string `json:"idle_policy,omitempty"`
 	IdleAfterSeconds *uint32 `json:"idle_after_seconds,omitempty"`
 	IdleInstruction  *string `json:"idle_instruction,omitempty"`
-	IdleRunBudget    *uint32 `json:"idle_run_budget,omitempty"`
 	IdleWakeOn       *string `json:"idle_wake_on,omitempty"`
 }
 
@@ -62,12 +61,10 @@ type AgentUpdateResult struct {
 	Revision Decimal `json:"revision"`
 }
 
-// ProjectLimits replaces the future run allowance and per-run ceiling. A zero
-// allowance or duration explicitly means unlimited.
+// ProjectLimits replaces the per-run wall-clock ceiling.
 type ProjectLimits struct {
 	ProjectID        string  `json:"project_id"`
 	ExpectedRevision Decimal `json:"expected_revision"`
-	RunBudget        Decimal `json:"run_budget"`
 	MaxRunSeconds    uint32  `json:"max_run_seconds"`
 }
 
@@ -621,8 +618,7 @@ func validConsoleControl(kind MessageType, body any) error {
 			value.AccountID != nil && *value.AccountID != "" && validateDynamicID(*value.AccountID) != nil ||
 			value.IdlePolicy != nil && !validIdlePolicy(*value.IdlePolicy) ||
 			value.IdleAfterSeconds != nil && *value.IdleAfterSeconds > MaxIdleAfterSeconds ||
-			value.IdleInstruction != nil && validateBoundedText(*value.IdleInstruction, 0, MaxTaskInstructionBytes) != nil ||
-			value.IdleRunBudget != nil && *value.IdleRunBudget > MaxIdleRunBudget {
+			value.IdleInstruction != nil && validateBoundedText(*value.IdleInstruction, 0, MaxTaskInstructionBytes) != nil {
 			return bad()
 		}
 	case AgentUpdateResult:
@@ -640,7 +636,7 @@ func validConsoleControl(kind MessageType, body any) error {
 			return bad()
 		}
 	case ProjectLimits:
-		if validateDynamicID(value.ProjectID) != nil || value.ExpectedRevision == 0 || uint64(value.RunBudget) > MaxSQLiteInteger || value.MaxRunSeconds > 86400 {
+		if validateDynamicID(value.ProjectID) != nil || value.ExpectedRevision == 0 || value.MaxRunSeconds > 86400 {
 			return bad()
 		}
 	case ProjectLimitsResult:

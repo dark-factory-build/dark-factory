@@ -98,10 +98,10 @@ const (
   factoryctl project repository base --id ID --revision REVISION --base REF
   factoryctl project repository default|enable|disable|remove --id ID --revision REVISION
   factoryctl project repository fetch|github --id ID
-  factoryctl project limits --project ID --revision REVISION --run-budget N --max-run-seconds N [--token-budget N] [--specialist-runs N] [--specialist-open-proposals N]
-  factoryctl agent create --project ID --name TEXT --provider shell|claude_code|codex --tool-budget N [--role worker|orchestrator] [--model TEXT] [--reasoning-effort low|medium|high|xhigh|max|ultra] [--account ID]
+  factoryctl project limits --project ID --revision REVISION --max-run-seconds N
+  factoryctl agent create --project ID --name TEXT --provider shell|claude_code|codex [--role worker|orchestrator] [--model TEXT] [--reasoning-effort low|medium|high|xhigh|max|ultra] [--account ID]
   factoryctl agent idle-policy --agent ID --revision REVISION --policy wait
-  factoryctl agent idle-policy --agent ID --revision REVISION --policy standing_instruction --after-seconds N --instruction TEXT [--run-budget N] [--wake-on failures|merges|failures,merges]
+  factoryctl agent idle-policy --agent ID --revision REVISION --policy standing_instruction --after-seconds N --instruction TEXT [--wake-on failures|merges|failures,merges]
   factoryctl agent pause|resume|archive|restore --agent ID --revision REVISION
   factoryctl agent set --agent ID [--cadence DURATION] [--wake-on failures|merges|failures,merges|none] [--model TEXT] [--reasoning-effort EFFORT] [--pause|--resume]
     Changes only the named fields at the current revision; the standing instruction is kept.
@@ -299,9 +299,6 @@ type attemptCommand struct {
 	maxBytes            uint32
 	maxRunSeconds       uint32
 	seconds             uint32
-	tokenBudget         *uint64
-	specialistRuns      *uint32
-	openProposals       *uint32
 	wakeOn              string
 	priority            int64
 	prioritySet         bool
@@ -1678,11 +1675,11 @@ func parseOperator(args []string) (attemptCommand, bool, bool) {
 	case "project create":
 		command.kind, names = commandProjectCreate, []string{"--name", "--root"}
 	case "project limits":
-		command.kind, names = commandProjectLimits, []string{"--project", "--revision", "--run-budget", "--token-budget", "--max-run-seconds", "--specialist-runs", "--specialist-open-proposals"}
+		command.kind, names = commandProjectLimits, []string{"--project", "--revision", "--max-run-seconds"}
 	case "agent create":
-		command.kind, names = commandAgentCreate, []string{"--project", "--name", "--role", "--provider", "--model", "--reasoning-effort", "--account", "--tool-budget"}
+		command.kind, names = commandAgentCreate, []string{"--project", "--name", "--role", "--provider", "--model", "--reasoning-effort", "--account"}
 	case "agent idle-policy":
-		command.kind, names = commandAgentIdlePolicy, []string{"--agent", "--revision", "--policy", "--after-seconds", "--instruction", "--run-budget", "--wake-on"}
+		command.kind, names = commandAgentIdlePolicy, []string{"--agent", "--revision", "--policy", "--after-seconds", "--instruction", "--wake-on"}
 	case "agent select-account":
 		command.kind, names = commandAgentSelectAccount, []string{"--agent", "--account", "--revision"}
 	case "agent select-model":
@@ -1719,14 +1716,6 @@ func parseOperator(args []string) (attemptCommand, bool, bool) {
 			command.repository = value
 		case name == "--revision" && (command.kind == commandProjectLimits || command.kind == commandAgentIdlePolicy || command.kind == commandAgentSelectAccount || command.kind == commandAgentSelectModel || command.kind == commandOverseerAgentUpdate || command.kind == commandTaskRead) && isCount && count > 0:
 			command.expectedRevision = count
-		case name == "--run-budget" && command.kind == commandProjectLimits && isCount:
-			command.toolBudget = count
-		case name == "--token-budget" && command.kind == commandProjectLimits && isCount:
-			command.tokenBudget = &count
-		case name == "--specialist-runs" && command.kind == commandProjectLimits && isCount && count <= kernel.MaxSpecialistRuns:
-			command.specialistRuns = &[]uint32{uint32(count)}[0]
-		case name == "--specialist-open-proposals" && command.kind == commandProjectLimits && isCount && count <= kernel.MaxSpecialistOpenProposals:
-			command.openProposals = &[]uint32{uint32(count)}[0]
 		case name == "--wake-on" && command.kind == commandAgentIdlePolicy:
 			command.wakeOn = value
 		case name == "--max-run-seconds" && command.kind == commandProjectLimits && isCount && count <= 86400:
@@ -1751,16 +1740,12 @@ func parseOperator(args []string) (attemptCommand, bool, bool) {
 			command.provider = value
 		case name == "--model" && command.kind == commandAgentCreate && validOperatorText(value, 0, 128):
 			command.model = value
-		case name == "--tool-budget" && command.kind == commandAgentCreate && isCount && count >= 1 && count <= 1_000_000_000:
-			command.toolBudget = count
 		case name == "--policy" && command.kind == commandAgentIdlePolicy && (value == "wait" || value == "standing_instruction"):
 			command.provider = value
 		case name == "--after-seconds" && command.kind == commandAgentIdlePolicy && isCount && count <= uint64(kernel.MaxIdleAfterSeconds):
 			command.maxRunSeconds = uint32(count)
 		case name == "--instruction" && command.kind == commandAgentIdlePolicy && validOperatorText(value, 1, 32768):
 			command.text = value
-		case name == "--run-budget" && command.kind == commandAgentIdlePolicy && isCount && count <= uint64(kernel.MaxIdleRunBudget):
-			command.toolBudget = count
 		case name == "--title" && command.kind == commandTaskAdd && validOperatorText(value, 1, 1024):
 			command.title = value
 		case name == "--body" && command.kind == commandTaskAdd && validOperatorText(value, 0, 131072):
@@ -1819,7 +1804,7 @@ func parseOperator(args []string) (attemptCommand, bool, bool) {
 		}
 	case commandAgentCreate:
 		provider, err := kernel.ParseProvider(command.provider)
-		if command.project == "" || command.name == "" || command.toolBudget == 0 || err != nil || kernel.ValidateProviderLaunchControls(provider, command.model, command.reasoningEffort) != nil {
+		if command.project == "" || command.name == "" || err != nil || kernel.ValidateProviderLaunchControls(provider, command.model, command.reasoningEffort) != nil {
 			return attemptCommand{}, false, false
 		}
 	case commandAgentIdlePolicy:
@@ -2482,7 +2467,7 @@ func runOperator(ctx context.Context, command attemptCommand, getenv func(string
 			Revision uint64 `json:"revision"`
 		}{ID: id, Head: result.Head, Revision: result.Revision})
 	case commandProjectLimits:
-		result, callErr := client.SetProjectLimits(callContext, api.ProjectLimitsInput{ProjectID: command.project, ExpectedRevision: command.expectedRevision, RunBudget: command.toolBudget, MaxRunSeconds: command.maxRunSeconds, TokenBudget: command.tokenBudget, SpecialistRuns: command.specialistRuns, SpecialistOpenProposals: command.openProposals})
+		result, callErr := client.SetProjectLimits(callContext, api.ProjectLimitsInput{ProjectID: command.project, ExpectedRevision: command.expectedRevision, MaxRunSeconds: command.maxRunSeconds})
 		if callErr != nil {
 			return writeWebFailure(stderr, "project limits", callErr)
 		}
@@ -2533,7 +2518,7 @@ func runOperator(ctx context.Context, command attemptCommand, getenv func(string
 		result, callErr := client.CreateAgent(callContext, api.CreateAgentInput{
 			ID: id, ProjectID: command.project, Name: command.name, Role: command.role,
 			Provider: command.provider, Model: command.model, ReasoningEffort: command.reasoningEffort,
-			AccountID: command.account, ToolBudgetLimit: command.toolBudget,
+			AccountID: command.account,
 		})
 		if callErr != nil {
 			return writeWebFailure(stderr, "agent create", callErr)
@@ -2544,7 +2529,7 @@ func runOperator(ctx context.Context, command attemptCommand, getenv func(string
 			Revision uint64 `json:"revision"`
 		}{ID: id, Head: result.Head, Revision: result.Revision})
 	case commandAgentIdlePolicy:
-		result, callErr := client.SetAgentIdlePolicy(callContext, api.AgentIdlePolicyInput{AgentID: command.agent, ExpectedRevision: command.expectedRevision, Policy: command.provider, AfterSeconds: command.maxRunSeconds, Instruction: command.text, RunBudget: command.toolBudget, WakeOn: command.wakeOn})
+		result, callErr := client.SetAgentIdlePolicy(callContext, api.AgentIdlePolicyInput{AgentID: command.agent, ExpectedRevision: command.expectedRevision, Policy: command.provider, AfterSeconds: command.maxRunSeconds, Instruction: command.text, WakeOn: command.wakeOn})
 		if callErr != nil {
 			return writeWebFailure(stderr, "agent idle-policy", callErr)
 		}

@@ -462,7 +462,7 @@ func (backend *browserBackend) UpdateAgent(ctx context.Context, rawClient [brows
 		policy := kernel.IdlePolicy(*request.IdlePolicy)
 		patch.IdlePolicy = &policy
 	}
-	patch.IdleAfterSeconds, patch.IdleInstruction, patch.IdleRunBudget, patch.IdleWakeOn = request.IdleAfterSeconds, request.IdleInstruction, request.IdleRunBudget, request.IdleWakeOn
+	patch.IdleAfterSeconds, patch.IdleInstruction, patch.IdleWakeOn = request.IdleAfterSeconds, request.IdleInstruction, request.IdleWakeOn
 	agent, err := backend.store.UpdateAgent(ctx, agentID, expected, patch, at)
 	if err != nil {
 		return browserprotocol.AgentUpdateResult{}, consoleUpdateError(err)
@@ -491,7 +491,7 @@ func (backend *browserBackend) SetProjectLimits(ctx context.Context, rawClient [
 	if err != nil {
 		return browserprotocol.ProjectLimitsResult{}, err
 	}
-	project, err := backend.store.SetProjectLimits(ctx, projectID, expected, uint64(request.RunBudget), request.MaxRunSeconds, at)
+	project, err := backend.store.SetProjectLimits(ctx, projectID, expected, 0, request.MaxRunSeconds, at)
 	if err != nil {
 		return browserprotocol.ProjectLimitsResult{}, consoleUpdateError(err)
 	}

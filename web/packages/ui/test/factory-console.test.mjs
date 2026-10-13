@@ -1136,8 +1136,6 @@ test("the settings modal keeps actionable settings compact", () => {
   assert.doesNotMatch(markup, /<dt>(RUN ALLOWANCE|PER-RUN LIMIT)<\/dt>/);
   assert.equal((markup.match(/aria-label="Limits for North Workshop"/g) ?? []).length, 1);
   assert.equal((markup.match(/aria-label="Limits for South Workshop"/g) ?? []).length, 1);
-  assert.match(markup, /5 runs used · 7 future runs left/);
-  assert.match(markup, /3 runs used · unlimited/);
   assert.match(markup, /value="900"/);
   assert.match(markup, /aria-label="Pairing"/);
   assert.match(markup, /Pairing unavailable/);
@@ -1265,12 +1263,9 @@ test("private GitHub settings stays behind the paired admin surface", async () =
   renderer.unmount();
 });
 
-test("settings edits project limits as future runs with an explicit unlimited choice", () => {
+test("settings edits the project duration", () => {
   const markup = render({ settingsOpen: true, onToggleSettings: () => {}, onSaveProjectLimits: () => {} });
   assert.match(markup, /aria-label="Project limits"/);
-  assert.match(markup, /value="7"/);
-  assert.match(markup, /Remaining run allowance/);
-  assert.match(markup, /Unlimited runs/);
   assert.match(markup, /value="0"/);
   assert.match(markup, /Max seconds per run \(0 = unlimited\)/);
   assert.doesNotMatch(markup, /AUTONOMOUS GITHUB ISSUE WORK REQUIRES BOTH LIMITS/);
@@ -1284,7 +1279,7 @@ test("settings rejects a blank per-run duration before saving", async () => {
   });
   const form = renderer.root.findByProps({ "aria-label": `Limits for ${fixtureState.projects.get(ids.project).name}` });
   const inputs = form.findAllByType("input");
-  await act(async () => { inputs[2].props.onChange({ currentTarget: { value: "" } }); });
+  await act(async () => { inputs[0].props.onChange({ currentTarget: { value: "" } }); });
   await act(async () => { form.props.onSubmit({ preventDefault: () => {} }); });
   assert.equal(calls.length, 0);
   assert.match(JSON.stringify(renderer.toJSON()), /Duration must be 0–86400 seconds/);
@@ -1823,7 +1818,6 @@ test("the RULES block saves an idle rule and sends only what changed", async () 
   await act(async () => { field(`df-idle-${ids.agent}`).props.onChange({ currentTarget: { value: "standing_instruction" } }); });
   await act(async () => { field(`df-idle-after-${ids.agent}`).props.onChange({ currentTarget: { value: "2" } }); });
   await act(async () => { field(`df-idle-instruction-${ids.agent}`).props.onChange({ currentTarget: { value: "Look for follow-up work." } }); });
-  assert.notEqual(field(`df-idle-budget-${ids.agent}`), undefined);
   await act(async () => { form().props.onSubmit({ preventDefault() {} }); });
   assert.deepEqual(edits.at(-1), { idlePolicy: "standing_instruction", idleAfterSeconds: 2, idleInstruction: "Look for follow-up work." });
   // A rule the daemon would refuse never leaves the form: no wait means no
@@ -1850,7 +1844,6 @@ test("the RULES block saves an idle rule and sends only what changed", async () 
   await act(async () => { spentField(`df-idle-instruction-${ids.agent}`).props.onChange({ currentTarget: { value: "Look for follow-up work, then tidy." } }); });
   await act(async () => { spentRenderer.root.findAllByType("form")[0].props.onSubmit({ preventDefault() {} }); });
   assert.deepEqual(again.at(-1), { idlePolicy: "standing_instruction", idleAfterSeconds: 600, idleInstruction: "Look for follow-up work, then tidy." });
-  assert.notEqual(spentField(`df-idle-budget-${ids.agent}`), undefined);
 });
 
 test("overseer supervision names worker events and a seconds cooldown", () => {
@@ -2780,7 +2773,6 @@ test("a specialist is grouped, states what it is doing and owes, and Stop archiv
   assert.match(markup, /waiting: waiting for a free background slot/);
   assert.match(markup, /aria-label="Remit">Keep the docs true to the code\.</);
   assert.match(markup, /Next review .*\(events\) or sooner on failures/);
-  assert.match(markup, /Reviews 1\/4 · open proposals 1\/3/);
   assert.match(markup, /Stop specialist/);
   assert.doesNotMatch(markup, /Archive worker/);
   // Stop asks first, then archives; a running review is ended by the same archive.

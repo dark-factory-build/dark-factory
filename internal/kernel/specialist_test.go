@@ -95,17 +95,6 @@ func specialistStateOf(t *testing.T, store *Store, id AgentID) SpecialistState {
 	return SpecialistState{}
 }
 
-func setSpecialistLimits(t *testing.T, store *Store, project ProjectID, runs, proposals *uint32, at int64) {
-	t.Helper()
-	current, _, err := store.Project(context.Background(), project)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, err := store.SetProjectLimitsWithTokens(context.Background(), project, current.Revision, 0, 0, nil, runs, proposals, mustTime(t, at)); err != nil {
-		t.Fatal(err)
-	}
-}
-
 // A specialist is due at once, then a cadence after each review, doubling for
 // each quiet review up to 8x; a proposal resets the backoff, and only its
 // wake_on classes bring a review forward, a quarter cadence after the last. A
@@ -121,7 +110,7 @@ func TestSpecialistSchedule(t *testing.T) {
 		t.Fatalf("initial state = %+v", state)
 	}
 	bodies := wakeBodies(t, store, 20)
-	if len(bodies) != 1 || !strings.HasPrefix(bodies[0], "Review the factory.\n\nSpecialist wake: reason=initial; prior_task_id=; prior_base=; quiet_reviews=0; open_proposals=0/3; reviews_used=1/unlimited.\nPrior checkpoint:\nnone") {
+	if len(bodies) != 1 || !strings.HasPrefix(bodies[0], "Review the factory.\n\nSpecialist wake: reason=initial; prior_task_id=; prior_base=; quiet_reviews=0; open_proposals=0/0; reviews_used=1/unlimited.\nPrior checkpoint:\nnone") {
 		t.Fatalf("initial wake = %q", bodies)
 	}
 	if again := wakeBodies(t, store, 21); len(again) != 0 {
@@ -212,32 +201,20 @@ func TestSpecialistSchedule(t *testing.T) {
 		t.Fatalf("blocked state = %+v", state)
 	}
 
-	// Pausing, or an exhausted budget, stops its wakes.
+	// Pausing stops its wakes.
 	current, _, _ = store.Agent(ctx, agent.ID)
-	paused := pauseAgent(t, store, current, true, task.UpdatedAt.Int64()+1)
+	paused := pauseAgent(t, store, current, true, state.NextReviewAt+2)
 	if state := specialistStateOf(t, store, agent.ID); state.Waiting != "paused" || state.NextReviewAt != 0 {
 		t.Fatalf("paused state = %+v", state)
 	}
 	if woken := wakeBodies(t, store, 1<<40); len(woken) != 0 {
 		t.Fatalf("paused wake = %q", woken)
 	}
-	resumed := pauseAgent(t, store, paused, false, task.UpdatedAt.Int64()+2)
-	budget := resumed.Idle.RunsUsed
-	exhausted, err := store.UpdateAgent(ctx, agent.ID, resumed.Revision, AgentPatch{IdleRunBudget: &budget}, mustTime(t, task.UpdatedAt.Int64()+3))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if state := specialistStateOf(t, store, exhausted.ID); state.Waiting != "budget" {
-		t.Fatalf("budget state = %+v", state)
-	}
-	if woken := wakeBodies(t, store, 1<<40); len(woken) != 0 {
-		t.Fatalf("exhausted wake = %q", woken)
-	}
+	_ = pauseAgent(t, store, paused, false, state.NextReviewAt+3)
 }
 
 // A specialist never claims shared work. Its carrier needs a worker slot
-// spare for explicit work and room under specialist_runs, which report as
-// capacity; work assigned to it explicitly is admitted as usual.
+// spare for explicit work; work assigned to it explicitly is admitted as usual.
 func TestSpecialistAdmission(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
@@ -274,20 +251,11 @@ func TestSpecialistAdmission(t *testing.T) {
 	store, _, project, specialist, _ = newSharedQueueStore(t, 3)
 	defer store.Close()
 	makeSpecialist(t, store, specialist, "", 5)
-	zero, one := uint32(0), uint32(1)
-	setSpecialistLimits(t, store, project.ID, &zero, nil, 6)
 	if bodies := wakeBodies(t, store, 7); len(bodies) != 1 {
 		t.Fatalf("carrier = %q", bodies)
 	}
-	if admission, err := store.AdmitNext(ctx, admissionKeys(t, 40, nil), mustTime(t, 8)); err != nil || admission.Reason != NoAdmissionAtCapacity {
-		t.Fatalf("carrier over specialist_runs: %+v, %v", admission, err)
-	}
-	if state := specialistStateOf(t, store, specialist.ID); state.Waiting != "capacity" {
-		t.Fatalf("held state = %+v", state)
-	}
-	setSpecialistLimits(t, store, project.ID, &one, nil, 9)
-	if admission, err := store.AdmitNext(ctx, admissionKeys(t, 40, nil), mustTime(t, 10)); err != nil || !admission.Admitted() || admission.Run.AgentID != specialist.ID {
-		t.Fatalf("carrier admission = %+v, %v", admission, err)
+	if admission, err := store.AdmitNext(ctx, admissionKeys(t, 40, nil), mustTime(t, 8)); err != nil || !admission.Admitted() {
+		t.Fatalf("carrier despite obsolete specialist_runs: %+v, %v", admission, err)
 	}
 }
 
@@ -359,15 +327,9 @@ func TestSpecialistRecordLimits(t *testing.T) {
 	proposal := func(seed byte) NewContent {
 		return knowledgeSpec(t, run.ProjectID, seed, ContentObservation, KnowledgeMetadata{Status: "tentative", RecordType: "proposal"})
 	}
-	zero, three := uint32(0), uint32(3)
-	setSpecialistLimits(t, store, run.ProjectID, nil, &zero, 40)
-	if _, err := store.CreateContentForAttempt(ctx, run.CredentialDigest, proposal(90), mustTime(t, 41)); !errors.Is(err, ErrConflict) {
-		t.Fatalf("proposal over the open cap: %v", err)
-	}
-	setSpecialistLimits(t, store, run.ProjectID, nil, &three, 42)
-	first, err := store.CreateContentForAttempt(ctx, run.CredentialDigest, proposal(90), mustTime(t, 43))
+	first, err := store.CreateContentForAttempt(ctx, run.CredentialDigest, proposal(90), mustTime(t, 41))
 	if err != nil {
-		t.Fatal(err)
+		t.Fatalf("proposal despite obsolete open cap: %v", err)
 	}
 	if _, err := store.CreateContentForAttempt(ctx, run.CredentialDigest, proposal(91), mustTime(t, 44)); !errors.Is(err, ErrConflict) {
 		t.Fatalf("second proposal in one run: %v", err)

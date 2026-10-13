@@ -656,14 +656,14 @@ type FactorySummary struct {
 type ProjectSummary struct {
 	ID                      string `json:"id"`
 	Name                    string `json:"name"`
-	RunBudgetLimit          uint64 `json:"run_budget_limit"`
+	RunBudgetLimit          uint64 `json:"-"`
 	RunsUsed                uint64 `json:"runs_used"`
 	MaxRunSeconds           uint32 `json:"max_run_seconds"`
-	TokenLimit              uint64 `json:"token_limit"`
+	TokenLimit              uint64 `json:"-"`
 	TokensUsed              uint64 `json:"tokens_used"`
 	Revision                uint64 `json:"revision"`
-	SpecialistRuns          uint32 `json:"specialist_runs"`
-	SpecialistOpenProposals uint32 `json:"specialist_open_proposals"`
+	SpecialistRuns          uint32 `json:"-"`
+	SpecialistOpenProposals uint32 `json:"-"`
 }
 
 type AgentSummary struct {
@@ -1001,16 +1001,15 @@ type AgentIdlePolicyInput struct {
 	Policy           string `json:"policy"`
 	AfterSeconds     uint32 `json:"after_seconds"`
 	Instruction      string `json:"instruction"`
-	RunBudget        uint64 `json:"run_budget"`
 	// WakeOn is a specialist's event classes; empty is none.
 	WakeOn string `json:"wake_on,omitempty"`
 }
 
 func validAgentIdlePolicyInput(input AgentIdlePolicyInput) bool {
-	if !validID(input.AgentID) || input.ExpectedRevision == 0 || input.AfterSeconds > kernel.MaxIdleAfterSeconds || input.RunBudget > uint64(kernel.MaxIdleRunBudget) || !validText(input.Instruction, 0, 32768) {
+	if !validID(input.AgentID) || input.ExpectedRevision == 0 || input.AfterSeconds > kernel.MaxIdleAfterSeconds || !validText(input.Instruction, 0, 32768) {
 		return false
 	}
-	return input.Policy == "wait" && input.AfterSeconds == 0 && input.Instruction == "" && input.RunBudget == 0 && input.WakeOn == "" || input.Policy == "standing_instruction" && input.AfterSeconds > 0 && input.Instruction != ""
+	return input.Policy == "wait" && input.AfterSeconds == 0 && input.Instruction == "" && input.WakeOn == "" || input.Policy == "standing_instruction" && input.AfterSeconds > 0 && input.Instruction != ""
 }
 
 type OverseerRunStopInput struct {
@@ -1103,14 +1102,7 @@ type ProjectRepositories struct {
 type ProjectLimitsInput struct {
 	ProjectID        string `json:"project_id"`
 	ExpectedRevision uint64 `json:"expected_revision"`
-	RunBudget        uint64 `json:"run_budget"`
 	MaxRunSeconds    uint32 `json:"max_run_seconds"`
-	// TokenBudget permits this many more provider tokens than are already
-	// recorded; zero removes the ceiling and absent leaves it as it is.
-	TokenBudget *uint64 `json:"token_budget,omitempty"`
-	// The specialist limits; absent leaves each as it is.
-	SpecialistRuns          *uint32 `json:"specialist_runs,omitempty"`
-	SpecialistOpenProposals *uint32 `json:"specialist_open_proposals,omitempty"`
 }
 
 type CreateAgentInput struct {
@@ -1123,8 +1115,7 @@ type CreateAgentInput struct {
 	ReasoningEffort string `json:"reasoning_effort,omitempty"`
 	// AccountID selects one linked provider login. Empty means the provider's
 	// default configuration directory.
-	AccountID       string `json:"account_id,omitempty"`
-	ToolBudgetLimit uint64 `json:"tool_budget_limit"`
+	AccountID string `json:"account_id,omitempty"`
 }
 
 func validCreateAgentInput(input CreateAgentInput) bool {
@@ -1135,8 +1126,7 @@ func validCreateAgentInput(input CreateAgentInput) bool {
 	return validID(input.ID) && validID(input.ProjectID) && validText(input.Name, 1, 128) &&
 		(input.Role == "worker" || input.Role == "orchestrator") &&
 		(input.AccountID == "" || validID(input.AccountID) && provider != kernel.ProviderShell) &&
-		kernel.ValidateProviderLaunchControls(provider, input.Model, input.ReasoningEffort) == nil &&
-		input.ToolBudgetLimit >= 1 && input.ToolBudgetLimit <= 1_000_000_000
+		kernel.ValidateProviderLaunchControls(provider, input.Model, input.ReasoningEffort) == nil
 }
 
 type EnqueueTaskInput struct {
