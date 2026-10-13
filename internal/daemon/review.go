@@ -259,9 +259,7 @@ func (daemon *Daemon) reconcilePull(ctx context.Context, open kernel.OpenPull, u
 	case err != nil:
 		op.Observation = ""
 		if binding, observed := enqueueBinding(err); binding == "base" {
-			if review.HeadRE.MatchString(observed) {
-				op.Request.Base = observed
-			} else if observed != "" {
+			if observed != "" {
 				op.Request.BaseRef = observed
 			}
 			op.Failures = 0
@@ -348,9 +346,7 @@ func (daemon *Daemon) reconcilePull(ctx context.Context, open kernel.OpenPull, u
 					action = review.Review
 					note = "the enqueue binding changed: " + binding
 				case "base":
-					if review.HeadRE.MatchString(observed) {
-						op.Request.Base = observed
-					} else if observed != "" {
+					if observed != "" {
 						op.Request.BaseRef = observed
 					}
 					op.Failures = 0
