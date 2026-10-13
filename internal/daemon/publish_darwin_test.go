@@ -647,7 +647,7 @@ func TestACorrectionNeverTurnsAnUnfinishedIntakeIntoAClose(t *testing.T) {
 				t.Fatal(err)
 			}
 			body := app.writes[len(app.writes)-1]
-			if text, _ := body["arguments"].(map[string]any)["body"].(string); body["name"] != "update_pull_request_body" || !strings.HasPrefix(text, "Answered the review.\n\nRefs #9\n\nPublished by factoryd") ||
+			if text, _ := body["arguments"].(map[string]any)["body"].(string); body["name"] != "update_pull_request_body" || !strings.HasPrefix(text, "Fix  the\nthing\n\nCorrection result:\nAnswered the review.\n\nRefs #9\n\nPublished by factoryd") ||
 				!strings.HasSuffix(text, "The merge queue runs the gate.\n\nRefs #9") || strings.Contains(strings.ToLower(text), "closes") {
 				t.Fatalf("writes = %+v", app.writes)
 			}
