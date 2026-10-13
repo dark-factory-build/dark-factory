@@ -525,6 +525,58 @@ func (store *Store) Snapshot(ctx context.Context) (DashboardSnapshot, error) {
 	return snapshot, nil
 }
 
+func (store *Store) Status(ctx context.Context) (StatusSummary, error) {
+	if err := store.heldCorruption(); err != nil {
+		return StatusSummary{}, err
+	}
+	tx, err := store.beginRead(ctx)
+	if err != nil {
+		return StatusSummary{}, err
+	}
+	defer tx.Close()
+	var status StatusSummary
+	if err := tx.connection.QueryRowContext(ctx, `SELECT
+		(SELECT COUNT(*) FROM projects),
+		(SELECT COUNT(*) FROM agents),
+		(SELECT COUNT(*) FROM tasks),
+		(SELECT COUNT(*) FROM human_requests WHERE status IN ('open', 'delivering', 'delivery_unknown')),
+		(SELECT COUNT(*) FROM accounts)`).Scan(&status.Projects, &status.Agents, &status.Tasks, &status.HumanRequests, &status.Accounts); err != nil {
+		return StatusSummary{}, err
+	}
+	rows, err := tx.connection.QueryContext(ctx, `SELECT id, project_id, title, status, updated_at_ms FROM tasks ORDER BY updated_at_ms DESC, id DESC LIMIT ?`, StatusRecentLimit)
+	if err != nil {
+		return StatusSummary{}, err
+	}
+	for rows.Next() {
+		var rawID, rawProjectID []byte
+		var title, rawStatus string
+		var updatedAt int64
+		if err := rows.Scan(&rawID, &rawProjectID, &title, &rawStatus, &updatedAt); err != nil {
+			rows.Close()
+			return StatusSummary{}, err
+		}
+		id, idErr := TaskIDFromBytes(rawID)
+		projectID, projectErr := ProjectIDFromBytes(rawProjectID)
+		updated, updatedErr := NewUnixMillis(updatedAt)
+		if idErr != nil || projectErr != nil || updatedErr != nil || byteLen(title) < 1 || byteLen(title) > 1024 {
+			rows.Close()
+			return StatusSummary{}, fmt.Errorf("%w: invalid status task", ErrCorruptState)
+		}
+		if _, err := parseTaskStatus(rawStatus); err != nil {
+			rows.Close()
+			return StatusSummary{}, fmt.Errorf("%w: invalid status task status", ErrCorruptState)
+		}
+		status.RecentTasks = append(status.RecentTasks, StatusTask{ID: id, ProjectID: projectID, Title: title, Status: rawStatus, UpdatedAt: updated})
+	}
+	if err := rows.Close(); err != nil {
+		return StatusSummary{}, err
+	}
+	if status.RecentTasks == nil {
+		status.RecentTasks = []StatusTask{}
+	}
+	return status, rows.Err()
+}
+
 func nullStringValue(value sql.NullString) string {
 	if value.Valid {
 		return value.String

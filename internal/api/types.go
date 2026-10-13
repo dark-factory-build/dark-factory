@@ -104,10 +104,35 @@ func validRemoteDetail(value string) bool {
 // Changes reclaim keeps by reason, and each repository's readiness.
 type HealthStatus struct {
 	Ready         bool                `json:"ready"`
+	Summary       *StatusSummary      `json:"summary,omitempty"`
 	Conditions    []HealthCondition   `json:"conditions,omitempty"`
 	OverseerItems []OverseerItem      `json:"overseer_items,omitempty"`
 	KeptChanges   map[string]int      `json:"kept_changes,omitempty"`
 	Repositories  []ProjectRepository `json:"repositories,omitempty"`
+}
+
+type StatusSummary struct {
+	Counts StatusCounts `json:"counts"`
+	Recent []StatusItem `json:"recent"`
+	Why    string       `json:"why"`
+	Report string       `json:"report"`
+}
+
+type StatusCounts struct {
+	Projects      uint64 `json:"projects"`
+	Agents        uint64 `json:"agents"`
+	Tasks         uint64 `json:"tasks"`
+	HumanRequests uint64 `json:"human_requests"`
+	Accounts      uint64 `json:"accounts"`
+}
+
+type StatusItem struct {
+	Kind      string `json:"kind"`
+	ID        string `json:"id"`
+	ProjectID string `json:"project_id"`
+	Title     string `json:"title"`
+	Status    string `json:"status"`
+	UpdatedAt uint64 `json:"updated_at_ms"`
 }
 
 type HealthCondition struct {

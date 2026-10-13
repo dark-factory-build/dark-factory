@@ -2344,11 +2344,11 @@ func runOperator(ctx context.Context, command attemptCommand, getenv func(string
 			}
 			return writeJSON(stdout, health)
 		}
-		snapshot, callErr := client.Snapshot(callContext)
+		health, callErr := client.Health(callContext, "")
 		if callErr != nil {
 			return writeWebFailure(stderr, "status", callErr)
 		}
-		return writeJSON(stdout, snapshot)
+		return writeJSON(stdout, health)
 	case commandOperatorTerminalObserve:
 		result, callErr := client.TerminalObserve(callContext, api.TerminalObserveInput{ProjectID: command.project, TaskID: command.id, RunID: command.run, Cursor: command.offset, MaxBytes: command.maxBytes, Text: command.terminalText})
 		if callErr != nil {

@@ -1264,7 +1264,11 @@ func (daemon *Daemon) health(ctx context.Context, call api.Call) api.Reply {
 	}
 	project, _ := call.HealthProject()
 	if project == "" {
-		return api.NewHealthReply(api.HealthStatus{Ready: true})
+		summary, err := daemon.store.Status(ctx)
+		if err != nil {
+			return newErrorReply(remoteErrorCode(err))
+		}
+		return api.NewHealthReply(api.HealthStatus{Ready: true, Summary: statusSummary(summary)})
 	}
 	id, err := decodeID(project, kernel.ProjectIDFromBytes)
 	if err != nil {
@@ -1275,6 +1279,19 @@ func (daemon *Daemon) health(ctx context.Context, call api.Call) api.Reply {
 		return newErrorReply(remoteErrorCode(err))
 	}
 	return api.NewHealthReply(status)
+}
+
+func statusSummary(summary kernel.StatusSummary) *api.StatusSummary {
+	result := &api.StatusSummary{
+		Counts: api.StatusCounts{Projects: summary.Projects, Agents: summary.Agents, Tasks: summary.Tasks, HumanRequests: summary.HumanRequests, Accounts: summary.Accounts},
+		Recent: make([]api.StatusItem, 0, len(summary.RecentTasks)),
+		Why:    "factoryctl why --pull N | --task ID",
+		Report: "factoryctl report",
+	}
+	for _, task := range summary.RecentTasks {
+		result.Recent = append(result.Recent, api.StatusItem{Kind: "task", ID: task.ID.String(), ProjectID: task.ProjectID.String(), Title: task.Title, Status: task.Status, UpdatedAt: uint64(task.UpdatedAt.Int64())})
+	}
+	return result
 }
 
 // oversight is what factoryd waits on in project (api.HealthStatus).

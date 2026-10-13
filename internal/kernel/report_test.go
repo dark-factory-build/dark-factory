@@ -51,6 +51,9 @@ func TestReportAndWhyReadTheReconcilersState(t *testing.T) {
 	if err != nil || len(lines) != 4 || lines[2] != "pull: none published" || lines[3] != "waits on: worker: its task is running" {
 		t.Fatalf("why task = %q, %v", lines, err)
 	}
+	if lines, err = store.Why(ctx, nil, 7, TaskID{}); err != nil || len(lines) != 8 || lines[0] != "pull: example/factory#7 open \"\"" {
+		t.Fatalf("singleton why pull = %q, %v", lines, err)
+	}
 	if _, err := store.Why(ctx, &project.ID, 8, TaskID{}); err != ErrNotFound {
 		t.Fatalf("why of an unknown pull = %v", err)
 	}
@@ -92,6 +95,24 @@ func TestReportAndWhyReadTheReconcilersState(t *testing.T) {
 	// leaves it, so it waits on no factoryd pass.
 	if waits := whyPullWaits(ProductionPullRequest{State: "open"}, true, Task{Status: TaskCancelled}, "", &review.Operation{State: "enqueued", Verdict: "allow"}, 0, 0); waits != "operator: its task was cancelled, so factoryd no longer advances it" {
 		t.Fatalf("a cancelled task's pull waits on %q", waits)
+	}
+}
+
+func TestStatusIsBoundedAndCountsHistory(t *testing.T) {
+	store, _, project, agent := newAdmissionStore(t, RoleWorker, 1)
+	defer store.Close()
+	ctx := context.Background()
+	for index := 0; index < StatusRecentLimit+3; index++ {
+		if _, err := store.EnqueueTask(ctx, NewTask{ID: taskID(t, byte(240+index)), ProjectID: project.ID, AssignedAgentID: agent.ID, IncarnationID: incarnationID(t, byte(280+index)), Title: "task"}, mustTime(t, int64(index+1))); err != nil {
+			t.Fatal(err)
+		}
+	}
+	status, err := store.Status(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if status.Projects != 1 || status.Agents != 1 || status.Tasks != StatusRecentLimit+3 || status.Accounts != 0 || len(status.RecentTasks) != StatusRecentLimit {
+		t.Fatalf("status = %+v", status)
 	}
 }
 

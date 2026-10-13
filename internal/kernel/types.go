@@ -11,6 +11,7 @@ const (
 	DigestBytes         = 32
 	EventRetentionLimit = 4096
 	SnapshotEntityLimit = 4096
+	StatusRecentLimit   = 8
 	MaxFactoryCapacity  = 1024
 )
 
@@ -730,6 +731,23 @@ type DashboardSnapshot struct {
 	HumanRequests []HumanRequestProjection
 	Accounts      []AccountSummary
 	PeerQuestions []PeerQuestionSummary
+}
+
+type StatusSummary struct {
+	Projects      uint64
+	Agents        uint64
+	Tasks         uint64
+	HumanRequests uint64
+	Accounts      uint64
+	RecentTasks   []StatusTask
+}
+
+type StatusTask struct {
+	ID        TaskID
+	ProjectID ProjectID
+	Title     string
+	Status    string
+	UpdatedAt UnixMillis
 }
 
 func byteLen(value string) int { return len([]byte(value)) }
