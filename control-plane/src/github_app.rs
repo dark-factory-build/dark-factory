@@ -1711,11 +1711,9 @@ impl AppAuthority {
             .await?;
         let repository = self.0.repository_metadata(&token).await?;
         if request.base != repository.default_branch {
-            return Err(OperationError::EnqueueBinding {
-                binding: "base",
-                expected: request.base.clone(),
-                observed: repository.default_branch,
-            });
+            // A non-default target branch is a request restriction, not stale
+            // pull-request state that the daemon can refresh.
+            return Err(OperationError::Conflict);
         }
         let pull = self
             .0
