@@ -361,3 +361,20 @@ func TestLiveClaudeReviewerShellRunsFocusedTests(t *testing.T) {
 		t.Fatalf("err=%v\nstdout:\n%s\nstderr:\n%s", err, result.Stdout, result.Stderr)
 	}
 }
+
+// A path granted twice would be a duplicate TOML key, which makes Codex read
+// the whole profile as a string and refuse to start (13 Oct 2026: every
+// Codex review failed). Each path is granted once, writable if any grant is.
+func TestCodexReviewGrantsEachPathOnce(t *testing.T) {
+	dir := t.TempDir()
+	argv := CodexReview([]string{dir}, "/opt/toolchain", dir, "/opt/toolchain")
+	profile := argv[len(argv)-1]
+	for _, key := range []string{`"/opt/toolchain"=`, `"` + dir + `"=`} {
+		if n := strings.Count(profile, key); n != 1 {
+			t.Fatalf("%s granted %d times in %s", key, n, profile)
+		}
+	}
+	if !strings.Contains(profile, `"`+dir+`"="write"`) {
+		t.Fatalf("writable grant lost when also readable: %s", profile)
+	}
+}

@@ -865,11 +865,24 @@ func codexProfile(name string, grants []grant, network string) string {
 // profile), with no network. It replaces --sandbox read-only, which reads the
 // whole disk. Each path is granted under its resolved spelling as well.
 func CodexReview(writable []string, readable ...string) []string {
+	// A path granted twice is a duplicate TOML key: Codex then reads the
+	// whole profile as a string and refuses to start, failing every review
+	// (13 Oct: ~/.rustup came both from the toolchain roots and the
+	// operator home). Each path is granted once, writable if any spelling is.
 	var grants []grant
+	seen := map[string]int{}
+	add := func(path string, write bool) {
+		if at, ok := seen[path]; ok {
+			grants[at].write = grants[at].write || write
+			return
+		}
+		seen[path] = len(grants)
+		grants = append(grants, grant{path, write})
+	}
 	for i, path := range append(writable, readable...) {
-		grants = append(grants, grant{path, i < len(writable)})
+		add(path, i < len(writable))
 		if resolved, err := filepath.EvalSymlinks(path); err == nil && resolved != path {
-			grants = append(grants, grant{resolved, i < len(writable)})
+			add(resolved, i < len(writable))
 		}
 	}
 	return []string{"-c", `default_permissions="dark-factory-review"`, "-c", codexProfile("dark-factory-review", grants, "{enabled=false}")}
