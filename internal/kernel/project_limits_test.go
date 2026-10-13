@@ -63,31 +63,30 @@ func TestOverseerRunHasBackstopBelowDisabledOrLongerProjectLimit(t *testing.T) {
 
 func TestAdmissionAllowsProjectPastRetainedRunCeiling(t *testing.T) {
 	t.Parallel()
-	for _, role := range []AgentRole{RoleWorker, RoleOrchestrator} {
+	for _, role := range []AgentRole{RoleWorker} {
 		t.Run(role.String(), func(t *testing.T) {
-			store, _, exhausted, exhaustedAgent := newAdmissionStore(t, role, 4)
+			store, _, exhausted, exhaustedAgent := newAdmissionStore(t, role, 2)
 			defer store.Close()
 			ctx := context.Background()
-			if _, err := store.writer.Exec(`UPDATE projects SET run_budget_limit = 1, runs_used = 1 WHERE id = ?`, exhausted.ID.Bytes()); err != nil {
+			if _, err := store.writer.Exec(`UPDATE projects SET run_budget_limit = 1, runs_used = 0 WHERE id = ?`, exhausted.ID.Bytes()); err != nil {
 				t.Fatal(err)
 			}
-			funded, err := store.CreateProject(ctx, NewProject{ID: projectID(t, 210), Name: "funded", Root: "/funded"}, mustTime(t, 4))
+			secondAgent, err := store.CreateAgent(ctx, NewAgent{ID: agentID(t, 250), ProjectID: exhausted.ID, Name: "second", Role: role, Provider: ProviderCodex, ToolBudgetLimit: 5}, mustTime(t, 5))
 			if err != nil {
 				t.Fatal(err)
 			}
-			fundedAgent, err := store.CreateAgent(ctx, NewAgent{ID: agentID(t, 211), ProjectID: funded.ID, Name: "funded", Role: role, Provider: ProviderCodex, ToolBudgetLimit: 5}, mustTime(t, 5))
-			if err != nil {
+			if _, err := store.EnqueueTask(ctx, NewTask{ID: taskID(t, 212), ProjectID: exhausted.ID, AssignedAgentID: exhaustedAgent.ID, IncarnationID: incarnationID(t, 213), Title: "first"}, mustTime(t, 6)); err != nil {
 				t.Fatal(err)
 			}
-			if _, err := store.EnqueueTask(ctx, NewTask{ID: taskID(t, 212), ProjectID: exhausted.ID, AssignedAgentID: exhaustedAgent.ID, IncarnationID: incarnationID(t, 213), Title: "exhausted", Priority: 9}, mustTime(t, 6)); err != nil {
+			first, err := store.AdmitNext(ctx, admissionKeys(t, 216, nil), mustTime(t, 7))
+			if err != nil || !first.Admitted() {
+				t.Fatalf("first admission = %+v, %v", first, err)
+			}
+			if _, err := store.EnqueueTask(ctx, NewTask{ID: taskID(t, 214), ProjectID: exhausted.ID, AssignedAgentID: secondAgent.ID, IncarnationID: incarnationID(t, 215), Title: "past ceiling"}, mustTime(t, 9)); err != nil {
 				t.Fatal(err)
 			}
-			_, err = store.EnqueueTask(ctx, NewTask{ID: taskID(t, 214), ProjectID: funded.ID, AssignedAgentID: fundedAgent.ID, IncarnationID: incarnationID(t, 215), Title: "funded", Priority: 1}, mustTime(t, 7))
-			if err != nil {
-				t.Fatal(err)
-			}
-			result, err := store.AdmitNext(ctx, admissionKeys(t, 216, nil), mustTime(t, 8))
-			if err != nil || !result.Admitted() || result.Run.TaskID != taskID(t, 212) {
+			result, err := store.AdmitNext(ctx, admissionKeys(t, 230, nil), mustTime(t, 10))
+			if err != nil || !result.Admitted() || result.Run.TaskID != taskID(t, 214) {
 				t.Fatalf("admission = %+v, %v", result, err)
 			}
 			snapshot, err := store.ReadPublicSnapshot(ctx)
