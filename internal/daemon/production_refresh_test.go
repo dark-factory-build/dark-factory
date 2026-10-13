@@ -122,7 +122,7 @@ func TestRefreshProjectsMergeGroupAndMainChecks(t *testing.T) {
 		case "list_pull_requests":
 			return json.RawMessage(`{"jsonrpc":"2.0","id":1,"result":{"structuredContent":{"pull_requests":[{"number":7,"head_sha":"` + head + `","base_ref":"main","base_sha":"` + base + `","state":"open","review":{"head":"` + head + `","state":"allow"}}],"next_page":null}}}`), nil
 		case "observe_pull_request_merge":
-			return json.RawMessage(`{"jsonrpc":"2.0","id":1,"result":{"structuredContent":{"pull_number":7,"head_sha":"` + head + `","state":"NOT_QUEUED","merge_group":{"run_id":12,"url":"https://github.com/o/r/actions/runs/12","conclusion":"failure","failed_jobs":[{"name":"go","conclusion":"failure","annotations":["--- FAIL: TestQueue"]}]}}}}`), nil
+			return json.RawMessage(`{"jsonrpc":"2.0","id":1,"result":{"structuredContent":{"pull_number":7,"head_sha":"` + head + `","state":"NOT_QUEUED","merge_group":{"run_id":12,"url":"https://github.com/o/r/actions/runs/12","conclusion":"failure","failed_jobs":[{"name":"go","conclusion":"failure","annotations":["--- FAIL: TestQueue","token=merge-secret"]}]}}}}`), nil
 		case "observe_repository_checks":
 			return json.RawMessage(`{"jsonrpc":"2.0","id":1,"result":{"structuredContent":{"revision":"` + base + `","checks":[{"name":"main","status":"completed","conclusion":"failure","url":"https://github.com/o/r/actions/runs/13","required":false,"annotations":[]}]}}}`), nil
 		case "observe_pull_request_checks":
@@ -136,7 +136,7 @@ func TestRefreshProjectsMergeGroupAndMainChecks(t *testing.T) {
 	if err != nil || len(got.Checks) != 2 {
 		t.Fatalf("observation = %+v, %v", got, err)
 	}
-	if got.Checks[0].Scope != "merge_group" || got.Checks[0].Jobs[0].Annotations[0] != "--- FAIL: TestQueue" || got.Checks[1].Scope != "main" || got.Checks[1].Revision != base {
+	if got.Checks[0].Scope != "merge_group" || got.Checks[0].Jobs[0].Annotations[0] != "--- FAIL: TestQueue" || strings.Contains(strings.Join(got.Checks[0].Jobs[0].Annotations, "\n"), "merge-secret") || got.Checks[1].Scope != "main" || got.Checks[1].Revision != base {
 		t.Fatalf("projected checks = %+v", got.Checks)
 	}
 	withoutMain := func(ctx context.Context, request json.RawMessage, repositories map[string]uint64) (json.RawMessage, error) {
@@ -195,6 +195,19 @@ func TestReadMaintainerMainChecksKeepsPerRevisionUnfinishedRuns(t *testing.T) {
 	converted := mainChecksToProduction(checks)
 	if len(converted) != 1 || converted[0].Revision != previous || converted[0].Conclusion != "failure" {
 		t.Fatalf("converted main checks = %+v", converted)
+	}
+}
+
+func TestMainCheckRerunsKeepCompletedRunIdentity(t *testing.T) {
+	revision := strings.Repeat("a", 40)
+	failure, success := "failure", "success"
+	checks := []maintainerMainCheck{
+		{Revision: revision, Name: "build", Status: "completed", Conclusion: &failure, URL: "https://github.com/o/r/actions/runs/13"},
+		{Revision: revision, Name: "build", Status: "completed", Conclusion: &success, URL: "https://github.com/o/r/actions/runs/14"},
+	}
+	got := mainChecksToProduction(checks)
+	if len(got) != 2 || got[0].ID == got[1].ID || got[0].Conclusion != "failure" || got[1].Conclusion != "success" {
+		t.Fatalf("main reruns = %+v", got)
 	}
 }
 

@@ -29,6 +29,7 @@ type publicReviewBackend struct {
 	journal                                 map[string]string
 	observations                            map[string]review.Receipt
 	pull                                    *review.Pull
+	broker                                  maintainerMCP
 	observeFailures                         int
 	storedErr                               error
 }
@@ -79,9 +80,25 @@ func (b *publicReviewBackend) Enqueue(_ context.Context, operation review.Operat
 
 // ObservePull defaults to the pull request open at the operation's head with
 // every check passed, queued once it has been enqueued.
-func (b *publicReviewBackend) ObservePull(_ context.Context, operation review.Operation) (review.Pull, error) {
+func (b *publicReviewBackend) ObservePull(ctx context.Context, operation review.Operation) (review.Pull, error) {
 	if b.pull != nil {
 		return *b.pull, nil
+	}
+	if b.broker != nil {
+		observation, err := productionObservation(ctx, b.broker, operation.Request.Repository, 42, nil, nil, func(error) {})
+		if err != nil {
+			return review.Pull{}, err
+		}
+		for _, check := range observation.Checks {
+			if check.Scope != "merge_group" {
+				continue
+			}
+			group := &review.GroupRun{ID: 12, URL: check.URL, Conclusion: check.Conclusion}
+			for _, job := range check.Jobs {
+				group.Jobs = append(group.Jobs, review.GroupJob{Name: job.Name, Conclusion: job.Conclusion, Annotations: job.Annotations})
+			}
+			return review.Pull{Head: operation.Request.Head, State: "open", Group: group}, nil
+		}
 	}
 	checks := b.checks
 	if checks == nil {
@@ -185,22 +202,56 @@ func reviewNow(ctx context.Context, daemon *Daemon, project kernel.ProjectID, re
 
 func TestReconciliationPersistsMergeGroupFailureForReport(t *testing.T) {
 	fixture, project := reviewPublicFixture(t)
-	customerMode(t, fixture)
 	request := publishedReviewRequest()
-	backend := &publicReviewBackend{pull: &review.Pull{
-		Head: request.Head, State: "open", Checks: []string{"required=success"},
-		Group: &review.GroupRun{ID: 12, URL: "https://github.com/o/r/actions/runs/12", Conclusion: "failure", Jobs: []review.GroupJob{{Name: "go", Conclusion: "failure", Annotations: []string{"--- FAIL: TestQueue (0.01s)"}}}},
-	}}
-	fixture.daemon.reviewBackend = func(string, uint64) review.Backend { return backend }
-	if _, err := reviewNow(context.Background(), fixture.daemon, project, request); err != nil {
-		t.Fatal(err)
+	call := func(_ context.Context, raw json.RawMessage, _ map[string]uint64) (json.RawMessage, error) {
+		var envelope struct {
+			Params struct {
+				Name string `json:"name"`
+			} `json:"params"`
+		}
+		if err := json.Unmarshal(raw, &envelope); err != nil {
+			t.Fatal(err)
+		}
+		reply := func(content string) json.RawMessage {
+			return json.RawMessage(`{"jsonrpc":"2.0","id":1,"result":{"structuredContent":` + content + `}}`)
+		}
+		switch envelope.Params.Name {
+		case "list_pull_requests":
+			return reply(`{"pull_requests":[{"number":12,"title":"Ship it","head_sha":"` + request.Head + `","base_ref":"main","base_sha":"` + request.Base + `","state":"open","review":{"state":"allow"}}],"next_page":null}`), nil
+		case "observe_pull_request_merge":
+			return reply(`{"pull_number":12,"head_sha":"` + request.Head + `","state":"NOT_QUEUED","merge_group":{"run_id":12,"url":"https://github.com/o/r/actions/runs/12","conclusion":"failure","failed_jobs":[{"name":"go","conclusion":"failure","annotations":["--- FAIL: TestQueue"]}]}}`), nil
+		case "observe_pull_request_checks":
+			return reply(`{"pull_number":12,"head_sha":"` + request.Head + `","checks":[]}`), nil
+		case "observe_repository_checks":
+			return reply(`{"revision":"` + request.Base + `","checks":[]}`), nil
+		default:
+			t.Fatalf("unexpected maintainer tool %s", envelope.Params.Name)
+			return nil, nil
+		}
 	}
-	if _, err := fixture.daemon.advanceReviewOperations(context.Background(), false); err != nil {
+	backend := &publicReviewBackend{broker: call}
+	pull, err := backend.ObservePull(context.Background(), review.Operation{Request: review.Request{Repository: request.Repository, PullNumber: request.PullNumber, Head: request.Head, Base: request.Base, BaseRef: request.BaseRef}})
+	if err != nil || pull.Group == nil {
+		t.Fatalf("recorded merge observation = %+v, %v", pull, err)
+	}
+	if err := fixture.daemon.recordReconciledMergeGroup(context.Background(), project, request.Repository, request.Head, request.PullNumber, pull.Group); err != nil {
 		t.Fatal(err)
 	}
 	lines, err := fixture.store.Report(context.Background(), &project, 0, 3600000)
 	if err != nil || !strings.Contains(strings.Join(lines, "\n"), "failure new") || !strings.Contains(strings.Join(lines, "\n"), "TestQueue") {
 		t.Fatalf("reconciled merge-group report = %q, %v", lines, err)
+	}
+	overseer, err := fixture.store.CreateAgent(context.Background(), kernel.NewAgent{ID: mustAgentID(t, testID(60)), ProjectID: project, Name: "specialist", Role: kernel.RoleWorker, Provider: kernel.ProviderCodex, ToolBudgetLimit: 2}, mustKernelTime(t, 3001))
+	if err != nil {
+		t.Fatal(err)
+	}
+	policy, after, instruction, wakeOn := kernel.IdleStandingInstruction, uint32(1), "Supervise.", "failures"
+	if _, err := fixture.store.UpdateAgent(context.Background(), overseer.ID, overseer.Revision, kernel.AgentPatch{IdlePolicy: &policy, IdleAfterSeconds: &after, IdleInstruction: &instruction, IdleWakeOn: &wakeOn}, mustKernelTime(t, 3002)); err != nil {
+		t.Fatal(err)
+	}
+	wakes, err := fixture.store.EnqueueOverseerWakeups(context.Background(), mustKernelTime(t, 3003))
+	if err != nil || len(wakes) != 1 {
+		t.Fatalf("reconciled merge-group wake = %+v, %v", wakes, err)
 	}
 }
 

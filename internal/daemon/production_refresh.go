@@ -371,7 +371,10 @@ func mainChecksToProduction(checks []maintainerMainCheck) []kernel.ProductionChe
 			continue
 		}
 		revision := strings.ToLower(check.Revision)
-		key := sha256.Sum256([]byte(revision + "\x00main\x00" + check.Name))
+		// The workflow URL carries the completed run identity. Keep reruns at
+		// the same revision separate so a later success cannot overwrite the
+		// failure that explains the earlier run.
+		key := sha256.Sum256([]byte(revision + "\x00main\x00" + check.Name + "\x00" + check.URL))
 		conclusion := ""
 		if check.Conclusion != nil {
 			conclusion = *check.Conclusion
@@ -384,7 +387,9 @@ func mainChecksToProduction(checks []maintainerMainCheck) []kernel.ProductionChe
 func mergeGroupCheck(pr kernel.ProductionPullRequest, group *review.GroupRun) kernel.ProductionCheck {
 	jobs := make([]kernel.ProductionJob, 0, len(group.Jobs))
 	for _, job := range group.Jobs {
-		jobs = append(jobs, kernel.ProductionJob{Name: job.Name, State: "completed", Conclusion: job.Conclusion, URL: group.URL, Annotations: job.Annotations})
+		annotations := append([]string(nil), job.Annotations...)
+		redactLines(annotations)
+		jobs = append(jobs, kernel.ProductionJob{Name: job.Name, State: "completed", Conclusion: job.Conclusion, URL: group.URL, Annotations: annotations})
 	}
 	return kernel.ProductionCheck{ID: fmt.Sprintf("merge-group:%d", group.ID), Name: "merge_group", Revision: strings.ToLower(pr.Head), Scope: "merge_group", State: "completed", Conclusion: group.Conclusion, URL: group.URL, PullRequests: []uint64{pr.Number}, Jobs: jobs}
 }
