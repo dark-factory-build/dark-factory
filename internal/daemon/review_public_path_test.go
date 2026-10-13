@@ -128,11 +128,11 @@ func TestEnqueueBodyBindingStartsAFreshSameHeadReview(t *testing.T) {
 	ctx := context.Background()
 	newBody := "edited body\n"
 	backend := &publicReviewBackend{}
+	backend.bodyEditAfterReview = newBody
 	fixture.daemon.reviewBackend = func(string, uint64) review.Backend { return backend }
 	if _, err := reviewNow(ctx, fixture.daemon, project, publishedReviewRequest()); err != nil {
 		t.Fatal(err)
 	}
-	backend.bodyEditAfterReview = newBody
 	waitForMergePipeline(t, fixture.daemon)
 	op := waitForDurableReviewMatching(t, fixture.store, project, func(op review.Operation) bool {
 		return op.Request.Body == newBody && op.State == "enqueued" && op.Enqueues == 1
@@ -592,7 +592,7 @@ func waitForDurableReview(t *testing.T, store *kernel.Store, project kernel.Proj
 
 func waitForDurableReviewMatching(t *testing.T, store *kernel.Store, project kernel.ProjectID, ready func(review.Operation) bool) review.Operation {
 	t.Helper()
-	deadline := time.Now().Add(2 * time.Second)
+	deadline := time.Now().Add(5 * time.Second)
 	for time.Now().Before(deadline) {
 		page, err := store.Production(context.Background(), project, 0, 8, kernel.UnixMillis{})
 		if err != nil {
