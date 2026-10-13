@@ -363,8 +363,10 @@ func (daemon *Daemon) reviewHead(ctx context.Context, coordinator review.Coordin
 	}
 	request.Answer = strings.ToValidUTF8(answer[:min(len(answer), 4000)], "")
 	request.PriorFindings = priorBlockingFindings(open, request.Head)
+	if previous, ok := previousReviewOperation(open, request); ok {
+		request.PreviousHead = previous.Request.Head
+	}
 	if prior, ok := priorAllowedOperation(open, request); ok {
-		request.PreviousHead = prior.Request.Head
 		if diffBackend, ok := coordinator.Backend.(interface {
 			DiffID(context.Context, review.Request) (string, error)
 		}); ok {
@@ -405,6 +407,20 @@ func priorAllowedOperation(open kernel.OpenPull, request review.Request) (review
 		prior = operation
 	}
 	return prior, prior.ID != ""
+}
+
+func previousReviewOperation(open kernel.OpenPull, request review.Request) (review.Operation, bool) {
+	var previous review.Operation
+	for _, document := range open.History {
+		var operation review.Operation
+		if json.Unmarshal(document, &operation) != nil || operation.Request.Head == "" || operation.Request.Head == request.Head || operation.Request.BaseRef != request.BaseRef {
+			continue
+		}
+		if operation.Verdict == "allow" || operation.Verdict == "request_changes" {
+			previous = operation
+		}
+	}
+	return previous, previous.ID != ""
 }
 
 // sendBackPull returns the head's work, with the operation's marker, to the
@@ -708,7 +724,7 @@ func (b *daemonReviewBackend) CloneReadOnly(ctx context.Context, request review.
 	if request.PullNumber != 0 {
 		ref = fmt.Sprintf("refs/pull/%d/head", request.PullNumber)
 	}
-	return b.clone(ctx, request.Repository, ref, request.Head, request.Base, request.BaseRef)
+	return b.clone(ctx, request.Repository, ref, request.Head, request.Base, request.BaseRef, request.PreviousHead)
 }
 
 func (b *daemonReviewBackend) DiffID(ctx context.Context, request review.Request) (string, error) {
@@ -725,7 +741,7 @@ func (b *daemonReviewBackend) DiffID(ctx context.Context, request review.Request
 }
 
 // clone is CloneReadOnly at ref's exact head (change.ReviewCheckout).
-func (b *daemonReviewBackend) clone(ctx context.Context, repo, ref, head, base, baseRef string) (string, func(), error) {
+func (b *daemonReviewBackend) clone(ctx context.Context, repo, ref, head, base, baseRef, previousHead string) (string, func(), error) {
 	repository, source, err := b.registered(ctx, repo)
 	if err != nil {
 		return "", nil, err
@@ -742,7 +758,7 @@ func (b *daemonReviewBackend) clone(ctx context.Context, repo, ref, head, base, 
 	cleanup := func() { _ = os.RemoveAll(root) }
 	checkout := filepath.Join(root, "repo")
 	expected := change.RepositorySourceIdentity{Root: rootIdentity, Git: gitIdentity, OriginDigest: source.OriginDigest}
-	if err := change.ReviewCheckout(ctx, change.TrustedGitExecutable, repository.Root, expected, checkout, ref, head, base, baseRef); err != nil {
+	if err := change.ReviewCheckoutWithHistory(ctx, change.TrustedGitExecutable, repository.Root, expected, checkout, ref, head, base, baseRef, previousHead); err != nil {
 		cleanup()
 		return "", nil, fmt.Errorf("review checkout: %w", err)
 	}
@@ -785,21 +801,25 @@ func (b *daemonReviewBackend) Review(ctx context.Context, checkout string, reque
 	// so factoryd writes the complete diff inside the checkout, untracked
 	// under .git.
 	diff := filepath.Join(checkout, ".git", "change.diff")
+	fullDiffBytes, err := reviewDiffBytes(ctx, checkout, request.Base)
+	if err != nil {
+		return review.Verdict{}, fmt.Errorf("review: diff: %w", err)
+	}
 	diffBase := request.Base
-	diffBytes, err := reviewDiffBytes(ctx, checkout, diffBase)
+	diffBytes := fullDiffBytes
 	if request.PreviousHead != "" {
 		diffBase = request.PreviousHead
 		diffBytes, err = reviewIncrementalDiffBytes(ctx, checkout, request.PreviousHead)
-	}
-	if err != nil {
-		return review.Verdict{}, fmt.Errorf("review: diff: %w", err)
+		if err != nil {
+			return review.Verdict{}, fmt.Errorf("review: incremental diff: %w", err)
+		}
 	}
 	if os.WriteFile(diff, diffBytes, 0o600) != nil {
 		return review.Verdict{}, errors.New("review: diff: write change.diff")
 	}
-	if len(diffBytes) == 0 {
+	if len(fullDiffBytes) == 0 {
 		// An empty change has no path an ALLOW could name, and merging it changes nothing.
-		return review.Verdict{Event: "REQUEST_CHANGES", Body: "git diff " + request.Base + "...HEAD is empty: this exact head changes no path.", DiffID: diffID(diffBytes)}, nil
+		return review.Verdict{Event: "REQUEST_CHANGES", Body: "git diff " + request.Base + "...HEAD is empty: this exact head changes no path.", DiffID: diffID(fullDiffBytes)}, nil
 	}
 	homes, err := b.daemon.store.ReviewerAccountHomes(ctx, b.project, kind)
 	if err != nil {
@@ -830,7 +850,7 @@ func (b *daemonReviewBackend) Review(ctx context.Context, checkout string, reque
 	if err != nil {
 		return review.Verdict{}, err
 	}
-	return review.Verdict{Event: event, Body: text, DiffID: diffID(diffBytes)}, nil
+	return review.Verdict{Event: event, Body: text, DiffID: diffID(fullDiffBytes)}, nil
 }
 
 // reviewGit is git's NUL-separated output in the review checkout, or none.

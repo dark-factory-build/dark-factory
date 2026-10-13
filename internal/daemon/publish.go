@@ -91,7 +91,7 @@ func (daemon *Daemon) publishSettledChange(ctx context.Context, c kernel.Publish
 	}
 	backend := &daemonReviewBackend{daemon: daemon, project: c.Task.ProjectID, repository: repo, repositoryID: id}
 	checkout := func(ctx context.Context, main string) (string, func(), error) {
-		path, cleanup, err := backend.clone(ctx, repo, "", main, c.Base, "main")
+		path, cleanup, err := backend.clone(ctx, repo, "", main, c.Base, "main", "")
 		return filepath.Join(path, ".git"), cleanup, err
 	}
 	source, err := daemon.settledChangeGitDirectory(ctx, c)
