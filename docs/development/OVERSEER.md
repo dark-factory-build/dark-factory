@@ -362,8 +362,8 @@ task (one issue, one worker; a Linear or cross-repository source, or work
 split over several tasks, is yours): when that task succeeds at work
 revision 1 with a settled head, it pushes that exact head (`publish_pack`)
 to `factory/<first 12 hex of change_id>`, so the pull request head is the
-Change head, opens the pull request from the accepted source (`Closes #N`, or `Refs #N`
-when the head changes no file or the worker's result says `Refs #N`),
+Change head, opens the pull request from the accepted source with `Refs #N`
+and keeps the issue open for live acceptance,
 records it against the worker task and reviews it; when it succeeds again
 after a send-back, it pushes the corrected head to that pull request's branch,
 replacing the head it observed there, and replaces its body. The App refuses
@@ -512,8 +512,8 @@ review_base=$(git -C repo merge-base origin/main "$HEAD_SHA")
 git -C repo diff --numstat "$review_base" "$HEAD_SHA"
 ```
 
-For source-linked work, preserve the exact `Refs #NUMBER` (deployment required)
-or `Closes #NUMBER` source footer as the final line of the replacement body.
+For source-linked work, preserve the exact `Refs #NUMBER` source footer as the
+final line of the replacement body until live acceptance is recorded.
 A body update does not reconstruct that link automatically.
 
 The supplied body must be the fresh text only: do not copy an App operation
@@ -528,8 +528,8 @@ from the returned head under its own `body-HEAD8` operation.
 Intake work factoryd does not publish is yours (section 3):
 reuse its accepted source, never create an issue. For a GitHub source pass
 `issue_number` and `source_repository` (fully qualified) from the accepted
-snapshot, with `close_on_merge = true` only on the pull request that completes
-the issue (`Closes #N`; `false` renders `Refs #N`). For a Linear source pass
+snapshot, with `close_on_merge = false` and `Refs #N` until the steward records
+the installed live acceptance signal. For a Linear source pass
 `external_source_url` with `issue_number = 0` and `close_on_merge = false`.
 Skip `create_issue` for both.
 
@@ -539,7 +539,7 @@ text plus the change id; it returns the issue number. Then read
 `observe_ref` for `main` again, immediately before the call, and use that
 answer: `create_pull_request` with `opid "$change_id" pr`, `issue_number` from that
 result, `head = branch`, `head_sha` = the last published commit, `base =
-main`, `close_on_merge` as above (`true` for a new issue), `base_sha` = main's head as just read (the App verifies the base
+main`, `close_on_merge = false` for a new issue, `base_sha` = main's head as just read (the App verifies the base
 branch is at that commit at that moment; `base_commit` is wrong whenever
 main moved, and a stale read is wrong whenever main moves between the read
 and the call), `draft = false`, the same title, and a body in this
@@ -575,6 +575,11 @@ review task for a worker, record a verdict, enqueue, or wait on that pipeline.
 Each head goes back to its task at most once per review. A task that answers
 a REQUEST_CHANGES without a new head gets one more review of that head, which
 reads its answer; a conflicting head factoryd first rebases itself.
+Merge is not proof that an issue is fixed. For each linked issue, the issue
+steward checks the installed revision and records the live acceptance signal,
+quoting the observation; it closes the issue when the signal passes and
+reopens it when the fix is absent or regresses. A claimed cost, speed, or
+failure-rate gain must include the baseline query so the steward can rerun it.
 
 factoryd wakes you with `Escalated: factoryd cannot advance OWNER/REPO#N at
 exact head HEAD: ...` only when it cannot advance a pull request: a review that

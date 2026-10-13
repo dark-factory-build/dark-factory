@@ -220,8 +220,8 @@ func TestFactorydPublishesASettledIntakeChange(t *testing.T) {
 	}
 	publishedExactly(t, app, source, c.Head)
 	body := pull["body"].(string)
-	if pull["head_sha"] != c.Head || pull["issue_number"] != uint64(9) || pull["source_repository"] != nil || pull["close_on_merge"] != true || pull["base_sha"] != c.Base ||
-		strings.Contains(body, "example.com") || strings.Contains(body, "/Users/") || !strings.Contains(body, "Implemented it") || !strings.Contains(body, c.Head) || !strings.Contains(body, "+51 -1 across 52 files") || !strings.HasSuffix(body, "The merge queue runs the gate.") {
+	if pull["head_sha"] != c.Head || pull["issue_number"] != uint64(9) || pull["source_repository"] != nil || pull["close_on_merge"] != false || pull["base_sha"] != c.Base ||
+		strings.Contains(body, "example.com") || strings.Contains(body, "/Users/") || !strings.Contains(body, "Implemented it") || !strings.Contains(body, c.Head) || !strings.Contains(body, "+51 -1 across 52 files") || !strings.HasSuffix(body, "The merge queue runs the gate.\n\nRefs #9") {
 		t.Fatalf("pull request = %+v", pull)
 	}
 	if pr := readProductionPull(t, fixture.store, c.Task.ProjectID, 31); pr.Head != c.Head || pr.Branch != "factory/"+c.Change.String()[:12] {
@@ -373,7 +373,7 @@ func TestFactorydPublishesACorrectionOnItsPullRequest(t *testing.T) {
 	publishedExactly(t, app, source, c.Head)
 	text := body["body"].(string)
 	if body["operation_id"] != uuid5("dark-factory:"+c.Change.String()+":body-"+c.Head[:8]+"-3") || body["pull_number"] != uint64(31) ||
-		!strings.Contains(text, "at "+c.Head+": +2 -1 across 3 files from "+c.Base) || !strings.HasSuffix(text, "\n\nCloses #9") {
+		!strings.Contains(text, "at "+c.Head+": +2 -1 across 3 files from "+c.Base) || !strings.HasSuffix(text, "\n\nRefs #9") {
 		t.Fatalf("corrected body = %+v", body)
 	}
 }
@@ -626,18 +626,6 @@ func TestACorrectionNeverTurnsAnUnfinishedIntakeIntoAClose(t *testing.T) {
 				t.Fatalf("writes = %+v", app.writes)
 			}
 		})
-	}
-}
-
-func TestClosesIssueOnlyForACompletingChange(t *testing.T) {
-	for _, tc := range []struct {
-		text  string
-		files int
-		want  bool
-	}{{"Done.", 2, true}, {"Done.", 0, false}, {"refs #9, partial", 2, false}, {"Refs #90 is separate.", 2, true}, {"Body\n\nRefs #9\n", 1, false}} {
-		if got := closesIssue(tc.text, 9, tc.files); got != tc.want {
-			t.Errorf("closesIssue(%q, 9, %d) = %v", tc.text, tc.files, got)
-		}
 	}
 }
 
