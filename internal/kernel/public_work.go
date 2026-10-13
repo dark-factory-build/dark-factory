@@ -18,7 +18,7 @@ func (store *Store) PublicProduction(ctx context.Context, project ProjectID, sin
 		return nil, err
 	}
 	defer tx.Close()
-	rows, err := tx.connection.QueryContext(ctx, `WITH pulls AS (SELECT repository, identity, json_extract(document, '$.state') = 'open' AS open FROM production_records
+	rows, err := tx.connection.QueryContext(ctx, `WITH pulls AS MATERIALIZED (SELECT repository, identity, json_extract(document, '$.state') = 'open' AS open FROM production_records
 		WHERE project_id = ?1 AND kind = 'pull_request' AND (json_extract(document, '$.state') = 'open' OR observed_at_ms >= ?2))
 	SELECT r.repository, r.kind, r.identity, json_remove(r.document, '$.review.findings', '$.jobs'), r.observed_at_ms FROM production_records r WHERE r.project_id = ?1 AND (r.kind = 'repository'
 		OR (r.kind = 'pull_request' AND EXISTS (SELECT 1 FROM pulls p WHERE p.repository = r.repository AND p.identity = r.identity))

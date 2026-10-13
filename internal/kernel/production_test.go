@@ -820,3 +820,48 @@ func TestProductionRepositoryKeepsItsNewestDeployment(t *testing.T) {
 		t.Fatalf("deployed_at over refreshes = %v", got)
 	}
 }
+
+// The public world projects every repository record, the pull requests open
+// or observed since the window, the checks naming an open one and the
+// deliveries naming any of them; nothing else.
+func TestPublicProductionProjectsOpenAndRecentPullsOnly(t *testing.T) {
+	t.Parallel()
+	store, _, project, _ := newAdmissionStore(t, RoleOrchestrator, 2)
+	defer store.Close()
+	ctx := context.Background()
+	head := strings.Repeat("a", 40)
+	pull := func(number uint64, state string) ProductionPullRequest {
+		return ProductionPullRequest{Number: number, Title: "A machine", Head: head, State: state}
+	}
+	check := func(id string, pulls ...uint64) ProductionCheck {
+		return ProductionCheck{ID: id, Name: "CI", Revision: head, Scope: "head", State: "completed", Conclusion: "success", PullRequests: pulls,
+			Jobs: []ProductionJob{{ID: "1", Name: "test", State: "completed", Conclusion: "success"}}}
+	}
+	delivery := func(id string, pulls ...uint64) ProductionDelivery {
+		return ProductionDelivery{ID: id, Kind: "merge", Revision: head, State: "verified", PullRequests: pulls}
+	}
+	old := ProductionObservation{Repository: "example/factory", ObservedAt: 10, PullRequests: []ProductionPullRequest{pull(3, "merged")},
+		Checks: []ProductionCheck{check("old-check", 3)}, Deliveries: []ProductionDelivery{delivery("old-delivery", 3)}}
+	recent := ProductionObservation{Repository: "example/factory", ObservedAt: 1000, PullRequests: []ProductionPullRequest{pull(5, "merged"), pull(7, "open")},
+		Checks: []ProductionCheck{check("open-check", 7), check("merged-check", 5)}, Deliveries: []ProductionDelivery{delivery("recent-delivery", 5)}}
+	for _, observation := range []ProductionObservation{old, recent} {
+		if err := store.RecordProductionObservation(ctx, project.ID, observation, mustTime(t, observation.ObservedAt)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	records, err := store.PublicProduction(ctx, project.ID, 500)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := map[string]bool{}
+	for _, record := range records {
+		got[record.Kind+":"+record.ID] = true
+		if strings.Contains(string(record.Document), `"jobs"`) || strings.Contains(string(record.Document), `"findings"`) {
+			t.Fatalf("%s:%s carries what nothing public reads: %s", record.Kind, record.ID, record.Document)
+		}
+	}
+	want := map[string]bool{"repository:example/factory": true, "pull_request:5": true, "pull_request:7": true, "check:open-check": true, "delivery:recent-delivery": true}
+	if fmt.Sprint(got) != fmt.Sprint(want) {
+		t.Fatalf("PublicProduction = %v, want %v", got, want)
+	}
+}

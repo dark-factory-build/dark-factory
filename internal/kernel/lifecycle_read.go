@@ -390,9 +390,6 @@ func (store *Store) Run(ctx context.Context, id RunID) (Run, bool, error) {
 	if err != nil || !found {
 		return run, found, err
 	}
-	if err := validateOwnershipLocators(ctx, tx.connection); err != nil {
-		return Run{}, false, err
-	}
 	if _, err := loadRunRelationships(ctx, tx.connection, run); err != nil {
 		return Run{}, false, err
 	}
@@ -418,9 +415,6 @@ func (store *Store) Resources(ctx context.Context, runID RunID) ([]Resource, err
 	if !found {
 		return nil, ErrNotFound
 	}
-	if err := validateOwnershipLocators(ctx, tx.connection); err != nil {
-		return nil, err
-	}
 	relationships, err := loadRunRelationships(ctx, tx.connection, run)
 	if err != nil {
 		return nil, err
@@ -443,9 +437,6 @@ func (store *Store) Resource(ctx context.Context, id ResourceID) (Resource, bool
 		if err == nil {
 			err = ErrCorruptState
 		}
-		return Resource{}, false, err
-	}
-	if err := validateOwnershipLocators(ctx, tx.connection); err != nil {
 		return Resource{}, false, err
 	}
 	if _, err := loadRunRelationships(ctx, tx.connection, run); err != nil {
@@ -604,9 +595,6 @@ func authenticateAttempt(ctx context.Context, connection *sql.Conn, digest Attem
 	}
 	if !found || run.Phase != RunRunning || run.CredentialRevokedAt != nil || !bytes.Equal(run.CredentialDigest.Bytes(), digest.Bytes()) {
 		return AttemptAuthority{}, ErrUnauthorized
-	}
-	if err := validateOwnershipLocators(ctx, connection); err != nil {
-		return AttemptAuthority{}, err
 	}
 	relationships, err := loadRunRelationships(ctx, connection, run)
 	if err != nil {

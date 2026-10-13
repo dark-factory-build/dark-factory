@@ -125,7 +125,7 @@ func TestAdmissionRejectsOverlapWithDurableRuntime(t *testing.T) {
 	}
 }
 
-func TestInjectedRuntimeOwnershipOverlapFailsReadsAndOpen(t *testing.T) {
+func TestInjectedRuntimeOwnershipOverlapFailsSnapshotAndOpen(t *testing.T) {
 	t.Parallel()
 	store, _, project, firstAgent := newAdmissionStore(t, RoleWorker, 4)
 	path := storePath(t, store)
@@ -152,9 +152,6 @@ func TestInjectedRuntimeOwnershipOverlapFailsReadsAndOpen(t *testing.T) {
 		t.Fatalf("second admission = %+v, %v", second, err)
 	}
 	corruptSQL(t, store, `UPDATE resources SET path = ? WHERE run_id = ? AND kind = 'runtime_root'`, firstKeys.RuntimeRoot+"/nested", second.Run.ID.Bytes())
-	if _, _, err := store.Run(context.Background(), first.Run.ID); !errors.Is(err, ErrCorruptState) {
-		t.Fatalf("Run = %v", err)
-	}
 	if _, err := store.Snapshot(context.Background()); !errors.Is(err, ErrCorruptState) {
 		t.Fatalf("Snapshot = %v", err)
 	}
