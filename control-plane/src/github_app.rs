@@ -5216,7 +5216,7 @@ fn default_branch_check_revisions(current: &str, runs: Vec<WorkflowRun>) -> Vec<
     let mut revisions = vec![current.to_owned()];
     for run in runs {
         if revisions.len() >= 8
-            || !valid_sha(&run.head_sha).is_ok()
+            || valid_sha(&run.head_sha).is_err()
             || revisions.contains(&run.head_sha)
         {
             continue;
