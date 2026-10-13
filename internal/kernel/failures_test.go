@@ -3,7 +3,9 @@ package kernel
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"errors"
+	"os"
 	"strings"
 	"testing"
 )
@@ -12,17 +14,42 @@ func TestFailureSignatureIgnoresIdentifiersAndNumbers(t *testing.T) {
 	exit := sql.NullInt64{Int64: 70, Valid: true}
 	a := failureSignature("failed", "provider_exit", exit, sql.NullInt64{}, exit, "provider exited before an attempt outcome")
 	b := failureSignature("failed", "provider_exit", exit, sql.NullInt64{}, exit, "provider exited before an attempt outcome")
-	if a != b || a != "failed/provider_exit/70/-/70 provider exited before an attempt outcome" {
+	if a != b || a != "provider_crash failed/provider_exit/70/-/70 provider exited before an attempt outcome" {
 		t.Fatalf("signature = %q / %q", a, b)
 	}
 	first := failureSignature("blocked", "", sql.NullInt64{}, sql.NullInt64{}, sql.NullInt64{}, "task 6717e53f321acc7b request 42 failed twice: local API transport failed")
-	second := failureSignature("blocked", "", sql.NullInt64{}, sql.NullInt64{}, sql.NullInt64{}, "task 9c3ec56bee6513d5 request 7 failed twice: other words")
+	second := failureSignature("blocked", "", sql.NullInt64{}, sql.NullInt64{}, sql.NullInt64{}, "task 9c3ec56bee6513d5 request 7 failed twice: local API is unavailable")
 	if first != second {
 		t.Fatalf("same cause, different ids: %q vs %q", first, second)
 	}
 	if other := failureSignature("failed", "provider_exit", sql.NullInt64{Int64: 1, Valid: true}, sql.NullInt64{}, sql.NullInt64{}, "provider exited before an attempt outcome"); other == a {
 		t.Fatal("a different exit code shared a signature")
 	}
+}
+
+// The cause classes score at least 28/32 (the #1773 text rules' hand-checked
+// bar) on a redacted corpus of real details quoted in this repository's issues.
+func TestFailureCauseScoresOnTheCorpus(t *testing.T) {
+	raw, err := os.ReadFile("testdata/failure_causes.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var corpus []struct{ Source, Code, Detail, Cause string }
+	if err := json.Unmarshal(raw, &corpus); err != nil {
+		t.Fatal(err)
+	}
+	right := 0
+	for _, example := range corpus {
+		if got := failureCause(example.Code, example.Detail); got == example.Cause {
+			right++
+		} else {
+			t.Logf("%s: %s, want %s: %q", example.Source, got, example.Cause, example.Detail)
+		}
+	}
+	if right*32 < 28*len(corpus) {
+		t.Fatalf("%d/%d right, below 28/32", right, len(corpus))
+	}
+	t.Logf("%d/%d right", right, len(corpus))
 }
 
 func TestFailureSignatureHandlesUnicodeBeforeMarker(t *testing.T) {
@@ -105,7 +132,7 @@ func TestSpecialistFailureEventsAreNewSignaturesOnly(t *testing.T) {
 	agent := Agent{ProjectID: finalizing.ProjectID}
 	agent.Idle.WakeOn = "failures"
 	events, err := specialistEvents(ctx, connection, agent, 0)
-	if err != nil || len(events) != 1 || !strings.HasPrefix(events[0], "- new failure x1 blocked/") || !strings.Contains(events[0], " missing prerequisite: ") {
+	if err != nil || len(events) != 1 || !strings.HasPrefix(events[0], "- new failure x1 other blocked/") || !strings.Contains(events[0], " missing prerequisite: ") {
 		t.Fatalf("events = %q, %v", events, err)
 	}
 	if events, err := specialistEvents(ctx, connection, agent, mustTime(t, 81).Int64()); err != nil || len(events) != 0 {

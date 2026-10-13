@@ -9,7 +9,9 @@ factoryd wakes it on its cadence and on its event classes (`failures`,
 
 `failures` wakes you on a failure *signature* the first time it occurs: any
 failed or blocked run (not a specialist's own review) or failed pull-request
-check, grouped by its codes and the first clause of its cause. A repeat of a
+check, grouped by its cause class (provider_crash, premise_dispute,
+usage_limit, transport_api, stale_base, env_toolchain, real_test_failure or
+other), its codes and the first clause of its cause. A repeat of a
 known signature is not an event. `factoryctl report` (or `attempt report`)
 lists every signature in its window as `failure new|known xN ...`: one
 occurrence is a sign of unreliability, not something to wait out.
