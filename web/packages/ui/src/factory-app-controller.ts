@@ -23,7 +23,6 @@ import {
   type RepositoryView,
   type IntakeView,
   type StateView,
-  type TaskContentPin,
   type TaskItem,
   type TerminalReset,
   type RunPathsView,
@@ -512,7 +511,7 @@ export class FactoryAppController {
   }
 
   /** Queue work from the Tasks panel: for one agent, or for any eligible worker in its project. */
-  async addTask(agent: Pick<AgentItem, "id" | "revision">, instruction: string, mode: "queue" | "any", files: readonly File[] = [], content: readonly TaskContentPin[] = []): Promise<boolean> {
+  async addTask(agent: Pick<AgentItem, "id" | "revision">, instruction: string, mode: "queue" | "any", files: readonly File[] = []): Promise<boolean> {
     const session = this.#client?.session;
     if (this.#closed || this.#status !== "ready" || session === undefined || this.#edit?.pending === true) return false;
     const generation = this.#generation;
@@ -520,7 +519,7 @@ export class FactoryAppController {
     this.#edit = edit;
     this.#publish();
     try {
-      const request = { agentId: agent.id, expectedAgentRevision: agent.revision, instruction: instruction.trim(), mode, content: content.map(({ content_id, revision }) => ({ content_id, revision })) };
+      const request = { agentId: agent.id, expectedAgentRevision: agent.revision, instruction: instruction.trim(), mode };
       if (files.length === 0) await session.enqueueAgentTask(request);
       else await session.enqueueAgentTaskWithFiles(request, files);
       if (!this.#current(generation) || this.#edit !== edit) return false;

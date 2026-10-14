@@ -149,7 +149,7 @@ export function FactoryConsole({
   const showWork = () => { onDetail?.("work"); };
   const openWork = (id: string | undefined, missions: boolean) => { selectProject(id); setByMission(missions); if (!missions) setWorkFilter("all"); showWork(); };
   const openMission = (projectId: string, id: string) => { setRequestedMission({ projectId, id }); openWork(projectId, true); };
-  // Routes into Work from outside it (floor, Library, Settings) reset the view first so the answer form or task is never hidden.
+  // Routes into Work from outside it reset the view first so the answer form or task is never hidden.
   const selectRequest = pickRequest === undefined ? undefined : (request: Parameters<typeof pickRequest>[0]) => { openWork(request.project_id, false); pickRequest(request); };
   const goTask = selectTask === undefined ? undefined : (id: string) => { openWork(projectId, false); selectTask(id); };
   const sources = projectId === undefined ? undefined : intake?.get(projectId)?.sources;
@@ -207,21 +207,17 @@ export function FactoryConsole({
           </p>
         )}
 
-        {onDetail === undefined ? null : <nav className="dfMobileNav dfConsoleViewToggle" aria-label="Console views">
-          <button type="button" aria-pressed={detail === "floor"} disabled={!ready} onClick={() => { onDetail("floor"); }}>Floor</button>
-          <button type="button" aria-pressed={detail !== "floor" && selectedDetail === "agent"} disabled={!ready} onClick={showAgents}>Agents</button>
-          <IconButton icon="list" aria-pressed={detail !== "floor" && selectedDetail === "work"} disabled={!ready} onClick={showWork}>Work <Badge n={waiting} /></IconButton>
-        </nav>}
+        <nav className="dfConsoleViewToggle dfMobileNav" aria-label="Console views">
+          <button type="button" aria-pressed={detail === "floor"} disabled={!ready || onDetail === undefined} onClick={() => { onDetail?.("floor"); }}>Floor</button>
+          <button type="button" aria-pressed={detail !== "floor" && selectedDetail === "agent"} disabled={!ready || onDetail === undefined} onClick={showAgents}>Agents</button>
+          <IconButton icon="list" aria-pressed={detail !== "floor" && selectedDetail === "work"} disabled={!ready || onDetail === undefined} onClick={showWork}>Work <Badge n={waiting} /></IconButton>
+        </nav>
         <div className="dfConsoleLayout">
           <section className="dfConsoleLayout__left dfFactoryConsole__section" aria-label="Factory floor">
             <FactoryFloor changes={productionItems} changesRead={productionData.read} onProjectContent={onProjectContent} onOpenTasks={ready ? (id) => openWork(id, false) : undefined} onOpenMissions={ready ? (id) => openWork(id, true) : undefined} projectId={projectId} selectedTaskId={selectedTask?.id} onSelectTask={ready ? goTask : undefined} selectedAgentId={selectedDetail === "agent" ? selectedAgent?.id : undefined} state={scopedState} graphs={graphs} graphErrors={graphErrors} onLoadNode={onLoadNode} onAddTask={ready ? onAddTask : undefined} runPaths={runPaths} lastRunPaths={lastRunPaths} onSelectAgent={ready ? chooseAgent : undefined} onSelectHumanRequest={ready ? selectRequest : undefined} connected={ready} />
           </section>
 
           <aside className="dfConsoleSidebar" aria-label="Selected detail">
-            <div className="dfConsoleViewToggle" role="group" aria-label="Right panel">
-              <IconButton icon="list" aria-pressed={selectedDetail === "work"} disabled={!ready || onDetail === undefined} onClick={showWork}>Work <Badge n={waiting} /></IconButton>
-              <IconButton icon="terminal" aria-pressed={selectedDetail === "agent"} disabled={!ready || onDetail === undefined} onClick={showAgents}>Agents</IconButton>
-            </div>
             {editError === undefined ? null : <p className="dfFactoryConsole__terminalError" role="alert">{editError}</p>}
             <div hidden={selectedDetail !== "work"}>
               <WorkPanel

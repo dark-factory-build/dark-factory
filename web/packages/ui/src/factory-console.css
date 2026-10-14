@@ -1106,13 +1106,16 @@ summary.dfConsoleItem__summary { cursor: pointer; }
 
 .dfConsoleSidebar__panel > h3 { margin: .75rem 0; font-size: var(--df-text-sm); }
 
-.dfMobileNav { display: none; }
+.dfFactoryConsole { position: relative; }
+.dfMobileNav { margin-bottom: 1rem; }
 @media (max-width: 1024px) {
   .dfConsoleLayout__left .dfConsoleViewToggle { display: none; }
-  .dfMobileNav { display: flex; flex-wrap: wrap; margin-bottom: 1rem; }
   .dfFactoryConsole[data-mobile-view="detail"] .dfConsoleLayout__left,
   .dfFactoryConsole[data-mobile-view="floor"] .dfConsoleSidebar,
   .dfFactoryConsole[data-mobile-view] .dfConsoleSidebar > .dfConsoleViewToggle { display: none; }
+}
+@media (min-width: 1025px) {
+  .dfMobileNav { position: absolute; top: 4rem; right: max(0px, calc((100% - 90rem) / 2)); z-index: 2; }
 }
 
 .dfStatus[data-stage$="passed"], .dfStatus[data-stage="succeeded"], .dfStatus[data-stage="working"], .dfStatus[data-stage="ready"], .dfStatus[data-stage="Delivered"], .dfStatus[data-stage="accepted"], .dfStatus[data-stage$="running"], .dfStatus[data-stage="Construction"], .dfStatus[data-stage="Deploying"], .dfStatus[data-stage="Merge"], .dfStatus[data-stage="Merge queued"] { color: var(--df-console-accent); }
@@ -1122,9 +1125,6 @@ summary.dfConsoleItem__summary { cursor: pointer; }
 
 
 .dfConsoleDialog:is([aria-label="Project library"], [aria-label="Project board"]) { width: min(64rem, calc(100% - 2rem)); }
-
-/* Reading space: the floor remains visible behind a single Library workspace. */
-
 
 /* The operational plant. Paint is observation, the andon lamp is state, and
    material only moves where a flow was observed. A blueprint has no telemetry
