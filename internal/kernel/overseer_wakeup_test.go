@@ -67,7 +67,7 @@ func escalate(t testing.TB, store *Store, project ProjectID, number, state, head
 	}
 }
 
-// BenchmarkOverseerItemsLiveShape keeps the reviewer escalation branch
+// BenchmarkOverseerItemsLiveShape keeps the combined wake/stalled pass
 // measurable against the retained-store scale called out in #1881.
 func BenchmarkOverseerItemsLiveShape(b *testing.B) {
 	store, _, overseer := wakeFixture(b)
@@ -83,7 +83,7 @@ func BenchmarkOverseerItemsLiveShape(b *testing.B) {
 	b.Cleanup(func() { _ = connection.Close() })
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		rows, err := connection.QueryContext(context.Background(), overseerStalledItems, args...)
+		rows, err := connection.QueryContext(context.Background(), overseerPassItems, args...)
 		if err != nil {
 			b.Fatal(err)
 		}
