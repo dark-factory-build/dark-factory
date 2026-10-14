@@ -23,12 +23,9 @@ export type FactoryConsoleProps = FactoryAppSnapshot & {
   onDetail?: (detail: ConsoleDetail) => void;
   agentPanel?: AgentPanelView;
   onAgentPanel?: (panel: AgentPanelView) => void;
-  settingsOpen?: boolean;
-  onToggleSettings?: () => void;
   selectedAgent?: FactoryAgentSelection;
   onSelectAgent?: (agent: AgentItem) => void;
   onSetDispatch?: (expectedRevision: bigint, enabled: boolean) => Promise<{ revision: bigint; enabled: boolean }>;
-  onAttachmentRetention?: (enabled?: boolean) => Promise<boolean>;
   onProjectContent?: ProjectContentCall;
   onSaveAgentConfig?: (config: AgentConfigEdit) => void;
   onSaveAgentAppearance?: (agentId: string, appearance: SpriteAppearance) => Promise<boolean>;
@@ -47,21 +44,13 @@ export type FactoryConsoleProps = FactoryAppSnapshot & {
   onReplyHumanRequest?: () => void;
   onCancelHumanRequest?: () => void;
   onCloseHumanRequest?: () => void;
-  onInviteRemote?: () => void;
-  onDismissRemoteInvite?: () => void;
-  onTelemetryIngest?: (action: TelemetryIngestBody["action"]) => Promise<TelemetryIngest>;
-  onLoadDevices?: () => void;
-  onRevokeDevice?: (device: { clientId: string; expectedRevision: bigint }) => void;
-  onLoadAccounts?: () => void;
-  onLinkAccount?: (login: DiscoveredAccount, label: string) => void;
-  onUpdateAccount?: (account: AccountItem, change: { label?: string; remove?: boolean }) => void;
   onLoadRepositories?: (projectId: string) => void;
   onMutateRepository?: (request: RepositoryMutation) => void;
-  onCreateProject?: (request: { name: string; root: string }) => void;
-  onLoadIntake?: (projectId: string) => void; onIntakeAction?: (projectId: string, request: import("@dark-factory/client").IntakeBody) => void;
-  onGitHub?: (request: GitHubConnectionBody) => void;
-  /** Overrides the pairing surface the settings modal mounts by default. */
-  pairing?: ReactNode;
+  intake?: ReadonlyMap<string, import("@dark-factory/client").IntakeView>;
+  intakePending?: ReadonlySet<string>;
+  intakeErrors?: ReadonlyMap<string, string>;
+  onLoadIntake?: (projectId: string) => void;
+  onIntakeAction?: (projectId: string, request: import("@dark-factory/client").IntakeBody) => void;
   /** The selected agent's mounted terminal and durable composer. */
   terminalContent?: ReactNode;
 };
@@ -112,13 +101,10 @@ export function FactoryConsole({
   onSelectTask,
   agentPanel,
   onAgentPanel,
-  settingsOpen,
-  onToggleSettings,
   selectedHumanRequest,
   selectedAgent,
   onSelectAgent,
   onSetDispatch,
-  onAttachmentRetention,
   onProjectContent,
   onSaveAgentConfig,
   onSaveAgentAppearance,
@@ -136,37 +122,14 @@ export function FactoryConsole({
   onReplyHumanRequest,
   onCancelHumanRequest,
   onCloseHumanRequest,
-  remoteInviteAllowed,
-  remoteInvite,
-  remoteInviteError,
-  onInviteRemote,
-  onDismissRemoteInvite,
-  onTelemetryIngest,
-  devices,
-  devicesError,
-  ownClientId,
-  onLoadDevices,
-  onRevokeDevice,
-  accounts,
-  accountsPending,
-  accountsError,
-  github,
-  onLoadAccounts,
-  onLinkAccount,
-  onUpdateAccount,
   repositories,
-  repositoryPending,
-  repositoryErrors,
   onLoadRepositories,
   onMutateRepository,
-  onCreateProject,
   intake,
   intakePending,
   intakeErrors,
   onLoadIntake,
   onIntakeAction,
-  onGitHub,
-  pairing,
   terminalContent,
 }: FactoryConsoleProps) {
   // This is browser presentation only: it deliberately shares neither the
@@ -206,8 +169,6 @@ export function FactoryConsole({
   const shownProduction = productionItems.some((item) => productionKey(item) === selectedProduction);
   const [libraryOpen, setLibraryOpen] = useState(false);
   const [taskContent, setTaskContent] = useState<readonly TaskContentChip[]>([]);
-  const [settingsTab, setSettingsTab] = useState<number>();
-  useEffect(() => { if (settingsOpen !== true) setSettingsTab(undefined); }, [settingsOpen]);
   const [knowledgeView, setKnowledgeView] = useState<{ board?: boolean; project?: string; entity?: string; id?: string; revision?: number; repository?: string }>({});
   const [requestedEntity, setRequestedEntity] = useState<{ id: string }>();
   const openKnowledge = (board: boolean, project?: string, entity?: string, id?: string, repository?: string, revision?: number) => { setKnowledgeView({ board, project: project ?? projectId, ...(entity ? { entity } : {}), ...(id ? { id } : {}), ...(revision ? { revision } : {}), ...(repository ? { repository } : {}) }); setLibraryOpen(true); };
@@ -353,7 +314,6 @@ export function FactoryConsole({
                 sources={sources}
                 onIntakeAction={ready ? onIntakeAction : undefined}
                 intake={projectId === undefined ? undefined : { state: intake?.get(projectId)?.state, failed: intakeErrors?.has(projectId) === true, busy: intakePending?.has(projectId) === true }}
-                onManageSources={ready && onToggleSettings !== undefined ? () => { setSettingsTab(1); if (settingsOpen !== true) onToggleSettings(); } : undefined}
               /></div>
             </div>
             <div hidden={selectedDetail !== "agent"}>

@@ -14,7 +14,6 @@ import {
   type ProjectContentOutput,
   type BrowserSession,
   type BrowserSessionOptions,
-  type TelemetryIngest,
   type AgentItem,
   type SpriteAppearance,
   type ProjectItem,
@@ -38,7 +37,6 @@ import {
   type OperationalNodeView,
 } from "@dark-factory/client";
 import { agentCurrentTask, type RunPathSample } from "./console-view.js";
-import { FactoryConfigurationCoordinator, type FactoryGitHubView, type FactoryRemoteInvite } from "./factory-settings-coordinator.js";
 import { HumanRequestFlow, type HumanRequestPhase } from "./human-request-flow.js";
 import { MAX_PENDING_INPUT_BYTES, TerminalController, type TerminalControllerSnapshot, type TerminalErrorSource, type TerminalSurface } from "./terminal-controller.js";
 
@@ -70,7 +68,6 @@ export type FactoryHumanRequestView = Readonly<{
   reply: string;
 }>;
 
-export type { FactoryRemoteInvite } from "./factory-settings-coordinator.js";
 
 export type FactoryAgentSelection = Readonly<{
   id: string;
@@ -139,26 +136,11 @@ export type FactoryAppSnapshot = Readonly<{
   lastRunPaths?: ReadonlyMap<string, RunPathSample>;
   edit?: FactoryEditView;
   /** True only while a ready session carries the full loopback grant. */
-  remoteInviteAllowed?: boolean;
   dispatchAllowed?: boolean;
-  remoteInvite?: FactoryRemoteInvite;
-  remoteInviteError?: string;
-  /** The identities the factory has granted, once SETTINGS asks; this console's own is marked by id. */
-  devices?: BrowserClientsView;
-  devicesError?: string;
-  ownClientId?: string;
-  /** The provider logins on the daemon's machine, once SETTINGS asks. */
-  accounts?: readonly DiscoveredAccountView[];
-  accountsPending?: boolean;
-  accountsError?: string;
-  /** Private SETTINGS observation; roots never enter StateView or STATE. */
   repositories?: ReadonlyMap<string, readonly RepositoryView[]>;
-  repositoryPending?: ReadonlySet<string>;
-  repositoryErrors?: ReadonlyMap<string, string>;
   intake?: ReadonlyMap<string, IntakeView>;
   intakePending?: ReadonlySet<string>;
   intakeErrors?: ReadonlyMap<string, string>;
-  github?: FactoryGitHubView;
 }>;
 
 export type FactoryAppStatus =
@@ -275,14 +257,10 @@ export class FactoryAppController {
   #runPathsDue = false;
   #edit: FactoryEditView | undefined;
   #taskEditConfirmation: TaskEditConfirmation | undefined;
-  readonly #settings = new FactoryConfigurationCoordinator({
-    session: () => this.#client?.session,
-    ready: () => !this.#closed && this.#status === "ready",
-    generation: () => this.#generation,
-    current: (generation) => this.#current(generation),
-    errorCode: (error) => finiteError(error).code,
-    publish: () => this.#publish(),
-  });
+  readonly #repositories = new Map<string, readonly RepositoryView[]>();
+  readonly #intake = new Map<string, IntakeView>();
+  readonly #intakePending = new Set<string>();
+  readonly #intakeErrors = new Map<string, string>();
   #instructionAttempt = 0;
   #generation = 0;
   #started = false;
@@ -827,39 +805,32 @@ export class FactoryAppController {
   }
 
   /** The provider logins on this machine; SETTINGS explicitly asks for them. */
-  loadAccounts(): Promise<void> { return this.#settings.loadAccounts(); }
-
-  /** Link one discovered login, then reread discovery so it shows as linked. */
-  linkAccount(request: { provider: "claude_code" | "codex"; home: string; label: string }): Promise<void> {
-    return this.#settings.linkAccount(request);
+  async loadRepositories(projectId: string): Promise<void> {
+    const session = this.#client?.session;
+    if (!this.#current(this.#generation) || session === undefined) return;
+    this.#repositories.set(projectId, await session.getRepositories(projectId));
+    this.#publish();
   }
-
-  updateAccount(request: Parameters<BrowserSession["updateAccount"]>[0]): Promise<void> {
-    return this.#settings.updateAccount(request);
+  async mutateRepository(request: RepositoryMutation): Promise<void> {
+    const session = this.#client?.session;
+    if (!this.#current(this.#generation) || session === undefined) return;
+    await session.mutateRepository(request);
+    await this.loadRepositories(request.projectId);
   }
-
-  loadRepositories(projectId: string): Promise<void> { return this.#settings.loadRepositories(projectId); }
-
-  mutateRepository(request: RepositoryMutation): Promise<void> { return this.#settings.mutateRepository(request); }
-
-  loadIntake(projectId: string): Promise<void> { return this.#settings.loadIntake(projectId); }
-  intakeAction(projectId: string, request: Parameters<BrowserSession["intake"]>[0]): Promise<void> { return this.#settings.intakeAction(projectId, request); }
-
-  createProject(request: { name: string; root: string }): Promise<void> { return this.#settings.createProject(request); }
-
-  loadDevices(): Promise<void> { return this.#settings.loadDevices(); }
-
-  githubConnection(request: Parameters<BrowserSession["githubConnection"]>[0]): Promise<void> { return this.#settings.githubConnection(request); }
-
-  revokeDevice(request: { clientId: string; expectedRevision: bigint }): Promise<void> { return this.#settings.revokeDevice(request); }
-
-  /** The mint is never retried: a failure is reported and the operator asks again. */
-  inviteRemote(): Promise<void> { return this.#settings.inviteRemote(); }
-
-  telemetryIngest(action: Parameters<BrowserSession["telemetryIngest"]>[0]): Promise<TelemetryIngest> { return this.#settings.telemetryIngest(action); }
-
-  dismissRemoteInvite(): void {
-    if (!this.#closed) this.#settings.dismissRemoteInvite();
+  async loadIntake(projectId: string): Promise<void> {
+    const session = this.#client?.session;
+    if (!this.#current(this.#generation) || session === undefined) return;
+    this.#intakePending.add(projectId); this.#publish();
+    try { this.#intake.set(projectId, await session.intake({ action: "list", project_id: projectId })); this.#intakeErrors.delete(projectId); }
+    catch (error) { this.#intakeErrors.set(projectId, finiteError(error).code); }
+    finally { this.#intakePending.delete(projectId); this.#publish(); }
+  }
+  async intakeAction(projectId: string, request: Parameters<BrowserSession["intake"]>[0]): Promise<void> {
+    const session = this.#client?.session;
+    if (!this.#current(this.#generation) || session === undefined) return;
+    try { this.#intake.set(projectId, await session.intake(request)); this.#intakeErrors.delete(projectId); }
+    catch (error) { this.#intakeErrors.set(projectId, finiteError(error).code); }
+    this.#publish();
   }
 
   beginTerminalSurface(token: object, surfaceVersion = this.#terminalSurfaceVersion): void {
@@ -966,11 +937,7 @@ export class FactoryAppController {
       this.#discardTaskEditConfirmation();
       this.#human.clear(true);
       // A reconnect must not show a code minted for the connection that dropped.
-      this.#settings.clearRemoteInvite();
-      // GitHub is private session state; a replacement browser session must
-      // reread it rather than displaying observations from the old socket.
-      this.#settings.clearGitHub();
-      this.#settings.clearProjectSettings();
+      this.#repositories.clear();
     }
     // A wire-level state restart resnapshots on the same authenticated socket;
     // exact terminal discovery and handles remain owned by that session.
@@ -1474,22 +1441,10 @@ export class FactoryAppController {
         reply: selection.reply,
       },
       dispatchAllowed: this.#status === "ready" && ((this.#client?.session?.capabilities ?? 0) & CAPABILITIES.administration) !== 0,
-      remoteInviteAllowed: this.#settings.remoteInviteAllowed,
-      remoteInvite: this.#settings.remoteInvite,
-      remoteInviteError: this.#settings.remoteInviteError,
-      devices: this.#settings.devices,
-      devicesError: this.#settings.devicesError,
-      ownClientId: this.#settings.ownClientId,
-      accounts: this.#settings.accounts,
-      accountsPending: this.#settings.accountsPending,
-      accountsError: this.#settings.accountsError,
-      repositories: this.#settings.repositories,
-      repositoryPending: this.#settings.repositoryPending,
-      repositoryErrors: this.#settings.repositoryErrors,
-      intake: this.#settings.intake,
-      intakePending: this.#settings.intakePending,
-      intakeErrors: this.#settings.intakeErrors,
-      github: this.#settings.github,
+      repositories: this.#repositories,
+      intake: this.#intake,
+      intakePending: this.#intakePending,
+      intakeErrors: this.#intakeErrors,
       selectedAgent: this.#selectedAgent === undefined ? undefined : {
         id: this.#selectedAgent.agent.id,
         name: this.#selectedAgent.agent.name,
