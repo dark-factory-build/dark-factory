@@ -544,9 +544,9 @@ func (store *Store) RecordPublication(ctx context.Context, project ProjectID, ta
 	return tx.Commit(ctx)
 }
 
-// PublishableChange is a succeeded intake worker task's settled Change that
-// factoryd publishes itself: as a new pull request, or, when Pull is set, as
-// the correction of the open pull request it published for that task.
+// PublishableChange is a succeeded task's settled Change that factoryd
+// publishes itself: as a new pull request, or, when Pull is set, as the
+// correction of the open pull request it published for that task.
 type PublishableChange struct {
 	Task       Task
 	Change     ChangeID
@@ -582,7 +582,7 @@ func PublishFailureID(change ChangeID, revision Revision) string {
 }
 
 // PublishableChanges lists, oldest first, the current settled Changes of
-// succeeded tasks bound to a live intake acceptance factoryd publishes, whose
+// succeeded tasks bound to a repository factoryd publishes, whose
 // head differs from their base, with no publish failure at that Change
 // revision recorded within PublishRetryAfter of at: with no publication of
 // that Change or task, at any work revision, or above work revision 1
@@ -603,7 +603,7 @@ func (store *Store) PublishableChanges(ctx context.Context, at UnixMillis) ([]Pu
 		  AND EXISTS (SELECT 1 FROM production_records r WHERE r.project_id = p.project_id AND r.repository = p.repository AND r.kind = 'pull_request'
 		      AND r.identity = CAST(p.pull_number AS TEXT) AND json_extract(r.document, '$.state') = 'open')
 		WHERE c.phase = 'retained' AND t.status = 'succeeded' AND a.withdrawn_at_ms IS NULL AND c.head_commit <> c.base_commit
-		  AND ((a.id IS NOT NULL AND `+factorydPublishesAcceptance+`) OR (a.id IS NULL AND EXISTS (SELECT 1 FROM publication_tasks repair WHERE repair.project_id = c.project_id AND repair.task_id = c.task_id)))
+		  AND ((a.id IS NOT NULL AND `+factorydPublishesAcceptance+`) OR (a.id IS NULL AND EXISTS (SELECT 1 FROM task_repository_bindings b WHERE b.task_id = c.task_id)))
 		  AND (p.pull_number IS NOT NULL OR NOT EXISTS (SELECT 1 FROM publication_tasks q WHERE (q.change_id = c.id OR q.task_id = c.task_id)
 		      AND NOT EXISTS (SELECT 1 FROM production_records r JOIN runs u ON u.id = c.settled_run_id
 		          WHERE r.project_id = q.project_id AND r.repository = q.repository AND r.kind = 'pull_request' AND r.identity = CAST(q.pull_number AS TEXT)

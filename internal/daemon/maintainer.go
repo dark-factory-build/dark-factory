@@ -29,6 +29,52 @@ type maintainerToolCall struct {
 	Arguments map[string]json.RawMessage
 }
 
+var overseerWriteTools = map[string]bool{
+	"add_issue_comment":          true,
+	"close_issue":                true,
+	"create_branch":              true,
+	"create_issue":               true,
+	"create_pull_request":        true,
+	"delete_branch":              true,
+	"enqueue_pull_request":       true,
+	"merge_pull_request":         true,
+	"publish_commit":             true,
+	"publish_pack":               true,
+	"submit_pull_request_review": true,
+	"update_issue":               true,
+	"update_pull_request_body":   true,
+}
+
+func filterOverseerTools(response json.RawMessage) (json.RawMessage, error) {
+	var envelope map[string]json.RawMessage
+	if err := json.Unmarshal(response, &envelope); err != nil {
+		return nil, err
+	}
+	var result map[string]json.RawMessage
+	if err := json.Unmarshal(envelope["result"], &result); err != nil {
+		return nil, err
+	}
+	var tools []json.RawMessage
+	if err := json.Unmarshal(result["tools"], &tools); err != nil {
+		return nil, err
+	}
+	filtered := tools[:0]
+	for _, raw := range tools {
+		var tool struct {
+			Name string `json:"name"`
+		}
+		if err := json.Unmarshal(raw, &tool); err != nil {
+			return nil, err
+		}
+		if !overseerWriteTools[tool.Name] {
+			filtered = append(filtered, raw)
+		}
+	}
+	result["tools"], _ = json.Marshal(filtered)
+	envelope["result"], _ = json.Marshal(result)
+	return json.Marshal(envelope)
+}
+
 func (daemon *Daemon) attemptMaintainer(ctx context.Context, call api.Call) api.Reply {
 	failure := func(state string) api.Reply { return api.NewContentReply(api.MaintainerResult{State: state}) }
 	digest, ok := call.AttemptDigest()
@@ -60,12 +106,12 @@ func (daemon *Daemon) attemptMaintainer(ctx context.Context, call api.Call) api.
 		if err != nil {
 			return failure("invalid")
 		}
+		if overseerWriteTools[params.Name] {
+			return failure("denied")
+		}
 		// factoryd is the one verdict authority: it reviews and
 		// enqueues every published head itself, and alone pushes exact
 		// packs, whose review-authority paths it checks before sending.
-		if params.Name == "submit_pull_request_review" || params.Name == "enqueue_pull_request" || params.Name == "publish_pack" {
-			return failure("denied")
-		}
 		request.Params = encoded
 		// A published Change carries its own worker task's intake source; the
 		// overseer publishes it from a wake task that has none.
@@ -218,6 +264,12 @@ func (daemon *Daemon) attemptMaintainer(ctx context.Context, call api.Call) api.
 			return failure("invalid")
 		}
 		return failure("unavailable")
+	}
+	if request.Method == "tools/list" {
+		response, err = filterOverseerTools(response)
+		if err != nil {
+			return failure("invalid")
+		}
 	}
 	if observedAcceptance != nil {
 		response, err = frozenAcceptedIssueResponse(request, *observedAcceptance, response)

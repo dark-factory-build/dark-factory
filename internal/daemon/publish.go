@@ -334,7 +334,9 @@ func (daemon *Daemon) publishPull(ctx context.Context, c kernel.PublishableChang
 		step += "-" + base
 		done, err = completed(step, &pull)
 	}
-	body = referenceIssue(body, issue)
+	if issue != 0 {
+		body = referenceIssue(body, issue)
+	}
 	if err == nil && !done {
 		arguments := map[string]any{"repository": repo, "operation_id": operation(step), "head": branch, "head_sha": c.Head, "base": "main", "base_sha": base, "title": publicationMessage(c), "body": body, "draft": false,
 			"issue_number": issue, "close_on_merge": false} // live acceptance closes the source issue
