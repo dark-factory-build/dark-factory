@@ -222,8 +222,9 @@ eligible same-project handoffs can be read in one attempt.
   `close: true`, naming its successor in the body, then cancel its task.
 - Verify a merged intake task once its wake line shows it live: run its
   issue's Live signal, then `update_issue` with `completed` and the quoted
-  evidence, or `reopened` with the observed gap and the pull request link and
-  a new worker task for the gap.
+  evidence, or `reopened` with the observed gap and the pull request link,
+  then send that intake task back with them; factoryd publishes its
+  correction as a new pull request.
 - Never record a review verdict yourself. The review is a separate headless
   session started by factoryd; you read its App receipt. A BLOCK of record
   stands at its exact head (#1300): no fresh review clears it, only a new head

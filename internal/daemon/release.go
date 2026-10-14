@@ -14,6 +14,7 @@ import (
 	"regexp"
 	"runtime"
 	"slices"
+	"strconv"
 	"strings"
 	"sync"
 	"syscall"
@@ -347,6 +348,7 @@ func (daemon *Daemon) release(project kernel.ProjectID, root string, source chan
 		fail(err.Error())
 		return
 	}
+	delivery.PullRequests = releasedPulls(ctx, filepath.Join(directory, "tree", ".git"), delivery.Revision)
 	delivery.Phase = "drain"
 	_ = daemon.writeRelease(ctx, project, &delivery)
 	daemon.releaseHold.Store(true)
@@ -468,6 +470,28 @@ func deployWorker(ctx context.Context, daemon *Daemon, tree, live, sha string, r
 		return fmt.Errorf("%w: %s", err, lines[len(lines)-1])
 	}
 	return nil
+}
+
+// releasedPull is a squash merge's subject suffix, "(#N)".
+var releasedPull = regexp.MustCompile(`(?m)\(#([0-9]{1,15})\)$`)
+
+// releasedPulls names the pull requests sha ships beyond the running release
+// (its last 256 commits on a build that is not one), so the overseer's
+// verification wake learns which release made each merge live (#1906). An
+// unreadable history ships none.
+func releasedPulls(ctx context.Context, gitDir, sha string) []uint64 {
+	revisions := sha
+	if running := buildinfo.Current(); running.Release() {
+		revisions = running.Source() + ".." + sha
+	}
+	subjects, _ := gitOutput(ctx, gitDir, "log", "--format=%s", "-n", "256", revisions)
+	pulls := []uint64{}
+	for _, match := range releasedPull.FindAllSubmatch(subjects, -1) {
+		if number, err := strconv.ParseUint(string(match[1]), 10, 53); err == nil && number > 0 {
+			pulls = append(pulls, number)
+		}
+	}
+	return pulls
 }
 
 // releaseDescends refuses a commit that is not the running build or one of

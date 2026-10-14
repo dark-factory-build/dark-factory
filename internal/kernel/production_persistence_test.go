@@ -818,6 +818,27 @@ func TestPublishableIntakeChangeIsFactorydsUntilPublishedOrFailed(t *testing.T) 
 	if found := candidates(); len(found) != 1 || found[0].Pull != 0 || !closed() {
 		t.Fatalf("an unpublished retried Change: candidates=%+v closed=%v", found, closed())
 	}
+	// A merged pull request is published again only once a run admitted after
+	// the merge settled its Change: the send-back of a live signal that failed
+	// after release (#1906), never the merged work itself.
+	var admitted int64
+	if err := store.writer.QueryRowContext(ctx, `SELECT u.admitted_at_ms FROM changes AS c JOIN runs AS u ON u.id = c.settled_run_id WHERE c.id = ?`, change.ID.Bytes()).Scan(&admitted); err != nil || admitted < 1 {
+		t.Fatalf("settled run admitted at %d: %v", admitted, err)
+	}
+	merged := pr
+	merged.Number, merged.URL, merged.State = 6, "https://github.com/example/factory/pull/6", "merged"
+	if err := store.RecordPublication(ctx, worker.ProjectID, worker.TaskID, "example/factory", merged, mustTime(t, admitted)); err != nil {
+		t.Fatal(err)
+	}
+	if found := candidates(); len(found) != 0 {
+		t.Fatalf("merged work published again: %+v", found)
+	}
+	if _, err := store.writer.ExecContext(ctx, `UPDATE production_records SET observed_at_ms = ? WHERE kind = 'pull_request' AND identity = '6'`, admitted-1); err != nil {
+		t.Fatal(err)
+	}
+	if found := candidates(); len(found) != 1 || found[0].Pull != 0 {
+		t.Fatalf("work sent back after its merge: candidates=%+v", found)
+	}
 }
 
 // A pull request a person opened has no factory Change. Its repair task's
