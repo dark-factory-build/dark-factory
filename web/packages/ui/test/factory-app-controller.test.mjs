@@ -51,7 +51,6 @@ function harness(overrides = {}) {
     getHumanRequestDetail: overrides.getDetail ?? (async () => detailFor()),
     replyHumanRequest: overrides.reply ?? (async () => ({ status: "resolved" })),
     cancelHumanRequest: overrides.cancel ?? (async () => ({ request_id: request.id })),
-    updateAgent: overrides.updateAgent ?? (async () => { throw new SessionError("not_found"); }),
     updateTask: overrides.updateTask ?? (async () => { throw new SessionError("not_found"); }),
     getTaskHistory: overrides.getTaskHistory ?? (async () => { throw new SessionError("not_found"); }),
     getTaskDetail: overrides.getTaskDetail ?? (async () => { throw new SessionError("not_found"); }),
@@ -537,42 +536,17 @@ test("deletion or revision change clears detail and fences a late private respon
   assert.equal(context.latest().selectedHumanRequest, undefined);
 });
 
-test("console edits carry the exact served revision and surface a refusal", async () => {
+test("console task edits carry the exact served revision", async () => {
   const sent = [];
   const agent = fixtureState.agents.get([...fixtureState.agents.keys()][0]);
   const queued = [...fixtureState.tasks.values()].find((task) => task.status === "queued");
-  let refuse = false;
   const context = harness({
-    updateAgent: async (input) => { sent.push(["agent", input]); if (refuse) throw new SessionError("stale"); return { agentId: input.agentId, revision: input.expectedRevision + 1n }; },
     updateTask: async (input) => { sent.push(["task", input]); return { taskId: input.taskId, revision: input.expectedRevision + 1n }; },
   });
   context.controller.start();
   context.emitState(fixtureState);
   context.emitStatus("ready");
   context.controller.selectAgent(agent);
-
-  // Pausing alone sends paused alone: the daemon only revalidates a launch
-  // control when the patch touches it, so an agent whose stored model it no
-  // longer accepts must still be pausable.
-  await context.controller.updateAgentConfig({ paused: true });
-  assert.deepEqual(sent.at(-1), ["agent", { agentId: agent.id, expectedRevision: agent.revision, paused: true }]);
-  assert.equal(context.latest().edit, undefined, "a settled edit leaves no state behind");
-
-  await context.controller.updateAgentConfig({ model: "claude-opus-5", reasoningEffort: "high", paused: true });
-  assert.deepEqual(sent.at(-1), ["agent", { agentId: agent.id, expectedRevision: agent.revision, model: "claude-opus-5", reasoningEffort: "high", paused: true }]);
-
-  // An empty patch is not a write, so it cannot bump a revision for nothing.
-  const before = sent.length;
-  await context.controller.updateAgentConfig({});
-  assert.equal(sent.length, before);
-
-  refuse = true;
-  await context.controller.updateAgentConfig({ model: "gone", reasoningEffort: "", paused: false });
-  assert.equal(context.latest().edit.pending, false);
-  assert.equal(context.latest().edit.error.code, "stale");
-  // Selecting another agent must not inherit the refusal.
-  context.controller.selectAgent(fixtureState.agents.get([...fixtureState.agents.keys()][2]));
-  assert.equal(context.latest().edit, undefined);
 
   const taskEdit = context.controller.editTask(queued, { priority: 11 });
   await settle();
