@@ -1,5 +1,5 @@
 import { useEffect, useId, useRef, useState, type FormEvent, type ReactNode } from "react";
-import { MAX_TASK_ATTACHMENTS, MAX_TASK_ATTACHMENT_BYTES, MAX_TASK_PRIORITY, type IntakeView, type IntakeBody, type DiscoveredAccount, type AccountItem, type AgentItem, type IdleWakeOn, type GitHubConnectionBody, type GitHubDelegationBody, type HumanRequestItem, type ProjectItem, type RepositoryMutation, type RunTelemetry, type RepositoryView, type StateView, type TaskHistoryView, type TaskItem, type TaskListView, type TaskPeerQuestion, type TaskContentPin } from "@dark-factory/client";
+import { MAX_TASK_ATTACHMENTS, MAX_TASK_ATTACHMENT_BYTES, MAX_TASK_PRIORITY, type IntakeView, type IntakeBody, type DiscoveredAccount, type AccountItem, type AgentItem, type IdleWakeOn, type GitHubConnectionBody, type GitHubDelegationBody, type HumanRequestItem, type ProjectItem, type RepositoryMutation, type RunTelemetry, type RepositoryView, type StateView, type TaskHistoryView, type TaskItem, type TaskPeerQuestion, type TaskContentPin } from "@dark-factory/client";
 import type { FactoryEditView, FactoryHumanRequestView } from "./factory-app-controller.js";
 import type { FactoryGitHubView } from "./factory-settings-coordinator.js";
 import { rankLabel } from "./console-screens.js";
@@ -9,7 +9,7 @@ import { telemetryLine } from "./factory-scene/scene.js";
 import { agentStatus, agentCurrentTask, agentActivity, isSpecialist, needsYou, specialistStatus, type WorkRow, type WorkState } from "./console-view.js";
 import { productionKey, productionStages } from "./production-view.js";
 import { AnswerControls } from "./console-interactions.js";
-import { Icon, IconButton, type IconName } from "./icons.js";
+import { Icon, IconButton } from "./icons.js";
 import { Badge, SectionHeader, Status, formatTime } from "./console-kit.js";
 import type { FloorAppearance } from "./floor-appearance.js";
 import type { PublishedRelease, RuntimeBuild } from "./production-data.js";
@@ -20,8 +20,6 @@ export type AgentConfigEdit = Readonly<{ model?: string; reasoningEffort?: strin
 export type TaskEdit = Readonly<{ title?: string; body?: string; priority?: number; assignedAgentId?: string; cancel?: boolean; retry?: boolean }>;
 export type TaskBrief = Readonly<{ taskId: string; revision: bigint; head: bigint; instruction: string; feedback: string; outcome?: string; peerQuestions: readonly TaskPeerQuestion[]; nextPeerOffset?: bigint }>;
 export type AgentPanelView = "terminal" | "config";
-export type TaskScope = { agent_id: string } | { project_id: string };
-type TaskCursor = { beforeUpdatedAtMs?: bigint; beforeTaskId?: string };
 
 /** One private peer-conversation page, shared by queued and completed work. */
 export function TaskConversation({ brief, onOlder, pending = false }: { brief: TaskBrief; onOlder?: () => void; pending?: boolean }) {
@@ -54,7 +52,6 @@ export function AgentPanel({
   onEditAppearance,
   onLoadTaskDetail,
   onLoadTaskHistory,
-  onLoadTaskList,
   terminalContent,
   panel: panelProp,
   onPanel,
@@ -73,7 +70,6 @@ export function AgentPanel({
   onEditAppearance?: (agent: AgentItem) => void;
   onLoadTaskDetail?: (task: TaskItem, peerOffset?: bigint, expectedHead?: bigint) => Promise<TaskBrief>;
   onLoadTaskHistory?: (task: TaskItem) => Promise<TaskHistoryView>;
-  onLoadTaskList?: (scope: TaskScope, cursor?: TaskCursor) => Promise<TaskListView>;
   /** The selected agent's mounted terminal and durable composer. */
   terminalContent?: ReactNode;
   panel?: AgentPanelView;
@@ -134,14 +130,6 @@ export function AgentPanel({
         <AgentConfig key={formKey(agent.id)} agent={agent} accounts={state === undefined ? [] : [...state.accounts.values()]} pending={edit?.pending === true} ready={ready} onSave={onSaveConfig} running={current !== undefined} />
       </section>
 
-      <RecentWork
-        scope={{ agent_id: agent.id }}
-        name={agent.name}
-        completionRevision={state === undefined ? "" : [...state.tasks.values()].filter((task) => task.assigned_agent_id === agent.id).map((task) => `${task.id}:${task.revision}`).join(" ")}
-        onLoadTaskList={onLoadTaskList}
-        onLoadTaskDetail={onLoadTaskDetail}
-        onLoadTaskHistory={onLoadTaskHistory}
-      />
     </section>
   );
 }
@@ -189,68 +177,6 @@ export function ConsoleDialog({ label, title, className = "", onClose, children 
       {children}
     </div>
   </dialog>;
-}
-
-/** Private completed-task detail, kept bounded until the operator opens it. */
-function RecentWork({
-  scope, name, label = "Recent work", icon, completionRevision, onLoadTaskList, onLoadTaskDetail, onLoadTaskHistory,
-}: {
-  scope: TaskScope;
-  name: string;
-  label?: string;
-  icon?: IconName;
-  completionRevision: string;
-  onLoadTaskList?: (scope: TaskScope, cursor?: TaskCursor) => Promise<TaskListView>;
-  onLoadTaskDetail?: (task: TaskItem, peerOffset?: bigint, expectedHead?: bigint) => Promise<TaskBrief>;
-  onLoadTaskHistory?: (task: TaskItem) => Promise<TaskHistoryView>;
-}) {
-  const [open, setOpen] = useState(false);
-  const [page, setPage] = useState<readonly TaskItem[]>([]);
-  const [selectedId, setSelectedId] = useState<string>();
-  const [total, setTotal] = useState<bigint>();
-  const [hasMore, setHasMore] = useState(false);
-  const [pending, setPending] = useState(false);
-  const [failed, setFailed] = useState(false);
-  const request = useRef(0);
-  const load = (append: boolean) => {
-    const loader = onLoadTaskList;
-    if (loader === undefined || (append && (pending || !hasMore))) return;
-    const cursor = append ? page.at(-1) : undefined;
-    if (append && cursor?.updated_at_ms === undefined) return;
-    const token = ++request.current;
-    setPending(true);
-    setFailed(false);
-    void loader(scope, cursor === undefined ? undefined : { beforeUpdatedAtMs: cursor.updated_at_ms!, beforeTaskId: cursor.id }).then((result) => {
-      if (request.current !== token) return;
-      setPage((prior) => append ? [...prior, ...result.tasks] : result.tasks);
-      setTotal(result.total);
-      setHasMore(result.hasMore);
-    }).catch(() => { if (request.current === token) setFailed(true); }).finally(() => { if (request.current === token) setPending(false); });
-  };
-  useEffect(() => {
-    if (!open) return;
-    load(false);
-    return () => { ++request.current; };
-  }, [open, Object.values(scope)[0], completionRevision]);
-  const selected = page.find((task) => task.id === selectedId) ?? page[0];
-  return <div className="dfConsoleRecentWork dfConsoleSidebar__section">
-    {icon ? <IconButton icon={icon} aria-label={label} title={total === undefined ? label : `${label} · ${total}`} onClick={() => setOpen(true)}><Badge n={total === undefined ? undefined : Number(total)} /></IconButton> : <button type="button" onClick={() => setOpen(true)}>{label}{total === undefined ? "" : ` · ${total}`}</button>}
-    {!open ? null : <ConsoleDialog className="dfRecentWorkDialog" label={`${label} for ${name}`} title={`${label} · ${name}`} onClose={() => setOpen(false)}>
-        {failed ? <p role="alert">Recent work unavailable <button type="button" onClick={() => load(false)}>Retry</button></p> : null}
-        <div className="dfRecentWorkLayout">
-          <nav aria-label="Completed work">
-            <p>{total === undefined ? "Loading work…" : `${total} completed or blocked tasks`}</p>
-            <ol className="dfConsoleItems">{page.map((task) => <li key={task.id}>
-              <button type="button" className="dfRecentWorkRow" aria-pressed={selected?.id === task.id} onClick={() => setSelectedId(task.id)}>
-                <strong>{task.title}</strong><Status stage={task.status} /><time>{formatTime(task.updated_at_ms)}</time>
-              </button>
-            </li>)}</ol>
-            {!hasMore ? null : <button type="button" disabled={pending} onClick={() => load(true)}>{pending ? "Loading" : "Show more"}</button>}
-          </nav>
-          {selected === undefined ? <p>{pending ? "Loading recent work…" : "No completed or blocked tasks."}</p> : <TaskDetail key={`${selected.id}:${selected.revision}`} task={selected} onLoadTaskDetail={onLoadTaskDetail} onLoadTaskHistory={onLoadTaskHistory} />}
-        </div>
-    </ConsoleDialog>}
-  </div>;
 }
 
 export function TaskDetail({ task, onLoadTaskDetail, onLoadTaskHistory }: {
@@ -320,7 +246,7 @@ export type AddTask = (agent: AgentItem, instruction: string, mode: "queue" | "a
 
 /** One list for everything open: what needs you, what is in review, running and queued. */
 export function WorkPanel({
-  state, rows, projectId, filter, onFilter, byMission, onByMission, missions, edit, ready, onEditTask, onAddTask, taskContent = [], onTaskContent = () => undefined, onLoadTaskDetail, onLoadTaskHistory, onLoadTaskList,
+  state, rows, projectId, filter, onFilter, byMission, onByMission, missions, edit, ready, onEditTask, onAddTask, taskContent = [], onTaskContent = () => undefined, onLoadTaskDetail, onLoadTaskHistory,
   selectedTaskId, onSelectTask, selectedHumanRequest, onSelectHumanRequest, onCloseHumanRequest, requestContent, onSelectProduction, onMission, sources, onManageSources, onIntakeAction, intake,
 }: {
   /** The local source list for the shown project; undefined until loaded. */
@@ -349,7 +275,6 @@ export function WorkPanel({
   onTaskContent?: (content: readonly TaskContentChip[]) => void;
   onLoadTaskDetail?: (task: TaskItem, peerOffset?: bigint, expectedHead?: bigint) => Promise<TaskBrief>;
   onLoadTaskHistory?: (task: TaskItem) => Promise<TaskHistoryView>;
-  onLoadTaskList?: (scope: TaskScope, cursor?: TaskCursor) => Promise<TaskListView>;
   selectedHumanRequest?: FactoryHumanRequestView;
   onSelectHumanRequest?: (request: HumanRequestItem) => void;
   onCloseHumanRequest?: () => void;
@@ -402,7 +327,6 @@ export function WorkPanel({
         <button type="button" aria-pressed={byMission} disabled={!ready} onClick={onByMission}>By mission</button>
       </div>
       {byMission ? null : <IconButton icon="terminal" aria-label="Show overseer and specialist passes" aria-pressed={overseer} disabled={!ready} onClick={() => setOverseer(!overseer)} />}
-      {projectId === undefined ? <IconButton icon="history" aria-label="History" title="Choose a project" disabled /> : <RecentWork scope={{ project_id: projectId }} name={state.projects.get(projectId)?.name ?? projectId} label="History" icon="history" completionRevision={[...state.tasks.values()].map((task) => `${task.id}:${task.revision}`).join(" ")} onLoadTaskList={onLoadTaskList} onLoadTaskDetail={onLoadTaskDetail} onLoadTaskHistory={onLoadTaskHistory} />}
     </div>
     <div hidden={byMission}>
       {rows.some((row) => row.intake !== undefined) && (intake?.failed || !["ok", "accepted", "imported", "withdrawn", "withdrawal_pending", undefined].includes(intake?.state)) ? <p role="alert">Could not accept: {intake?.failed ? "try again" : intake?.state?.replaceAll("_", " ")}. {onManageSources === undefined ? null : <button type="button" onClick={onManageSources}>Review in Sources</button>}</p> : null}

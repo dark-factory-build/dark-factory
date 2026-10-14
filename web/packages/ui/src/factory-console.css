@@ -759,22 +759,11 @@ summary.dfConsoleItem__summary { cursor: pointer; }
 .dfPlantMap__worker--needs { fill: #f2c94c; }
 .dfPlantMap__view { fill: rgba(128, 221, 255, .08); stroke: #80ddff; stroke-width: 6; pointer-events: none; }
 
-.dfRecentWorkDialog { width: min(70rem, calc(100% - 2rem)); }
-.dfRecentWorkLayout { display: grid; grid-template-columns: minmax(14rem, 1fr) minmax(0, 2fr); gap: 1.5rem; margin-top: 1rem; }
-.dfRecentWorkLayout > nav, .dfRecentWorkDetail { min-width: 0; max-height: calc(100svh - 12rem); overflow-y: auto; }
-.dfRecentWorkDialog .dfRecentWorkRow { font: inherit; font-size: var(--df-text-md); letter-spacing: normal; display: grid; gap: 0.4rem; width: 100%; text-align: left; text-transform: none; }
-.dfRecentWorkRow[aria-pressed="true"] { border-color: var(--df-console-accent); }
-.dfRecentWorkRow :where(span, time), .dfRecentWorkDetail time { color: var(--df-console-muted); font-size: var(--df-text-sm); }
 .dfRecentWorkDetail { display: grid; align-content: start; gap: .75rem; line-height: 1.5; overflow-wrap: anywhere; font-size: var(--df-text-sm); }
 .dfRecentWorkDetail h3, .dfRecentWorkDetail h4 { margin: 0; color: var(--df-console-text); font-size: var(--df-text-md); letter-spacing: normal; }
 .dfRecentWorkText { white-space: pre-wrap; }
 .dfRecentWorkDetail a { display: block; color: var(--df-console-accent); }
 .dfRecentWorkDetail summary { cursor: pointer; }
-@media (max-width: 640px) {
-  .dfRecentWorkLayout { grid-template-columns: minmax(0, 1fr); }
-  .dfRecentWorkLayout > nav { max-height: 28svh; }
-  .dfRecentWorkDetail { max-height: none; }
-}
 
 .dfAgentSprite { flex: 0 0 auto; width: 2rem; height: 2rem; image-rendering: pixelated; }
 .dfAgentSpriteEdit { position: relative; flex: 0 0 auto; padding: 0; border: 0; background: transparent; }
@@ -873,9 +862,8 @@ summary.dfConsoleItem__summary { cursor: pointer; }
 .dfProduction__notice p { margin-top: .4rem; }
 .dfProduction__detail { min-width: 0; overflow-wrap: anywhere; }
 .dfWorkBar { display: flex; flex-wrap: nowrap; gap: .25rem; align-items: center; margin-block: .6rem; overflow-x: auto; }
-.dfWorkBar .dfConsoleRecentWork { margin: 0; padding: 0; border: 0; }
 .dfWorkBar .dfConsoleViewToggle { flex: 0 0 auto; flex-wrap: nowrap; }
-.dfWorkBar > button, .dfWorkBar .dfConsoleRecentWork button { padding-inline: .4rem; }
+.dfWorkBar > button { padding-inline: .4rem; }
 .dfWorkRow__head { position: relative; padding: .7rem; overflow-wrap: anywhere; }
 .dfWorkRow__head .dfConsoleItem__meta { margin-top: .3rem; }
 .dfConsoleItem .dfWorkRow__title { text-align: left; padding: 0; }
@@ -1170,8 +1158,6 @@ summary.dfConsoleItem__summary { cursor: pointer; }
 
 
 .dfConsoleSidebar__panel > h3 { margin: .75rem 0; font-size: var(--df-text-sm); }
-.dfConsoleSidebar .dfRecentWorkDetail > p { margin: 0; }
-.dfConsoleSidebar .dfRecentWorkDetail > p:first-of-type { color: var(--df-console-muted); font-size: var(--df-text-sm); }
 
 .dfMobileNav { display: none; }
 @media (max-width: 1024px) {

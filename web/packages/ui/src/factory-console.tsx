@@ -1,8 +1,8 @@
 import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
-import type { DiscoveredAccount, AccountItem, AgentItem, GitHubConnectionBody, OperationalNodeView, ProjectItem, RepositoryMutation, SpriteAppearance, TaskHistoryView, TaskItem, TaskListView, TelemetryIngest, TelemetryIngestBody } from "@dark-factory/client";
+import type { DiscoveredAccount, AccountItem, AgentItem, GitHubConnectionBody, OperationalNodeView, ProjectItem, RepositoryMutation, SpriteAppearance, TaskHistoryView, TaskItem, TelemetryIngest, TelemetryIngestBody } from "@dark-factory/client";
 import { type FactoryAgentSelection, type FactoryAppSnapshot, type FactoryHumanRequestView } from "./factory-app-controller.js";
 import { AgentList, FactoryFloor } from "./console-screens.js";
-import { AgentPanel, ConsoleDialog, HumanRequestPanel, WorkPanel, TaskDetail, SettingsDialog, editErrorCopy, type AgentConfigEdit, type AgentPanelView, type TaskEdit, type TaskBrief, type TaskScope, type TaskContentChip, type AddTask, type WorkFilter } from "./console-sidebar.js";
+import { AgentPanel, ConsoleDialog, HumanRequestPanel, WorkPanel, TaskDetail, SettingsDialog, editErrorCopy, type AgentConfigEdit, type AgentPanelView, type TaskEdit, type TaskBrief, type TaskContentChip, type AddTask, type WorkFilter } from "./console-sidebar.js";
 import { ProjectLibrary, type ProjectContentCall } from "./project-library.js";
 import { activityTarget, onBoard, useKnowledgeActivity, type KnowledgeActivity } from "./project-board.js";
 import { useProduction } from "./production-data.js";
@@ -43,7 +43,6 @@ export type FactoryConsoleProps = FactoryAppSnapshot & {
   onLoadTaskDetail?: (task: TaskItem, peerOffset?: bigint, expectedHead?: bigint) => Promise<TaskBrief>;
   onLoadTaskHistory?: (task: TaskItem) => Promise<TaskHistoryView>;
   onLoadNode?: (projectId: string, nodeId: string) => Promise<OperationalNodeView>;
-  onLoadTaskList?: (scope: TaskScope, cursor?: { beforeUpdatedAtMs?: bigint; beforeTaskId?: string }) => Promise<TaskListView>;
   onOpenTerminalForHumanRequest?: (request: FactoryHumanRequestView["request"]) => void;
   onSelectHumanRequest?: (request: FactoryHumanRequestView["request"]) => void;
   onHumanReplyChange?: (reply: string) => void;
@@ -133,7 +132,6 @@ export function FactoryConsole({
   onAddTask,
   onLoadTaskDetail,
   onLoadTaskHistory,
-  onLoadTaskList,
   onOpenTerminalForHumanRequest,
   onSelectHumanRequest,
   onHumanReplyChange,
@@ -354,7 +352,6 @@ export function FactoryConsole({
                 onTaskContent={setTaskContent}
                 onLoadTaskDetail={onLoadTaskDetail}
                 onLoadTaskHistory={onLoadTaskHistory}
-                onLoadTaskList={onLoadTaskList}
                 selectedTaskId={selectedTask?.id}
                 onSelectTask={ready ? selectTask : undefined}
                 selectedHumanRequest={selectedHumanRequest}
@@ -392,7 +389,6 @@ export function FactoryConsole({
                 onEditAppearance={ready && !agent.archived ? onEditAppearance : undefined}
                 onLoadTaskDetail={onLoadTaskDetail}
                 onLoadTaskHistory={onLoadTaskHistory}
-                onLoadTaskList={onLoadTaskList}
                 terminalContent={terminalContent}
                 panel={agentPanel}
                 onPanel={onAgentPanel}

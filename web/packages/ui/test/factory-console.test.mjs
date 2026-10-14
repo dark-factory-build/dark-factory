@@ -10,7 +10,7 @@ import { layoutScene } from "../dist/src/factory-scene/scene.js";
 import { projectGraph, projectFloor, workRows } from "../dist/src/console-view.js";
 import { FactoryFloor, StageMeter } from "../dist/src/console-screens.js";
 import { ProjectLibrary } from "../dist/src/project-library.js";
-import { SettingsDialog, WorkPanel } from "../dist/src/console-sidebar.js";
+import { AgentPanel, SettingsDialog, TaskDetail, WorkPanel } from "../dist/src/console-sidebar.js";
 import { FactoryScene } from "../dist/src/factory-scene/factory-scene.js";
 import { TerminalPanel } from "../dist/src/factory-app.js";
 import { DEFAULT_FLOOR_APPEARANCE, readFloorAppearance } from "../dist/src/floor-appearance.js";
@@ -544,19 +544,6 @@ test("a succeeded task linked to an open PR is in review with its PR cell", () =
   assert.match(markup, /Review the state projection/);
 });
 
-test("History reads the project's tasks and is disabled across all projects", async () => {
-  const scopes = [];
-  let tree;
-  const props = { status: "ready", state: fixtureState, detail: "work", onDetail() {}, onLoadTaskList: async (scope) => { scopes.push(scope); return { agentId: ids.project, head: 1n, total: 0n, tasks: [], hasMore: false }; } };
-  await act(async () => { tree = create(createElement(FactoryConsole, props)); });
-  const history = () => tree.root.findByProps({ "aria-label": "Work" }).findAllByType("button").find((button) => button.props["aria-label"] === "History");
-  assert.equal(history().props.disabled, true);
-  await act(async () => tree.root.findByProps({ "aria-label": "Project" }).props.onChange({ currentTarget: { value: ids.project } }));
-  await act(async () => history().props.onClick());
-  assert.deepEqual(scopes, [{ project_id: ids.project }]);
-  await act(async () => tree.unmount());
-});
-
 test("a selected PR never traps the Work tab: Open mission and a project switch both return", async () => {
   const done = { ...fixtureState.tasks.get(ids.task), status: "succeeded" };
   const state = baseState({ tasks: new Map([[done.id, done]]), humanRequests: new Map() });
@@ -991,110 +978,6 @@ test("a config refusal resets only its form and config saves remain partial", as
   } finally {
     globalThis.IS_REACT_ACT_ENVIRONMENT = previousAct;
   }
-});
-
-test("recent work remains collapsed, bounded, and private until opened", async () => {
-  const tasks = new Map(Array.from({ length: 12 }, (_, index) => {
-    const task = {
-      ...fixtureState.tasks.get(ids.task),
-      id: String(index + 1).padStart(32, "0"),
-      assigned_agent_id: ids.agent,
-      title: "Direct instruction",
-      status: index % 3 === 0 ? "blocked" : index % 3 === 1 ? "succeeded" : "failed",
-      revision: BigInt(index + 1),
-      updated_at_ms: BigInt(1_700_000_000_000 + index),
-    };
-    return [task.id, task];
-  }));
-  const detailCalls = [];
-  const historyCalls = [];
-  const listCalls = [];
-  const props = {
-    status: "ready", state: baseState({ tasks }), selectedAgent: agentSelection(), onSaveAgentConfig: () => {}, onEditTask: async () => true,
-    onLoadTaskDetail: async (task, peerOffset, expectedHead) => {
-      detailCalls.push([task.id, peerOffset, expectedHead]);
-      return {
-        taskId: task.id, revision: task.revision, head: expectedHead ?? 9n,
-        instruction: `Instruction ${task.id}`,
-        feedback: "https://github.com/example-owner/example-repo/pull/42 https://example.test/not-a-pr",
-        outcome: `Outcome ${task.id}`,
-        peerQuestions: [],
-      };
-    },
-    onLoadTaskHistory: async (task) => {
-      historyCalls.push(task.id);
-      return { taskId: task.id, entries: [{ operationId: "91".repeat(16), kind: "message", actor: "operator", body: "reviewed", status: "delivered", createdAtMs: 1_700_000_000_012n }] };
-    },
-    onLoadTaskList: async (_agentId, cursor) => {
-      listCalls.push(cursor);
-      const recent = [...tasks.values()].sort((left, right) => left.updated_at_ms === right.updated_at_ms ? right.id.localeCompare(left.id) : left.updated_at_ms > right.updated_at_ms ? -1 : 1);
-      const start = cursor === undefined ? 0 : recent.findIndex((task) => task.id === cursor.beforeTaskId) + 1;
-      const page = recent.slice(start, start + 10);
-      return { agentId: ids.agent, head: 9n, total: BigInt(recent.length), tasks: page, hasMore: start + page.length < recent.length };
-    },
-  };
-  let renderer;
-  await act(async () => { renderer = create(createElement(FactoryConsole, props)); });
-  const recent = renderer.root.findByProps({ className: "dfConsoleRecentWork dfConsoleSidebar__section" });
-  assert.equal(renderer.root.findAllByType("dialog").length, 0);
-  assert.deepEqual(detailCalls, []);
-  assert.deepEqual(listCalls, []);
-  assert.deepEqual(historyCalls, []);
-  await act(async () => { recent.findByType("button").props.onClick(); });
-  assert.equal(detailCalls.length, 1, "only the selected task loads private detail");
-  assert.equal(listCalls.length, 1);
-  assert.deepEqual(historyCalls, [detailCalls[0][0]]);
-  const items = () => renderer.root.findAllByProps({ className: "dfRecentWorkRow" });
-  assert.equal(items().length, 10);
-  assert.equal(items()[0].props["aria-pressed"], true);
-  assert.equal(detailCalls[0][0], "00000000000000000000000000000012");
-  assert.equal(JSON.stringify(items()[0].children.map((child) => typeof child === "string" ? child : child.props.children)).includes("Instruction"), false, "list titles do not repeat full private instructions");
-  const detail = renderer.root.findByProps({ "aria-label": "Work details" });
-  assert.ok(detail.findAllByType("p").some((item) => item.props.children === `Outcome ${detailCalls[0][0]}`));
-  assert.deepEqual(detail.findAllByType("a").map((link) => link.props.href), ["https://github.com/example-owner/example-repo/pull/42"]);
-  await act(async () => { renderer.root.findAllByType("button").find((button) => button.props.children === "Show more").props.onClick(); });
-  assert.equal(detailCalls.length, 1, "pagination does not fetch private details for unselected work");
-  assert.deepEqual(listCalls[1], { beforeUpdatedAtMs: 1_700_000_000_002n, beforeTaskId: "00000000000000000000000000000003" });
-  assert.equal(items().length, 12);
-  await act(async () => { items()[11].props.onClick(); });
-  assert.equal(detailCalls.length, 2);
-  assert.equal(historyCalls.length, 2);
-  assert.equal(items()[11].props["aria-pressed"], true);
-  await act(async () => { renderer.root.findByType("dialog").props.onClose(); });
-  assert.equal(renderer.root.findAllByType("dialog").length, 0);
-  await act(async () => { renderer.unmount(); });
-});
-
-test("late recent-work detail never crosses an agent remount", async () => {
-  const first = fixtureState.agents.get(ids.agent);
-  const second = fixtureState.agents.get(ids.idleAgent);
-  const firstTask = { ...fixtureState.tasks.get(ids.task), assigned_agent_id: first.id, status: "succeeded", revision: 21n, updated_at_ms: 21n };
-  const secondTask = { ...firstTask, id: "52".repeat(16), assigned_agent_id: second.id, status: "failed", revision: 22n, updated_at_ms: 22n };
-  const pending = new Map();
-  const props = {
-    status: "ready", state: baseState({ tasks: new Map([[firstTask.id, firstTask], [secondTask.id, secondTask]]) }), selectedAgent: agentSelection(first.id), onSaveAgentConfig: () => {},
-    onLoadTaskDetail: (task) => new Promise((resolve) => pending.set(task.id, resolve)),
-    onLoadTaskList: async ({ agent_id }) => ({ agentId: agent_id, head: 9n, total: 1n, tasks: [agent_id === first.id ? firstTask : secondTask], hasMore: false }),
-  };
-  let renderer;
-  await act(async () => { renderer = create(createElement(FactoryConsole, props)); });
-  const openRecent = async () => {
-    const recent = renderer.root.findByProps({ className: "dfConsoleRecentWork dfConsoleSidebar__section" });
-    await act(async () => { recent.findByType("button").props.onClick(); });
-  };
-  await openRecent();
-  assert.equal(pending.has(firstTask.id), true);
-  await act(async () => { renderer.update(createElement(FactoryConsole, { ...props, selectedAgent: agentSelection(second.id) })); });
-  await openRecent();
-  pending.get(secondTask.id)({ taskId: secondTask.id, revision: secondTask.revision, head: 9n, instruction: "SECOND DETAIL", feedback: "", outcome: "SECOND OUTCOME", peerQuestions: [] });
-  await act(async () => {});
-  pending.get(firstTask.id)({ taskId: firstTask.id, revision: firstTask.revision, head: 9n, instruction: "FIRST DETAIL", feedback: "", outcome: "FIRST OUTCOME", peerQuestions: [] });
-  await act(async () => {});
-  const text = renderer.toJSON();
-  const markup = JSON.stringify(text);
-  assert.match(markup, /SECOND DETAIL/);
-  assert.equal(markup.includes("FIRST DETAIL"), false, "the late prior-agent detail has no new panel to update");
-  await act(async () => { renderer.unmount(); });
 });
 
 test("a rejected edit says plainly that the durable value did not change", () => {
@@ -1971,6 +1854,15 @@ test("task selection and floor questions open the exact existing task detail and
   await act(async () => { tree.update(createElement(Harness, { state: { ...fixtureState, tasks } })); });
   assert.equal(tree.root.findAllByProps({ "aria-label": "Task details" }).length, 0, "removed work is not retained as invented history");
   await act(async () => tree.unmount());
+});
+
+test("removed history controls leave inspected task detail intact", () => {
+  const agentMarkup = renderToStaticMarkup(createElement(AgentPanel, { agent: fixtureState.agents.get(ids.agent), state: fixtureState, ready: true }));
+  const workMarkup = renderToStaticMarkup(createElement(WorkPanel, { state: fixtureState, rows: workRows(fixtureState, []), filter: "all", onFilter() {}, byMission: false, onByMission() {}, missions: null, ready: true, onSelectProduction() {}, onMission() {} }));
+  const detailMarkup = renderToStaticMarkup(createElement(TaskDetail, { task: fixtureState.tasks.get(ids.task), onLoadTaskDetail: async () => ({ taskId: ids.task, revision: 1n, head: 1n, instruction: "kept", feedback: "", peerQuestions: [] }) }));
+  assert.doesNotMatch(agentMarkup, /Recent work|aria-label="History"/);
+  assert.doesNotMatch(workMarkup, /Recent work|aria-label="History"/);
+  assert.match(detailMarkup, /aria-label="Work details"/);
 });
 
 test("floor omits the global evidence essay", () => {

@@ -79,8 +79,8 @@ const expectIgnoredMember = (base, mutated, role = "client") => {
 };
 
 test("canonical control fixtures decode by sender role and re-encode exactly", () => {
-  const client = ["pair_prove", "auth_prove", "remote_invite", "push_subscribe", "browser_clients_get", "browser_client_revoke", "run_paths_get", "agent_control", "task_history_get", "task_list_get"];
-  const server = ["hello", "pair_result", "auth_result", "remote_invite_result", "push_subscribe_result", "browser_clients", "browser_client_revoke_result", "run_paths", "agent_control_result", "task_history", "task_list"];
+  const client = ["pair_prove", "auth_prove", "remote_invite", "push_subscribe", "browser_clients_get", "browser_client_revoke", "run_paths_get", "agent_control", "task_history_get"];
+  const server = ["hello", "pair_result", "auth_result", "remote_invite_result", "push_subscribe_result", "browser_clients", "browser_client_revoke_result", "run_paths", "agent_control_result", "task_history"];
   for (const name of client) assert.equal(encodeClientControl(decodeClientControl(fixture(`${name}.json`))), fixture(`${name}.json`));
   for (const name of server) assert.equal(encodeServerControl(decodeServerControl(fixture(`${name}.json`))), fixture(`${name}.json`));
   // An agent with no live run is in no room, so an empty run identity may not
@@ -92,7 +92,6 @@ test("canonical control fixtures decode by sender role and re-encode exactly", (
   assert.equal(encodeClientControl(decodeClientControl(error)), error);
   assert.equal(encodeServerControl(decodeServerControl(error)), error);
 });
-
 test("GitHub settings frames keep the paired admin bridge bounded", () => {
   const request = JSON.stringify({ type: "GITHUB_CONNECTION", id: "github-1", body: { action: "delegate", repositories: [{ installation_id: 7, repository_id: 9, repository: "factory-org/worker" }] } });
   assert.deepEqual(decodeClientControl(request).body.repositories[0], { installation_id: 7, repository_id: 9, repository: "factory-org/worker" });
@@ -474,13 +473,4 @@ test("Linear shares intake controls without a fabricated GitHub identity or key 
   assert.equal(decodeServerControl(JSON.stringify(result)).body.sources[0].github_repository_id,0n);
   assert.equal(decodeServerControl(JSON.stringify({...result,body:{...result.body,api_key:"private-test-key"}})).body.api_key,undefined);
   expectMalformed(()=>decodeServerControl(JSON.stringify({...result,body:{...result.body,sources:[{...source,github_repository_id:"42"}]}})));
-});
-
-test("project-scoped task lists decode origin fields and reject a foreign project's task", () => {
-  const project = "7a".repeat(16);
-  const task = { id: "01".repeat(16), project_id: project, assigned_agent_id: "03".repeat(16), title: "done", status: "cancelled", priority: 0, revision: 1n, updated_at_ms: 5n, issue_number: 7n, mission_id: "05".repeat(16) };
-  const list = (body) => encodeServerControl({ type: "TASK_LIST", id: "l", body: { head: 1n, total: 1n, has_more: false, ...body } });
-  assert.deepEqual(decodeServerControl(list({ project_id: project, tasks: [task] })).body.tasks[0], task);
-  expectMalformed(() => decodeServerControl(list({ project_id: project, tasks: [{ ...task, project_id: "7b".repeat(16) }] })));
-  expectMalformed(() => decodeServerControl(list({ project_id: project, agent_id: task.assigned_agent_id, tasks: [task] })));
 });

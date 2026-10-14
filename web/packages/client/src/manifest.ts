@@ -101,7 +101,6 @@ export const CONTROL_MANIFEST = [
   { type: "AGENT_CONTROL", direction: "client" }, { type: "AGENT_CONTROL_RESULT", direction: "server" },
   { type: "TASK_HISTORY_GET", direction: "client" }, { type: "TASK_HISTORY", direction: "server" },
   { type: "TASK_DETAIL_GET", direction: "client" }, { type: "TASK_DETAIL", direction: "server" },
-  { type: "TASK_LIST_GET", direction: "client" }, { type: "TASK_LIST", direction: "server" },
   { type: "PROJECT_CONTENT", direction: "client" }, { type: "PROJECT_CONTENT_RESULT", direction: "server" },
 ] as const;
 export const CONTROL_TYPES = CONTROL_MANIFEST.map((entry) => entry.type);

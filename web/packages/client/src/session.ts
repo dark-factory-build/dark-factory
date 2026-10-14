@@ -142,7 +142,7 @@ type TargetPending = Request & { agentId: string; expectedAgentRevision: bigint;
 type HumanPending = Request & { requestId: string; expectedRevision: bigint; expectedRunRevision: bigint; runId?: string; yielded?: boolean };
 type TaskPending = Request & { taskId: string; expectedAgentRevision: bigint };
 type AgentControlPending = Request & { operationId: string; taskId: string; runId: string };
-type ConsoleKind = "AGENT_UPDATE_RESULT" | "PROJECT_LIMITS_RESULT" | "TASK_UPDATE_RESULT" | "OPERATIONAL_GRAPH" | "OPERATIONAL_NODE" | "RUN_PATHS" | "TASK_LIST" | "TASK_HISTORY" | "TASK_DETAIL";
+type ConsoleKind = "AGENT_UPDATE_RESULT" | "PROJECT_LIMITS_RESULT" | "TASK_UPDATE_RESULT" | "OPERATIONAL_GRAPH" | "OPERATIONAL_NODE" | "RUN_PATHS" | "TASK_HISTORY" | "TASK_DETAIL";
 type ConsolePending = Request & { entityId: string; expectedRevision: bigint };
 const IGNORE = (): void => { /* the session itself owns this request's outcome */ };
 
@@ -169,7 +169,6 @@ export type OperationalNodeView = OperationalNodeBody;
 /** One agent's live run and the repository directories it has changed. */
 export type RunPathsView = Readonly<{ agentId: string; runId: string; paths: readonly string[]; telemetry?: Readonly<RunTelemetry> }>;
 /** `agentId` is the scope id: the agent, or the project for a project-scoped list. */
-export type TaskListView = Readonly<{ agentId: string; head: bigint; total: bigint; tasks: readonly TaskItem[]; hasMore: boolean }>;
 type AccountKind = "TELEMETRY_INGEST_RESULT" | "ATTACHMENT_RETENTION_RESULT" | "FACTORY_DISPATCH_RESULT" | "PROJECT_CONTENT_RESULT" | "ACCOUNTS" | "ACCOUNT_LINK_RESULT" | "ACCOUNT_UPDATE_RESULT" | "BROWSER_CLIENTS" | "BROWSER_CLIENT_REVOKE_RESULT" | "PROJECT_CREATE_RESULT" | "REPOSITORIES" | "REPOSITORY_MUTATE_RESULT";
 type AccountCorrelation = { operation?: ProjectContentOperation; accountId?: string; entityId?: string; expectedRevision?: bigint; enabled?: boolean; action?: RepositoryMutateBody["action"] };
 type AccountPending = Request & AccountCorrelation;
@@ -494,19 +493,6 @@ export class BrowserSession {
     const capability = CAPABILITIES.private_human_request_detail | (write ? CAPABILITIES.human_actions : 0);
     if ((this.#capabilities & capability) !== capability) return Promise.reject(new SessionError("unauthorized"));
     return this.#accountRequest("PROJECT_CONTENT_RESULT", capability, "project-content", (id) => encodeClientControl({ type: "PROJECT_CONTENT", id, body: { operation, input } }), { operation });
-  }
-
-  getTaskList(scope: { agent_id: string } | { project_id: string }, cursor: { beforeUpdatedAtMs?: bigint; beforeTaskId?: string } = {}): Promise<TaskListView> {
-    try { this.#ensureLive(); } catch (error) { return Promise.reject(error); }
-    if (!this.#authenticated || (this.#capabilities & CAPABILITIES.private_human_request_detail) === 0) return Promise.reject(new SessionError("unauthorized"));
-    const scopeId = "agent_id" in scope ? scope.agent_id : scope.project_id;
-    if (!validDynamicID(scopeId) || (cursor.beforeUpdatedAtMs === undefined) !== (cursor.beforeTaskId === undefined) || (cursor.beforeUpdatedAtMs !== undefined && (cursor.beforeUpdatedAtMs < 1n || cursor.beforeUpdatedAtMs > MAX_SQLITE_INTEGER)) || (cursor.beforeTaskId !== undefined && !validDynamicID(cursor.beforeTaskId))) return Promise.reject(new SessionError("invalid_request"));
-    if (this.#requests.size >= MAX_OUTSTANDING_REQUESTS) return Promise.reject(new SessionError("rate_limited"));
-    const id = this.#nextID("task-list");
-    const body = { ...scope, ...(cursor.beforeUpdatedAtMs === undefined ? {} : { before_updated_at_ms: cursor.beforeUpdatedAtMs, before_task_id: cursor.beforeTaskId! }) };
-    let payload: string;
-    try { payload = encodeClientControl({ type: "TASK_LIST_GET", id, body }); } catch (error) { return Promise.reject(error); }
-    return this.#track(id, { kind: "TASK_LIST", entityId: scopeId, expectedRevision: 1n }, payload);
   }
 
   /** The provider logins present on the daemon's machine. A linked one
@@ -871,7 +857,7 @@ export class BrowserSession {
       this.#agentControlResult(frame.body, frame.id);
       return;
     }
-    if (frame.type === "AGENT_UPDATE_RESULT" || frame.type === "PROJECT_LIMITS_RESULT" || frame.type === "TASK_UPDATE_RESULT" || frame.type === "OPERATIONAL_GRAPH" || frame.type === "OPERATIONAL_NODE" || frame.type === "RUN_PATHS" || frame.type === "TASK_LIST" || frame.type === "TASK_HISTORY" || frame.type === "TASK_DETAIL") {
+    if (frame.type === "AGENT_UPDATE_RESULT" || frame.type === "PROJECT_LIMITS_RESULT" || frame.type === "TASK_UPDATE_RESULT" || frame.type === "OPERATIONAL_GRAPH" || frame.type === "OPERATIONAL_NODE" || frame.type === "RUN_PATHS" || frame.type === "TASK_HISTORY" || frame.type === "TASK_DETAIL") {
       this.#consoleResult(frame);
       return;
     }
@@ -1181,9 +1167,9 @@ export class BrowserSession {
     return this.#track(id, { kind, entityId, expectedRevision }, payload);
   }
 
-  #consoleResult(frame: Extract<ServerControlFrame, { type: "AGENT_UPDATE_RESULT" | "PROJECT_LIMITS_RESULT" | "TASK_UPDATE_RESULT" | "OPERATIONAL_GRAPH" | "OPERATIONAL_NODE" | "RUN_PATHS" | "TASK_LIST" | "TASK_HISTORY" | "TASK_DETAIL" }>): void {
+  #consoleResult(frame: Extract<ServerControlFrame, { type: "AGENT_UPDATE_RESULT" | "PROJECT_LIMITS_RESULT" | "TASK_UPDATE_RESULT" | "OPERATIONAL_GRAPH" | "OPERATIONAL_NODE" | "RUN_PATHS" | "TASK_HISTORY" | "TASK_DETAIL" }>): void {
     const pending = this.#pending<ConsolePending>(frame.id, frame.type);
-    const identity = frame.type === "AGENT_UPDATE_RESULT" || frame.type === "RUN_PATHS" ? frame.body.agent_id : frame.type === "TASK_LIST" ? frame.body.agent_id ?? frame.body.project_id : (frame.type === "TASK_UPDATE_RESULT" || frame.type === "TASK_HISTORY" || frame.type === "TASK_DETAIL") ? frame.body.task_id : frame.type === "OPERATIONAL_NODE" ? `${frame.body.project_id}:${frame.body.node_id}` : frame.body.project_id;
+    const identity = frame.type === "AGENT_UPDATE_RESULT" || frame.type === "RUN_PATHS" ? frame.body.agent_id : (frame.type === "TASK_UPDATE_RESULT" || frame.type === "TASK_HISTORY" || frame.type === "TASK_DETAIL") ? frame.body.task_id : frame.type === "OPERATIONAL_NODE" ? `${frame.body.project_id}:${frame.body.node_id}` : frame.body.project_id;
     if (identity !== pending.entityId || frame.type === "TASK_DETAIL" && frame.body.revision !== pending.expectedRevision) throw new ProtocolError("malformed");
     this.#requests.delete(frame.id);
     if (frame.type === "TASK_HISTORY") {
@@ -1202,7 +1188,6 @@ export class BrowserSession {
     if (frame.type === "PROJECT_LIMITS_RESULT") { pending.resolve(Object.freeze({ projectId: frame.body.project_id, revision: frame.body.revision }) as never); return; }
     if (frame.type === "TASK_UPDATE_RESULT") { pending.resolve(Object.freeze({ taskId: frame.body.task_id, revision: frame.body.revision }) as never); return; }
     if (frame.type === "RUN_PATHS") { pending.resolve(Object.freeze({ agentId: frame.body.agent_id, runId: frame.body.run_id, paths: Object.freeze([...frame.body.paths]), ...(frame.body.telemetry === undefined ? {} : { telemetry: Object.freeze({ ...frame.body.telemetry }) }) }) as never); return; }
-    if (frame.type === "TASK_LIST") { pending.resolve(Object.freeze({ agentId: frame.body.agent_id ?? frame.body.project_id!, head: frame.body.head, total: frame.body.total, tasks: Object.freeze(frame.body.tasks.map((task) => Object.freeze({ ...task }))), hasMore: frame.body.has_more }) as never); return; }
     // Decoded frames are fresh objects; freezing the top level keeps callers honest.
     pending.resolve(Object.freeze(frame.body) as never);
   }

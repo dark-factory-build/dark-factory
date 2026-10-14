@@ -567,18 +567,6 @@
       "fixture": "task_detail.json"
     },
     {
-      "type": "TASK_LIST_GET",
-      "direction": "client",
-      "id": "required",
-      "fixture": "task_list_get.json"
-    },
-    {
-      "type": "TASK_LIST",
-      "direction": "server",
-      "id": "required",
-      "fixture": "task_list.json"
-    },
-    {
       "type": "PROJECT_CONTENT",
       "direction": "client",
       "id": "required",
