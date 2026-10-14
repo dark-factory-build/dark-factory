@@ -52,7 +52,6 @@ function harness(overrides = {}) {
     replyHumanRequest: overrides.reply ?? (async () => ({ status: "resolved" })),
     cancelHumanRequest: overrides.cancel ?? (async () => ({ request_id: request.id })),
     updateTask: overrides.updateTask ?? (async () => { throw new SessionError("not_found"); }),
-    getTaskHistory: overrides.getTaskHistory ?? (async () => { throw new SessionError("not_found"); }),
     getTaskDetail: overrides.getTaskDetail ?? (async () => { throw new SessionError("not_found"); }),
     getOperationalGraph: overrides.getOperationalGraph ?? (async () => { throw new SessionError("not_found"); }),
     getRunPaths: overrides.getRunPaths ?? (async () => { throw new SessionError("not_found"); }),
@@ -229,7 +228,6 @@ test("task-detail pages cover a maximum outcome with one head and peer continuat
   const task = [...fixtureState.tasks.values()][0];
   const calls = [];
   const context = harness({
-    getTaskHistory: async (taskID) => ({ taskId: taskID, entries: [] }),
     getTaskDetail: async (taskID, revision, offsets) => {
       calls.push([taskID, revision, offsets]);
       if (offsets.peerOffset === 1n) {
@@ -263,8 +261,6 @@ test("task-detail pages cover a maximum outcome with one head and peer continuat
 
   await context.controller.taskDetail(task, first.nextPeerOffset, first.head);
   assert.deepEqual(calls.at(-1), [task.id, task.revision, { textOffset: 0n, peerOffset: 1n, expectedHead: 9n }]);
-  const history = await context.controller.taskHistory(task);
-  assert.deepEqual(history, { taskId: task.id, entries: [] });
   context.controller.close();
 });
 test("a failed fragment scrub creates no client or browser effect", () => {

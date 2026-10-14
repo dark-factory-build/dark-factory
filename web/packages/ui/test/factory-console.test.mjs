@@ -1017,13 +1017,18 @@ test("task selection and floor questions open the exact existing task detail and
   await act(async () => tree.unmount());
 });
 
-test("removed history controls leave inspected task detail intact", () => {
+test("task detail keeps outcome and instruction without a history disclosure", async () => {
   const agentMarkup = renderToStaticMarkup(createElement(AgentPanel, { agent: fixtureState.agents.get(ids.agent), state: fixtureState, ready: true }));
   const workMarkup = renderToStaticMarkup(createElement(WorkPanel, { state: fixtureState, rows: workRows(fixtureState, []), filter: "all", onFilter() {}, byMission: false, onByMission() {}, missions: null, ready: true, onMission() {} }));
-  const detailMarkup = renderToStaticMarkup(createElement(TaskDetail, { task: fixtureState.tasks.get(ids.task), onLoadTaskDetail: async () => ({ taskId: ids.task, revision: 1n, head: 1n, instruction: "kept", feedback: "", peerQuestions: [] }) }));
+  let detail;
+  await act(async () => { detail = create(createElement(TaskDetail, { task: fixtureState.tasks.get(ids.task), onLoadTaskDetail: async () => ({ taskId: ids.task, revision: 1n, head: 1n, instruction: "kept instruction", feedback: "", outcome: "kept outcome", peerQuestions: [] }) })); });
+  const detailMarkup = JSON.stringify(detail.toJSON());
   assert.doesNotMatch(agentMarkup, /Recent work|aria-label="History"/);
   assert.doesNotMatch(workMarkup, /Recent work|aria-label="History"/);
-  assert.match(detailMarkup, /aria-label="Work details"/);
+  assert.doesNotMatch(detailMarkup, /History/);
+  assert.match(detailMarkup, /kept outcome/);
+  assert.match(detailMarkup, /kept instruction/);
+  detail.unmount();
 });
 
 test("floor omits the global evidence essay", () => {

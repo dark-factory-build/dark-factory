@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
-import type { AgentItem, OperationalNodeView, TaskHistoryView, TaskItem } from "@dark-factory/client";
+import type { AgentItem, OperationalNodeView, TaskItem } from "@dark-factory/client";
 import { type FactoryAgentSelection, type FactoryAppSnapshot, type FactoryHumanRequestView } from "./factory-app-controller.js";
 import { AgentList, FactoryFloor } from "./console-screens.js";
 import { AgentPanel, ConsoleDialog, HumanRequestPanel, WorkPanel, TaskDetail, editErrorCopy, type TaskEdit, type TaskBrief, type TaskScope, type TaskContentChip, type AddTask, type WorkFilter } from "./console-sidebar.js";
@@ -26,7 +26,6 @@ export type FactoryConsoleProps = FactoryAppSnapshot & {
   onEditTask?: (task: TaskItem, change: TaskEdit) => Promise<boolean>;
   onAddTask?: AddTask;
   onLoadTaskDetail?: (task: TaskItem, peerOffset?: bigint, expectedHead?: bigint) => Promise<TaskBrief>;
-  onLoadTaskHistory?: (task: TaskItem) => Promise<TaskHistoryView>;
   onLoadNode?: (projectId: string, nodeId: string) => Promise<OperationalNodeView>;
   onOpenTerminalForHumanRequest?: (request: FactoryHumanRequestView["request"]) => void;
   onSelectHumanRequest?: (request: FactoryHumanRequestView["request"]) => void;
@@ -99,7 +98,6 @@ export function FactoryConsole({
   onEditTask,
   onAddTask,
   onLoadTaskDetail,
-  onLoadTaskHistory,
   onOpenTerminalForHumanRequest,
   onSelectHumanRequest,
   onHumanReplyChange,
@@ -273,7 +271,6 @@ export function FactoryConsole({
                 taskContent={taskContent}
                 onTaskContent={setTaskContent}
                 onLoadTaskDetail={onLoadTaskDetail}
-                onLoadTaskHistory={onLoadTaskHistory}
                 selectedTaskId={selectedTask?.id}
                 onSelectTask={ready ? selectTask : undefined}
                 selectedHumanRequest={selectedHumanRequest}
@@ -310,7 +307,7 @@ export function FactoryConsole({
               </div>
             </div>
             {inspectedTask === undefined ? null : <ConsoleDialog key={inspectedTask.id} label="Task details" title="Task" onClose={() => { if (relatedTask) setRelatedTask(undefined); else onSelectTask?.(undefined); }}>
-              <TaskDetail key={inspectedTask.id} task={inspectedTask} onLoadTaskDetail={onLoadTaskDetail} onLoadTaskHistory={onLoadTaskHistory} />
+              <TaskDetail key={inspectedTask.id} task={inspectedTask} onLoadTaskDetail={onLoadTaskDetail} />
               {relatedTask?.status === "queued" && state?.tasks.has(relatedTask.id) && selectTask ? <button type="button" disabled={!ready} onClick={() => { setRelatedTask(undefined); goTask?.(relatedTask.id); }}>Open in Work</button> : null}
             </ConsoleDialog>}
           </aside>

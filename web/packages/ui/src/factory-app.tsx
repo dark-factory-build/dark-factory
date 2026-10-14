@@ -1,10 +1,8 @@
 "use client";
 
 import { useEffect, useMemo, useRef, useState, type KeyboardEvent, type ReactNode, type SyntheticEvent } from "react";
-import { IconButton } from "./icons.js";
 import { browserEndpoint, FactoryAppController, type FactoryAppSnapshot, type FactoryAppStatus, type FactoryTerminalView } from "./factory-app-controller.js";
 import { FactoryConsole, type ConsoleDetail } from "./factory-console.js";
-import { TaskConversation } from "./console-sidebar.js";
 import { primaryAgent } from "./console-view.js";
 import { XtermTerminal } from "./xterm-terminal.js";
 
@@ -97,7 +95,6 @@ export function FactoryApp({ onStatusChange, browserPort }: FactoryAppProps = {}
       onEditTask={(task, change) => owner.current?.editTask(task, change) ?? Promise.resolve(false)}
       onAddTask={(agent, instruction, mode, files, content) => owner.current?.addTask(agent, instruction, mode, files, content) ?? Promise.resolve(false)}
       onLoadTaskDetail={(task, peerOffset, expectedHead) => owner.current?.taskDetail(task, peerOffset, expectedHead) ?? Promise.reject(new Error("closed"))}
-      onLoadTaskHistory={(task) => owner.current?.taskHistory(task) ?? Promise.reject(new Error("closed"))}
       onLoadNode={(projectId, nodeId) => owner.current?.operationalNode(projectId, nodeId) ?? Promise.reject(new Error("closed"))}
       onOpenTerminalForHumanRequest={(request) => { setDetail("agent"); owner.current?.openTerminalForHumanRequest(request); }}
       onSelectHumanRequest={(request) => { setDetail("work"); void owner.current?.selectHumanRequest(request); }}
@@ -183,7 +180,6 @@ function AgentIdleTools({ terminal, controller, repositories }: { terminal: Fact
   return (
     <>
       <AgentInstruction terminal={terminal} repositories={repositories} mode={mode} onDraftChange={(instruction) => controller.setAgentInstructionDraft(instruction)} onSubmit={(instruction, mode, repositoryId) => controller.enqueueAgentInstruction(instruction, mode, repositoryId)} />
-      {terminal.history === undefined && !terminal.historyPending ? null : <TaskHistory terminal={terminal} onRefresh={() => controller.loadTaskHistory()} onLoadConversation={() => controller.loadTaskDetail()} onLoadOlderConversation={() => controller.loadOlderTaskConversation()} />}
     </>
   );
 }
@@ -199,7 +195,7 @@ function AgentSteering({ terminal, controller }: { terminal: FactoryTerminalView
       : refused
         ? "Control not sent"
         : unknown
-          ? "Delivery could not be confirmed — check terminal/history before sending again"
+          ? "Delivery could not be confirmed — check task state before sending again"
           : undefined;
   if (!terminal.controlReady) return <p className="dfFactoryConsole__instructionState">{terminal.finishing ? "Finishing" : "Starting"}</p>;
   return (
@@ -209,25 +205,7 @@ function AgentSteering({ terminal, controller }: { terminal: FactoryTerminalView
         <button type="button" disabled={pending} onClick={() => { void controller.controlAgent("interrupt"); }}>Interrupt</button>
         <button type="button" disabled={pending} onClick={() => { void controller.controlAgent("stop"); }}>Stop current</button>
       </div>
-      <TaskHistory terminal={terminal} onRefresh={() => controller.loadTaskHistory()} onLoadConversation={() => controller.loadTaskDetail()} onLoadOlderConversation={() => controller.loadOlderTaskConversation()} />
     </section>
-  );
-}
-
-function TaskHistory({ terminal, onRefresh, onLoadConversation, onLoadOlderConversation }: { terminal: FactoryTerminalView; onRefresh: () => void; onLoadConversation: () => void; onLoadOlderConversation: () => void }) {
-  const history = terminal.history;
-  return (
-    <details className="dfFactoryConsole__history" aria-label="Task control history">
-      <summary>History</summary>
-      <div className="dfFactoryConsole__historyHeading"><IconButton icon="refresh" disabled={terminal.historyPending} onClick={onRefresh}>{terminal.historyPending ? "Loading" : "Refresh"}</IconButton><button type="button" disabled={terminal.taskDetailPending} onClick={onLoadConversation}>{terminal.taskDetailPending ? "Loading" : "View conversation"}</button></div>
-      {history === undefined || history.entries.length === 0 ? <p className="dfFactoryConsole__instructionState">{terminal.historyPending ? "Loading receipts" : "No durable controls yet"}</p> : (
-        <ol>
-          {history.entries.map((entry) => <li key={entry.operationId}><strong>{entry.kind} · {entry.status}</strong><span>{entry.actor}{entry.body === "" ? "" : ` · ${entry.body}`}</span></li>)}
-        </ol>
-      )}
-		{terminal.taskDetailError === undefined ? null : <p role="alert">The factory refused this history</p>}
-		{terminal.taskDetail === undefined ? null : <TaskConversation brief={terminal.taskDetail} pending={terminal.taskDetailPending} onOlder={terminal.taskDetail.nextPeerOffset === undefined ? undefined : onLoadOlderConversation} />}
-    </details>
   );
 }
 

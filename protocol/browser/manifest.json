@@ -507,18 +507,6 @@
       "fixture": "agent_control_result.json"
     },
     {
-      "type": "TASK_HISTORY_GET",
-      "direction": "client",
-      "id": "required",
-      "fixture": "task_history_get.json"
-    },
-    {
-      "type": "TASK_HISTORY",
-      "direction": "server",
-      "id": "required",
-      "fixture": "task_history.json"
-    },
-    {
       "type": "TASK_DETAIL_GET",
       "direction": "client",
       "id": "required",

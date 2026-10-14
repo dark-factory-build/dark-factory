@@ -25,7 +25,7 @@ function stateAt(head, overrides = {}) {
   return { ...fixtureState, head: BigInt(head), ...overrides };
 }
 
-function terminalHarness({ closeStatus = false, fail, failError = new SessionError("connection"), attachImpl, detachImpl, acquireImpl, enqueueImpl, controlImpl, historyImpl } = {}) {
+function terminalHarness({ closeStatus = false, fail, failError = new SessionError("connection"), attachImpl, detachImpl, acquireImpl, enqueueImpl, controlImpl } = {}) {
   let attachReset = false;
   const snapshots = [];
   const calls = [];
@@ -55,11 +55,6 @@ function terminalHarness({ closeStatus = false, fail, failError = new SessionErr
       calls.push({ kind: "control", value });
       if (controlImpl !== undefined) return controlImpl(value);
       return { operationId: value.operationId, taskId: value.taskId, runId: "61".repeat(16), status: "delivered", successorTaskId: "" };
-    },
-    getTaskHistory: async (taskId) => {
-      calls.push({ kind: "history", taskId });
-      if (historyImpl !== undefined) return historyImpl(taskId);
-      return { taskId, entries: [] };
     },
     resolveAgentTerminal: (value) => {
       calls.push({ kind: "resolve", value });
@@ -158,8 +153,8 @@ test("public terminal composition buffers direct input until writable authority"
   assert.deepEqual(context.calls.filter((call) => call.kind === "input").map((call) => [...call.bytes]), [[98, 101, 102, 111, 114, 101], [0xc3, 0xa9], [0, 255]]);
 });
 
-test("explicit steering reuses the current terminal target and preserves a durable receipt", async () => {
-  const context = terminalHarness({ historyImpl: async (taskId) => ({ taskId, entries: [{ operationId: "62".repeat(16), kind: "message", actor: "operator", body: "Continue", status: "delivered", createdAtMs: 1n }] }) });
+test("explicit steering reuses the current terminal target", async () => {
+  const context = terminalHarness();
   context.controller.start();
   context.ready();
   await openTerminal(context);
@@ -173,7 +168,6 @@ test("explicit steering reuses the current terminal target and preserves a durab
   assert.match(control.operationId, /^[0-9a-f]{32}$/);
   await flush();
   assert.equal(context.latest().terminal.controlStatus, "delivered");
-  assert.equal(context.latest().terminal.history.entries[0].body, "Continue");
 });
 
 test("steering reuses its target across an unrelated head advance", async () => {
@@ -1424,9 +1418,8 @@ test("disconnect during a durable control preserves its refusal without replay o
   context.controller.close();
 });
 
-test("an external archive and paused restore retain selection, draft and readable completed history", async () => {
-  const entries = [{ operationId: "61".repeat(16), kind: "message", actor: "operator", body: "retained receipt", status: "delivered", createdAtMs: 1n }];
-  const context = terminalHarness({ historyImpl: async (taskId) => ({ taskId, entries }) });
+test("an external archive and paused restore retain selection and draft", async () => {
+  const context = terminalHarness();
   const running = [...fixtureState.tasks.values()].find((task) => task.assigned_agent_id === agent.id && task.status === "running");
   const completed = { ...running, status: "succeeded", revision: running.revision + 1n };
   const tasks = new Map(fixtureState.tasks).set(completed.id, completed);
@@ -1439,12 +1432,10 @@ test("an external archive and paused restore retain selection, draft and readabl
   context.clientOptions().onState(stateAt(21, { tasks, agents: new Map(agents).set(agent.id, archived) }));
   assert.equal(context.latest().selectedAgent.id, agent.id);
   assert.equal(context.latest().terminal.instructionDraft, "retained draft");
-  assert.deepEqual(await context.controller.taskHistory(completed), { taskId: completed.id, entries });
   const restored = { ...archived, archived: false, revision: archived.revision + 1n };
   context.clientOptions().onState(stateAt(22, { tasks, agents: new Map(agents).set(agent.id, restored) }));
   assert.equal(context.latest().selectedAgent.id, agent.id);
   assert.equal(context.latest().terminal.paused, true);
-  assert.deepEqual(await context.controller.taskHistory(completed), { taskId: completed.id, entries });
   assert.equal(context.latest().terminal.instructionDraft, "retained draft");
   assert.equal(context.calls.some((call) => call.kind === "resolve" || call.kind === "enqueue"), false);
   context.controller.close();

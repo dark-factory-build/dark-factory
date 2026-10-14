@@ -19,9 +19,6 @@ func DecodeServerControl(data []byte) (ControlFrame, error) { return decodeContr
 func EncodeAgentControl(id string, value AgentControl) ([]byte, error) {
 	return encodeControl(TypeAgentControl, id, value)
 }
-func EncodeTaskHistoryGet(id string, value TaskHistoryGet) ([]byte, error) {
-	return encodeControl(TypeTaskHistoryGet, id, value)
-}
 func EncodeTaskDetailGet(id string, value TaskDetailGet) ([]byte, error) {
 	return encodeControl(TypeTaskDetailGet, id, value)
 }

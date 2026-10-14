@@ -171,9 +171,6 @@ func (backend *terminalTestBackend) ControlAgent(ctx context.Context, _ Principa
 	}
 	return browserprotocol.AgentControlResult{OperationID: request.OperationID, TaskID: request.TaskID, RunID: request.RunID, SuccessorTaskID: request.SuccessorTaskID, Status: "delivered"}, nil
 }
-func (*terminalTestBackend) TaskHistory(_ context.Context, _ [browserprotocol.ClientIDSize]byte, request browserprotocol.TaskHistoryGet) (browserprotocol.TaskHistory, error) {
-	return browserprotocol.TaskHistory{TaskID: request.TaskID, Entries: []browserprotocol.TaskHistoryEntry{}}, nil
-}
 func (backend *terminalTestBackend) ReplyHumanRequest(ctx context.Context, _ Principal, request browserprotocol.HumanRequestReply) (browserprotocol.HumanRequestReplyResult, error) {
 	if err := backend.waitControl(ctx); err != nil {
 		return browserprotocol.HumanRequestReplyResult{}, err
