@@ -215,7 +215,7 @@ func (daemon *Daemon) publishPull(ctx context.Context, c kernel.PublishableChang
 		return true, json.Unmarshal(observed.Result, result)
 	}
 	branch := "factory/" + c.Change.String()[:12]
-	if c.Repair && c.Branch != "" {
+	if c.Branch != "" {
 		branch = c.Branch
 	}
 	refHead := func(branch string) (string, error) {
@@ -319,25 +319,23 @@ func (daemon *Daemon) publishPull(ctx context.Context, c kernel.PublishableChang
 	}
 	if c.Pull != 0 {
 		// The corrected body keeps the issue referenced while the steward waits
-		// for live acceptance. One settlement's body is written once.
-		if !c.Repair {
-			step := fmt.Sprintf("body-%s-%d", c.Head[:8], c.Revision.Int64())
-			done, err := completed(step, new(json.RawMessage))
-			if err == nil && !done {
-				updatedBody := body
-				switch {
-				case crossSource:
-					updatedBody = appendPublicationFooter(updatedBody, fmt.Sprintf("Refs %s#%d", sourceRepository, issue))
-				case linearSource:
-					updatedBody = appendPublicationFooter(updatedBody, "Refs "+c.Accepted.Snapshot.URL)
-				case issue != 0:
-					updatedBody = fmt.Sprintf("%s\n\nRefs #%d", referenceIssue(updatedBody, issue), issue)
-				}
-				_, err = call(ctx, "update_pull_request_body", map[string]any{"repository": repo, "operation_id": operation(step), "pull_number": c.Pull, "body": updatedBody})
+		// One settlement's body is written once.
+		step := fmt.Sprintf("body-%s-%d", c.Head[:8], c.Revision.Int64())
+		done, err := completed(step, new(json.RawMessage))
+		if err == nil && !done {
+			updatedBody := body
+			switch {
+			case crossSource:
+				updatedBody = appendPublicationFooter(updatedBody, fmt.Sprintf("Refs %s#%d", sourceRepository, issue))
+			case linearSource:
+				updatedBody = appendPublicationFooter(updatedBody, "Refs "+c.Accepted.Snapshot.URL)
+			case issue != 0:
+				updatedBody = fmt.Sprintf("%s\n\nRefs #%d", referenceIssue(updatedBody, issue), issue)
 			}
-			if err != nil {
-				return err
-			}
+			_, err = call(ctx, "update_pull_request_body", map[string]any{"repository": repo, "operation_id": operation(step), "pull_number": c.Pull, "body": updatedBody})
+		}
+		if err != nil {
+			return err
 		}
 		// A correction changing nothing is the worker's answer: the
 		// reconciler reviews the same head once more (review.Decide).

@@ -554,7 +554,6 @@ type PublishableChange struct {
 	Base, Head string
 	Accepted   IntakeAcceptance
 	Repository RepositoryID
-	Repair     bool
 	Branch     string
 	Pull       uint64
 }
@@ -661,7 +660,6 @@ func (store *Store) PublishableChanges(ctx context.Context, at UnixMillis) ([]Pu
 			err = ErrCorruptState
 		}
 		if err == nil {
-			found[i].Repair = !bound
 			if !bound && found[i].Repository.zero() {
 				err = ErrCorruptState
 			}

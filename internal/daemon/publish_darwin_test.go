@@ -407,6 +407,35 @@ func TestFactorydPublishesACorrectionOnItsPullRequest(t *testing.T) {
 	}
 }
 
+func TestFactorydPublishesANonIntakeCorrectionBody(t *testing.T) {
+	fixture, c, source, app, checkout := publishFixture(t, 2, false)
+	ctx := context.Background()
+	root, git := filepath.Dir(source), change.TrustedGitExecutable
+	c.Accepted = kernel.IntakeAcceptance{}
+	c.Task.Result = "Initial task result"
+	if err := fixture.daemon.publishChange(ctx, c, "team/repo", source, app.call, checkout); err != nil {
+		t.Fatal(err)
+	}
+	app.writes = nil
+	tip := c.Head
+	if err := os.WriteFile(filepath.Join(root, "f00.txt"), []byte("corrected\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	supervisorGit(t, git, "-C", root, "-c", "user.name=fixture", "-c", "user.email=fixture@example.invalid", "commit", "-q", "-am", "correct")
+	c.Head, c.Pull = strings.TrimSpace(supervisorGitOutput(t, git, "-C", root, "rev-parse", "HEAD")), 31
+	c.Task.Result = "New task result"
+	if err := fixture.daemon.publishChange(ctx, c, "team/repo", source, app.call, checkout); err != nil {
+		t.Fatal(err)
+	}
+	if len(app.writes) != 2 || app.writes[0]["name"] != "publish_pack" || app.writes[1]["name"] != "update_pull_request_body" {
+		t.Fatalf("writes = %+v", app.writes)
+	}
+	body := app.writes[1]["arguments"].(map[string]any)["body"].(string)
+	if !strings.Contains(body, "New task result") || !strings.Contains(body, "at "+c.Head) || strings.Contains(body, "at "+tip) {
+		t.Fatalf("corrected no-intake body = %q", body)
+	}
+}
+
 // #1819: a correction rebased onto a main that moved under its pull request,
 // resolving a conflict, is pushed as it is, so the pull request's history has
 // that main and stays mergeable; no commit is built on the old tip without it.
