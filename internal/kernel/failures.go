@@ -23,6 +23,8 @@ type failure struct {
 	count       int64 // since
 	first, last int64
 	example     string
+	repository  string
+	url         string
 }
 
 // failureLedger reads the ledger for scope (a project's bytes, or nil for every
@@ -37,21 +39,22 @@ func failureLedger(ctx context.Context, c *sql.Conn, archived history, scope []b
 		project = scope
 	}
 	rows, err := c.QueryContext(ctx, `SELECT r.terminal_kind, COALESCE(r.terminal_code, ''), r.provider_exit_code, r.provider_exit_signal,
-			r.runner_exit_code, COALESCE(r.terminal_detail, t.blocked_reason, ''), r.terminal_at_ms, lower(hex(t.id))
+			r.runner_exit_code, COALESCE(r.terminal_detail, t.blocked_reason, ''), r.terminal_at_ms, lower(hex(t.id)), '', ''
 		FROM `+archived.table("runs")+` AS r JOIN `+archived.table("tasks")+` AS t ON t.id = r.task_id JOIN agents AS a ON a.id = r.agent_id
 		WHERE (?1 IS NULL OR r.project_id = ?1) AND r.terminal_kind IN ('failed', 'blocked') AND r.terminal_at_ms IS NOT NULL AND NOT `+specialistCarrierSQL+`
 		UNION ALL SELECT 'check', json_extract(document, '$.name'), NULL, NULL, NULL,
 			CASE WHEN json_extract(document, '$.pull_requests[0]') IS NULL THEN 'main' ELSE 'pull request #' || json_extract(document, '$.pull_requests[0]') END || ' at ' || substr(json_extract(document, '$.revision'), 1, 8) || COALESCE(' ' || (SELECT group_concat(json_extract(j.value, '$.name') || ' ' || json_extract(j.value, '$.annotations')) FROM json_each(production_records.document, '$.jobs') j), ''), observed_at_ms, ''
+			, repository, COALESCE(json_extract(document, '$.url'), '')
 		FROM production_records WHERE (?1 IS NULL OR project_id = ?1) AND kind = 'check' AND json_extract(document, '$.conclusion') IN ('failure', 'timed_out', 'startup_failure')`, project)
 	if err != nil {
 		return nil, err
 	}
 	byKey := map[string]*failure{}
 	for rows.Next() {
-		var kind, code, detail, task string
+		var kind, code, detail, task, repository, url string
 		var exit, signal, runner sql.NullInt64
 		var at int64
-		if err := rows.Scan(&kind, &code, &exit, &signal, &runner, &detail, &at, &task); err != nil {
+		if err := rows.Scan(&kind, &code, &exit, &signal, &runner, &detail, &at, &task, &repository, &url); err != nil {
 			return nil, errors.Join(err, rows.Close())
 		}
 		key := failureSignature(kind, code, exit, signal, runner, detail)
@@ -64,7 +67,7 @@ func failureLedger(ctx context.Context, c *sql.Conn, archived history, scope []b
 		if at >= since {
 			entry.count++
 			if at >= entry.last {
-				entry.last, entry.example = at, strings.TrimSpace(task+" "+oneLine(detail, 160))
+				entry.last, entry.example, entry.repository, entry.url = at, strings.TrimSpace(task+" "+oneLine(detail, 160)), repository, url
 			}
 		}
 	}
