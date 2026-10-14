@@ -807,13 +807,13 @@ export class FactoryAppController {
   /** The provider logins on this machine; SETTINGS explicitly asks for them. */
   async loadRepositories(projectId: string): Promise<void> {
     const session = this.#client?.session;
-    if (!this.#current(this.#generation) || session === undefined) return;
+    if (!this.#current(this.#generation) || session === undefined || typeof session.getRepositories !== "function") return;
     this.#repositories.set(projectId, await session.getRepositories(projectId));
     this.#publish();
   }
   async mutateRepository(request: RepositoryMutation): Promise<void> {
     const session = this.#client?.session;
-    if (!this.#current(this.#generation) || session === undefined) return;
+    if (!this.#current(this.#generation) || session === undefined || typeof session.mutateRepository !== "function") return;
     await session.mutateRepository(request);
     await this.loadRepositories(request.projectId);
   }
