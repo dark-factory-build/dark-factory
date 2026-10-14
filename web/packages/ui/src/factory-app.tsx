@@ -113,7 +113,6 @@ export function FactoryApp({ onStatusChange, browserPort }: FactoryAppProps = {}
       onLoadTaskDetail={(task, peerOffset, expectedHead) => owner.current?.taskDetail(task, peerOffset, expectedHead) ?? Promise.reject(new Error("closed"))}
       onLoadTaskHistory={(task) => owner.current?.taskHistory(task) ?? Promise.reject(new Error("closed"))}
       onLoadNode={(projectId, nodeId) => owner.current?.operationalNode(projectId, nodeId) ?? Promise.reject(new Error("closed"))}
-      onLoadTaskList={(scope, cursor) => owner.current?.taskList(scope, cursor) ?? Promise.reject(new Error("closed"))}
       onOpenTerminalForHumanRequest={(request) => { setDetail("agent"); setAgentPanel("terminal"); owner.current?.openTerminalForHumanRequest(request); }}
       onSelectHumanRequest={(request) => { setDetail("work"); void owner.current?.selectHumanRequest(request); }}
       onHumanReplyChange={(reply) => owner.current?.setHumanReply(reply)}

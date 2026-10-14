@@ -254,11 +254,6 @@ type AgentControlBackend interface {
 	TaskDetail(context.Context, [browserprotocol.ClientIDSize]byte, browserprotocol.TaskDetailGet) (browserprotocol.TaskDetail, error)
 }
 
-// TaskListBackend serves bounded completed work independently of live state.
-type TaskListBackend interface {
-	TaskList(context.Context, [browserprotocol.ClientIDSize]byte, browserprotocol.TaskListGet) (browserprotocol.TaskList, error)
-}
-
 // ContentBackend serves the optional project library through one finite,
 // lazily requested operation union. The JSON payload is decoded by the daemon
 // adapter so this transport package does not import API or kernel DTOs.

@@ -28,26 +28,6 @@ type AgentControlResult struct {
 	SuccessorTaskID string `json:"successor_task_id"`
 }
 
-// TaskListGet pages completed work separately from the active state snapshot.
-type TaskListGet struct {
-	AgentID         string   `json:"agent_id,omitempty"`
-	ProjectID       string   `json:"project_id,omitempty"`
-	BeforeUpdatedAt *Decimal `json:"before_updated_at_ms,omitempty"`
-	BeforeTaskID    string   `json:"before_task_id,omitempty"`
-}
-type TaskList struct {
-	AgentID   string     `json:"agent_id,omitempty"`
-	ProjectID string     `json:"project_id,omitempty"`
-	Head      Decimal    `json:"head"`
-	Total     Decimal    `json:"total"`
-	Tasks     []TaskItem `json:"tasks"`
-	HasMore   Bool       `json:"has_more"`
-}
-
-func EncodeTaskList(id string, value TaskList) ([]byte, error) {
-	return encodeControl(TypeTaskList, id, value)
-}
-
 type TaskHistoryGet struct {
 	TaskID string `json:"task_id"`
 }
@@ -108,10 +88,6 @@ func EncodeTaskHistory(id string, value TaskHistory) ([]byte, error) {
 	return encodeControl(TypeTaskHistory, id, value)
 }
 
-func oneTaskListScope(agentID, projectID string) bool {
-	return (agentID == "") != (projectID == "") && validateDynamicID(agentID+projectID) == nil
-}
-
 func validAgentAction(action string) bool {
 	return action == "message" || action == "interrupt" || action == "stop" || action == "replace"
 }
@@ -119,21 +95,6 @@ func validAgentControl(kind MessageType, body any) error {
 	body = indirect(body)
 	bad := func() error { return fmt.Errorf("%w: invalid %s", ErrMalformed, kind) }
 	switch v := body.(type) {
-	case TaskListGet:
-		if !oneTaskListScope(v.AgentID, v.ProjectID) || (v.BeforeUpdatedAt == nil) != (v.BeforeTaskID == "") || v.BeforeTaskID != "" && validateDynamicID(v.BeforeTaskID) != nil {
-			return bad()
-		}
-	case TaskList:
-		if !oneTaskListScope(v.AgentID, v.ProjectID) || v.Head == 0 || v.Tasks == nil || len(v.Tasks) > 10 || uint64(v.Total) < uint64(len(v.Tasks)) || bool(v.HasMore) && len(v.Tasks) != 10 {
-			return bad()
-		}
-		seen := make(map[string]bool, len(v.Tasks))
-		for _, task := range v.Tasks {
-			if validateTaskItem(task) != nil || v.AgentID != "" && task.AssignedAgentID != v.AgentID || v.ProjectID != "" && task.ProjectID != v.ProjectID || task.Status == "queued" || task.Status == "running" || seen[task.ID] {
-				return bad()
-			}
-			seen[task.ID] = true
-		}
 	case AgentControl:
 		if validateDynamicID(v.OperationID) != nil || validateDynamicID(v.TaskID) != nil || validateDynamicID(v.RunID) != nil || v.ExpectedTaskRevision == 0 || v.ExpectedRunRevision == 0 || !validAgentAction(v.Action) {
 			return bad()

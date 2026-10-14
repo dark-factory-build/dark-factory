@@ -111,8 +111,6 @@ export type TaskHistoryBody = { task_id: string; entries: TaskHistoryEntry[] };
 export type TaskDetailGetBody = { task_id: string; expected_revision: bigint; text_offset?: bigint; peer_offset?: bigint; expected_head?: bigint };
 export type TaskPeerQuestion = { id: string; source_task_id: string; target_task_id: string; question: string; answer?: string; recipient_delivery_state: string; answer_delivery_state: string; revision: bigint; created_at_ms: bigint; updated_at_ms: bigint };
 export type TaskDetailBody = { task_id: string; revision: bigint; head: bigint; instruction: string; feedback: string; outcome?: string; next_text_offset?: bigint; peer_questions: TaskPeerQuestion[]; next_peer_offset?: bigint };
-export type TaskListGetBody = { agent_id?: string; project_id?: string; before_updated_at_ms?: bigint; before_task_id?: string };
-export type TaskListBody = { agent_id?: string; project_id?: string; head: bigint; total: bigint; tasks: TaskItem[]; has_more: boolean };
 export type AgentUpdateBody = { agent_id: string; expected_revision: bigint; appearance?: SpriteAppearance; model?: string; reasoning_effort?: string; account_id?: string; paused?: boolean; archived?: boolean; idle_policy?: IdlePolicy; idle_after_seconds?: number; idle_instruction?: string; idle_wake_on?: IdleWakeOn };
 export type AgentUpdateResultBody = { agent_id: string; revision: bigint };
 export type ProjectLimitsBody = { project_id: string; expected_revision: bigint; max_run_seconds: number };
@@ -256,7 +254,6 @@ export type ServerControlFrame = { type: "ATTACHMENT_RETENTION_RESULT"; id: stri
   | { type: "AGENT_CONTROL_RESULT"; id: string; body: AgentControlResultBody }
   | { type: "TASK_HISTORY"; id: string; body: TaskHistoryBody }
   | { type: "TASK_DETAIL"; id: string; body: TaskDetailBody }
-  | { type: "TASK_LIST"; id: string; body: TaskListBody }
   | { type: "AGENT_UPDATE_RESULT"; id: string; body: AgentUpdateResultBody }
   | { type: "PROJECT_LIMITS_RESULT"; id: string; body: ProjectLimitsResultBody }
   | { type: "PROJECT_CREATE_RESULT"; id: string; body: ProjectCreateResultBody }
@@ -286,7 +283,6 @@ export type ClientControlFrame = { type: "ATTACHMENT_RETENTION"; id: string; bod
   | { type: "AGENT_CONTROL"; id: string; body: AgentControlBody }
   | { type: "TASK_HISTORY_GET"; id: string; body: TaskHistoryGetBody }
   | { type: "TASK_DETAIL_GET"; id: string; body: TaskDetailGetBody }
-  | { type: "TASK_LIST_GET"; id: string; body: TaskListGetBody }
   | { type: "AGENT_UPDATE"; id: string; body: AgentUpdateBody }
   | { type: "PROJECT_LIMITS"; id: string; body: ProjectLimitsBody }
   | { type: "PROJECT_CREATE"; id: string; body: ProjectCreateBody }
@@ -476,23 +472,6 @@ function validateBody(type: ControlType, body: unknown, wire: boolean): ControlB
     }
     case "TASK_DETAIL_GET": { requireKeys(body, ["task_id", "expected_revision"], wire, ["text_offset", "peer_offset", "expected_head"]); const result: TaskDetailGetBody = { task_id: dynamicID(body.task_id), expected_revision: decimal(body.expected_revision, wire, true) }; if (present(body, "text_offset")) result.text_offset = decimal(body.text_offset, wire); if (present(body, "peer_offset")) result.peer_offset = decimal(body.peer_offset, wire); if (present(body, "expected_head")) result.expected_head = decimal(body.expected_head, wire, true); if ((result.peer_offset ?? 0n) !== 0n && result.expected_head === undefined) malformed(); return result; }
     case "TASK_DETAIL": requireKeys(body, ["task_id", "revision", "head", "instruction", "feedback", "peer_questions"], wire, ["outcome", "next_text_offset", "next_peer_offset"]); { if (!Array.isArray(body.peer_questions) || body.peer_questions.length > 1) malformed(); const result: TaskDetailBody = { task_id: dynamicID(body.task_id), revision: decimal(body.revision, wire, true), head: decimal(body.head, wire, true), instruction: boundedText(body.instruction, 0, MAX_TASK_INSTRUCTION_BYTES), feedback: boundedText(body.feedback, 0, MAX_TASK_INSTRUCTION_BYTES), peer_questions: body.peer_questions.map((item) => taskPeerQuestion(item, wire)) }; if (present(body, "outcome")) result.outcome = boundedText(body.outcome, 0, MAX_TASK_INSTRUCTION_BYTES); if (present(body, "next_text_offset")) result.next_text_offset = decimal(body.next_text_offset, wire, true); if (present(body, "next_peer_offset")) result.next_peer_offset = decimal(body.next_peer_offset, wire, true); return result; }
-    case "TASK_LIST_GET": {
-      requireKeys(body, [], wire, ["agent_id", "project_id", "before_updated_at_ms", "before_task_id"]);
-      const result: TaskListGetBody = taskListScope(body);
-      if (present(body, "before_updated_at_ms")) result.before_updated_at_ms = decimal(body.before_updated_at_ms, wire, true);
-      if (present(body, "before_task_id")) result.before_task_id = dynamicID(body.before_task_id);
-      if ((result.before_updated_at_ms === undefined) !== (result.before_task_id === undefined)) malformed();
-      return result;
-    }
-    case "TASK_LIST": {
-      requireKeys(body, ["head", "total", "tasks", "has_more"], wire, ["agent_id", "project_id"]);
-      if (!Array.isArray(body.tasks) || body.tasks.length > 10 || typeof body.has_more !== "boolean") malformed();
-      const scope = taskListScope(body);
-      const tasks = body.tasks.map((item) => taskListItem(item, wire, scope));
-      const total = decimal(body.total, wire);
-      if (total < BigInt(tasks.length) || (body.has_more && tasks.length !== 10)) malformed();
-      return { ...scope, head: decimal(body.head, wire, true), total, tasks, has_more: body.has_more };
-    }
     case "AGENT_UPDATE": requireKeys(body, ["agent_id", "expected_revision"], wire, ["appearance", "model", "reasoning_effort", "account_id", "paused", "archived", "idle_policy", "idle_after_seconds", "idle_instruction", "idle_wake_on"]); { const result: AgentUpdateBody = { agent_id: dynamicID(body.agent_id), expected_revision: decimal(body.expected_revision, wire, true) }; if (present(body, "appearance")) result.appearance = spriteAppearance(body.appearance, wire); if (present(body, "model")) result.model = boundedText(body.model, 0, MAX_AGENT_MODEL_BYTES); if (present(body, "reasoning_effort")) result.reasoning_effort = boundedText(body.reasoning_effort, 0, MAX_AGENT_MODEL_BYTES); if (present(body, "account_id")) result.account_id = body.account_id === "" ? "" : dynamicID(body.account_id); if (present(body, "paused")) { if (typeof body.paused !== "boolean") malformed(); result.paused = body.paused; } if (present(body, "archived")) { if (typeof body.archived !== "boolean") malformed(); result.archived = body.archived; } if (present(body, "idle_policy")) result.idle_policy = idlePolicy(body.idle_policy); if (present(body, "idle_after_seconds")) result.idle_after_seconds = integer(body.idle_after_seconds, 0, MAX_IDLE_AFTER_SECONDS); if (present(body, "idle_instruction")) result.idle_instruction = boundedText(body.idle_instruction, 0, MAX_TASK_INSTRUCTION_BYTES); if (present(body, "idle_wake_on")) result.idle_wake_on = wakeOn(body.idle_wake_on); return result; }
     case "AGENT_UPDATE_RESULT": requireKeys(body, ["agent_id", "revision"], wire); return { agent_id: dynamicID(body.agent_id), revision: decimal(body.revision, wire, true) };
     case "PROJECT_LIMITS": requireKeys(body, ["project_id", "expected_revision", "max_run_seconds"], wire); return { project_id: dynamicID(body.project_id), expected_revision: decimal(body.expected_revision, wire, true), max_run_seconds: integer(body.max_run_seconds, 0, 86400) };
@@ -922,18 +901,6 @@ function taskItem(value: unknown, wire: boolean): TaskItem {
 function sharedTaskItem(value: unknown, wire: boolean): TaskItem {
   if (!isObject(value) || value.assigned_agent_id !== "" || value.status !== "queued") malformed();
   return { ...taskItem({ ...value, assigned_agent_id: "f".repeat(32) }, wire), assigned_agent_id: "" };
-}
-/** Exactly one of agent_id or project_id scopes a task list. */
-function taskListScope(body: Record<string, unknown>): { agent_id: string } | { project_id: string } {
-  if (present(body, "agent_id") === present(body, "project_id")) malformed();
-  return present(body, "agent_id") ? { agent_id: dynamicID(body.agent_id) } : { project_id: dynamicID(body.project_id) };
-}
-function taskListItem(value: unknown, wire: boolean, scope: { agent_id: string } | { project_id: string }): TaskItem {
-  if (!isObject(value)) malformed();
-  requireKeys(value, ["id", "project_id", "assigned_agent_id", "title", "status", "priority", "revision", "updated_at_ms"], wire, ["blocked_reason", "issue_number", "mission_id"]);
-  const task = taskItem(value, wire);
-  if ("agent_id" in scope && task.assigned_agent_id !== scope.agent_id || "project_id" in scope && task.project_id !== scope.project_id || task.updated_at_ms === undefined || task.status === "queued" || task.status === "running") malformed();
-  return task;
 }
 function agentControlAction(value: unknown): AgentControlAction {
   if (value !== "message" && value !== "interrupt" && value !== "stop" && value !== "replace") malformed();

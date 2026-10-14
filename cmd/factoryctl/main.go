@@ -143,7 +143,7 @@ const (
   factoryctl task read --task ID --revision REVISION [--offset N]
   factoryctl production --project ID [--offset N --limit N]
   factoryctl task history --task ID
-  factoryctl task list --agent ID [--cursor UPDATED_AT_MS:TASK_ID]
+  factoryctl task list (--agent ID | --project ID) [--cursor UPDATED_AT_MS:TASK_ID]
   factoryctl dispatch on|off [--revision REVISION]
   factoryctl capacity --workers N --revision REVISION
     Worker slots only; the separate overseer lane remains available.
@@ -1456,8 +1456,10 @@ func parseOperator(args []string) (attemptCommand, bool, bool) {
 		return attemptCommand{kind: commandTaskHistory, id: values["--task"]}, false, ok && validHumanRequestKey(values["--task"])
 	}
 	if len(args) >= 2 && args[0] == "task" && args[1] == "list" {
-		values, ok := pairedFlagValues(args[2:], false, "--agent", "--cursor")
-		return attemptCommand{kind: commandTaskList, agent: values["--agent"], cursor: values["--cursor"]}, false, ok && validHumanRequestKey(values["--agent"]) && (values["--cursor"] == "" || validOperatorText(values["--cursor"], 1, 256))
+		values, ok := pairedFlagValues(args[2:], false, "--agent", "--project", "--cursor")
+		oneScope := (values["--agent"] == "") != (values["--project"] == "")
+		validScope := values["--agent"] != "" && validHumanRequestKey(values["--agent"]) || values["--project"] != "" && validHumanRequestKey(values["--project"])
+		return attemptCommand{kind: commandTaskList, agent: values["--agent"], project: values["--project"], cursor: values["--cursor"]}, false, ok && oneScope && validScope && (values["--cursor"] == "" || validOperatorText(values["--cursor"], 1, 256))
 	}
 	if len(args) >= 2 && args[0] == "intake" {
 		input := api.IntakeInput{Action: strings.ReplaceAll(args[1], "-", "_")}
@@ -2596,9 +2598,10 @@ func runOperator(ctx context.Context, command attemptCommand, getenv func(string
 	case commandTaskList:
 		input := struct {
 			AgentID           string `json:"agent_id"`
+			ProjectID         string `json:"project_id"`
 			BeforeUpdatedAtMS *int64 `json:"before_updated_at_ms,omitempty"`
 			BeforeTaskID      string `json:"before_task_id,omitempty"`
-		}{AgentID: command.agent}
+		}{AgentID: command.agent, ProjectID: command.project}
 		if command.cursor != "" {
 			parts := strings.Split(command.cursor, ":")
 			if len(parts) != 2 {

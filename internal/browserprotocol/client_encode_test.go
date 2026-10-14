@@ -16,9 +16,6 @@ func EncodeHumanRequestDetailGet(id string, value HumanRequestDetailGet) ([]byte
 	return encodeControl(TypeHumanRequestDetailGet, id, value)
 }
 func DecodeServerControl(data []byte) (ControlFrame, error) { return decodeControl(data, serverRole) }
-func EncodeTaskListGet(id string, value TaskListGet) ([]byte, error) {
-	return encodeControl(TypeTaskListGet, id, value)
-}
 func EncodeAgentControl(id string, value AgentControl) ([]byte, error) {
 	return encodeControl(TypeAgentControl, id, value)
 }

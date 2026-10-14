@@ -257,32 +257,6 @@ func TestBrowserTaskDetailRejectsEditBetweenBriefAndPeerReads(t *testing.T) {
 	}
 }
 
-func TestBrowserTaskListRequiresPrivateCapabilityAndPagesCompletedWork(t *testing.T) {
-	for _, private := range []bool{false, true} {
-		caps := kernel.BrowserCapabilityObserve
-		if private {
-			caps |= kernel.BrowserCapabilityPrivateHumanRequestDetail
-		}
-		fixture := newAdapterFixture(t, caps)
-		fixture.pair(t)
-		run := adapterRunningRun(t, fixture.store, 189)
-		result, err := fixture.backend.TaskList(context.Background(), rawBrowserClient(fixture.client.ID), browserprotocol.TaskListGet{AgentID: run.AgentID.String()})
-		if !private {
-			if !errors.Is(mapBrowserError(err), browser.ErrUnauthorized) {
-				t.Fatalf("unprivileged list = %+v %v", result, err)
-			}
-		} else if err != nil || result.AgentID != run.AgentID.String() || len(result.Tasks) != 0 || result.Total != 0 {
-			t.Fatalf("active task leaked to completed list = %+v %v", result, err)
-		}
-		if private {
-			byProject, err := fixture.backend.TaskList(context.Background(), rawBrowserClient(fixture.client.ID), browserprotocol.TaskListGet{ProjectID: run.ProjectID.String()})
-			if err != nil || byProject.ProjectID != run.ProjectID.String() || byProject.AgentID != "" || len(byProject.Tasks) != 0 {
-				t.Fatalf("project list = %+v %v", byProject, err)
-			}
-		}
-	}
-}
-
 // Activity is invalidated by event head; the control revision remains usable
 // across admission and settlement, while each snapshot has the current count.
 func TestBrowserActivityRefreshDoesNotConsumeFactoryControlRevision(t *testing.T) {

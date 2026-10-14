@@ -29,7 +29,7 @@ export function specialistStatus(agent: AgentItem, state: StateView) {
     : status === "working" ? ["working", aim === "" ? "reviewing" : `reviewing: ${aim.length <= 48 ? aim : `${aim.slice(0, 47).trimEnd()}…`}`]
     : status === "needs-you" ? ["needs-you", "needs you"]
     : agent.paused ? ["paused", "paused: no new reviews"]
-    : failed ? ["failed", "failed: its latest review failed; open it under Recent work"]
+    : failed ? ["failed", "failed: its latest review failed; inspect the task details"]
     : info?.waiting && WAITING[info.waiting] ? ["waiting", `waiting: ${WAITING[info.waiting]}`]
     : ["ready", "ready: between reviews"];
   const wake = (agent.idle_wake_on ?? "") === "" ? "" : ` or sooner on ${(agent.idle_wake_on ?? "").replace(",", " and ")}`;

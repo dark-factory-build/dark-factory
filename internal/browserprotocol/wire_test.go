@@ -123,10 +123,6 @@ func encodeDecoded(frame ControlFrame) ([]byte, error) {
 		return EncodeTaskHistoryGet(frame.ID, value)
 	case TaskHistory:
 		return EncodeTaskHistory(frame.ID, value)
-	case TaskListGet:
-		return EncodeTaskListGet(frame.ID, value)
-	case TaskList:
-		return EncodeTaskList(frame.ID, value)
 	case TaskDetailGet:
 		return EncodeTaskDetailGet(frame.ID, value)
 	case TaskDetail:
@@ -637,7 +633,7 @@ func TestManifestMatchesImplementedRegistry(t *testing.T) {
 	}
 	// The manifest carries a stable name, not a generation: the contract is
 	// unversioned by owner decision on 4 September 2026.
-	if manifest.Name != "dark-factory/browser" || len(manifest.Control) != 89 || len(manifest.Terminal.Opcodes) != 2 {
+	if manifest.Name != "dark-factory/browser" || len(manifest.Control) != 87 || len(manifest.Terminal.Opcodes) != 2 {
 		t.Fatalf("manifest registry incomplete: %+v", manifest)
 	}
 	capabilityNames := []string{"observe", "private_human_request_detail", "human_actions", "terminal_input", "administration"}
