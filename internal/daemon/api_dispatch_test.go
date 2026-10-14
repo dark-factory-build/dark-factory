@@ -2014,11 +2014,11 @@ drained:
 	if err != nil {
 		t.Fatal(err)
 	}
-	proof, err := kernel.ResultProofDigestFromBytes(bytes.Repeat([]byte{250}, 32))
+	proof, err := kernel.ResultProofDigestFromBytes(bytes.Repeat([]byte{251}, 32))
 	if err != nil {
 		t.Fatal(err)
 	}
-	admissionKeys = kernel.AdmissionKeys{ResultProofDigest: proof, RunID: mustRunID(t, testID(244)), TerminalSessionID: mustTerminalSessionID(t, testID(254)), AttemptDigest: digest, CandidateChangeID: candidate, RuntimeRoot: filepath.Join(filepath.Dir(fixture.socket), "runtime-240"), Resources: kernel.AdmissionResourceIDs{RuntimeRoot: mustResourceID(t, testID(245)), RunnerProcess: mustResourceID(t, testID(246)), ProviderProcess: mustResourceID(t, testID(247)), ProviderGroup: mustResourceID(t, testID(248))}}
+	admissionKeys = kernel.AdmissionKeys{ResultProofDigest: proof, RunID: mustRunID(t, testID(241)), TerminalSessionID: mustTerminalSessionID(t, testID(242)), AttemptDigest: digest, CandidateChangeID: candidate, RuntimeRoot: filepath.Join(filepath.Dir(fixture.socket), "runtime-240"), Resources: kernel.AdmissionResourceIDs{RuntimeRoot: mustResourceID(t, testID(245)), RunnerProcess: mustResourceID(t, testID(246)), ProviderProcess: mustResourceID(t, testID(247)), ProviderGroup: mustResourceID(t, testID(248))}}
 	close(keysReady)
 	done = fixture.serve(t)
 	content, err := operator.ContentCreate(context.Background(), api.ContentInput{ID: testID(234), ProjectID: active.run.ProjectID.String(), Kind: "observation", Title: "accepted proposal", Body: "body", SourceReferences: `{"status":"tentative","record_type":"proposal"}`})
