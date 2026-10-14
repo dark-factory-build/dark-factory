@@ -435,6 +435,16 @@ test('two principals: callback, pagination, refresh, replay, grants and revocati
     unavailable = '';
     unavailableStatus = 503;
 
+    // Factoryd publications without an intake issue use a source-free PR:
+    // issue_number 0 is valid only with no source and no automatic closure.
+    recoveryPostMode = 'success';
+    const sourceFree = { repository: 'team/shared', operation_id: '6d1f0f8e-7f1f-11f0-952e-acde48001130', issue_number: 0,
+      head: 'topic-source-free', head_sha: 'b'.repeat(40), base: 'main', base_sha: 'a'.repeat(40), title: 'source-free publication', body: 'exact work', draft: false, close_on_merge: false };
+    const sourceFreeReply = (await (await call(alice, 'create_pull_request', sourceFree)).json()).result;
+    assert.equal(sourceFreeReply.isError, false, JSON.stringify(sourceFreeReply));
+    assert.equal(sourceFreeReply.structuredContent.number, 105);
+    assert.equal(recoveryPostCount, 5);
+
     const readArgs = { repository: 'team/shared', branch: 'main' };
     assert.equal((await (await call(alice, 'observe_ref', readArgs)).json()).result.structuredContent.head_sha, 'a'.repeat(40));
     wrongGrant = true;

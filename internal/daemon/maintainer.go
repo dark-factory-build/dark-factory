@@ -41,7 +41,6 @@ var overseerWriteTools = map[string]bool{
 	"publish_commit":             true,
 	"publish_pack":               true,
 	"submit_pull_request_review": true,
-	"update_issue":               true,
 	"update_pull_request_body":   true,
 }
 
@@ -113,21 +112,6 @@ func (daemon *Daemon) attemptMaintainer(ctx context.Context, call api.Call) api.
 		// enqueues every published head itself, and alone pushes exact
 		// packs, whose review-authority paths it checks before sending.
 		request.Params = encoded
-		// A published Change carries its own worker task's intake source; the
-		// overseer publishes it from a wake task that has none.
-		sourceTask := authority.TaskID
-		if params.Name == "publish_commit" || params.Name == "create_pull_request" {
-			var branch string
-			_ = json.Unmarshal(params.Arguments["branch"], &branch)
-			_ = json.Unmarshal(params.Arguments["head"], &branch)
-			if task, closed, err := daemon.store.ChangeBranchClosedToOverseer(ctx, authority.ProjectID, branch); err != nil {
-				return failure("unavailable")
-			} else if closed {
-				return failure("denied") // a sent-back Change, or intake work factoryd publishes
-			} else if task != (kernel.TaskID{}) {
-				sourceTask = task
-			}
-		}
 		var repository, source string
 		if json.Unmarshal(params.Arguments["repository"], &repository) != nil || repository == "" {
 			return failure("invalid")
@@ -141,7 +125,7 @@ func (daemon *Daemon) attemptMaintainer(ctx context.Context, call api.Call) api.
 		if err != nil {
 			return failure("unavailable")
 		}
-		accepted, found, err := daemon.store.IntakeAcceptanceForTask(ctx, sourceTask)
+		accepted, found, err := daemon.store.IntakeAcceptanceForTask(ctx, authority.TaskID)
 		if err != nil {
 			return failure("unavailable")
 		}
@@ -174,30 +158,6 @@ func (daemon *Daemon) attemptMaintainer(ctx context.Context, call api.Call) api.
 					return failure("invalid")
 				}
 				observedAcceptance = &accepted
-			}
-			if params.Name == "create_pull_request" && accepted.Snapshot.LinearTeamID != "" {
-				// Source provenance comes from the accepted receipt, never the model.
-				params.Arguments["external_source_url"], _ = json.Marshal(accepted.Snapshot.URL)
-				params.Arguments["issue_number"] = json.RawMessage("0")
-				params.Arguments["close_on_merge"] = json.RawMessage("false")
-				delete(params.Arguments, "source_repository")
-				source = ""
-				request.Params, err = encodeMaintainerToolCall(params)
-				if err != nil {
-					return failure("invalid")
-				}
-			}
-			if params.Name == "create_pull_request" && accepted.Snapshot.LinearTeamID == "" {
-				var number uint64
-				if json.Unmarshal(params.Arguments["issue_number"], &number) != nil || number != accepted.Snapshot.IssueNumber {
-					return failure("denied")
-				}
-				if source == "" {
-					source = repository
-				}
-				if !strings.EqualFold(source, accepted.SourceRepository) {
-					return failure("denied")
-				}
 			}
 			// Accepted work keeps its exact destination, including after a default
 			// change or disabling the binding for new work.

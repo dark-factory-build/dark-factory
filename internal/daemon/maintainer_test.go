@@ -18,7 +18,7 @@ func TestFilterOverseerToolsRemovesEveryWriteTool(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if strings.Contains(string(response), "publish_commit") || strings.Contains(string(response), "create_pull_request") || strings.Contains(string(response), "update_issue") || !strings.Contains(string(response), "observe_ref") {
+	if strings.Contains(string(response), "publish_commit") || strings.Contains(string(response), "create_pull_request") || !strings.Contains(string(response), "update_issue") || !strings.Contains(string(response), "observe_ref") {
 		t.Fatalf("filtered tools = %s", response)
 	}
 }

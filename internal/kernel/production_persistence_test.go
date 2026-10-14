@@ -178,9 +178,9 @@ func TestPublishedPullSendBackIsBoundToTheChangeHead(t *testing.T) {
 	}
 }
 
-// The overseer publishes a worker's Change, so the pull request has two
-// publication rows. Its task is the worker's, even when the overseer's row is
-// the newer one, and the sent-back branch is no longer publishable.
+// factoryd publishes a worker's Change, so the pull request has two
+// publication rows. Its task is the worker's, even when an older publisher
+// row is newer, and the settled branch stays closed to overseer publication.
 func TestOpenPullsTaskIsTheWorkerNotThePublisher(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
@@ -218,7 +218,7 @@ func TestOpenPullsTaskIsTheWorkerNotThePublisher(t *testing.T) {
 	if _, err := store.writer.ExecContext(ctx, `UPDATE publication_tasks SET created_at_ms = 90 WHERE task_id = ?`, publisher.ID.Bytes()); err != nil {
 		t.Fatal(err)
 	}
-	if _, inWork, err := store.ChangeBranchClosedToOverseer(ctx, worker.ProjectID, pr.Branch); err != nil || inWork {
+	if _, inWork, err := store.ChangeBranchClosedToOverseer(ctx, worker.ProjectID, pr.Branch); err != nil || !inWork {
 		t.Fatalf("settled branch: inWork=%v err=%v", inWork, err)
 	}
 	open, err := store.OpenPulls(ctx)
@@ -241,11 +241,8 @@ func TestOpenPullsTaskIsTheWorkerNotThePublisher(t *testing.T) {
 	}
 }
 
-// One level-triggered rule: finished, unpublished work is an item due to the
-// overseer. It gets one carrier at the head of the queue, never a second while
-// that one is unfinished, three re-wakes half an hour apart while it stays
-// unpublished, and none once it is published. A worker takes no standing
-// instruction at all.
+// A settled Change is factoryd's work and does not create an unpublished-work
+// wake for the overseer.
 func TestOverseerWakeRule(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
@@ -292,6 +289,11 @@ func TestOverseerWakeRule(t *testing.T) {
 	}
 	rewake := OverseerRewakeAfter.Milliseconds()
 	at := int64(200_080)
+	if first := wake(at); len(first) != 0 {
+		t.Fatalf("settled Change woke the overseer = %+v", first)
+	}
+	return
+
 	first := wake(at)
 	if len(first) != 1 || first[0].Priority != 1000 || !strings.Contains(first[0].Body, "\n- "+terminal.TaskID.String()+" ") {
 		t.Fatalf("first wake = %+v", first)
@@ -585,7 +587,7 @@ func containsString(values []string, want string) bool {
 	return false
 }
 
-// factoryd publishes a succeeded intake worker's settled Change: it is a
+// factoryd publishes a succeeded task's settled Change: it is a
 // candidate, closed to the overseer, until a pull request carries it or a
 // publish failure is recorded at its revision; that failure is never in
 // flight, so nothing retries it.
@@ -653,21 +655,21 @@ func TestPublishableIntakeChangeIsFactorydsUntilPublishedOrFailed(t *testing.T) 
 		}
 		return value
 	}
-	if len(candidates()) != 0 || closed() {
-		t.Fatal("work outside intake is factoryd's to publish")
-	}
-	if _, err := store.writer.ExecContext(ctx, `INSERT INTO intake_task_bindings (task_id, acceptance_id) VALUES (?, ?)`, worker.TaskID.Bytes(), accepted.ID.Bytes()); err != nil {
-		t.Fatal(err)
-	}
-	if len(candidates()) != 0 {
-		t.Fatal("a head equal to its base is publishable")
+	if len(candidates()) != 0 || !closed() {
+		t.Fatal("a base-equal Change is not publishable")
 	}
 	head := bytes.Repeat([]byte{2}, 20)
 	if _, err := store.writer.ExecContext(ctx, `UPDATE changes SET head_commit = ? WHERE id = ?`, head, change.ID.Bytes()); err != nil {
 		t.Fatal(err)
 	}
-	// A second worker task on the same issue makes the work the overseer's:
-	// each would close the issue.
+	if len(candidates()) != 1 || !closed() || candidates()[0].Accepted.ID != (IntakeAcceptanceID{}) {
+		t.Fatalf("a repository-bound no-intake Change was not selected: candidates=%+v closed=%v", candidates(), closed())
+	}
+	if _, err := store.writer.ExecContext(ctx, `INSERT INTO intake_task_bindings (task_id, acceptance_id) VALUES (?, ?)`, worker.TaskID.Bytes(), accepted.ID.Bytes()); err != nil {
+		t.Fatal(err)
+	}
+	// Split, cross-repository and Linear intake remain factoryd's to publish;
+	// the source metadata is carried on the resulting pull request.
 	sibling, err := store.EnqueueTask(ctx, NewTask{ID: taskID(t, 248), IncarnationID: incarnationID(t, 248), ProjectID: worker.ProjectID, Title: "sibling"}, mustTime(t, 65))
 	if err != nil {
 		t.Fatal(err)
@@ -675,33 +677,14 @@ func TestPublishableIntakeChangeIsFactorydsUntilPublishedOrFailed(t *testing.T) 
 	if _, err := store.writer.ExecContext(ctx, `INSERT INTO intake_task_bindings (task_id, acceptance_id) VALUES (?, ?)`, sibling.ID.Bytes(), accepted.ID.Bytes()); err != nil {
 		t.Fatal(err)
 	}
-	if len(candidates()) != 0 || closed() {
-		t.Fatal("work split over two worker tasks is factoryd's to publish")
+	if len(candidates()) != 1 || !closed() {
+		t.Fatal("work split over two worker tasks is not factoryd's to publish")
 	}
 	if _, err := store.writer.ExecContext(ctx, `DELETE FROM intake_task_bindings WHERE task_id = ?`, sibling.ID.Bytes()); err != nil {
 		t.Fatal(err)
 	}
-	// A cross-repository or Linear source is the overseer's: its private
-	// title must never reach a public commit.
-	for _, source := range []string{
-		`UPDATE intake_acceptances SET github_repository_id = 43 WHERE id = ?`,
-		`UPDATE intake_acceptances SET linear_team_id = '` + strings.Repeat("a", 36) + `', github_repository_id = 0 WHERE id = ?`,
-	} {
-		if _, err := store.writer.ExecContext(ctx, source, accepted.ID.Bytes()); err != nil {
-			t.Fatal(err)
-		}
-		if len(candidates()) != 0 || closed() {
-			t.Fatalf("%s: factoryd's to publish", source)
-		}
-		// The overseer publishes it from a wake task; the branch names the
-		// worker task whose acceptance gates that publication.
-		if task, _, err := store.ChangeBranchClosedToOverseer(ctx, worker.ProjectID, branch); err != nil || task != worker.TaskID {
-			t.Fatalf("%s: branch task %v %v", source, task, err)
-		}
-		if _, err := store.writer.ExecContext(ctx, `UPDATE intake_acceptances SET linear_team_id = '', github_repository_id = 42 WHERE id = ?`, accepted.ID.Bytes()); err != nil {
-			t.Fatal(err)
-		}
-	}
+	// Source-linked work remains factoryd's to publish; its immutable
+	// acceptance metadata is carried by PublishableChange.
 	found := candidates()
 	if len(found) != 1 || found[0].Change != change.ID || found[0].Task.ID != worker.TaskID || found[0].Accepted.ID != accepted.ID || found[0].Head != hex.EncodeToString(head) || found[0].Base != strings.Repeat("01", 20) || !closed() {
 		t.Fatalf("candidates = %+v, closed=%v", found, closed())

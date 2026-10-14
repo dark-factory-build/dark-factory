@@ -263,6 +263,9 @@ func (daemon *Daemon) publishPull(ctx context.Context, c kernel.PublishableChang
 		}
 	}
 	issue := c.Accepted.Snapshot.IssueNumber
+	if c.Accepted.Snapshot.LinearTeamID != "" {
+		issue = 0
+	}
 	issueTitle := c.Accepted.Snapshot.Title
 	issueBody := c.Accepted.Snapshot.Body
 	if sourceRepository := c.Accepted.SourceRepository; sourceRepository != "" {
@@ -340,6 +343,12 @@ func (daemon *Daemon) publishPull(ctx context.Context, c kernel.PublishableChang
 	if err == nil && !done {
 		arguments := map[string]any{"repository": repo, "operation_id": operation(step), "head": branch, "head_sha": c.Head, "base": "main", "base_sha": base, "title": publicationMessage(c), "body": body, "draft": false,
 			"issue_number": issue, "close_on_merge": false} // live acceptance closes the source issue
+		if issue != 0 && c.Accepted.SourceRepository != "" && !strings.EqualFold(c.Accepted.SourceRepository, repo) {
+			arguments["source_repository"] = c.Accepted.SourceRepository
+		}
+		if c.Accepted.Snapshot.LinearTeamID != "" {
+			arguments["external_source_url"] = c.Accepted.Snapshot.URL
+		}
 		var response json.RawMessage
 		if response, err = call(ctx, "create_pull_request", arguments); err == nil {
 			err = json.Unmarshal(response, &pull)
