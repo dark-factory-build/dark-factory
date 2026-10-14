@@ -377,11 +377,11 @@ func (store *Store) RecordDelivery(ctx context.Context, project ProjectID, repos
 	return tx.Commit(ctx)
 }
 
-// UnreleasedIntakePulls lists, newest first and at most a release's worth,
-// repository's published intake pull requests, merged or not yet seen to be,
-// that no verified release names: the ones a release may still make live
-// (#1906). Its history decides which it ships, so a merge refresh has yet to
-// observe still counts; one closed unmerged never ships.
+// UnreleasedIntakePulls lists, newest first and all of them, repository's
+// published intake pull requests, merged or not yet seen to be, that no
+// verified release names: the ones a release may still make live (#1906). Its
+// history decides which it ships, so a merge refresh has yet to observe still
+// counts; one closed unmerged never ships.
 func (store *Store) UnreleasedIntakePulls(ctx context.Context, project ProjectID, repository string) ([]uint64, error) {
 	tx, err := store.beginRead(ctx)
 	if err != nil {
@@ -395,7 +395,7 @@ func (store *Store) UnreleasedIntakePulls(ctx context.Context, project ProjectID
 		  AND NOT EXISTS (SELECT 1 FROM production_records AS d, json_each(d.document, '$.pull_requests') AS n
 		      WHERE d.project_id = ?1 AND d.repository = ?2 AND d.kind = 'delivery' AND d.identity LIKE 'release:%'
 		        AND json_extract(d.document, '$.state') = 'verified' AND CAST(n.value AS INTEGER) = p.pull_number)
-		ORDER BY p.pull_number DESC LIMIT 256`, project.Bytes(), strings.ToLower(repository))
+		ORDER BY p.pull_number DESC`, project.Bytes(), strings.ToLower(repository))
 	if err != nil {
 		return nil, err
 	}

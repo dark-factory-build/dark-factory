@@ -966,6 +966,18 @@ func TestMergedIntakeSentBackPublishesItsCorrectionAnew(t *testing.T) {
 		t.Fatal(err)
 	}
 	unreleased()
+	// However many newer ones are open, none hides an older one: a release
+	// bounds what it names only after its history decides.
+	var open []uint64
+	for number := uint64(309); number >= 10; number-- {
+		newer := pr
+		newer.Number, newer.URL, newer.State = number, fmt.Sprintf("https://github.com/example/factory/pull/%d", number), "open"
+		if err := store.RecordPublication(ctx, worker.ProjectID, worker.TaskID, "example/factory", newer, mustTime(t, 102)); err != nil {
+			t.Fatal(err)
+		}
+		open = append(open, number)
+	}
+	unreleased(open...)
 }
 
 // A pull request a person opened has no factory Change. Its repair task's

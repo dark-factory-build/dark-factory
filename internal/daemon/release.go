@@ -492,7 +492,8 @@ func releasedPulls(ctx context.Context, gitDir, sha string, outstanding []uint64
 	}
 	pulls := []uint64{}
 	for _, number := range outstanding {
-		if shipped[number] {
+		// A delivery names at most 256; the rest stay outstanding for the next.
+		if shipped[number] && len(pulls) < 256 {
 			pulls = append(pulls, number)
 		}
 	}

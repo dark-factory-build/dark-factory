@@ -704,6 +704,14 @@ func TestReleasedPullsNameTheOutstandingMergesTheCommitShips(t *testing.T) {
 	if pulls := releasedPulls(context.Background(), gitDir, git("rev-parse", "HEAD"), []uint64{1906, 99, 12, 7}); !slices.Equal(pulls, []uint64{1906, 7}) {
 		t.Fatalf("released pulls = %v", pulls)
 	}
+	// Hundreds of newer unshipped ones do not crowd out a shipped one.
+	var outstanding []uint64
+	for number := uint64(2300); number > 2000; number-- {
+		outstanding = append(outstanding, number)
+	}
+	if pulls := releasedPulls(context.Background(), gitDir, git("rev-parse", "HEAD"), append(outstanding, 7)); !slices.Equal(pulls, []uint64{7}) {
+		t.Fatalf("shipped pull behind 300 unshipped = %v", pulls)
+	}
 	if pulls := releasedPulls(context.Background(), gitDir, strings.Repeat("0", 40), []uint64{7}); len(pulls) != 0 || pulls == nil {
 		t.Fatalf("an unreadable history shipped %v", pulls)
 	}
