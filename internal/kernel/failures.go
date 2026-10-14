@@ -26,18 +26,19 @@ type failure struct {
 }
 
 // failureLedger reads the ledger for scope (a project's bytes, or nil for every
-// project) since since (Unix ms), newest last-seen first. It records nothing.
+// project) since since (Unix ms), newest last-seen first, from runs across
+// archived (nil reads hot runs only). It records nothing.
 // ponytail: it scans every failed run and failed check to find first
 // occurrences (about 2k rows on 12 Oct 2026); keep a first-seen table if that
 // grows past ~100k.
-func failureLedger(ctx context.Context, c *sql.Conn, scope []byte, since int64) ([]failure, error) {
+func failureLedger(ctx context.Context, c *sql.Conn, archived history, scope []byte, since int64) ([]failure, error) {
 	var project any
 	if scope != nil {
 		project = scope
 	}
 	rows, err := c.QueryContext(ctx, `SELECT r.terminal_kind, COALESCE(r.terminal_code, ''), r.provider_exit_code, r.provider_exit_signal,
 			r.runner_exit_code, COALESCE(r.terminal_detail, t.blocked_reason, ''), r.terminal_at_ms, lower(hex(t.id))
-		FROM runs AS r JOIN tasks AS t ON t.id = r.task_id JOIN agents AS a ON a.id = r.agent_id
+		FROM `+archived.table("runs")+` AS r JOIN `+archived.table("tasks")+` AS t ON t.id = r.task_id JOIN agents AS a ON a.id = r.agent_id
 		WHERE (?1 IS NULL OR r.project_id = ?1) AND r.terminal_kind IN ('failed', 'blocked') AND r.terminal_at_ms IS NOT NULL AND NOT `+specialistCarrierSQL+`
 		UNION ALL SELECT 'check', json_extract(document, '$.name'), NULL, NULL, NULL,
 			CASE WHEN json_extract(document, '$.pull_requests[0]') IS NULL THEN 'main' ELSE 'pull request #' || json_extract(document, '$.pull_requests[0]') END || ' at ' || substr(json_extract(document, '$.revision'), 1, 8) || COALESCE(' ' || (SELECT group_concat(json_extract(j.value, '$.name') || ' ' || json_extract(j.value, '$.annotations')) FROM json_each(production_records.document, '$.jobs') j), ''), observed_at_ms, ''

@@ -422,6 +422,7 @@ func (store *Store) PendingIntakeAcceptancesAfter(ctx context.Context, sourceID 
 		LEFT JOIN tasks task ON task.id = accepted.task_id
 		WHERE accepted.github_repository_id = ? AND accepted.linear_team_id = ? AND accepted.project_id = ? AND accepted.repository_id = ?
 			AND accepted.withdrawn_at_ms IS NULL AND task.id IS NULL AND accepted.id > ?
+			AND accepted.task_id NOT IN (SELECT task_id FROM archived_tasks)
 			AND NOT EXISTS (
 				SELECT 1 FROM intake_acceptances newer
 				WHERE newer.github_repository_id = accepted.github_repository_id AND newer.linear_team_id = accepted.linear_team_id
@@ -656,6 +657,14 @@ func intakeImportReplay(ctx context.Context, connection *sql.Conn, id IntakeAcce
 	}
 	var permitted int
 	if err := connection.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM intake_sources WHERE github_repository_id = ? AND linear_team_id = ? AND project_id = ? AND target_repository_id = ? AND enabled = 1)`, int64(accepted.Snapshot.GitHubRepositoryID), accepted.Snapshot.LinearTeamID, accepted.ProjectID.Bytes(), accepted.RepositoryID.Bytes()).Scan(&permitted); err != nil || permitted == 0 {
+		if err == nil {
+			err = ErrConflict
+		}
+		return accepted, Task{}, false, err
+	}
+	// An archived task is history: its issue is never admitted again.
+	var archived bool
+	if err := connection.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM archived_tasks WHERE task_id = ?)`, accepted.TaskID.Bytes()).Scan(&archived); err != nil || archived {
 		if err == nil {
 			err = ErrConflict
 		}

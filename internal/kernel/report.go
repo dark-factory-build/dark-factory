@@ -42,7 +42,7 @@ func (store *Store) Report(ctx context.Context, project *ProjectID, since, bucke
 	rows, err := read.connection.QueryContext(ctx, `WITH spend AS (
 		SELECT r.admitted_at_ms / ?3 * ?3 AS bucket, 1 AS runs, r.terminal_kind = 'failed' AS failed,
 			CASE WHEN r.role = 'orchestrator' THEN 'overseer' WHEN `+specialistCarrierSQL+` THEN 'specialist' ELSE 'worker' END AS who, COALESCE(k.tokens, 0) AS tokens
-		FROM runs AS r JOIN tasks AS t ON t.id = r.task_id JOIN agents AS a ON a.id = r.agent_id LEFT JOIN run_tokens AS k ON k.run_id = r.id
+		FROM `+archived.table("runs")+` AS r JOIN `+archived.table("tasks")+` AS t ON t.id = r.task_id JOIN agents AS a ON a.id = r.agent_id LEFT JOIN `+archived.table("run_tokens")+` AS k ON k.run_id = r.id
 		WHERE (?1 IS NULL OR r.project_id = ?1) AND r.admitted_at_ms >= ?2),
 	merged AS (
 		SELECT COALESCE(unixepoch(json_extract(document, '$.merged_at')) * 1000, observed_at_ms) / ?3 * ?3 AS bucket, count(*) AS merges
@@ -78,10 +78,10 @@ func (store *Store) Report(ctx context.Context, project *ProjectID, since, bucke
 	}
 	for _, top := range []struct{ label, query string }{
 		{"task", `SELECT lower(hex(t.id)) || ' ' || t.status || ' "' || replace(substr(t.title, 1, 60), char(10), ' ') || '"', SUM(k.tokens)
-			FROM runs AS r JOIN run_tokens AS k ON k.run_id = r.id JOIN tasks AS t ON t.id = r.task_id
+			FROM ` + archived.table("runs") + ` AS r JOIN ` + archived.table("run_tokens") + ` AS k ON k.run_id = r.id JOIN ` + archived.table("tasks") + ` AS t ON t.id = r.task_id
 			WHERE (?1 IS NULL OR r.project_id = ?1) AND r.admitted_at_ms >= ?2 GROUP BY t.id ORDER BY 2 DESC LIMIT 5`},
 		{"pull", `SELECT p.repository || '#' || p.pull_number, SUM(k.tokens)
-			FROM publication_tasks AS p JOIN runs AS r ON r.task_id = p.task_id JOIN run_tokens AS k ON k.run_id = r.id
+			FROM ` + archived.table("publication_tasks") + ` AS p JOIN ` + archived.table("runs") + ` AS r ON r.task_id = p.task_id JOIN ` + archived.table("run_tokens") + ` AS k ON k.run_id = r.id
 			WHERE (?1 IS NULL OR p.project_id = ?1) AND r.admitted_at_ms >= ?2 GROUP BY p.repository, p.pull_number ORDER BY 2 DESC LIMIT 5`},
 	} {
 		rows, err := read.connection.QueryContext(ctx, top.query, scope, since)
@@ -115,7 +115,7 @@ func (store *Store) Report(ctx context.Context, project *ProjectID, since, bucke
 	if project != nil {
 		projectBytes = project.Bytes()
 	}
-	ledger, err := failureLedger(ctx, read.connection, projectBytes, since)
+	ledger, err := failureLedger(ctx, read.connection, archived, projectBytes, since)
 	if err != nil {
 		return nil, err
 	}
@@ -140,7 +140,7 @@ func (store *Store) Why(ctx context.Context, project *ProjectID, pull uint64, ta
 	if pull == 0 && task.zero() || pull > 1<<53-1 {
 		return nil, ErrInvalidValue
 	}
-	read, err := store.beginRead(ctx)
+	read, archived, err := store.beginHistoryRead(ctx)
 	if err != nil {
 		return nil, err
 	}
@@ -151,7 +151,7 @@ func (store *Store) Why(ctx context.Context, project *ProjectID, pull uint64, ta
 			return nil, err
 		}
 	}
-	return why(ctx, read.connection, project, "", pull, task)
+	return why(ctx, read.connection, archived, project, "", pull, task)
 }
 
 func singletonProject(ctx context.Context, c *sql.Conn) (*ProjectID, error) {
@@ -182,8 +182,9 @@ func singletonProject(ctx context.Context, c *sql.Conn) (*ProjectID, error) {
 }
 
 // why reads pull in repository, or in any repository of the project when it is
-// empty.
-func why(ctx context.Context, c *sql.Conn, project *ProjectID, repository string, pull uint64, taskID TaskID) ([]string, error) {
+// empty, and tasks, their runs and publications across archived (nil reads
+// hot rows only).
+func why(ctx context.Context, c *sql.Conn, archived history, project *ProjectID, repository string, pull uint64, taskID TaskID) ([]string, error) {
 	// A nil []byte binds as an empty blob, not NULL, so an unscoped read must
 	// pass a nil interface for "?1 IS NULL" to match every project.
 	var scope any
@@ -195,7 +196,7 @@ func why(ctx context.Context, c *sql.Conn, project *ProjectID, repository string
 	var found bool
 	var err error
 	if !taskID.zero() {
-		if task, found, err = taskByID(ctx, c, taskID); err != nil {
+		if task, found, err = historyTask(ctx, c, archived, taskID); err != nil {
 			return nil, err
 		}
 		if !found || project != nil && task.ProjectID != *project {
@@ -204,7 +205,7 @@ func why(ctx context.Context, c *sql.Conn, project *ProjectID, repository string
 		lines = append(lines, whyTask(task))
 		var phase, kind, detail sql.NullString
 		var at int64
-		err := c.QueryRowContext(ctx, `SELECT phase, terminal_kind, terminal_detail, updated_at_ms FROM runs WHERE task_id = ? ORDER BY admitted_at_ms DESC, id DESC LIMIT 1`, taskID.Bytes()).Scan(&phase, &kind, &detail, &at)
+		err := c.QueryRowContext(ctx, `SELECT phase, terminal_kind, terminal_detail, updated_at_ms FROM `+archived.table("runs")+` WHERE task_id = ? ORDER BY admitted_at_ms DESC, id DESC LIMIT 1`, taskID.Bytes()).Scan(&phase, &kind, &detail, &at)
 		if err != nil && !errors.Is(err, sql.ErrNoRows) {
 			return nil, err
 		}
@@ -217,7 +218,7 @@ func why(ctx context.Context, c *sql.Conn, project *ProjectID, repository string
 	var document string
 	query, args := `SELECT r.project_id, r.repository, r.document FROM production_records AS r WHERE (?1 IS NULL OR r.project_id = ?1) AND r.kind = 'pull_request' AND r.identity = ?2 AND (?3 = '' OR r.repository = ?3) ORDER BY r.observed_at_ms DESC LIMIT 1`, []any{scope, strconv.FormatUint(pull, 10), repository}
 	if pull == 0 {
-		query, args = `SELECT r.project_id, r.repository, r.document FROM publication_tasks AS p JOIN production_records AS r ON r.project_id = p.project_id AND r.repository = p.repository AND r.kind = 'pull_request' AND r.identity = CAST(p.pull_number AS TEXT)
+		query, args = `SELECT r.project_id, r.repository, r.document FROM `+archived.table("publication_tasks")+` AS p JOIN production_records AS r ON r.project_id = p.project_id AND r.repository = p.repository AND r.kind = 'pull_request' AND r.identity = CAST(p.pull_number AS TEXT)
 			WHERE p.task_id = ? ORDER BY p.created_at_ms DESC LIMIT 1`, []any{taskID.Bytes()}
 	}
 	err = c.QueryRowContext(ctx, query, args...).Scan(&projectBytes, &repository, &document)
@@ -237,7 +238,7 @@ func why(ctx context.Context, c *sql.Conn, project *ProjectID, repository string
 	}
 	if !found {
 		var raw []byte
-		err := c.QueryRowContext(ctx, `SELECT task_id FROM publication_tasks WHERE project_id = ? AND repository = ? AND pull_number = ? ORDER BY change_id IS NOT NULL DESC, created_at_ms DESC LIMIT 1`, projectBytes, repository, int64(pr.Number)).Scan(&raw)
+		err := c.QueryRowContext(ctx, `SELECT task_id FROM `+archived.table("publication_tasks")+` WHERE project_id = ? AND repository = ? AND pull_number = ? ORDER BY change_id IS NOT NULL DESC, created_at_ms DESC LIMIT 1`, projectBytes, repository, int64(pr.Number)).Scan(&raw)
 		if err != nil && !errors.Is(err, sql.ErrNoRows) {
 			return nil, err
 		}
@@ -245,7 +246,7 @@ func why(ctx context.Context, c *sql.Conn, project *ProjectID, repository string
 			if taskID, err = TaskIDFromBytes(raw); err != nil {
 				return nil, err
 			}
-			if task, found, err = taskByID(ctx, c, taskID); err != nil {
+			if task, found, err = historyTask(ctx, c, archived, taskID); err != nil {
 				return nil, err
 			}
 		}
@@ -409,6 +410,11 @@ func whyTaskWaits(ctx context.Context, c *sql.Conn, task Task) (string, error) {
 	return "nobody: its task is " + task.Status.String(), nil
 }
 
+// historyTask reads a task, hot or archived.
+func historyTask(ctx context.Context, c *sql.Conn, archived history, id TaskID) (Task, bool, error) {
+	return scanTask(c.QueryRowContext(ctx, `SELECT `+taskSelectColumns+` FROM `+archived.table("tasks")+` WHERE id = ?`, id.Bytes()))
+}
+
 func whyTask(task Task) string {
 	line := fmt.Sprintf("task: %s %s rev=%d %q", task.ID, task.Status, task.WorkRevision.Int64(), oneLine(task.Title, 60))
 	if task.BlockedReason != "" {
@@ -434,7 +440,7 @@ func escalationWhy(ctx context.Context, c *sql.Conn, project ProjectID, key stri
 		project.Bytes(), strings.TrimSuffix(id, "]")).Scan(&repository, &pull) != nil || pull <= 0 {
 		return ""
 	}
-	lines, err := why(ctx, c, &project, repository, uint64(pull), TaskID{})
+	lines, err := why(ctx, c, nil, &project, repository, uint64(pull), TaskID{})
 	if err != nil {
 		return ""
 	}

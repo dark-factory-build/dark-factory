@@ -88,6 +88,16 @@ existing constant):
    row of an unsettled task names T as parent. It also means no
    `peer_questions` or `task_interventions` row joins T to an unsettled task.
    Trees connected only to settled trees move in the same generation.
+6. No attachment of T still holds data. Attachment retention removes it 30
+   days after T settles, or an operator removes it, and the append-only
+   archive could never drop it.
+7. T pins no proposal revision (`task_content_references`): that pin is the
+   proposal's acceptance, which `attachedProposalSQL` reads from the hot store
+   inside scheduler writes. Phase 3 can move these once the acceptance is
+   recorded without the pin.
+8. T is not one of its agent's three newest finished carrier tasks, which
+   `specialistSchedule` reads for the last review and its quiet streak; a
+   queued, running or blocked newer carrier does not displace them.
 
 The rows that move with T, in child-first delete order: `terminal_diagnostics`,
 `run_tokens`, `human_requests`, `terminal_sessions`, `resources`,
@@ -100,13 +110,15 @@ and `runs.change_id` refer to each other, so the hot delete runs with
 `PRAGMA defer_foreign_keys = ON`. Foreign keys stay enforced at commit.
 
 Every archive table mirrors the column list of its hot table and adds a
-leading `generation` column, as `archive.content_accesses` does. Readers can
-then put the same column list on both sides of a `UNION ALL`. A user_version
-bump that changes a moving hot table changes its archive mirror in the same
-migration. The archive is attached read-write there, as in the archive pass.
-The archive keeps no constraints of its own beyond `(generation, primary
-key)` uniqueness. The digest (`digestRows`) runs per table over rows ordered
-by primary key.
+trailing `generation` column (`CREATE TABLE … AS SELECT *, 0 AS generation`),
+so readers union `SELECT *, NULL` from the hot table with `SELECT *` from the
+archive (`history.table`). A user_version bump that changes a moving hot table
+changes its archive mirror in the same migration. The archive is attached
+read-write there, as in the archive pass. The archive keeps no constraints of
+its own, only an index on `generation`: its rows are proven equal to hot rows
+that met every hot constraint. The digest (`digestRows`) runs per table over
+rows ordered by primary key, and a generation's digest covers every archive
+table in a fixed order, so a receipt generation still hashes as it did.
 
 ### Settled production records
 
@@ -147,10 +159,13 @@ serves two readers:
   acceptance whose `task_id` has no row in `tasks` as not yet materialized,
   and creates its task. Without the index, archiving an intake task would
   admit the issue again. The query also excludes acceptances whose `task_id`
-  is in `archived_tasks`. `intake_acceptances` stays hot because intake looks
-  up an issue's acceptance by issue identity before it accepts the issue.
-- **Lookups.** `why --task`, task read and the console can say "archived in
-  generation N" and read the archive, instead of reporting an unknown task.
+  is in `archived_tasks`. Each intake poll also replays the import of every
+  listed issue already accepted, so the import (`intakeImportReplay`) refuses
+  an archived task with `ErrConflict`, which the poll treats as nothing to do.
+  `intake_acceptances` stays hot because intake looks up an issue's acceptance
+  by issue identity before it accepts the issue.
+- **Lookups.** `why --task` reads an archived task, its runs and publications
+  through the union. Task read and the console report it as not found.
 
 Validation adds one check: no `archived_tasks` id is also in `tasks`.
 
@@ -164,7 +179,8 @@ Validation adds one check: no `archived_tasks` id is also in `tasks`.
 | Validation (open, periodic, `setFactory`, compaction, migration) | hot | the row walk and `integrity_check` follow the size of live state; the archive is checked by digest when a read crosses into it and on each pass |
 | `factoryctl report` | hot ∪ archive (`beginHistoryRead`, already used) | a `--since` window that reaches past the cutoff (bucket alignment can add up to a day) still counts every run |
 | `why --task` | hot, else archive via `archived_tasks` | unchanged output for archived tasks |
-| `why --pull`, specialist events, failure ledger | hot ∪ archive | first occurrences and merged pulls stay complete |
+| `why --pull`, failure ledger in `report` | hot ∪ archive | first occurrences and merged pulls stay complete |
+| Specialist events | hot | they are read inside the scheduler's write, which cannot attach the archive, so a failure signature seen only in archived runs counts as new when it recurs |
 | Console task list, status counts, recent tasks | hot | lists live and recent work; the summary adds the `archived_tasks` count; opening an archived task reads the archive |
 | Knowledge supply and the Library access view | hot ∪ archive receipts (already) | unchanged |
 | Backup, rollback | both files | as in `DEPLOY.md`: the archive only grows, and a restored store ignores generations it does not record |
@@ -186,13 +202,13 @@ INCREMENTAL` should replace that manual step.
 
 ## Migration and rollback
 
-The `user_version` goes from 42 to 43 and adds `archived_tasks` to the hot
+The `user_version` goes from 43 to 44 (v43 took the intake author columns) and adds `archived_tasks` to the hot
 schema. The migration moves no data; the archive pass moves it. The archive
 tables are created by the pass (`CREATE TABLE IF NOT EXISTS`), as in #1819.
 The release trial migrates a copy of the live store (`DEPLOY.md`). Before that
 release, the same copy is archived to completion and measured: size,
 `Validate` time, and a `why` and `report` comparison before and after. Rollback
-follows `DEPLOY.md`: the previous build refuses version 43, the release backup
+follows `DEPLOY.md`: the previous build refuses version 44, the release backup
 is restored, and the archive is left in place. The restored store does not
 record the newer generations, so readers ignore them. Their rows are still
 hot in the backup and are copied again under new generations.
@@ -204,8 +220,10 @@ holds:
 
 - The content-access-only selection in `archive.go` becomes one table of the
   general batch. Existing generations stay readable.
-- The ponytail ceilings on whole-history scans in `failures.go` and
-  `verifyArchive` (verification can keep a verified high-water mark instead).
+- The ponytail ceiling on the whole-history scan in `failures.go`.
+  `verifyArchive` already skips the rehash while the archive file and the
+  newest committed generation are as last proved (`archiveStamp`, phase 1):
+  without it, each pass of the backlog rehashed every earlier generation.
 - The one-minute validation in the scheduler, if a hot-only `Validate` stays
   under 0.5 s: it can return to running at validated writes.
 - The scheduler's forced WAL `TRUNCATE` checkpoint, if SQLite's automatic
@@ -219,11 +237,21 @@ holds:
    bytes per table; `Validate` timed with and without `integrity_check`; WAL
    bytes per scheduler tick; a CPU profile of idle factoryd. These settle the
    hypotheses above and whether the Library or diagnostics need to move.
-1. **Settled task trees**, `archived_tasks`, version 43, and the readers in
+1. **Settled task trees**, `archived_tasks`, version 44, and the readers in
    the table: intake pending, `why`, report, failure ledger, console counts.
    Acceptance on the copy: hot `Validate` under 0.5 s, and intake admits no
    archived issue again (a test that archives an intake task and runs
    `PendingIntakeAcceptances`).
+   Built and measured in `TestArchiveHistoryBoundsALiveShapedStore`, on a
+   synthetic store of the live shape (4000 tasks and 8000 runs over 60 days,
+   8500 production records, 64 terminal diagnostics of 300 KB): 75.0 MB and
+   `Validate` 3.2–4.7 s (row walk 2.6–2.8 s, 68 027 statements) before;
+   41.7 MB and `Validate` 0.30–0.50 s (row walk 0.21–0.35 s, 8 527
+   statements) after archiving and one compaction, with 500 tasks hot. The
+   row walk costs about 0.35 ms per hot run, so the 0.5 s target holds up to
+   about 1000 runs a week. Production records, which phase 2 moves, are most
+   of the remaining file and of `integrity_check`. The backlog took 15 passes
+   and 18–23 s.
 2. **Settled production records** and their union readers.
 3. **Fold and delete**: the content-access path joins the general pass, and
    the items under *What the split makes unnecessary* are deleted where their

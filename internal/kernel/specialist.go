@@ -183,7 +183,10 @@ func specialistEvents(ctx context.Context, c *sql.Conn, agent Agent, since int64
 	}
 	var lines []string
 	if failures {
-		ledger, err := failureLedger(ctx, c, agent.ProjectID.Bytes(), since)
+		// ponytail: this runs in the scheduler's write, which cannot attach the
+		// archive, so a signature seen only in archived runs counts as new when
+		// it recurs; read a first-seen table if that wakes specialists falsely.
+		ledger, err := failureLedger(ctx, c, nil, agent.ProjectID.Bytes(), since)
 		if err != nil {
 			return nil, err
 		}

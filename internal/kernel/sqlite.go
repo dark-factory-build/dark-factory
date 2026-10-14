@@ -38,6 +38,7 @@ type Store struct {
 
 	repositoryBase  string // Boot-owned initial binding default; protected by writerGate.
 	archivePath     string // The history archive beside the database; see ArchiveHistory.
+	archiveVerified atomic.Pointer[archiveStamp]
 	overseerStalled map[string]overseerStalledState
 
 	// Writer-hold diagnostics (see LogWriterHolds). The holder fields are

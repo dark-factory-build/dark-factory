@@ -9,7 +9,7 @@ import (
 
 const (
 	applicationID = 0x4446474f
-	userVersion   = 43
+	userVersion   = 44
 
 	// SQLite reserves the exact lower-case "sqlite_" prefix. Use a literal,
 	// binary prefix test: LIKE would treat '_' as a wildcard and hide names
@@ -609,7 +609,16 @@ var schemaStatements = []string{
 ) STRICT, WITHOUT ROWID`,
 	taskAutomaticEventsTable,
 	archiveBatchesTable,
+	archivedTasksTable,
 }
+
+// archivedTasksTable is v44's hot index of the task trees ArchiveHistory moved
+// out, by generation: intake reads it so an archived intake task is never
+// admitted again, and no id in it is also in tasks.
+const archivedTasksTable = `CREATE TABLE archived_tasks (
+    task_id BLOB PRIMARY KEY CHECK (length(task_id) = 16),
+    generation INTEGER NOT NULL REFERENCES archive_batches(generation)
+) STRICT, WITHOUT ROWID`
 
 // archiveBatchesTable is v42's hot record of each history generation
 // committed to the archive beside the database (see ArchiveHistory): no hot
