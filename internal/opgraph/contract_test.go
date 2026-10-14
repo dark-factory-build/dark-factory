@@ -46,7 +46,7 @@ func TestConsoleDecoderMatchesGraphValues(t *testing.T) {
 		}
 	}
 	types := map[string]string{"GRAPH_NODE_KINDS": "Kind", "GRAPH_EDGE_KINDS": "EdgeKind", "GRAPH_EVIDENCE": "EvidenceState", "GRAPH_OBSERVATIONS": "Visibility",
-		"GRAPH_STATES": "Activity", "GRAPH_RUNTIMES": "Placement", "GRAPH_TRIGGERS": "Trigger", "GRAPH_ORIGINS": "Origin"}
+		"GRAPH_STATES": "Activity", "GRAPH_RUNTIMES": "Placement", "GRAPH_TRIGGERS": "Trigger"}
 	if got, want := slices.Sorted(maps.Keys(tsValues)), slices.Sorted(maps.Keys(types)); !slices.Equal(got, want) {
 		t.Fatalf("control.ts GRAPH_* arrays %v, want %v", got, want)
 	}

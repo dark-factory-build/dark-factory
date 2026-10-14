@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
-import type { AgentItem, OperationalNodeView, TaskItem } from "@dark-factory/client";
+import type { AgentItem, TaskItem } from "@dark-factory/client";
 import { type FactoryAgentSelection, type FactoryAppSnapshot, type FactoryHumanRequestView } from "./factory-app-controller.js";
 import { AgentList, FactoryFloor } from "./console-screens.js";
 import { AgentPanel, ConsoleDialog, HumanRequestPanel, WorkPanel, TaskDetail, editErrorCopy, type TaskEdit, type TaskBrief, type TaskScope, type AddTask, type WorkFilter } from "./console-sidebar.js";
@@ -24,7 +24,6 @@ export type FactoryConsoleProps = FactoryAppSnapshot & {
   onEditTask?: (task: TaskItem, change: TaskEdit) => Promise<boolean>;
   onAddTask?: AddTask;
   onLoadTaskDetail?: (task: TaskItem, peerOffset?: bigint, expectedHead?: bigint) => Promise<TaskBrief>;
-  onLoadNode?: (projectId: string, nodeId: string) => Promise<OperationalNodeView>;
   onOpenTerminalForHumanRequest?: (request: FactoryHumanRequestView["request"]) => void;
   onSelectHumanRequest?: (request: FactoryHumanRequestView["request"]) => void;
   onHumanReplyChange?: (reply: string) => void;
@@ -80,7 +79,6 @@ export function FactoryConsole({
   error,
   graphs,
   graphErrors,
-  onLoadNode,
   runPaths,
   lastRunPaths,
   edit,
@@ -210,7 +208,7 @@ export function FactoryConsole({
             <IconButton icon="list" aria-pressed={detail !== "floor" && selectedDetail === "work"} disabled={!ready || onDetail === undefined} onClick={showWork}>Work <Badge n={waiting} /></IconButton>
           </nav>
           <section className="dfConsoleLayout__left dfFactoryConsole__section" aria-label="Factory floor">
-            <FactoryFloor changes={productionItems} changesRead={productionData.read} onProjectContent={onProjectContent} onOpenTasks={ready ? openWork : undefined} projectId={projectId} selectedTaskId={selectedTask?.id} onSelectTask={ready ? goTask : undefined} selectedAgentId={selectedDetail === "agent" ? selectedAgent?.id : undefined} state={scopedState} graphs={graphs} graphErrors={graphErrors} onLoadNode={onLoadNode} onAddTask={ready ? onAddTask : undefined} runPaths={runPaths} lastRunPaths={lastRunPaths} onSelectAgent={ready ? chooseAgent : undefined} onSelectHumanRequest={ready ? selectRequest : undefined} connected={ready} />
+            <FactoryFloor changes={productionItems} changesRead={productionData.read} onProjectContent={onProjectContent} onOpenTasks={ready ? openWork : undefined} projectId={projectId} selectedTaskId={selectedTask?.id} onSelectTask={ready ? goTask : undefined} selectedAgentId={selectedDetail === "agent" ? selectedAgent?.id : undefined} state={scopedState} graphs={graphs} graphErrors={graphErrors} onAddTask={ready ? onAddTask : undefined} runPaths={runPaths} lastRunPaths={lastRunPaths} onSelectAgent={ready ? chooseAgent : undefined} onSelectHumanRequest={ready ? selectRequest : undefined} connected={ready} />
           </section>
 
           <aside className="dfConsoleSidebar" aria-label="Selected detail">

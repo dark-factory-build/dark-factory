@@ -1,5 +1,5 @@
 import { useLayoutEffect, useEffect, useMemo, useRef, useState, type MouseEvent, type FocusEvent, type PointerEvent, type KeyboardEvent, type ReactNode, type RefObject } from "react";
-import { GRAPH_OBSERVATIONS, type OperationalNodeView, type PeerQuestionItem } from "@dark-factory/client";
+import { GRAPH_OBSERVATIONS, type PeerQuestionItem } from "@dark-factory/client";
 import type { SceneTask } from "../console-view.js";
 import {
   PADDING,
@@ -43,7 +43,6 @@ export type FactorySceneProps = Readonly<{
   crates?: readonly SceneCrate[];
   tools?: ReactNode;
   /** Read one machine's evidence when its inspector opens. */
-  onLoadNode?: (nodeId: string) => Promise<OperationalNodeView>;
   /** Queue an investigation of a machine as an ordinary task. */
   onInvestigate?: (machine: SceneMachine, unit?: SceneUnit) => void;
   onSelectEntity?: (entityId: string | undefined) => void;
@@ -477,7 +476,7 @@ export function offeredFixtures({ appearance = DEFAULT_SCENE_APPEARANCE, onOpenT
 }
 
 /** A disposable SVG projection of the operational world and current factory state. */
-export function FactoryScene({ proposals, crates, tools, onLoadNode, onInvestigate, onSelectEntity, graph, workers, appearance = DEFAULT_SCENE_APPEARANCE, selectedWorkerId, onSelectWorker, tasks = [], peerQuestions = NO_QUESTIONS, selectedTaskId, onSelectTask, onOpenTasks, onSelectHumanRequest, projectId, connected = true, reading = false, unavailable }: FactorySceneProps) {
+export function FactoryScene({ proposals, crates, tools, onInvestigate, onSelectEntity, graph, workers, appearance = DEFAULT_SCENE_APPEARANCE, selectedWorkerId, onSelectWorker, tasks = [], peerQuestions = NO_QUESTIONS, selectedTaskId, onSelectTask, onOpenTasks, onSelectHumanRequest, projectId, connected = true, reading = false, unavailable }: FactorySceneProps) {
   const [selectedId, setSelectedId] = useState<string>();
   // The crate pointed at or focused: the machines its change touches are lit.
   const [lit, setLit] = useState<string>();
@@ -553,7 +552,7 @@ export function FactoryScene({ proposals, crates, tools, onLoadNode, onInvestiga
   const animate = connected && appearance.animation !== "off";
   // Changeovers are dated against the graph's own observation time, never the viewer's clock.
   const observedAt = graph.observedAt ?? 0;
-  // A folded member is inspected through its fold, with that member chosen.
+  // A folded member is inspected through its fold.
   const fold = selectedId === undefined || machines.has(selectedId) ? undefined : [...machines.values()].find((machine) => machine.represented?.includes(selectedId));
   const selected = selectedId === undefined ? undefined : machines.get(selectedId) ?? fold;
   // Where the pane and the floor are, in client pixels, and how many pixels a scene unit is.
@@ -733,7 +732,7 @@ export function FactoryScene({ proposals, crates, tools, onLoadNode, onInvestiga
       {zoom === undefined || mapHidden ? null : <PlantMap layout={layout} width={sceneWidth} height={sceneHeight} machines={machines} graph={graph} placements={placements} workers={workers} viewElement={viewElement} onCentre={centreOn} pane={pane} />}
     </div>}
     </div>
-    {selected === undefined ? null : <MachineInspector key={selectedId} machine={selected} chosen={fold === undefined ? undefined : fold.represented!.indexOf(selectedId!)} unit={unitOf.get(selected.id)} onLoadNode={onLoadNode} onInvestigate={onInvestigate}
+    {selected === undefined ? null : <MachineInspector key={selectedId} machine={selected} unit={unitOf.get(selected.id)} onInvestigate={onInvestigate}
       proposals={proposals === undefined ? [] : proposalsForEntity(proposals.items, selected.id)} onSelectProposal={proposals?.onSelect}
       onFocus={() => focusEntity(selected.id)} onClose={() => selectEntity(undefined)} />}
     </div>
@@ -955,24 +954,12 @@ function kindText(machine: SceneMachine, unit?: SceneUnit) {
     : unit?.id === machine.id && unit.runtime !== undefined ? `${RUNTIME_TEXT[unit.runtime]} unit` : machine.kind;
 }
 
-/** The inspector loads evidence only when opened; runtime-only values are shown as data. */
-function MachineInspector({ machine, chosen, unit, onLoadNode, onInvestigate, proposals, onSelectProposal, onFocus, onDiscuss, onClose }: {
-  machine: SceneMachine; chosen?: number; unit?: SceneUnit; onLoadNode?: (id: string) => Promise<OperationalNodeView>; onInvestigate?: (machine: SceneMachine, unit?: SceneUnit) => void;
+/** The inspector reads the machine as the floor shows it; a fold lists its members by name. */
+function MachineInspector({ machine, unit, onInvestigate, proposals, onSelectProposal, onFocus, onDiscuss, onClose }: {
+  machine: SceneMachine; unit?: SceneUnit; onInvestigate?: (machine: SceneMachine, unit?: SceneUnit) => void;
   proposals: readonly SceneProposal[]; onSelectProposal?: (id: string) => void; onFocus: () => void; onDiscuss?: () => void; onClose: () => void;
 }) {
-  // A fold lists its members; the one chosen is inspected here, and only its own answer is ever shown.
-  const folded = machine.represented, [member, setMember] = useState<number | undefined>(chosen), [returned, setReturned] = useState<number>();
-  const nodeId = folded === undefined ? machine.id : member === undefined ? undefined : folded[member];
-  const name = (index: number) => machine.routes?.[index] ?? folded![index]!;
-  const [loaded, setLoaded] = useState<{ id: string; value: OperationalNodeView | "unavailable" }>();
-  const detail = loaded !== undefined && loaded.id === nodeId ? loaded.value : undefined;
   const [asked, setAsked] = useState(false);
-  useEffect(() => {
-    if (onLoadNode === undefined || nodeId === undefined) return;
-    let live = true;
-    onLoadNode(nodeId).then((value) => { if (live) setLoaded({ id: nodeId, value }); }, () => { if (live) setLoaded({ id: nodeId, value: "unavailable" }); });
-    return () => { live = false; };
-  }, [nodeId]);
   const reading = machine.reading;
   const worth = reading.state === "failing" || reading.state === "degraded" || reading.evidence === "runtime" || reading.evidence === "contradicted" || reading.observation === "unobserved";
   return <section className="dfMachineInspector" aria-label="Machine inspector">
@@ -985,18 +972,6 @@ function MachineInspector({ machine, chosen, unit, onLoadNode, onInvestigate, pr
     {onInvestigate && worth ? <button type="button" disabled={asked} onClick={() => { setAsked(true); onInvestigate(machine, unit); }}>{asked ? "Investigation queued" : "Investigate"}</button> : null}
     <button type="button" onClick={onClose}>Close</button>
     {proposals.length === 0 ? null : <div aria-label="Changes affecting this machine">{proposals.map((proposal) => <button type="button" key={proposal.id} onClick={() => onSelectProposal?.(proposal.id)}>{proposal.title}</button>)}</div>}
-    {folded === undefined ? null : member === undefined
-      ? <ul className="dfMachineInspector__members" aria-label="Folded routes">{folded.map((id, index) => <li key={id}>{onLoadNode === undefined ? name(index) : <button type="button" autoFocus={index === returned} onClick={() => setMember(index)}>{name(index)}</button>}</li>)}</ul>
-      : <p><button type="button" autoFocus onClick={() => { setReturned(member); setMember(undefined); }}>Back to folded routes</button> {name(member)}</p>}
-    {nodeId === undefined ? null : <details open={folded !== undefined || undefined}><summary>Evidence</summary>
-      <p>Node <code>{nodeId}</code></p>
-      {detail === undefined ? <p>{onLoadNode === undefined ? "Evidence is not available here." : "Loading evidence…"}</p> : detail === "unavailable" ? <p>Evidence unavailable.</p> : <>
-        {Object.keys(detail.selectors).length === 0 ? null : <dl>{Object.entries(detail.selectors).map(([key, value]) => <div key={key}><dt>{key}</dt><dd><code>{value}</code></dd></div>)}</dl>}
-        <ul aria-label="Evidence">{detail.evidence.map((item, index) => <li key={index}>{item.origin} · {item.source} · {item.confidence}{item.detail ? <> · <code>{item.detail}</code></> : null}</li>)}</ul>
-        {detail.sources.length === 0 ? null : <ul aria-label="Source locations">{detail.sources.map((location) => <li key={`${location.repository_id}:${location.path}:${location.line ?? 0}`}><code>{location.path}{location.line ? `:${location.line}` : ""}</code></li>)}</ul>}
-        {detail.modules.length === 0 ? null : <p>{detail.modules.length} code areas run in this unit.</p>}
-        <p>{detail.observers.length === 0 ? "No runtime source has reported on it." : `Seen by ${detail.observers.join(", ")}.`}</p>
-      </>}
-    </details>}
+    {machine.represented === undefined ? null : <ul className="dfMachineInspector__members" aria-label="Folded routes">{machine.represented.map((id, index) => <li key={id}>{machine.routes?.[index] ?? id}</li>)}</ul>}
   </section>;
 }

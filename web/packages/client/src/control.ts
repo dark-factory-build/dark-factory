@@ -130,7 +130,6 @@ export type IntakeResultBody = { source_id?: string; linear_teams?: { id: string
 export type TaskUpdateBody = { task_id: string; expected_revision: bigint; title?: string; body?: string; priority?: number; assigned_agent_id?: string; status?: "cancelled" | "queued" };
 export type TaskUpdateResultBody = { task_id: string; revision: bigint };
 export type OperationalGraphGetBody = { project_id: string };
-export type OperationalNodeGetBody = { project_id: string; node_id: string };
 export const GRAPH_NODE_KINDS = ["processor", "ingress", "job", "queue", "store", "external", "unknown"] as const;
 export const GRAPH_EDGE_KINDS = ["handles", "calls", "uses", "publishes", "consumes", "runs"] as const;
 export const GRAPH_EVIDENCE = ["static", "runtime", "both", "uncertain", "contradicted"] as const;
@@ -138,15 +137,12 @@ export const GRAPH_OBSERVATIONS = ["observed", "quiet", "partial", "stale", "uno
 export const GRAPH_STATES = ["failing", "degraded", "active", "idle", "unknown"] as const; // worst first
 export const GRAPH_RUNTIMES = ["process", "server", "worker", "browser", "cli", "ci"] as const; // the unit a path prefers first, as opgraph.Locate
 const GRAPH_TRIGGERS = ["request", "timer", "message"] as const;
-const GRAPH_ORIGINS = ["static", "runtime"] as const;
 export type GraphReading = Readonly<{ evidence: typeof GRAPH_EVIDENCE[number]; observation: typeof GRAPH_OBSERVATIONS[number]; state: typeof GRAPH_STATES[number]; rate_per_hour?: number }>;
 export type GraphNode = GraphReading & Readonly<{ id: string; kind: typeof GRAPH_NODE_KINDS[number]; label: string; unit?: string; runtime?: typeof GRAPH_RUNTIMES[number]; trigger?: typeof GRAPH_TRIGGERS[number]; paths: readonly string[]; error_permille?: number; latency_p95_ms?: number; last_seen?: number; deployed_at?: number }>;
 export type GraphEdge = GraphReading & Readonly<{ from: string; to: string; kind: typeof GRAPH_EDGE_KINDS[number] }>;
 export type GraphSummary = Readonly<{ components: number; inferred: number; observed: number; quiet: number; partial: number; stale: number; unobserved: number; opaque: number; runtime_only: number; contradicted: number }>;
 export type GraphSource = Readonly<{ repository_id: string; name: string; kind: "integrated" | "unavailable"; target_ref: string; revision: string; observed_at: number; reason?: string }>;
 export type OperationalGraphBody = Readonly<{ project_id: string; digest: string; observed_at: number; sources: readonly GraphSource[]; nodes: readonly GraphNode[]; edges: readonly GraphEdge[]; summary: GraphSummary; omitted: number }>;
-export type GraphLocation = Readonly<{ repository_id: string; path: string; line?: number }>;
-export type OperationalNodeBody = Readonly<{ project_id: string; node_id: string; selectors: Readonly<Record<string, string>>; evidence: readonly Readonly<{ origin: typeof GRAPH_ORIGINS[number]; source: string; detail?: string; confidence: string }>[]; sources: readonly GraphLocation[]; modules: readonly GraphLocation[]; observers: readonly string[] }>;
 export type RunPathsGetBody = { agent_id: string };
 /** One run's recorded agent effort and spend: counts and cost, never content. */
 export type RunTelemetry = { tokens_in: number; tokens_out: number; cost_micro_usd: number; tool_calls: number; api_requests: number; subagents?: number; quiet_seconds?: number };
@@ -251,7 +247,6 @@ export type ServerControlFrame = { type: "FACTORY_DISPATCH_RESULT"; id: string; 
   | { type: "INTAKE_RESULT"; id: string; body: IntakeResultBody }
   | { type: "TASK_UPDATE_RESULT"; id: string; body: TaskUpdateResultBody }
   | { type: "OPERATIONAL_GRAPH"; id: string; body: OperationalGraphBody }
-  | { type: "OPERATIONAL_NODE"; id: string; body: OperationalNodeBody }
   | { type: "RUN_PATHS"; id: string; body: RunPathsBody }
   | { type: "ACCOUNTS"; id: string; body: AccountsBody }
   | { type: "ACCOUNT_LINK_RESULT"; id: string; body: AccountLinkResultBody }
@@ -276,7 +271,6 @@ export type ClientControlFrame = { type: "FACTORY_DISPATCH"; id: string; body: F
   | { type: "INTAKE"; id: string; body: IntakeBody }
   | { type: "TASK_UPDATE"; id: string; body: TaskUpdateBody }
   | { type: "OPERATIONAL_GRAPH_GET"; id: string; body: OperationalGraphGetBody }
-  | { type: "OPERATIONAL_NODE_GET"; id: string; body: OperationalNodeGetBody }
   | { type: "RUN_PATHS_GET"; id: string; body: RunPathsGetBody }
   | { type: "ACCOUNTS_DISCOVER"; id: string; body: AccountsDiscoverBody }
   | { type: "ACCOUNT_LINK"; id: string; body: AccountLinkBody }
@@ -453,9 +447,7 @@ function validateBody(type: ControlType, body: unknown, wire: boolean): ControlB
     case "TASK_UPDATE": requireKeys(body, ["task_id", "expected_revision"], wire, ["title", "body", "priority", "assigned_agent_id", "status"]); { const result: TaskUpdateBody = { task_id: dynamicID(body.task_id), expected_revision: decimal(body.expected_revision, wire, true) }; if (present(body, "title")) result.title = boundedText(body.title, 1, MAX_TASK_TITLE_BYTES); if (present(body, "body")) result.body = boundedText(body.body, 0, MAX_TASK_INSTRUCTION_BYTES); if (present(body, "priority")) result.priority = integer(body.priority, -MAX_TASK_PRIORITY, MAX_TASK_PRIORITY); if (present(body, "assigned_agent_id")) result.assigned_agent_id = dynamicID(body.assigned_agent_id); if (present(body, "status")) { if (body.status !== "cancelled" && body.status !== "queued" || body.status === "queued" && (present(body, "title") || present(body, "body") || present(body, "priority"))) malformed(); result.status = body.status; } return result; }
     case "TASK_UPDATE_RESULT": requireKeys(body, ["task_id", "revision"], wire); return { task_id: dynamicID(body.task_id), revision: decimal(body.revision, wire, true) };
     case "OPERATIONAL_GRAPH_GET": requireKeys(body, ["project_id"], wire); return { project_id: dynamicID(body.project_id) };
-    case "OPERATIONAL_NODE_GET": requireKeys(body, ["project_id", "node_id"], wire); return { project_id: dynamicID(body.project_id), node_id: dynamicID(body.node_id) };
     case "OPERATIONAL_GRAPH": return operationalGraphBody(body, wire);
-    case "OPERATIONAL_NODE": return operationalNodeBody(body, wire);
     case "RUN_PATHS_GET": requireKeys(body, ["agent_id"], wire); return { agent_id: dynamicID(body.agent_id) };
     // No live run means no rooms, so an empty run identity carries no paths.
     case "RUN_PATHS": requireKeys(body, ["agent_id", "run_id", "paths"], wire, ["telemetry"]); { if (!Array.isArray(body.paths) || body.paths.length > MAX_ARRAY_ITEMS) malformed(); if (body.run_id === "" && (body.paths.length !== 0 || present(body, "telemetry"))) malformed(); return { agent_id: dynamicID(body.agent_id), run_id: body.run_id === "" ? "" : dynamicID(body.run_id), paths: body.paths.map((item) => boundedText(item, 1, MAX_TASK_TITLE_BYTES)), ...(present(body, "telemetry") ? { telemetry: runTelemetry(body.telemetry, wire) } : {}) }; }
@@ -841,16 +833,6 @@ function operationalGraphBody(body: Record<string, unknown>, wire: boolean): Ope
   requireKeys(summary, [...counts], wire);
   return { project_id: dynamicID(body.project_id), digest: fixedHex(body.digest, 32), observed_at: integer(body.observed_at, 0, Number.MAX_SAFE_INTEGER), sources, nodes, edges,
     summary: Object.fromEntries(counts.map((key) => [key, integer(summary[key], 0, 0xffffffff)])) as GraphSummary, omitted: integer(body.omitted, 0, 0xffffffff) };
-}
-function operationalNodeBody(body: Record<string, unknown>, wire: boolean): OperationalNodeBody {
-  requireKeys(body, ["project_id", "node_id", "selectors", "evidence", "sources", "modules", "observers"], wire);
-  if (!isObject(body.selectors) || Object.keys(body.selectors).length > 32) malformed();
-  const selectors = Object.fromEntries(Object.entries(body.selectors).map(([key, value]) => [boundedText(key, 1, 64), boundedText(value, 1, 256)]));
-  if (!Array.isArray(body.evidence) || body.evidence.length > 32 || !Array.isArray(body.sources) || body.sources.length > 16 || !Array.isArray(body.modules) || body.modules.length > 256 || !Array.isArray(body.observers) || body.observers.length > 16) malformed();
-  const location = (item: unknown): GraphLocation => { if (!isObject(item)) malformed(); requireKeys(item, ["repository_id", "path"], wire, ["line"]); return { repository_id: dynamicID(item.repository_id), path: boundedText(item.path, 1, MAX_TASK_TITLE_BYTES), ...(present(item, "line") ? { line: integer(item.line, 0, 0xffffffff) } : {}) }; };
-  return { project_id: dynamicID(body.project_id), node_id: dynamicID(body.node_id), selectors,
-    evidence: body.evidence.map((item) => { if (!isObject(item)) malformed(); requireKeys(item, ["origin", "source", "confidence"], wire, ["detail"]); return { origin: oneOf(item.origin, GRAPH_ORIGINS), source: boundedText(item.source, 1, 64), ...(present(item, "detail") ? { detail: boundedText(item.detail, 0, 256) } : {}), confidence: boundedText(item.confidence, 1, 32) }; }),
-    sources: body.sources.map(location), modules: body.modules.map(location), observers: body.observers.map((item) => boundedText(item, 1, 64)) };
 }
 function taskItem(value: unknown, wire: boolean): TaskItem {
   if (!isObject(value)) malformed(); requireKeys(value, ["id", "project_id", "assigned_agent_id", "title", "status", "priority", "revision"], wire, ["updated_at_ms", "blocked_reason", "issue_number", "mission_id"]);

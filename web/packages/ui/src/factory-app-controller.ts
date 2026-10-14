@@ -27,7 +27,6 @@ import {
   type RunPathsView,
   randomOperationID,
   type OperationalGraphView,
-  type OperationalNodeView,
 } from "@dark-factory/client";
 
 export type ProjectContentCall = (operation: ProjectContentOperation, input: ProjectContentInput) => Promise<ProjectContentOutput>;
@@ -135,7 +134,7 @@ export type FactoryAppStatus =
 type HumanSession = Pick<BrowserSession, "getHumanRequestDetail" | "replyHumanRequest" | "cancelHumanRequest">;
 type TerminalSession = Pick<BrowserSession, "resolveAgentTerminal" | "openTerminal" | "close">;
 type AgentTaskSession = Pick<BrowserSession, "enqueueAgentTaskWithFiles" | "enqueueAgentTask" | "controlAgent" | "getTaskDetail" | "resolveAgentTerminal">;
-type ConsoleSession = Pick<BrowserSession, "createProject" | "getRepositories" | "intake" | "updateTask" | "getOperationalGraph" | "getOperationalNode" | "getRunPaths" | "discoverAccounts" | "linkAccount" | "listBrowserClients" | "revokeBrowserClient" | "githubConnection" | "clientId">;
+type ConsoleSession = Pick<BrowserSession, "createProject" | "getRepositories" | "intake" | "updateTask" | "getOperationalGraph" | "getRunPaths" | "discoverAccounts" | "linkAccount" | "listBrowserClients" | "revokeBrowserClient" | "githubConnection" | "clientId">;
 type RemoteInviteSession = Pick<BrowserSession, "inviteRemote" | "capabilities">;
 type ControlledClient = Pick<BrowserClient, "connect" | "close"> & { readonly session?: HumanSession & TerminalSession & AgentTaskSession & ConsoleSession & RemoteInviteSession & Partial<Pick<BrowserSession, "projectContent" | "setDispatch">> };
 type ClientFactory = (options: BrowserSessionOptions) => ControlledClient;
@@ -514,13 +513,6 @@ export class FactoryAppController {
       this.#publish();
       return false;
     }
-  }
-
-  /** One operational node's evidence, read when its inspector opens. */
-  operationalNode(projectId: string, nodeId: string): Promise<OperationalNodeView> {
-    const session = this.#client?.session;
-    if (this.#closed || this.#status !== "ready" || session === undefined) return Promise.reject(new SessionError("closed"));
-    return session.getOperationalNode(projectId, nodeId);
   }
 
   /** Load private task text only when an operator opens its brief. */

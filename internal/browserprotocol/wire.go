@@ -81,8 +81,6 @@ const (
 	TypeTaskUpdateResult            MessageType = "TASK_UPDATE_RESULT"
 	TypeOperationalGraphGet         MessageType = "OPERATIONAL_GRAPH_GET"
 	TypeOperationalGraph            MessageType = "OPERATIONAL_GRAPH"
-	TypeOperationalNodeGet          MessageType = "OPERATIONAL_NODE_GET"
-	TypeOperationalNode             MessageType = "OPERATIONAL_NODE"
 	TypeRunPathsGet                 MessageType = "RUN_PATHS_GET"
 	TypeRunPaths                    MessageType = "RUN_PATHS"
 	TypeAccountsDiscover            MessageType = "ACCOUNTS_DISCOVER"
@@ -435,10 +433,6 @@ func decodeControl(data []byte, role senderRole) (ControlFrame, error) {
 		body = new(OperationalGraphGet)
 	case TypeOperationalGraph:
 		body = new(OperationalGraph)
-	case TypeOperationalNodeGet:
-		body = new(OperationalNodeGet)
-	case TypeOperationalNode:
-		body = new(OperationalNode)
 	case TypeRunPathsGet:
 		body = new(RunPathsGet)
 	case TypeRunPaths:
@@ -577,7 +571,7 @@ func idRequired(kind MessageType) bool {
 		TypeHumanRequestReply, TypeHumanRequestReplyResult, TypeHumanRequestCancelRun, TypeHumanRequestCancelRunResult,
 		TypeTaskAttachment, TypeTaskAttachmentResult, TypeTaskEnqueue, TypeTaskEnqueueResult, TypeAgentControl, TypeAgentControlResult, TypeTaskDetailGet, TypeTaskDetail,
 		TypeProjectContent, TypeProjectContentResult,
-		TypeAttachmentRetention, TypeAttachmentRetentionResult, TypeFactoryDispatch, TypeFactoryDispatchResult, TypeAgentUpdate, TypeAgentUpdateResult, TypeProjectCreate, TypeProjectCreateResult, TypeRepositoriesGet, TypeRepositories, TypeRepositoryMutate, TypeRepositoryMutateResult, TypeIntake, TypeIntakeResult, TypeTaskUpdate, TypeTaskUpdateResult, TypeOperationalGraphGet, TypeOperationalGraph, TypeOperationalNodeGet, TypeOperationalNode,
+		TypeAttachmentRetention, TypeAttachmentRetentionResult, TypeFactoryDispatch, TypeFactoryDispatchResult, TypeAgentUpdate, TypeAgentUpdateResult, TypeProjectCreate, TypeProjectCreateResult, TypeRepositoriesGet, TypeRepositories, TypeRepositoryMutate, TypeRepositoryMutateResult, TypeIntake, TypeIntakeResult, TypeTaskUpdate, TypeTaskUpdateResult, TypeOperationalGraphGet, TypeOperationalGraph,
 		TypeProjectLimits, TypeProjectLimitsResult,
 		TypeRunPathsGet, TypeRunPaths,
 		TypeAccountsDiscover, TypeAccounts, TypeAccountLink, TypeAccountLinkResult, TypeAccountUpdate, TypeAccountUpdateResult,
@@ -601,13 +595,13 @@ func typeAllowed(role senderRole, kind MessageType) bool {
 	if role == clientRole {
 		return kind == TypePairProve || kind == TypeAuthProve || kind == TypeStateGet ||
 			kind == TypeStateWatch || kind == TypeHumanRequestDetailGet || kind == TypeHumanRequestReply || kind == TypeHumanRequestCancelRun || kind == TypeTerminalTargetGet || kind == TypeTerminalAttach || kind == TypeTerminalAck || kind == TypeTerminalLeaseAcquire || kind == TypeTerminalLeaseRenew || kind == TypeTerminalLeaseRelease || kind == TypeTerminalResize || kind == TypeTerminalDetach || kind == TypeTaskAttachment || kind == TypeTaskEnqueue || kind == TypeRemoteInvite || kind == TypePushSubscribe || kind == TypeTelemetryIngest ||
-			kind == TypeAgentControl || kind == TypeTaskDetailGet || kind == TypeAgentUpdate || kind == TypeProjectLimits || kind == TypeProjectCreate || kind == TypeRepositoriesGet || kind == TypeRepositoryMutate || kind == TypeIntake || kind == TypeTaskUpdate || kind == TypeOperationalGraphGet || kind == TypeOperationalNodeGet || kind == TypeRunPathsGet ||
+			kind == TypeAgentControl || kind == TypeTaskDetailGet || kind == TypeAgentUpdate || kind == TypeProjectLimits || kind == TypeProjectCreate || kind == TypeRepositoriesGet || kind == TypeRepositoryMutate || kind == TypeIntake || kind == TypeTaskUpdate || kind == TypeOperationalGraphGet || kind == TypeRunPathsGet ||
 			kind == TypeAttachmentRetention || kind == TypeFactoryDispatch || kind == TypeProjectContent ||
 			kind == TypeAccountsDiscover || kind == TypeAccountLink || kind == TypeAccountUpdate || kind == TypeBrowserClientsGet || kind == TypeBrowserClientRevoke || kind == TypeGitHubConnection
 	}
 	return role == serverRole && (kind == TypeHello || kind == TypePairResult || kind == TypeAuthResult ||
 		kind == TypeStateSnapshot || kind == TypeStateChanged || kind == TypeHumanRequestDetail || kind == TypeHumanRequestReplyResult || kind == TypeHumanRequestCancelRunResult || kind == TypeTaskAttachmentResult || kind == TypeTaskEnqueueResult || kind == TypeTerminalTarget || kind == TypeTerminalAttached || kind == TypeTerminalLeaseResult || kind == TypeTerminalResized || kind == TypeTerminalDetached || kind == TypeTerminalInputResult || kind == TypeTerminalEOF || kind == TypeTerminalExit || kind == TypeTerminalReset || kind == TypeRemoteInviteResult || kind == TypePushSubscribeResult || kind == TypeTelemetryIngestResult ||
-		kind == TypeAgentControlResult || kind == TypeTaskDetail || kind == TypeAttachmentRetentionResult || kind == TypeFactoryDispatchResult || kind == TypeProjectContentResult || kind == TypeAgentUpdateResult || kind == TypeProjectLimitsResult || kind == TypeProjectCreateResult || kind == TypeRepositories || kind == TypeRepositoryMutateResult || kind == TypeIntakeResult || kind == TypeTaskUpdateResult || kind == TypeOperationalGraph || kind == TypeOperationalNode || kind == TypeRunPaths ||
+		kind == TypeAgentControlResult || kind == TypeTaskDetail || kind == TypeAttachmentRetentionResult || kind == TypeFactoryDispatchResult || kind == TypeProjectContentResult || kind == TypeAgentUpdateResult || kind == TypeProjectLimitsResult || kind == TypeProjectCreateResult || kind == TypeRepositories || kind == TypeRepositoryMutateResult || kind == TypeIntakeResult || kind == TypeTaskUpdateResult || kind == TypeOperationalGraph || kind == TypeRunPaths ||
 		kind == TypeAccounts || kind == TypeAccountLinkResult || kind == TypeAccountUpdateResult || kind == TypeBrowserClients || kind == TypeBrowserClientRevokeResult || kind == TypeGitHubConnectionResult)
 }
 
@@ -836,7 +830,7 @@ func validateBody(kind MessageType, body any) error {
 		return validProjectContent(kind, body)
 	case TypeTaskAttachment, TypeTaskAttachmentResult, TypeTaskEnqueue, TypeTaskEnqueueResult:
 		return validTaskControl(kind, body)
-	case TypeAttachmentRetention, TypeAttachmentRetentionResult, TypeFactoryDispatch, TypeFactoryDispatchResult, TypeAgentUpdate, TypeAgentUpdateResult, TypeProjectLimits, TypeProjectLimitsResult, TypeProjectCreate, TypeProjectCreateResult, TypeRepositoriesGet, TypeRepositories, TypeRepositoryMutate, TypeRepositoryMutateResult, TypeIntake, TypeIntakeResult, TypeTaskUpdate, TypeTaskUpdateResult, TypeOperationalGraphGet, TypeOperationalGraph, TypeOperationalNodeGet, TypeOperationalNode,
+	case TypeAttachmentRetention, TypeAttachmentRetentionResult, TypeFactoryDispatch, TypeFactoryDispatchResult, TypeAgentUpdate, TypeAgentUpdateResult, TypeProjectLimits, TypeProjectLimitsResult, TypeProjectCreate, TypeProjectCreateResult, TypeRepositoriesGet, TypeRepositories, TypeRepositoryMutate, TypeRepositoryMutateResult, TypeIntake, TypeIntakeResult, TypeTaskUpdate, TypeTaskUpdateResult, TypeOperationalGraphGet, TypeOperationalGraph,
 		TypeRunPathsGet, TypeRunPaths, TypeAccountsDiscover, TypeAccounts, TypeAccountLink, TypeAccountLinkResult, TypeAccountUpdate, TypeAccountUpdateResult,
 		TypeBrowserClientsGet, TypeBrowserClients, TypeBrowserClientRevoke, TypeBrowserClientRevokeResult:
 		return validConsoleControl(kind, body)

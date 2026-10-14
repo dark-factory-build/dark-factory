@@ -463,15 +463,6 @@ test("console edits and topology carry exact bodies and correlate their results"
   assert.equal(graph.nodes.length, graphBody.nodes.length);
   assert.equal(graph.summary.components, 4);
 
-  const nodeId = graphBody.nodes[0].id;
-  const nodePending = session.getOperationalNode(graphBody.project_id, nodeId);
-  const nodeFrame = decodeClientControl(socket.sent.at(-1));
-  assert.equal(nodeFrame.type, "OPERATIONAL_NODE_GET");
-  assert.deepEqual(nodeFrame.body, { project_id: graphBody.project_id, node_id: nodeId });
-  const nodeBody = JSON.parse(readFileSync(new URL("../../../../protocol/browser/fixtures/operational_node.json", import.meta.url), "utf8")).body;
-  socket.reply(encodeServerControl({ type: "OPERATIONAL_NODE", id: nodeFrame.id, body: { ...nodeBody, project_id: graphBody.project_id, node_id: nodeId } }));
-  assert.equal((await nodePending).node_id, nodeId);
-
   // An agent with no live run answers with no run identity and no rooms.
   const idlePending = session.getRunPaths(agentId);
   const idleFrame = decodeClientControl(socket.sent.at(-1));

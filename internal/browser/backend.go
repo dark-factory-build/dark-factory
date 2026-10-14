@@ -212,7 +212,6 @@ type ConsoleBackend interface {
 	Intake(context.Context, [browserprotocol.ClientIDSize]byte, browserprotocol.Intake) (browserprotocol.IntakeResult, error)
 	UpdateTask(context.Context, [browserprotocol.ClientIDSize]byte, browserprotocol.TaskUpdate) (browserprotocol.TaskUpdateResult, error)
 	OperationalGraph(context.Context, [browserprotocol.ClientIDSize]byte, browserprotocol.OperationalGraphGet) (browserprotocol.OperationalGraph, error)
-	OperationalNode(context.Context, [browserprotocol.ClientIDSize]byte, browserprotocol.OperationalNodeGet) (browserprotocol.OperationalNode, error)
 	RunPaths(context.Context, [browserprotocol.ClientIDSize]byte, browserprotocol.RunPathsGet) (browserprotocol.RunPaths, error)
 	DiscoverAccounts(context.Context, [browserprotocol.ClientIDSize]byte, browserprotocol.AccountsDiscover) (browserprotocol.Accounts, error)
 	LinkAccount(context.Context, [browserprotocol.ClientIDSize]byte, browserprotocol.AccountLink) (browserprotocol.AccountLinkResult, error)

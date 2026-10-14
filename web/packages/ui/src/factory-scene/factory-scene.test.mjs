@@ -1186,60 +1186,25 @@ test("fit shows the whole floor in the pane without relaying it out, the overvie
   }
 });
 
-test("a fold's inspector lists its routes and shows only the chosen route's evidence", async () => {
+test("a fold's inspector names its routes as plain text and investigates the fold", async () => {
   globalThis.IS_REACT_ACT_ENVIRONMENT = true;
-  const folded = sceneGraph([unit("api", { machines: [machine("api:docks", "ingress", { label: "3 routes", represented: ["n0", "n1", "n2"], routes: ["/a", "/b", "/c"] })] })]);
-  const pending = new Map(), loads = [];
-  const onLoadNode = (id) => { loads.push(id); return new Promise((resolve, reject) => pending.set(id, { resolve, reject })); };
-  const detail = (id) => ({ selectors: { node: id }, evidence: [], sources: [], modules: [], observers: [] });
+  const folded = sceneGraph([unit("api", { machines: [machine("api:docks", "ingress", { label: "3 routes", represented: ["n0", "n1", "n2"], routes: ["/a", "/b", "/c"], reading: { ...busy, state: "failing" } })] })]);
+  const investigated = [];
   let renderer;
-  const inspector = () => renderer.root.findByProps({ "aria-label": "Machine inspector" });
-  const text = () => JSON.stringify(renderer.toJSON());
-  const click = (label) => act(async () => inspector().findAllByType("button").find((button) => button.children.join("") === label).props.onClick());
   try {
-    await act(async () => { renderer = create(createElement(FactoryScene, { graph: folded, appearance: scenic, workers: [], onLoadNode })); });
+    await act(async () => { renderer = create(createElement(FactoryScene, { graph: folded, appearance: scenic, workers: [], onInvestigate: (value) => investigated.push(value.represented) })); });
     await act(async () => renderer.root.findByProps({ "aria-label": "Inspect 3 routes" }).props.onClick());
-    assert.deepEqual(inspector().findByProps({ "aria-label": "Folded routes" }).findAllByType("button").map((button) => button.children.join("")), ["/a", "/b", "/c"]);
-    assert.deepEqual(loads, [], "a fold loads nothing until a route is chosen");
-    await click("/a");
-    assert.deepEqual(loads, ["n0"]);
-    assert.match(text(), /Loading evidence…/);
-    // Back and on to another route before the first answers: the late answer is never shown.
-    await click("Back to folded routes");
-    await click("/b");
-    await act(async () => pending.get("n0").resolve(detail("n0")));
-    assert.match(text(), /Loading evidence…/);
-    assert.doesNotMatch(text(), /"n0"/);
-    await act(async () => pending.get("n1").resolve(detail("n1")));
-    assert.deepEqual(inspector().findAllByType("dd").map((term) => term.findByType("code").children.join("")), ["n1"]);
-    await click("Back to folded routes");
-    await click("/c");
-    await act(async () => pending.get("n2").reject(new Error("gone")));
-    assert.match(text(), /Evidence unavailable\./);
+    const inspector = renderer.root.findByProps({ "aria-label": "Machine inspector" });
+    assert.match(JSON.stringify(inspector.findByType("h3").children), /3 routes/);
+    const list = inspector.findByProps({ "aria-label": "Folded routes" });
+    assert.deepEqual(list.findAllByType("li").map((item) => item.children.join("")), ["/a", "/b", "/c"]);
+    assert.equal(list.findAllByType("button").length, 0, "members are names, not drill-downs");
+    assert.doesNotMatch(JSON.stringify(renderer.toJSON()), /Evidence|Back to folded routes/);
+    await act(async () => inspector.findAllByType("button").find((button) => button.children.join("") === "Investigate").props.onClick());
+    assert.deepEqual(investigated, [["n0", "n1", "n2"]]);
   } finally {
     await act(async () => renderer?.unmount());
   }
-  // A request for a member (the Library naming its source) opens the fold with that member chosen, and loads it.
-  loads.length = 0;
-  let member;
-  try {
-    await act(async () => { member = create(createElement(FactoryScene, { graph: folded, appearance: scenic, workers: [], onLoadNode })); });
-    await act(async () => member.root.findByProps({ "aria-label": "Inspect 3 routes" }).props.onClick());
-    await act(async () => member.root.findAllByType("button").find((button) => button.children.join("") === "/b").props.onClick());
-    assert.deepEqual(loads, ["n1"]);
-    assert.match(JSON.stringify(member.toJSON()), /Back to folded routes/);
-    assert.match(JSON.stringify(member.root.findByProps({ "aria-label": "Machine inspector" }).findByType("h3").children), /3 routes/);
-  } finally {
-    await act(async () => member?.unmount());
-  }
-  // A public floor names the routes without loading anything.
-  let publicRenderer;
-  await act(async () => { publicRenderer = create(createElement(FactoryScene, { graph: folded, appearance: scenic, workers: [] })); });
-  await act(async () => publicRenderer.root.findByProps({ "aria-label": "Inspect 3 routes" }).props.onClick());
-  const list = publicRenderer.root.findByProps({ "aria-label": "Folded routes" });
-  assert.deepEqual(list.findAllByType("li").map((item) => item.children.join("")), ["/a", "/b", "/c"]);
-  assert.equal(list.findAllByType("button").length, 0, "public floors have no evidence to load");
-  await act(async () => publicRenderer.unmount());
 });
 
 test("zooming to twice the fitted scale lists a manifold's routes inside its unmoved footprint", async () => {

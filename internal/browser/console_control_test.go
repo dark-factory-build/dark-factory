@@ -131,13 +131,6 @@ func (backend *consoleDispatchBackend) OperationalGraph(ctx context.Context, cli
 	return backend.graph, nil
 }
 
-func (backend *consoleDispatchBackend) OperationalNode(_ context.Context, client [browserprotocol.ClientIDSize]byte, request browserprotocol.OperationalNodeGet) (browserprotocol.OperationalNode, error) {
-	if err := backend.record(client); err != nil {
-		return browserprotocol.OperationalNode{}, err
-	}
-	return browserprotocol.OperationalNode{ProjectID: request.ProjectID, NodeID: request.NodeID}, nil
-}
-
 func (backend *consoleDispatchBackend) RunPaths(ctx context.Context, client [browserprotocol.ClientIDSize]byte, request browserprotocol.RunPathsGet) (browserprotocol.RunPaths, error) {
 	if err := backend.record(client); err != nil {
 		return browserprotocol.RunPaths{}, err
@@ -242,8 +235,6 @@ var consoleRequests = []struct {
 		`{"type":"TASK_UPDATE","id":"console-task","body":{"task_id":"` + consoleTaskID + `","expected_revision":"3","status":"cancelled"}}`},
 	{browserprotocol.TypeOperationalGraphGet, browserprotocol.TypeOperationalGraph,
 		`{"type":"OPERATIONAL_GRAPH_GET","id":"console-topology","body":{"project_id":"` + consoleProjectID + `"}}`},
-	{browserprotocol.TypeOperationalNodeGet, browserprotocol.TypeOperationalNode,
-		`{"type":"OPERATIONAL_NODE_GET","id":"console-node","body":{"project_id":"` + consoleProjectID + `","node_id":"` + consoleAgentID + `"}}`},
 	{browserprotocol.TypeRunPathsGet, browserprotocol.TypeRunPaths,
 		`{"type":"RUN_PATHS_GET","id":"console-rooms","body":{"agent_id":"` + consoleAgentID + `"}}`},
 	{browserprotocol.TypeAccountsDiscover, browserprotocol.TypeAccounts,
