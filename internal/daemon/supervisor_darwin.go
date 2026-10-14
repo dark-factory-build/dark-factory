@@ -761,16 +761,39 @@ func (daemon *Daemon) runNext(ctx context.Context, spec SupervisorSpec) (resultR
 	}
 	if worker {
 		if retained != nil || pull.Number != 0 {
-			// The registered checkout is factoryd's fetch boundary. Refresh the
-			// current base there, then copy that exact commit into a retained
-			// or pull request Change before the worker can run a correction
-			// offline.
-			current, selectErr := change.SelectRegisteredGit(ctx, spec.GitExecutable, repository.Root, repository.BaseRef, change.RepositorySourceIdentity{Root: repositoryIdentity, Git: repositoryGitIdentity, OriginDigest: repositoryOriginDigest})
-			if selectErr != nil {
-				return daemon.failRun(run, kernel.FailureSource, selectErr)
-			}
-			if fetchErr := change.FetchBase(ctx, current, filepath.Join(spec.ChangeParent, finalName)); fetchErr != nil {
-				return daemon.failRun(run, kernel.FailureSource, fetchErr)
+			path := filepath.Join(spec.ChangeParent, finalName)
+			if retained != nil {
+				updated, conflict, prepareErr := daemon.prepareRetainedChange(ctx, changeState, path)
+				if prepareErr != nil {
+					return daemon.failRun(run, kernel.FailureSource, prepareErr)
+				}
+				changeState = updated
+				if conflict != nil {
+					rawProviderTask = appendRetainedConflictContext(rawProviderTask, changeState, conflict)
+					delivery, preparedTask, prepareErr = provider.PrepareTask(run.Provider, rawProviderTask)
+					if prepareErr != nil {
+						return daemon.failRun(run, kernel.FailureSpawn, prepareErr)
+					}
+					if delivery == provider.TaskDeliveryFD11 {
+						providerTask = preparedTask
+					} else if delivery != provider.TaskDeliveryAttemptAPI || len(preparedTask) != 0 {
+						return daemon.failRun(run, kernel.FailureSpawn, provider.ErrInvalid)
+					}
+				}
+				retained, _, err = retainedWorkerCheckpoint(changeState)
+				if err != nil {
+					return daemon.failRun(run, kernel.FailureSource, err)
+				}
+			} else {
+				// Fresh repair Changes still need the exact pull head in their
+				// private administration; only the registered checkout fetches.
+				current, selectErr := change.SelectRegisteredGit(ctx, spec.GitExecutable, repository.Root, repository.BaseRef, change.RepositorySourceIdentity{Root: repositoryIdentity, Git: repositoryGitIdentity, OriginDigest: repositoryOriginDigest})
+				if selectErr != nil {
+					return daemon.failRun(run, kernel.FailureSource, selectErr)
+				}
+				if fetchErr := change.FetchBase(ctx, current, path); fetchErr != nil {
+					return daemon.failRun(run, kernel.FailureSource, fetchErr)
+				}
 			}
 		}
 		// The daemon reads the worktree itself: fresh Changes use private Git

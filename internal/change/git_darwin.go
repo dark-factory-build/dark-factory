@@ -45,6 +45,16 @@ const (
 // Operational failures are returned separately so the caller can retry them.
 var ErrRebaseConflict = errors.New("Change rebase conflicts with the current base")
 
+// RebaseConflict preserves only repository-relative paths from a failed
+// rebase. The worktree has already been restored by RebaseWorktree.
+type RebaseConflict struct {
+	Paths       []string
+	CurrentBase string
+}
+
+func (e *RebaseConflict) Error() string        { return ErrRebaseConflict.Error() }
+func (e *RebaseConflict) Is(target error) bool { return target == ErrRebaseConflict }
+
 type gitCommandSpec struct {
 	program     string
 	repository  string
@@ -1430,6 +1440,7 @@ func RebaseWorktree(ctx context.Context, selection Selection, path string) (Work
 		return WorktreeFacts{}, err
 	}
 	if result.exitCode != 0 {
+		paths := conflictPaths(ctx, authority, path)
 		abort := append([]string{}, gitArgs[:len(gitArgs)-2]...)
 		abort = append(abort, "rebase", "--abort")
 		aborted, abortErr := authority.run(ctx, maxGitSelectionOutput, abort...)
@@ -1437,11 +1448,25 @@ func RebaseWorktree(ctx context.Context, selection Selection, path string) (Work
 			return WorktreeFacts{}, abortErr
 		}
 		if aborted.exitCode == 0 {
-			return WorktreeFacts{}, ErrRebaseConflict
+			return WorktreeFacts{}, &RebaseConflict{Paths: paths, CurrentBase: selection.base.Hex()}
 		}
 		return WorktreeFacts{}, newGitError(gitFailureProcess)
 	}
 	return authority.inspectWorktree(ctx, path)
+}
+
+func conflictPaths(ctx context.Context, authority *gitAuthority, path string) []string {
+	result, err := authority.run(ctx, maxGitSelectionOutput, "-C", path, "diff", "--name-only", "--diff-filter=U")
+	if err != nil || result.exitCode != 0 {
+		return nil
+	}
+	var paths []string
+	for _, value := range strings.Split(strings.TrimSpace(string(result.output)), "\n") {
+		if value != "" && validateContentPath(value) == nil {
+			paths = append(paths, value)
+		}
+	}
+	return paths
 }
 
 // InspectWorktree verifies that path is a linked worktree of the repository
