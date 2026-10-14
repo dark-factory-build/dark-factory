@@ -20,6 +20,7 @@ import (
 	"github.com/dark-factory-build/dark-factory/internal/kernel"
 	"github.com/dark-factory-build/dark-factory/internal/provider"
 	"github.com/dark-factory-build/dark-factory/internal/review"
+	"github.com/dark-factory-build/dark-factory/internal/runner"
 )
 
 // reviewPR answers once the review operation is durable and runs it in the
@@ -840,7 +841,7 @@ func (b *daemonReviewBackend) Review(ctx context.Context, checkout string, reque
 	if len(homes) == 0 {
 		return review.Verdict{}, errors.New("review: no worker login for the provider")
 	}
-	reviewTemp, err := os.MkdirTemp("/private/tmp", "dfr-")
+	reviewTemp, err := os.MkdirTemp(runner.ShortTempDir(), "dfr-")
 	if err != nil {
 		return review.Verdict{}, fmt.Errorf("review temp: %w", err)
 	}
