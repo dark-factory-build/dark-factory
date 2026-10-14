@@ -8541,6 +8541,7 @@ mod tests {
         for body in [
             "Refs #390",
             "Closes #390",
+            "Related: #390",
             "This fixes team/backlog#390",
             "Closes https://github.com/team/backlog/issues/390",
         ] {

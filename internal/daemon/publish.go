@@ -301,6 +301,11 @@ func (daemon *Daemon) publishPull(ctx context.Context, c kernel.PublishableChang
 	issueBody = string(redactTerminalText([]byte(issueBody)))
 	issueBody = strings.ToValidUTF8(issueBody[:min(len(issueBody), 24000)], "")
 	body := fmt.Sprintf("%s\n\nPublished by factoryd from Change %s at %s: +%d -%d across %d files from %s.\n\nThe merge queue runs the gate.", issueBody, c.Change, c.Head, added, deleted, files, from)
+	if crossSource {
+		body = qualifySourceReferences(body, sourceRepository)
+	} else if linearSource {
+		body = qualifyExternalReferences(body, c.Accepted.Snapshot.URL)
+	}
 	if c.Pull != 0 {
 		// The corrected body keeps the issue referenced while the steward waits
 		// for live acceptance. One settlement's body is written once.
@@ -309,7 +314,12 @@ func (daemon *Daemon) publishPull(ctx context.Context, c kernel.PublishableChang
 			done, err := completed(step, new(json.RawMessage))
 			if err == nil && !done {
 				updatedBody := body
-				if issue != 0 && !linearSource && !crossSource {
+				switch {
+				case crossSource:
+					updatedBody = appendPublicationFooter(updatedBody, fmt.Sprintf("Refs %s#%d", sourceRepository, issue))
+				case linearSource:
+					updatedBody = appendPublicationFooter(updatedBody, "Refs "+c.Accepted.Snapshot.URL)
+				case issue != 0:
 					updatedBody = fmt.Sprintf("%s\n\nRefs #%d", referenceIssue(updatedBody, issue), issue)
 				}
 				_, err = call(ctx, "update_pull_request_body", map[string]any{"repository": repo, "operation_id": operation(step), "pull_number": c.Pull, "body": updatedBody})
@@ -382,6 +392,27 @@ func referenceIssue(body string, issue uint64) string {
 		body += fmt.Sprintf("\n\nRefs #%d", issue)
 	}
 	return body
+}
+
+var sourceClosingReference = regexp.MustCompile(`(?i)\b(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?):?(\s+\S*(?:#|/issues/)\d+)\b`)
+var bareIssueReference = regexp.MustCompile(`(^|[^\w/])#(\d+)\b`)
+
+func qualifySourceReferences(body, source string) string {
+	body = sourceClosingReference.ReplaceAllString(body, "Refs${1}")
+	return bareIssueReference.ReplaceAllString(body, "${1}"+source+"#$2")
+}
+
+func qualifyExternalReferences(body, sourceURL string) string {
+	body = sourceClosingReference.ReplaceAllString(body, "Refs${1}")
+	return bareIssueReference.ReplaceAllString(body, "${1}"+sourceURL)
+}
+
+func appendPublicationFooter(body, footer string) string {
+	body = strings.TrimSpace(body)
+	if last := body[strings.LastIndex(body, "\n")+1:]; strings.EqualFold(strings.TrimSpace(last), footer) {
+		return body
+	}
+	return body + "\n\n" + footer
 }
 
 // publicationTitle is the accepted title on one line, within the App's

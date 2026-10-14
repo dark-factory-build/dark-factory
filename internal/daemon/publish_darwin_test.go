@@ -209,7 +209,7 @@ func publishedExactly(t *testing.T, app *fakePublishMaintainer, source, head str
 func TestFactorydPublishesASettledIntakeChange(t *testing.T) {
 	fixture, c, source, app, checkout := publishFixture(t, 51, false)
 	ctx := context.Background()
-	app.issueBody = "Current operator scope"
+	app.issueBody = "Current operator scope\n\nRelated: #7\nCloses feed/issues#9"
 	c.Accepted.SourceRepository = "feed/issues"
 	app.loseNext = true
 	if err := fixture.daemon.publishChange(ctx, c, "team/repo", source, app.call, checkout); err == nil {
@@ -232,7 +232,7 @@ func TestFactorydPublishesASettledIntakeChange(t *testing.T) {
 	publishedExactly(t, app, source, c.Head)
 	body := pull["body"].(string)
 	if pull["head_sha"] != c.Head || pull["issue_number"] != uint64(9) || pull["source_repository"] != "feed/issues" || pull["close_on_merge"] != false || pull["base_sha"] != c.Base ||
-		strings.Contains(body, "example.com") || strings.Contains(body, "/Users/") || !strings.Contains(body, "Current operator scope") || strings.Contains(body, "Implemented it") || !strings.Contains(body, c.Head) || !strings.Contains(body, "+51 -1 across 52 files") || !strings.HasSuffix(body, "The merge queue runs the gate.") {
+		strings.Contains(body, "example.com") || strings.Contains(body, "/Users/") || !strings.Contains(body, "Current operator scope") || !strings.Contains(body, "Related: feed/issues#7") || !strings.Contains(body, "Refs feed/issues#9") || strings.Contains(body, "Closes feed/issues#9") || strings.Contains(body, "Implemented it") || !strings.Contains(body, c.Head) || !strings.Contains(body, "+51 -1 across 52 files") || !strings.HasSuffix(body, "The merge queue runs the gate.") {
 		t.Fatalf("pull request = %+v", pull)
 	}
 	if pr := readProductionPull(t, fixture.store, c.Task.ProjectID, 31); pr.Head != c.Head || pr.Branch != "factory/"+c.Change.String()[:12] {
@@ -644,6 +644,27 @@ func TestLinearPublicationUsesExternalSourceWithoutIssueObservation(t *testing.T
 	pull := app.writes[len(app.writes)-1]["arguments"].(map[string]any)
 	if pull["issue_number"] != uint64(0) || pull["source_repository"] != nil || pull["external_source_url"] != c.Accepted.Snapshot.URL || strings.Contains(pull["body"].(string), "#0") {
 		t.Fatalf("Linear pull request = %+v", pull)
+	}
+}
+
+func TestCrossSourceCorrectionKeepsQualifiedReferenceFooter(t *testing.T) {
+	fixture, c, source, app, checkout := publishFixture(t, 1, false)
+	c.Accepted.SourceRepository = "feed/issues"
+	c.Pull = 31
+	app.tip, app.body = c.Head, "Implemented it.\n\nRefs feed/issues#9"
+	root, git := filepath.Dir(source), change.TrustedGitExecutable
+	if err := os.WriteFile(filepath.Join(root, "f00.txt"), []byte("corrected\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	supervisorGit(t, git, "-C", root, "-c", "user.name=fixture", "-c", "user.email=fixture@example.invalid", "commit", "-q", "-am", "correct")
+	c.Head = strings.TrimSpace(supervisorGitOutput(t, git, "-C", root, "rev-parse", "HEAD"))
+	c.Task.Result = "Answered the review.\n\nCloses feed/issues#9"
+	if err := fixture.daemon.publishChange(context.Background(), c, "team/repo", source, app.call, checkout); err != nil {
+		t.Fatal(err)
+	}
+	body := app.writes[len(app.writes)-1]["arguments"].(map[string]any)["body"].(string)
+	if strings.Contains(body, "Closes feed/issues#9") || !strings.Contains(body, "Refs feed/issues#9") || !strings.HasSuffix(body, "Refs feed/issues#9") {
+		t.Fatalf("cross-source correction body = %q", body)
 	}
 }
 
