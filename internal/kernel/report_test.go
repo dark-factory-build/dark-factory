@@ -96,6 +96,12 @@ func TestReportAndWhyReadTheReconcilersState(t *testing.T) {
 	if waits := whyPullWaits(ProductionPullRequest{State: "open"}, true, Task{Status: TaskCancelled}, "", &review.Operation{State: "enqueued", Verdict: "allow"}, 0, 0); waits != "operator: its task was cancelled, so factoryd no longer advances it" {
 		t.Fatalf("a cancelled task's pull waits on %q", waits)
 	}
+	if waits := whyPullWaits(ProductionPullRequest{State: "open"}, false, Task{}, "", &review.Operation{State: "ejected", Failures: review.FailuresBeforeEscalation, LastAction: "could not enqueue it (attempt 6): conflict"}, 0, 0); waits != "factoryd: gave up; last action: could not enqueue it (attempt 6): conflict" {
+		t.Fatalf("an ejected operation waits on %q", waits)
+	}
+	if waits := whyPullWaits(ProductionPullRequest{State: "open"}, false, Task{}, "", &review.Operation{State: "ejected", Detail: "conflicts with main"}, 0, 0); waits != "factoryd: its next pass acts (every 5 minutes)" {
+		t.Fatalf("an actionable ejected operation waits on %q", waits)
+	}
 }
 
 func TestStatusIsBoundedAndCountsHistory(t *testing.T) {

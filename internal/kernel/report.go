@@ -346,6 +346,8 @@ func whyPullWaits(pr ProductionPullRequest, hasTask bool, task Task, taskWaits s
 		return "operator: factoryd escalated it to the overseer"
 	case hasTask && (task.Status == TaskBlocked || task.Status == TaskFailed):
 		return "operator: its task is " + task.Status.String()
+	case op != nil && op.State == "ejected" && op.Failures >= review.FailuresBeforeEscalation:
+		return "factoryd: gave up; last action: " + oneLine(cmp.Or(op.LastAction, op.Detail, "none recorded"), 300)
 	case failed > 0:
 		// review.Decide (and a review's wait for checks) acts on a failing check
 		// before a pending one or a missing verdict.
