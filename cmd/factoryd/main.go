@@ -67,9 +67,11 @@ var (
 	errRestart = errors.New("restarting for a release")
 	// trialLimit bounds how long a staged build has to answer as itself;
 	// trialPoll spaces the asks. Both, and selfSource, are package-test seams.
-	trialLimit = 5 * time.Minute
-	trialPoll  = time.Second
-	selfSource = func() string { return buildinfo.Current().Source() }
+	trialLimit         = 5 * time.Minute
+	trialPoll          = time.Second
+	selfSource         = func() string { return buildinfo.Current().Source() }
+	promoteService     = install.PromoteService
+	releaseSettledHook = func(string, string) {}
 
 	cleanStartupCancellation = errors.New("factoryd: clean startup cancellation")
 	startupPhaseHook         func(string)
@@ -369,14 +371,31 @@ func serve(ctx context.Context, configuration config) error {
 		if err != nil {
 			daemon.LogFactoryd(recoveryLog, "factoryd: discarding the upgrade marker: %v\n", err)
 		}
+		resumed := false
+		resumedTarget := ""
+		if marker.TrialPassed && marker.Target != selfSource() {
+			if err := promoteService(configuration.home); err != nil {
+				daemon.LogFactoryd(recoveryLog, "factoryd: resuming release %s promotion failed: %v\n", marker.Target, err)
+				return errors.Join(err, owner.close())
+			}
+			resumed = true
+			resumedTarget = marker.Target
+		}
 		// A promotion interrupted after its rename leaves the receipt behind.
 		if err := install.RebindServiceReceipt(configuration.home); err != nil {
 			daemon.LogFactoryd(recoveryLog, "factoryd: rebinding the service receipt: %v\n", err)
 		}
-		if marker.Target == selfSource() {
-			owner.settleRelease(ctx, configuration.home, marker.Target, "verified", "")
-		} else {
-			owner.settleRelease(ctx, configuration.home, marker.Target, "failed", cmp.Or(marker.Reason, "interrupted before promotion"))
+		if !resumed {
+			if marker.Target == selfSource() {
+				owner.settleRelease(ctx, configuration.home, marker.Target, "verified", "")
+			} else {
+				owner.settleRelease(ctx, configuration.home, marker.Target, "failed", cmp.Or(marker.Reason, "interrupted before promotion"))
+			}
+		}
+		if resumed {
+			// The promoted build must boot and settle the marker; the old build
+			// only closes so launchd starts bin/current.
+			return errors.Join(owner.close(), fmt.Errorf("%w: resumed %s", errRestart, resumedTarget))
 		}
 	} else if err := errors.Join(install.RemoveUpgrade(configuration.home), owner.daemon.FailInterruptedRelease(ctx)); err != nil {
 		// A backup never outlives its release, nor a record its process.
@@ -436,12 +455,20 @@ func superviseTrial(home string, args []string, marker install.UpgradeMarker) er
 	limit := ctx.Err()
 	cancel()
 	// Wait reports the cancel even when the child then exits cleanly.
+	passed := false
 	if answered.Load() && child.ProcessState.Success() {
-		if err = install.PromoteService(home); err == nil {
+		marker.Trial, marker.TrialStart = 0, 0
+		marker.TrialPassed = true
+		if err = install.WriteUpgradeMarker(home, marker); err == nil {
+			passed = true
+			err = promoteService(home)
+		}
+		if err == nil {
 			return fmt.Errorf("%w: promoted %s", errRestart, marker.Target)
 		}
 	}
 	marker.Trial, marker.TrialStart = 0, 0
+	marker.TrialPassed = passed
 	marker.Reason = fmt.Sprintf("the new build was not promoted (answered %t): %v", answered.Load(), cmp.Or(err, limit, errors.New("it exited")))
 	return errors.Join(fmt.Errorf("%w: %s", errRestart, marker.Reason), install.WriteUpgradeMarker(home, marker))
 }
@@ -465,6 +492,8 @@ func (owner *process) settleRelease(ctx context.Context, home, target, state, re
 	}
 	if err = errors.Join(err, owner.daemon.FinishRelease(ctx, target, state, reason)); err != nil {
 		daemon.LogFactoryd(recoveryLog, "factoryd: recording release %s %s failed: %v\n", target, state, err)
+	} else {
+		releaseSettledHook(target, state)
 	}
 }
 
