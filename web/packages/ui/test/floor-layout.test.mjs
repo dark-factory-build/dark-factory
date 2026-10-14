@@ -27,7 +27,7 @@ test("the floor and Work controls fit at phone width and stay one row on desktop
 function measure(browser, file, width, selector, controls) {
   const script = `<script>requestAnimationFrame(() => { const root = document.querySelector(${JSON.stringify(selector)}); const bounds = root.getBoundingClientRect(); const elements = [...root.querySelectorAll(${JSON.stringify(controls)})]; const items = elements.map((element) => { const rect = element.getBoundingClientRect(); return { text: element.textContent.trim(), within: rect.left >= bounds.left - .1 && rect.right <= bounds.right + .1 && rect.top >= bounds.top - .1 && rect.bottom <= bounds.bottom + .1, top: rect.top }; }); const rows = new Set(items.map((item) => item.top.toFixed(2))).size; document.body.insertAdjacentHTML("beforeend", "<pre id=\"df-layout\">" + JSON.stringify({ root: { scrollWidth: root.scrollWidth, clientWidth: root.clientWidth, rows }, controls: items }) + "</pre>"); });</script>`;
   const wrapper = `${file}.wrapper.html`;
-  writeFileSync(wrapper, readFileSync(file, "utf8").replace("</body>", `${script}</body>`));
+  writeFileSync(wrapper, `${readFileSync(file, "utf8")}${script}`);
   const dom = execFileSync(browser, ["--headless=new", "--no-sandbox", "--disable-gpu", "--no-first-run", "--disable-dev-shm-usage", `--user-data-dir=${mkdtempSync(join(tmpdir(), "df-chrome-"))}`, "--dump-dom", `--window-size=${width},844`, `file://${wrapper}`], { encoding: "utf8" });
   const match = dom.match(/<pre id="df-layout">([^<]+)/);
   assert.ok(match, `browser did not emit a ${width}px measurement`);
