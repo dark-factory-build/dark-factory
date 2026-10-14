@@ -63,7 +63,7 @@ func (backend *browserBackend) ProjectContent(ctx context.Context, raw [browserp
 	if err != nil && !factoryOnly {
 		return browserprotocol.ProjectContentResult{}, browser.ErrInvalidRequest
 	}
-	read := request.Operation == "search" || request.Operation == "accesses" || request.Operation == "activity" || request.Operation == "list" || request.Operation == "read" || request.Operation == "body" || request.Operation == "outcome_list" || request.Operation == "outcome_read" || request.Operation == "mission_tasks" || request.Operation == "production" || request.Operation == "task_read"
+	read := request.Operation == "search" || request.Operation == "accesses" || request.Operation == "activity" || request.Operation == "list" || request.Operation == "read" || request.Operation == "body" || request.Operation == "outcome_list" || request.Operation == "outcome_read" || request.Operation == "production" || request.Operation == "task_read"
 	_, release, client, err := backend.authorize(ctx, raw, kernel.BrowserCapabilityPrivateHumanRequestDetail)
 	if err != nil {
 		return browserprotocol.ProjectContentResult{}, err
@@ -72,7 +72,7 @@ func (backend *browserBackend) ProjectContent(ctx context.Context, raw [browserp
 	if !read && !client.CapabilityMask.Has(kernel.BrowserCapabilityHumanActions) {
 		return browserprotocol.ProjectContentResult{}, browser.ErrUnauthorized
 	}
-	if request.Operation == "create" || request.Operation == "revise" || request.Operation == "deprecate" || request.Operation == "body" || request.Operation == "mission_create" {
+	if request.Operation == "create" || request.Operation == "revise" || request.Operation == "deprecate" || request.Operation == "body" {
 		if backend.owner == nil {
 			return browserprotocol.ProjectContentResult{}, browser.ErrUnauthorized
 		}
@@ -104,7 +104,7 @@ func (backend *browserBackend) ProjectContent(ctx context.Context, raw [browserp
 		}
 	}
 
-	if (request.Operation == "mission_tasks" || request.Operation == "production" || request.Operation == "activity") && (input.Limit == 0 || input.Limit > 8) {
+	if (request.Operation == "production" || request.Operation == "activity") && (input.Limit == 0 || input.Limit > 8) {
 		return result, browser.ErrInvalidRequest
 	}
 	switch request.Operation {
@@ -329,43 +329,6 @@ func (backend *browserBackend) ProjectContent(ctx context.Context, raw [browserp
 			out.Items = append(out.Items, outcomeDTO(item))
 		}
 		output = out
-	case "mission_create":
-		owner, e := decodeID(input.OwnerAgentID, kernel.AgentIDFromBytes)
-		revision, re := kernel.NewRevision(int64(input.ExpectedAgentRevision))
-		id, ie := decodeID(input.ID, kernel.OutcomeIDFromBytes)
-		if e != nil || re != nil || ie != nil || input.ExpectedAgentRevision == 0 || input.Objective == "" || input.Criteria == "" {
-			return result, browser.ErrInvalidRequest
-		}
-		var driver kernel.AgentID
-		if input.DriverAgentID != "" {
-			var de error
-			driver, de = decodeID(input.DriverAgentID, kernel.AgentIDFromBytes)
-			if de != nil {
-				return result, browser.ErrInvalidRequest
-			}
-		}
-		created, ce := backend.store.CreateMissionForBrowser(ctx, client.ID, kernel.MissionCreate{ID: id, ProjectID: project, OwnerAgentID: owner, ExpectedAgentRevision: revision, Objective: input.Objective, Criteria: input.Criteria, DriverAgentID: driver}, at)
-		if ce != nil {
-			return result, ce
-		}
-		out := outcomeDTO(created.Mission)
-		out.Objective, out.Criteria = "", ""
-		output = out
-		backend.owner.notifyScheduler()
-	case "mission_tasks":
-		id, e := decodeID(input.ID, kernel.OutcomeIDFromBytes)
-		if e != nil {
-			return result, browser.ErrInvalidRequest
-		}
-		items, next, e := backend.store.ListMissionTasks(ctx, project, id, int(input.Offset), int(input.Limit))
-		if e != nil {
-			return result, e
-		}
-		tasks := make([]map[string]any, 0, len(items))
-		for _, item := range items {
-			tasks = append(tasks, browserTaskSummary(item))
-		}
-		output = map[string]any{"mission_id": id.String(), "tasks": tasks, "next_offset": next}
 	case "outcome_read", "outcome_write":
 		id, e := decodeID(input.ID, kernel.OutcomeIDFromBytes)
 		if e != nil {

@@ -14,7 +14,8 @@ test("the documented ?fixture page is the whole console, labelled, over the fixt
   const page = readFileSync(out, "utf8");
   assert.match(page, /<body[^>]*><p[^>]*>Fixture: simulated data, static render/);
   assert.match(page, /class="dfFactoryConsole[ "]/);
-  for (const text of ["Review the state projection", "Tighten the queue ordering", "Builder One", "North Workshop", "By mission", "Show overseer and specialist passes"]) assert.ok(page.includes(text), text);
+  for (const text of ["Review the state projection", "Tighten the queue ordering", "Builder One", "North Workshop", "Show overseer and specialist passes"]) assert.ok(page.includes(text), text);
+  assert.doesNotMatch(page, /By mission/);
 });
 
 test("the floor and work controls wrap instead of becoming horizontal overflow", () => {

@@ -110,6 +110,7 @@ test("one screen keeps Factory and the operator panels together", () => {
   assert.match(markup, /Builder One asks/);
   assert.match(markup, /Review the state projection/);
   assert.match(markup, /Review the state projection[\s\S]*North Workshop · Builder One asks/);
+  assert.equal(markup.includes("By mission"), false);
   assert.equal(markup.includes("Decision needed"), false, "an unopened request stays brief");
   assert.match(render({ detail: "work" }), /aria-label="Work"/);
   // No screen union survives: there is no navigation away from this screen.
@@ -438,7 +439,7 @@ test("a succeeded task linked to an open PR is in review with its PR cell", () =
   const done = { ...fixtureState.tasks.get(ids.task), status: "succeeded" };
   const state = baseState({ tasks: new Map([[done.id, done]]), humanRequests: new Map() });
   const pr = { visualId: "change:1", projectId: done.project_id, repository: "o/r", tasks: [done.id], missions: [], pullRequest: { number: 7, state: "open", title: "Ship", url: "https://github.com/o/r/pull/7", head: "a".repeat(40) }, review: { state: "pending" }, checks: [], deliveries: [], reviewers: [], completed: false, completedAt: 0, status: "open", nextAction: "" };
-  const markup = renderToStaticMarkup(createElement(WorkPanel, { state, rows: workRows(state, [pr]), filter: "all", onFilter() {}, byMission: false, onByMission() {}, missions: null, ready: true, onMission() {} }));
+  const markup = renderToStaticMarkup(createElement(WorkPanel, { state, rows: workRows(state, [pr]), filter: "all", onFilter() {}, ready: true }));
   assert.match(markup, /data-stage="in-review">in review/);
   assert.match(markup, /<a href="https:\/\/github.com\/o\/r\/pull\/7" target="_blank" rel="noreferrer">PR #7<\/a>/);
   assert.doesNotMatch(markup, /aria-label="Production inspection"/);
@@ -447,36 +448,9 @@ test("a succeeded task linked to an open PR is in review with its PR cell", () =
 
 test("a task-less production row opens its pull request and keeps its stages", () => {
   const pr = { visualId: "change:taskless", projectId: ids.project, repository: "o/r", tasks: [], missions: [], pullRequest: { number: 8, state: "open", title: "Taskless", url: "https://github.com/o/r/pull/8", head: "b".repeat(40) }, review: { state: "pending" }, checks: [], deliveries: [], reviewers: [], completed: false, completedAt: 0, status: "open", nextAction: "" };
-  const markup = renderToStaticMarkup(createElement(WorkPanel, { state: fixtureState, rows: workRows(fixtureState, [pr]), filter: "all", onFilter() {}, byMission: false, onByMission() {}, missions: null, ready: true, onMission() {} }));
+  const markup = renderToStaticMarkup(createElement(WorkPanel, { state: fixtureState, rows: workRows(fixtureState, [pr]), filter: "all", onFilter() {}, ready: true }));
   assert.match(markup, /<a class="dfConsoleItem__taskTitle dfWorkRow__title" href="https:\/\/github.com\/o\/r\/pull\/8" target="_blank" rel="noreferrer">Taskless<\/a>/);
   assert.match(markup, /data-stage="in-review">in review/);
-});
-
-test("a floor question opens its answer form even from By mission or a PR detail", async () => {
-  const request = fixtureState.humanRequests.get(ids.request);
-  let tree;
-  function Harness() {
-    const [chosen, setChosen] = useState();
-    return createElement(FactoryConsole, { status: "ready", state: fixtureState, detail: "work", onDetail() {}, selectedHumanRequest: chosen, onSelectHumanRequest: (item) => setChosen(selectedRequest({ request: item })), onCloseHumanRequest() {}, onReplyHumanRequest() {} });
-  }
-  await act(async () => { tree = create(createElement(Harness)); });
-  const filter = () => tree.root.findByProps({ "aria-label": "Work filter" }).findAllByType("button");
-  await act(async () => filter().find((button) => textOf(button) === "By mission").props.onClick());
-  await act(async () => tree.root.findByType(FactoryFloor).props.onSelectHumanRequest(request));
-  assert.equal(filter().find((button) => textOf(button) === "By mission").props["aria-pressed"], false);
-  assert.equal(tree.root.findAllByProps({ "aria-label": "Selected question" }).length > 0, true);
-  await act(async () => tree.unmount());
-});
-
-test("the MISSIONS desk opens Work in By-mission view", async () => {
-  let tree;
-  function Harness() { const [detail, setDetail] = useState("floor"); return createElement(FactoryConsole, { status: "ready", state: fixtureState, detail, onDetail: setDetail }); }
-  await act(async () => { tree = create(createElement(Harness)); });
-  await act(async () => tree.root.findByType(FactoryFloor).props.onOpenMissions(ids.project));
-  const toggle = tree.root.findByProps({ "aria-label": "Work filter" }).findAllByType("button").find((button) => button.children.join("") === "By mission");
-  assert.equal(toggle.props["aria-pressed"], true);
-  assert.equal(tree.root.findByType("main").props["data-mobile-view"], "detail");
-  await act(async () => tree.unmount());
 });
 
 test("Work lists blocked work, hides overseer passes until asked, flags dispatch off and queues new work", async () => {
@@ -974,7 +948,7 @@ test("task selection and floor questions open the exact existing task detail and
 
 test("task detail keeps outcome and instruction without a history disclosure", async () => {
   const agentMarkup = renderToStaticMarkup(createElement(AgentPanel, { agent: fixtureState.agents.get(ids.agent), state: fixtureState, ready: true }));
-  const workMarkup = renderToStaticMarkup(createElement(WorkPanel, { state: fixtureState, rows: workRows(fixtureState, []), filter: "all", onFilter() {}, byMission: false, onByMission() {}, missions: null, ready: true, onMission() {} }));
+  const workMarkup = renderToStaticMarkup(createElement(WorkPanel, { state: fixtureState, rows: workRows(fixtureState, []), filter: "all", onFilter() {}, ready: true }));
   let detail;
   await act(async () => { detail = create(createElement(TaskDetail, { task: fixtureState.tasks.get(ids.task), onLoadTaskDetail: async () => ({ taskId: ids.task, revision: 1n, head: 1n, instruction: "kept instruction", feedback: "", outcome: "kept outcome", peerQuestions: [] }) })); });
   const detailMarkup = JSON.stringify(detail.toJSON());
@@ -1225,36 +1199,18 @@ test("new-work admission reports acknowledgement and preserves active work", asy
   await act(async () => tree.unmount());
 });
 
-test("Missions share the task dialog and preserve their origin on close", async () => {
-  const { MissionsPanel } = await import("../dist/src/missions-panel.js");
-  const historical = { ...fixtureState.tasks.get(ids.task), id: "fe".repeat(16), status: "succeeded", title: "Delivered historical task" };
-  for (const [origin, Panel] of [["missions", MissionsPanel]]) {
-    const navigations = [], selections = []; let tree;
-    await act(async () => { tree = create(createElement(FactoryConsole, {status: "ready", state: fixtureState, detail: origin, onDetail: value => navigations.push(value), onSelectTask: id => selections.push(id), onLoadTaskDetail: async task => ({taskId: task.id, revision: task.revision, instruction: "Retained instruction", feedback: "", peerQuestions: []})})); });
-    await act(async () => tree.root.findByType(Panel).props.onOpenTask(historical));
-    assert.equal(tree.root.findAllByProps({"aria-label": "Task details"}).length, 1);
-    assert.equal(tree.root.findByProps({"aria-label": "Work details"}).findByType("h3").children.join(""), historical.title);
-    await act(async () => tree.root.findByProps({"aria-label": "Task details"}).props.onClose());
-    assert.equal(tree.root.findAllByProps({"aria-label": "Task details"}).length, 0);
-    assert.deepEqual(navigations, []);
-    assert.deepEqual(selections, []);
-    await act(async () => tree.unmount());
-  }
-});
+ 
 
 
 
 
-test("one project is selected automatically, with no header picker, and a missions prompt when several exist", () => {
+test("one project is selected automatically, with no header picker", () => {
   const one = baseState({ projects: new Map([...fixtureState.projects].slice(0, 1)) });
   const single = render({ state: one, detail: "work" });
   assert.equal(single.includes('aria-label="Project"'), false);
   assert.equal(single.includes("Mission project"), false);
-  assert.match(single, /Missions/);
   const many = render({ detail: "work" });
   assert.match(many, /aria-label="Project"/);
-  assert.match(many, /Choose a project in the header/);
-  assert.equal(many.includes("Mission project"), false);
 });
 
 test("Needs you and Changes counts hide at zero, and Help is gone", () => {

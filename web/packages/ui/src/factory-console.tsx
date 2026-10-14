@@ -6,7 +6,6 @@ import { AgentPanel, ConsoleDialog, HumanRequestPanel, WorkPanel, TaskDetail, ed
 import type { ProjectContentCall } from "./factory-app-controller.js";
 import { useProduction } from "./production-data.js";
 import { deriveProductionView, inProgressProduction } from "./production-view.js";
-import { MissionsPanel } from "./missions-panel.js";
 import { agentTelemetry, needsYou, workRows } from "./console-view.js";
 import { IconButton } from "./icons.js";
 import { Badge } from "./console-kit.js";
@@ -143,15 +142,12 @@ export function FactoryConsole({
   const productionView = useMemo(() => deriveProductionView(productionData.records, Date.now()), [productionData.records]);
   const productionItems = useMemo(() => Object.values(productionView.contraptions).sort((a, b) => Number(a.completed) - Number(b.completed) || (a.completed ? a.completedAt - b.completedAt : 0) || a.visualId.localeCompare(b.visualId)), [productionView]);
   const inProgressItems = useMemo(() => productionItems.filter(inProgressProduction), [productionItems]);
-  const [requestedMission, setRequestedMission] = useState<{ projectId: string; id: string }>();
-  const [byMission, setByMission] = useState(false);
   const [workFilter, setWorkFilter] = useState<WorkFilter>("all");
   const showWork = () => { onDetail?.("work"); };
-  const openWork = (id: string | undefined, missions: boolean) => { selectProject(id); setByMission(missions); if (!missions) setWorkFilter("all"); showWork(); };
-  const openMission = (projectId: string, id: string) => { setRequestedMission({ projectId, id }); openWork(projectId, true); };
-  // Routes into Work from outside it reset the view first so the answer form or task is never hidden.
-  const selectRequest = pickRequest === undefined ? undefined : (request: Parameters<typeof pickRequest>[0]) => { openWork(request.project_id, false); pickRequest(request); };
-  const goTask = selectTask === undefined ? undefined : (id: string) => { openWork(projectId, false); selectTask(id); };
+  const openWork = (id: string | undefined) => { selectProject(id); setWorkFilter("all"); showWork(); };
+  // Routes into Work from outside it (floor, Library, Settings) reset the view first so the answer form or task is never hidden.
+  const selectRequest = pickRequest === undefined ? undefined : (request: Parameters<typeof pickRequest>[0]) => { openWork(request.project_id); pickRequest(request); };
+  const goTask = selectTask === undefined ? undefined : (id: string) => { openWork(projectId); selectTask(id); };
   const sources = projectId === undefined ? undefined : intake?.get(projectId)?.sources;
   const rows = useMemo(() => workRows(scopedState, inProgressItems, sources), [scopedState, inProgressItems, sources]);
   const waiting = rows.filter(needsYou).length;
@@ -214,7 +210,7 @@ export function FactoryConsole({
             <IconButton icon="list" aria-pressed={detail !== "floor" && selectedDetail === "work"} disabled={!ready || onDetail === undefined} onClick={showWork}>Work <Badge n={waiting} /></IconButton>
           </nav>
           <section className="dfConsoleLayout__left dfFactoryConsole__section" aria-label="Factory floor">
-            <FactoryFloor changes={productionItems} changesRead={productionData.read} onProjectContent={onProjectContent} onOpenTasks={ready ? (id) => openWork(id, false) : undefined} onOpenMissions={ready ? (id) => openWork(id, true) : undefined} projectId={projectId} selectedTaskId={selectedTask?.id} onSelectTask={ready ? goTask : undefined} selectedAgentId={selectedDetail === "agent" ? selectedAgent?.id : undefined} state={scopedState} graphs={graphs} graphErrors={graphErrors} onLoadNode={onLoadNode} onAddTask={ready ? onAddTask : undefined} runPaths={runPaths} lastRunPaths={lastRunPaths} onSelectAgent={ready ? chooseAgent : undefined} onSelectHumanRequest={ready ? selectRequest : undefined} connected={ready} />
+            <FactoryFloor changes={productionItems} changesRead={productionData.read} onProjectContent={onProjectContent} onOpenTasks={ready ? openWork : undefined} projectId={projectId} selectedTaskId={selectedTask?.id} onSelectTask={ready ? goTask : undefined} selectedAgentId={selectedDetail === "agent" ? selectedAgent?.id : undefined} state={scopedState} graphs={graphs} graphErrors={graphErrors} onLoadNode={onLoadNode} onAddTask={ready ? onAddTask : undefined} runPaths={runPaths} lastRunPaths={lastRunPaths} onSelectAgent={ready ? chooseAgent : undefined} onSelectHumanRequest={ready ? selectRequest : undefined} connected={ready} />
           </section>
 
           <aside className="dfConsoleSidebar" aria-label="Selected detail">
@@ -225,10 +221,7 @@ export function FactoryConsole({
                 rows={rows}
                 projectId={projectId}
                 filter={workFilter}
-                onFilter={(value) => { setWorkFilter(value); setByMission(false); }}
-                byMission={byMission}
-                onByMission={() => setByMission(!byMission)}
-                missions={<MissionsPanel production={productionItems} requestedMission={requestedMission} state={scopedState} projectId={projectId} active={selectedDetail === "work" && byMission} call={ready ? onProjectContent : undefined} onSelectAgent={ready ? chooseAgent : undefined} onOpenTask={ready ? setRelatedTask : undefined} />}
+                onFilter={setWorkFilter}
                 edit={edit}
                 ready={ready}
                 onEditTask={onEditTask}
@@ -247,7 +240,6 @@ export function FactoryConsole({
                   onOpenTerminal={onOpenTerminalForHumanRequest === undefined ? undefined : (request) => { selectProject(request.project_id); onOpenTerminalForHumanRequest(request); }}
                   terminalReady={ready}
                 />}
-                onMission={(task) => openMission(task.project_id, task.mission_id!)}
                 onIntakeAction={ready ? onIntakeAction : undefined}
                 intake={projectId === undefined ? undefined : { state: intake?.get(projectId)?.state, failed: intakeErrors?.has(projectId) === true, busy: intakePending?.has(projectId) === true }}
               />
