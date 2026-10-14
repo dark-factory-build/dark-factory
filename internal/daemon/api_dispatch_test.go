@@ -1974,14 +1974,14 @@ drained:
 		t.Fatal(err)
 	}
 	done := fixture.serve(t)
-	content, err := operator.ContentCreate(context.Background(), api.ContentInput{ID: testID(231), ProjectID: active.run.ProjectID.String(), Kind: "proposal", Title: "accepted proposal", Body: "body"})
+	content, err := operator.ContentCreate(context.Background(), api.ContentInput{ID: testID(234), ProjectID: active.run.ProjectID.String(), Kind: "proposal", Title: "accepted proposal", Body: "body"})
 	waitDispatch(t, done)
 	if err != nil || content.Revision != 1 {
 		t.Fatalf("proposal content = %+v, %v", content, err)
 	}
-	taskID := testID(232)
+	taskID := testID(235)
 	done = fixture.serve(t)
-	_, err = active.client.OverseerEnqueueTask(context.Background(), api.OverseerTaskCreateInput{ID: taskID, IncarnationID: testID(233), Title: "accepted proposal", Content: []api.ContentPinInput{{ContentID: content.ID, ContentRevision: content.Revision}}})
+	_, err = active.client.OverseerEnqueueTask(context.Background(), api.OverseerTaskCreateInput{ID: taskID, IncarnationID: testID(236), Title: "accepted proposal", Content: []api.ContentPinInput{{ContentID: content.ID, ContentRevision: content.Revision}}})
 	waitDispatch(t, done)
 	if err != nil {
 		t.Fatal(err)
