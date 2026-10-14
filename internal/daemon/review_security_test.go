@@ -642,7 +642,7 @@ func TestCodexReviewerReadsOnlyItsCheckout(t *testing.T) {
 			t.Fatalf("reviewer may write %q", write[1])
 		}
 	}
-	if strings.Contains(joined, "--sandbox") || strings.Contains(joined, "sandbox_mode") || !reviewTempWrite || !strings.Contains(joined, strconv.Quote(checkout)+`="read"`) || !strings.Contains(joined, "\ndefault_permissions=\"dark-factory-review\"\n") || !strings.Contains(joined, profile) || !strings.Contains(joined, strconv.Quote(filepath.Join(registered, ".git", "objects"))+`="read"`) || !strings.Contains(joined, "},network={enabled=false,allow_local_binding=true}\n") {
+	if strings.Contains(joined, "--sandbox") || strings.Contains(joined, "sandbox_mode") || !reviewTempWrite || !strings.Contains(joined, strconv.Quote(checkout)+`="read"`) || !strings.Contains(joined, "\ndefault_permissions=\"dark-factory-review\"\n") || !strings.Contains(joined, profile) || !strings.Contains(joined, strconv.Quote(filepath.Join(registered, ".git", "objects"))+`="read"`) || !strings.Contains(joined, "network={enabled=false") || !strings.Contains(joined, "allow_local_binding=true") {
 		t.Fatalf("reviewer argv = %q, want the deny-root read-only profile and no --sandbox", argv)
 	}
 }
