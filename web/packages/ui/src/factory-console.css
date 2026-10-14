@@ -809,7 +809,7 @@ summary.dfConsoleItem__summary { cursor: pointer; }
 .dfMissions textarea { display: block; width: 100%; min-height: 6rem; padding: 0.65rem; resize: vertical; color: var(--df-console-text); background: var(--df-console-background); border: 1px solid var(--df-console-rule); font: inherit; }
 
 /* One floor: source search, projection controls and proposal selection stay reachable. */
-.dfFactoryEntityTools { display: flex; flex: none; align-items: center; gap: .6rem; height: 2.75rem; padding: .35rem .6rem; overflow-x: auto; white-space: nowrap; font-size: var(--df-text-xs); background: #122027; border-bottom: 1px solid #3c5051; }
+.dfFactoryEntityTools { position: relative; display: flex; flex: none; flex-wrap: wrap; align-items: center; gap: .6rem; min-height: 2.75rem; padding: .35rem .6rem; overflow: visible; white-space: normal; font-size: var(--df-text-xs); background: #122027; border-bottom: 1px solid #3c5051; }
 .dfFactoryEntityTools > * { flex: none; }
 .dfWorkLine { display: flex; align-items: center; gap: .6rem; }
 .dfWorkLine strong { color: #edba6b; font-variant-numeric: tabular-nums; }
@@ -817,7 +817,7 @@ summary.dfConsoleItem__summary { cursor: pointer; }
 .dfWorkLine [data-fault] .dfWorkLine__crate { border-color: #f77b70; }
 :is(.dfFloorMenu, .dfKnowledgeActivity) > summary { cursor: pointer; }
 :is(.dfFloorMenu, .dfKnowledgeActivity)[open] > summary { color: var(--df-console-accent); }
-.dfFactoryEntityTools .dfFloorMenu__body { position: absolute; z-index: 10; top: 2.75rem; left: .5rem; right: .5rem; max-height: min(24rem, 55svh); overflow: auto; padding: .75rem; white-space: normal; background: #122027; border: 1px solid #3c5051; box-shadow: 0 6px 16px #0008; }
+.dfFactoryEntityTools .dfFloorMenu__body { position: absolute; z-index: 10; top: 100%; left: .5rem; right: .5rem; max-height: min(24rem, 55svh); overflow: auto; padding: .75rem; white-space: normal; background: #122027; border: 1px solid #3c5051; box-shadow: 0 6px 16px #0008; }
 .dfFloorMenu__body button { display: block; width: 100%; text-align: left; }
 .dfFloorMenu__body > * + * { margin-top: .4rem; }
 .dfFactoryEntityTools label { display: flex; align-items: center; gap: .5rem; flex: 1 1 24rem; }
@@ -861,8 +861,8 @@ summary.dfConsoleItem__summary { cursor: pointer; }
 .dfProduction__notice { border: 1px solid var(--df-console-rule); padding: .35rem .45rem; }
 .dfProduction__notice p { margin-top: .4rem; }
 .dfProduction__detail { min-width: 0; overflow-wrap: anywhere; }
-.dfWorkBar { display: flex; flex-wrap: nowrap; gap: .25rem; align-items: center; margin-block: .6rem; overflow-x: auto; }
-.dfWorkBar .dfConsoleViewToggle { flex: 0 0 auto; flex-wrap: nowrap; }
+.dfWorkBar { display: flex; flex-wrap: wrap; gap: .25rem; align-items: center; margin-block: .6rem; overflow: visible; }
+.dfWorkBar .dfConsoleViewToggle { flex: 0 0 auto; flex-wrap: wrap; }
 .dfWorkBar > button { padding-inline: .4rem; }
 .dfWorkRow__head { position: relative; padding: .7rem; overflow-wrap: anywhere; }
 .dfWorkRow__head .dfConsoleItem__meta { margin-top: .3rem; }

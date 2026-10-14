@@ -14,7 +14,19 @@ test("the documented ?fixture page is the whole console, labelled, over the fixt
   const page = readFileSync(out, "utf8");
   assert.match(page, /<body[^>]*><p[^>]*>Fixture: simulated data, static render/);
   assert.match(page, /class="dfFactoryConsole[ "]/);
-  for (const text of ["Review the state projection", "Tighten the queue ordering", "Builder One", "North Workshop"]) assert.ok(page.includes(text), text);
+  for (const text of ["Review the state projection", "Tighten the queue ordering", "Builder One", "North Workshop", "By mission", "Show overseer and specialist passes"]) assert.ok(page.includes(text), text);
+});
+
+test("the floor and work controls wrap instead of becoming horizontal overflow", () => {
+  const out = join(mkdtempSync(join(tmpdir(), "df-floor-")), "floor.html");
+  execFileSync(process.execPath, [preview, out]);
+  const page = readFileSync(out, "utf8");
+  const css = readFileSync(new URL("../src/factory-console.css", import.meta.url), "utf8");
+  assert.match(page, /<summary>Search<\/summary>/);
+  assert.match(css, /\.dfFactoryEntityTools \{[^}]*flex-wrap: wrap;[^}]*min-height: 2\.75rem;[^}]*overflow: visible;[^}]*white-space: normal;/);
+  assert.match(css, /\.dfFactoryEntityTools \.dfFloorMenu__body \{[^}]*top: 100%;/);
+  assert.match(css, /\.dfWorkBar \{[^}]*flex-wrap: wrap;[^}]*overflow: visible;/);
+  assert.match(css, /\.dfWorkBar \.dfConsoleViewToggle \{[^}]*flex-wrap: wrap;/);
 });
 
 test("fixture server advertises only after binding and has a bounded lifecycle", async () => {
