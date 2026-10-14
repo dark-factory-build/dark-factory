@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
-import type { AgentItem, OperationalNodeView, SpriteAppearance, TaskHistoryView, TaskItem } from "@dark-factory/client";
+import type { AgentItem, OperationalNodeView, TaskHistoryView, TaskItem } from "@dark-factory/client";
 import { type FactoryAgentSelection, type FactoryAppSnapshot, type FactoryHumanRequestView } from "./factory-app-controller.js";
 import { AgentList, FactoryFloor } from "./console-screens.js";
 import { AgentPanel, ConsoleDialog, HumanRequestPanel, WorkPanel, TaskDetail, editErrorCopy, type AgentConfigEdit, type AgentPanelView, type TaskEdit, type TaskBrief, type TaskScope, type TaskContentChip, type AddTask, type WorkFilter } from "./console-sidebar.js";
@@ -12,7 +12,6 @@ import { MissionsPanel } from "./missions-panel.js";
 import { agentTelemetry, needsYou, workRows } from "./console-view.js";
 import { IconButton } from "./icons.js";
 import { Badge } from "./console-kit.js";
-import { SpriteEditor } from "./factory-scene/sprite-editor.js";
 
 export type ConsoleDetail = "work" | "agent" | "floor";
 
@@ -28,10 +27,6 @@ export type FactoryConsoleProps = FactoryAppSnapshot & {
   onSetDispatch?: (expectedRevision: bigint, enabled: boolean) => Promise<{ revision: bigint; enabled: boolean }>;
   onProjectContent?: ProjectContentCall;
   onSaveAgentConfig?: (config: AgentConfigEdit) => void;
-  onSaveAgentAppearance?: (agentId: string, appearance: SpriteAppearance) => Promise<boolean>;
-  appearanceAgentId?: string;
-  onEditAppearance?: (agent: AgentItem) => void;
-  onCloseAppearance?: () => void;
   onEditTask?: (task: TaskItem, change: TaskEdit) => Promise<boolean>;
   onAddTask?: AddTask;
   onLoadTaskDetail?: (task: TaskItem, peerOffset?: bigint, expectedHead?: bigint) => Promise<TaskBrief>;
@@ -104,10 +99,6 @@ export function FactoryConsole({
   onSetDispatch,
   onProjectContent,
   onSaveAgentConfig,
-  onSaveAgentAppearance,
-  appearanceAgentId,
-  onEditAppearance,
-  onCloseAppearance,
   onEditTask,
   onAddTask,
   onLoadTaskDetail,
@@ -210,7 +201,6 @@ export function FactoryConsole({
     setLibraryOpen(false);
   };
   const inspectedTask = relatedTask ? state?.tasks.get(relatedTask.id) ?? relatedTask : (onDetail === undefined || selectedDetail === "work") ? selectedTask : undefined;
-  const appearanceAgent = appearanceAgentId === undefined ? undefined : state?.agents.get(appearanceAgentId);
   const editError = edit !== undefined && state?.projects.has(edit.target) ? undefined : editErrorCopy(edit);
 
   return (
@@ -321,7 +311,6 @@ export function FactoryConsole({
                 edit={edit}
                 ready={ready}
                 onSaveConfig={onSaveAgentConfig}
-                onEditAppearance={ready && !agent.archived ? onEditAppearance : undefined}
                 onLoadTaskDetail={onLoadTaskDetail}
                 onLoadTaskHistory={onLoadTaskHistory}
                 terminalContent={terminalContent}
@@ -343,7 +332,6 @@ export function FactoryConsole({
       {!libraryOpen ? null : <ConsoleDialog key={knowledgeView.board ? "board" : "library"} label={knowledgeView.board ? "Discussion board" : "Project library"} title={knowledgeView.board ? "Board" : "Library"} className="dfLibraryDialog" onClose={() => setLibraryOpen(false)}>
         <ProjectLibrary open initialProjectId={knowledgeView.project} key={`${knowledgeView.project}:${knowledgeView.board}:${knowledgeView.entity}:${knowledgeView.id}:${knowledgeView.revision}`} board={knowledgeView.board} repository={knowledgeView.repository} entity={knowledgeView.entity} initialID={knowledgeView.id} initialRevision={knowledgeView.revision} onSource={(entity) => { selectProject(entity.split(":")[0]); setRequestedEntity({ id: entity.slice(entity.indexOf(":") + 1) }); setLibraryOpen(false); onDetail?.("floor"); }} onRecord={openKnowledgeRecord} state={state} call={ready ? onProjectContent : undefined} onUseInTask={onAddTask === undefined ? undefined : (chip) => { setTaskContent((chips) => [...chips.filter((item) => item.project_id === chip.project_id && item.content_id !== chip.content_id), chip]); setLibraryOpen(false); openWork(chip.project_id, false); }} />
       </ConsoleDialog>}
-      {appearanceAgent === undefined || onSaveAgentAppearance === undefined || onCloseAppearance === undefined ? null : <SpriteEditor agent={appearanceAgent} pending={edit?.target === appearanceAgent.id && edit.pending} error={edit?.target === appearanceAgent.id ? editError : undefined} onSave={(appearance) => onSaveAgentAppearance(appearanceAgent.id, appearance)} onClose={onCloseAppearance} />}
     </div>
   );
 }

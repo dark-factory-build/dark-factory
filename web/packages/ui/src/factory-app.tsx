@@ -23,7 +23,6 @@ export function FactoryApp({ onStatusChange, browserPort }: FactoryAppProps = {}
   const [detail, setDetail] = useState<ConsoleDetail>("work");
   const [agentPanel, setAgentPanel] = useState<AgentPanelView>("terminal");
   const [selectedTaskId, setSelectedTaskId] = useState<string>();
-  const [appearanceAgentId, setAppearanceAgentId] = useState<string>();
   const browser = useMemo(() => browserEndpoint(browserPort), [browserPort]);
   const owner = useRef<FactoryAppController | undefined>(undefined);
   const defaultedController = useRef<FactoryAppController | undefined>(undefined);
@@ -99,10 +98,6 @@ export function FactoryApp({ onStatusChange, browserPort }: FactoryAppProps = {}
       onSetDispatch={snapshot.dispatchAllowed ? (revision, enabled) => owner.current?.setDispatch(revision, enabled) ?? Promise.reject(new Error("closed")) : undefined}
       onProjectContent={(operation, input) => owner.current?.projectContent(operation, input) ?? Promise.reject(new Error("closed"))}
       onSaveAgentConfig={(config) => { void owner.current?.updateAgentConfig(config); }}
-      onSaveAgentAppearance={(agentId, appearance) => owner.current?.updateAgentAppearance(agentId, appearance) ?? Promise.resolve(false)}
-      appearanceAgentId={appearanceAgentId}
-      onEditAppearance={(agent) => setAppearanceAgentId(agent.id)}
-      onCloseAppearance={() => setAppearanceAgentId(undefined)}
       onEditTask={(task, change) => owner.current?.editTask(task, change) ?? Promise.resolve(false)}
       onAddTask={(agent, instruction, mode, files, content) => owner.current?.addTask(agent, instruction, mode, files, content) ?? Promise.resolve(false)}
       onLoadTaskDetail={(task, peerOffset, expectedHead) => owner.current?.taskDetail(task, peerOffset, expectedHead) ?? Promise.reject(new Error("closed"))}
