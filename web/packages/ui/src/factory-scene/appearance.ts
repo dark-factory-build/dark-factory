@@ -72,7 +72,7 @@ export function restingItem(worker: SceneWorker, at?: number): Readonly<{ item: 
  * in its seat until its next review wakes it, however long a backoff makes that.
  */
 export function offDuty(worker: SceneWorker): "asleep" | "off shift" | undefined {
-  return worker.specialist === undefined || worker.activity === "busy" || worker.activity === "needs-you" ? undefined : worker.paused ? "off shift" : "asleep";
+  return worker.specialist === undefined || worker.activity === "busy" || worker.activity === "needs-you" ? undefined : worker.paused ? "off shift" : worker.specialist.stage === "ready" ? "asleep" : undefined;
 }
 
 /**

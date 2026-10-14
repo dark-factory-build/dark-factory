@@ -362,7 +362,7 @@ test("at a machine empty hands work it facing it or type, a reviewing specialist
   assert.ok(working(operator, 0).every((name) => !/face|system|blink|tool|held/.test(name)), `${working(operator, 0)}`);
   assert.ok(workerFrames(operator, { action: "interacting", frame: 1 }).includes("person.skin.0.back.operate.0"), "reduced motion rests on the first frame");
   // A specialist's running review is inspection instead: it reads its board, then lowers it to look.
-  const specialist = { ...operator, specialist: { title: "Operations specialist", text: "reviewing: make delivery reliable", next: "" } };
+  const specialist = { ...operator, specialist: { title: "Operations specialist", stage: "ready", text: "reviewing: make delivery reliable", next: "" } };
   const reading = (worker, at, seat, action = "interacting") => workerFrames(worker, { action, frame: 0, at }, seat).filter((name) => /skin|legs|held|tool/.test(name));
   assert.deepEqual([0, 2500].map((at) => reading(specialist, at)), [
     ["person.skin.0.inspect.0", "person.legs.plain.stand", "person.held.clipboard.chest"],
