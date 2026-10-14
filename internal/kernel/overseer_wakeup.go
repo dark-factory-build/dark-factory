@@ -40,7 +40,11 @@ const (
 // it, and the Change item covers a publication that never happens. While
 // factoryd records
 // that Change revision's publication refused, the item is that refusal, at the
-// Change's version however often the hourly retry repeats it. A failed or
+// Change's version however often the hourly retry repeats it. A Change that
+// re-settled with no publication since, no open pull request of its task and
+// no refusal, while a pull request PublishableChanges still counts for it
+// keeps it unpublished, is one factoryd skips: the item names that pull
+// request (#1949). A failed or
 // cancelled intake task is an item too, re-woken while the overseer could
 // retry it (an automatic end) and otherwise one look, so a ready issue never
 // sits ownerless; a withdrawn issue's task is not. A succeeded intake task
@@ -92,18 +96,29 @@ item AS (
 	  AND NOT (t.status = 'succeeded' AND EXISTS (SELECT 1 FROM changes AS c WHERE c.task_id = t.id AND (c.phase = 'abandoned' OR c.phase = 'retained' AND c.head_commit IS NOT NULL)))
 	UNION ALL SELECT r.task_id, h.created_at_ms, 3, '', lower(hex(r.task_id)) FROM human_requests AS h JOIN runs AS r ON r.id = h.run_id
 	WHERE r.project_id = ?1 AND r.role = 'worker' AND h.status IN ('open', 'delivering', 'delivery_unknown')
-	UNION ALL SELECT CASE WHEN f.identity IS NULL THEN c.task_id END, c.updated_at_ms, CASE WHEN f.identity IS NULL THEN 3 ELSE 0 END,
-	  printf('Escalated: factoryd cannot publish change %s for task %s: %s', lower(hex(c.id)), lower(hex(c.task_id)), json_extract(f.document, '$.detail')),
-	  COALESCE('[reviewer:' || f.identity || ']', lower(hex(c.task_id))) FROM changes AS c JOIN tasks AS t ON t.id = c.task_id
-	LEFT JOIN production_records AS f ON f.project_id = c.project_id AND f.kind = 'reviewer' AND f.identity = 'publish-' || lower(hex(c.id)) || '-' || c.revision
-	WHERE c.project_id = ?1 AND t.status = 'succeeded' AND c.head_commit IS NOT NULL AND c.base_commit IS NOT NULL
-	  AND NOT EXISTS (SELECT 1 FROM agents AS a WHERE a.id = t.assigned_agent_id AND ` + specialistCarrierSQL + `)
-	  AND c.head_commit <> c.base_commit AND c.updated_at_ms + ?2 <= ?3
-	  AND f.identity IS NOT NULL
-	  AND (NOT EXISTS (SELECT 1 FROM publication_tasks AS p WHERE p.change_id = c.id)
-	       OR EXISTS (SELECT 1 FROM publication_tasks AS p JOIN production_records AS r
-	           ON r.project_id = p.project_id AND r.repository = p.repository AND r.kind = 'pull_request' AND r.identity = CAST(p.pull_number AS TEXT)
-	           WHERE p.change_id = c.id AND json_extract(r.document, '$.state') = 'open' AND c.updated_at_ms > p.created_at_ms))
+	UNION ALL SELECT NULL, version, 0, CASE WHEN failed IS NULL
+	    THEN printf('Settled, unpublishable: change %s for task %s: branch already has PR #%d', change, task, pull)
+	    ELSE printf('Escalated: factoryd cannot publish change %s for task %s: %s', change, task, failure) END,
+	  COALESCE('[reviewer:' || failed || ']', '[change:' || change || ']')
+	FROM (SELECT c.updated_at_ms AS version, lower(hex(c.id)) AS change, lower(hex(c.task_id)) AS task, f.identity AS failed, json_extract(f.document, '$.detail') AS failure,
+	    CASE WHEN f.identity IS NULL THEN (SELECT q.pull_number FROM publication_tasks AS q WHERE (q.change_id = c.id OR q.task_id = c.task_id)
+	        AND NOT EXISTS (SELECT 1 FROM production_records AS r JOIN runs AS u ON u.id = c.settled_run_id
+	            WHERE r.project_id = q.project_id AND r.repository = q.repository AND r.kind = 'pull_request' AND r.identity = CAST(q.pull_number AS TEXT)
+	              AND json_extract(r.document, '$.state') = 'merged' AND u.admitted_at_ms > r.observed_at_ms)
+	      ORDER BY q.created_at_ms DESC LIMIT 1) END AS pull
+	  FROM changes AS c JOIN tasks AS t ON t.id = c.task_id
+	  LEFT JOIN production_records AS f ON f.project_id = c.project_id AND f.kind = 'reviewer' AND f.identity = 'publish-' || lower(hex(c.id)) || '-' || c.revision
+	  WHERE c.project_id = ?1 AND t.status = 'succeeded' AND c.head_commit IS NOT NULL AND c.base_commit IS NOT NULL
+	    AND NOT EXISTS (SELECT 1 FROM agents AS a WHERE a.id = t.assigned_agent_id AND ` + specialistCarrierSQL + `)
+	    AND c.head_commit <> c.base_commit AND c.updated_at_ms + ?2 <= ?3
+	    AND (f.identity IS NOT NULL AND (NOT EXISTS (SELECT 1 FROM publication_tasks AS p WHERE p.change_id = c.id)
+	         OR EXISTS (SELECT 1 FROM publication_tasks AS p JOIN production_records AS r
+	             ON r.project_id = p.project_id AND r.repository = p.repository AND r.kind = 'pull_request' AND r.identity = CAST(p.pull_number AS TEXT)
+	             WHERE p.change_id = c.id AND json_extract(r.document, '$.state') = 'open' AND c.updated_at_ms > p.created_at_ms))
+	      OR f.identity IS NULL AND c.phase = 'retained' AND NOT ` + taskIssueWithdrawn + `
+	         AND NOT EXISTS (SELECT 1 FROM publication_tasks AS p WHERE p.task_id = c.task_id AND (p.created_at_ms >= t.completed_at_ms
+	             OR EXISTS (SELECT 1 FROM pull_request AS r WHERE r.project_id = p.project_id AND r.repository = p.repository AND r.identity = CAST(p.pull_number AS TEXT) AND r.state = 'open'))))
+	) WHERE failed IS NOT NULL OR pull IS NOT NULL
 	UNION ALL SELECT t.id, t.updated_at_ms, CASE WHEN ` + taskEndedAutomatically + ` THEN 3 END, '', lower(hex(t.id)) FROM tasks AS t
 	JOIN intake_task_bindings AS b ON b.task_id = t.id
 	JOIN intake_acceptances AS i ON i.id = b.acceptance_id

@@ -934,6 +934,14 @@ func TestMergedIntakeSentBackPublishesItsCorrectionAnew(t *testing.T) {
 	if len(found) != 1 || found[0].Task.ID != task.ID || found[0].Pull != 0 || found[0].Head != hex.EncodeToString(corrected.Bytes()) || found[0].Accepted.ID != accepted.ID {
 		t.Fatalf("correction candidates = %+v", found)
 	}
+	// Publishable, it is no "unpublishable" overseer item (#1949).
+	policy, after, instruction := IdleStandingInstruction, uint32(1), "Supervise."
+	if _, err := store.UpdateAgent(ctx, overseer.ID, overseer.Revision, AgentPatch{IdlePolicy: &policy, IdleAfterSeconds: &after, IdleInstruction: &instruction}, mustTime(t, 100)); err != nil {
+		t.Fatal(err)
+	}
+	if items, err := store.OverseerItems(ctx, worker.ProjectID, mustTime(t, 100+PublicationAttentionAfter.Milliseconds())); err != nil || slices.ContainsFunc(items, func(item OverseerItem) bool { return strings.Contains(item.Line, "unpublishable") }) {
+		t.Fatalf("publishable correction reported = %+v, %v", items, err)
+	}
 	// A pull request closed unmerged never ships.
 	closedPull := pr
 	closedPull.Number, closedPull.URL, closedPull.State = 4, "https://github.com/example/factory/pull/4", "closed"

@@ -281,6 +281,62 @@ func TestOverseerPublishFailureWake(t *testing.T) {
 	}
 }
 
+// #1949: a no-intake Change that settles after its task's pull request merged
+// (its run admitted before the merge) or closed is one PublishableChanges
+// skips without a refusal: the overseer's wake names it exactly once, and it
+// becomes one NEEDS YOU card. A correction it does publish is no item
+// (TestMergedIntakeSentBackPublishesItsCorrectionAnew).
+func TestOverseerUnpublishableSettledChangeWake(t *testing.T) {
+	t.Parallel()
+	for _, mode := range []string{"merged", "closed"} {
+		ctx := context.Background()
+		succeeded, _ := NewSuccessProposal("done")
+		store, finalizing := finalizingReleasedRun(t, RoleWorker, succeeded)
+		defer store.Close()
+		change, _, err := store.Change(ctx, *finalizing.ChangeID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		moved, _ := NewCommitID(change.Selection.format, bytes.Repeat([]byte{0xd2}, change.Selection.format.oidLength()))
+		head := hex.EncodeToString(moved.Bytes())
+		pr := ProductionPullRequest{Number: 7, Title: "Ship", URL: "https://github.com/example/factory/pull/7", Head: head, Branch: "factory/" + change.ID.String()[:12], Base: "main", State: "open", Review: ProductionReview{Head: head, State: "unknown"}}
+		if err := store.RecordPublication(ctx, finalizing.ProjectID, finalizing.TaskID, "example/factory", pr, mustTime(t, 70)); err != nil {
+			t.Fatal(err)
+		}
+		pr.State = mode
+		if err := store.RecordProductionObservation(ctx, finalizing.ProjectID, ProductionObservation{Repository: "example/factory", ObservedAt: 75, PullRequests: []ProductionPullRequest{pr}, Checks: []ProductionCheck{}}, mustTime(t, 75)); err != nil {
+			t.Fatal(err)
+		}
+		settlement, _ := NewRetainedChangeSettlement(change.Revision, &moved)
+		if _, err := store.FinalizeWorkerRun(ctx, finalizing.ID, finalizing.Revision, settlement, mustTime(t, 80)); err != nil {
+			t.Fatal(err)
+		}
+		if found, err := store.PublishableChanges(ctx, mustTime(t, 1<<40)); err != nil || len(found) != 0 {
+			t.Fatalf("%s publishable = %+v, %v", mode, found, err)
+		}
+		overseer, err := store.CreateAgent(ctx, NewAgent{ID: agentID(t, 3), ProjectID: finalizing.ProjectID, Name: "overseer", Role: RoleOrchestrator, Provider: ProviderCodex, ToolBudgetLimit: 2}, mustTime(t, 82))
+		if err != nil {
+			t.Fatal(err)
+		}
+		policy, after, instruction := IdleStandingInstruction, uint32(1), "Supervise."
+		if _, err := store.UpdateAgent(ctx, overseer.ID, overseer.Revision, AgentPatch{IdlePolicy: &policy, IdleAfterSeconds: &after, IdleInstruction: &instruction}, mustTime(t, 83)); err != nil {
+			t.Fatal(err)
+		}
+		item := "Settled, unpublishable: change " + change.ID.String() + " for task " + finalizing.TaskID.String() + ": branch already has PR #7"
+		at := 80 + PublicationAttentionAfter.Milliseconds()
+		if bodies := wakeBodies(t, store, at); len(bodies) != 1 || strings.Count(bodies[0], "Settled, unpublishable: ") != 1 || !strings.Contains(bodies[0], "\n"+item) {
+			t.Fatalf("%s wake = %q", mode, bodies)
+		}
+		settleCarrier(t, store, at+1, 90, "ran")
+		if bodies := wakeBodies(t, store, at+1+OverseerRewakeAfter.Milliseconds()); len(bodies) != 0 {
+			t.Fatalf("%s re-wake = %q", mode, bodies)
+		}
+		if requests, err := store.OperatorHumanRequests(ctx); err != nil || len(requests) != 1 || strings.Count(requests[0].QuestionText, item) != 1 {
+			t.Fatalf("%s operator escalation = %+v, %v", mode, requests, err)
+		}
+	}
+}
+
 // #1561: a failed self-release wakes the overseer once and becomes exactly one
 // NEEDS YOU card naming the release, its phase and its reason; a retry failing
 // for the same cause escalates nothing more, and a new cause wakes again.
