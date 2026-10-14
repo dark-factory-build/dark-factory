@@ -117,8 +117,16 @@ func (daemon *Daemon) tickMergePipeline(ctx context.Context) {
 	}
 	daemon.pipelineAt.Store(now.Add(productionRefreshInterval).UnixNano())
 	go func() {
-		defer daemon.pipelineBusy.Store(false)
-		daemon.advanceMergePipeline(ctx)
+		for {
+			daemon.advanceMergePipeline(ctx)
+			daemon.pipelineBusy.Store(false)
+			// A wake during the pass (pipelineAt reset to 0, as a review's
+			// verdict does) lost its tick to the busy pass: run it now.
+			if daemon.pipelineAt.Load() != 0 || !daemon.pipelineBusy.CompareAndSwap(false, true) {
+				return
+			}
+			daemon.pipelineAt.Store(daemon.now().Add(productionRefreshInterval).UnixNano())
+		}
 	}()
 }
 
