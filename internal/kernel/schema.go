@@ -9,7 +9,7 @@ import (
 
 const (
 	applicationID = 0x4446474f
-	userVersion   = 42
+	userVersion   = 43
 
 	// SQLite reserves the exact lower-case "sqlite_" prefix. Use a literal,
 	// binary prefix test: LIKE would treat '_' as a wildcard and hide names
@@ -166,6 +166,8 @@ var schemaStatements = []string{
     incarnation_id BLOB NOT NULL UNIQUE CHECK (length(incarnation_id) = 16 AND incarnation_id <> zeroblob(16)),
     withdrawn_at_ms INTEGER CHECK (withdrawn_at_ms IS NULL OR withdrawn_at_ms >= 0),
     created_at_ms INTEGER NOT NULL CHECK (created_at_ms >= 0),
+    author_login TEXT NOT NULL DEFAULT '' CHECK (length(CAST(author_login AS BLOB)) <= 44),
+    author_type TEXT NOT NULL DEFAULT '' CHECK (author_type IN ('', 'user', 'bot')),
     UNIQUE(linear_team_id, github_repository_id, issue_number, issue_node_id, title, body_hash, project_id, repository_id),
     CHECK (withdrawn_at_ms IS NULL OR withdrawn_at_ms >= created_at_ms)
 ,CHECK ((linear_team_id = '' AND github_repository_id > 0) OR (linear_team_id <> '' AND github_repository_id = 0))

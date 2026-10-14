@@ -9,8 +9,9 @@ import (
 	"strings"
 )
 
-// Open migrates the five earlier versions. v42 adds archive_batches, which
-// the transaction itself proves, and moves no history; v41 folds the
+// Open migrates the six earlier versions. v42 adds archive_batches, which
+// the transaction itself proves, and moves no history; v43 persists intake
+// author identity; v41 folds the
 // continuations table onto the human request each row awaited; v40 drops
 // browser_security_events, a log nothing read; v39 names the retryable
 // failure code 'transient' where v38 named 'runner_exit', which nothing ever
@@ -23,6 +24,7 @@ const (
 	v39UserVersion = 39
 	v40UserVersion = 40
 	v41UserVersion = 41
+	v42UserVersion = 42
 )
 
 var browserSecurityEventStatements = []string{
@@ -65,8 +67,14 @@ var v40Continuations = []string{
 }
 
 func legacySchemaStatements(version int) []string {
-	statements := slices.DeleteFunc(slices.Clone(schemaStatements), func(statement string) bool { return statement == archiveBatchesTable })
-	if version == v41UserVersion {
+	statements := slices.Clone(schemaStatements)
+	if version < v42UserVersion {
+		statements = slices.DeleteFunc(statements, func(statement string) bool { return statement == archiveBatchesTable })
+	}
+	if version == v41UserVersion || version == v42UserVersion {
+		for index, statement := range statements {
+			statements[index] = strings.ReplaceAll(statement, "    author_login TEXT NOT NULL DEFAULT '' CHECK (length(CAST(author_login AS BLOB)) <= 44),\n    author_type TEXT NOT NULL DEFAULT '' CHECK (author_type IN ('', 'user', 'bot')),\n", "")
+		}
 		return statements
 	}
 	pairs := []string{humanContinuationColumns, "", "'peer_question')),", "'peer_question', 'continuation')),"}
@@ -85,6 +93,9 @@ func legacySchemaStatements(version int) []string {
 	statements = slices.Insert(statements, at, v40Continuations...)
 	for index, statement := range statements {
 		statements[index] = replacer.Replace(statement)
+		if version <= v42UserVersion {
+			statements[index] = strings.ReplaceAll(statements[index], "    author_login TEXT NOT NULL DEFAULT '' CHECK (length(CAST(author_login AS BLOB)) <= 44),\n    author_type TEXT NOT NULL DEFAULT '' CHECK (author_type IN ('', 'user', 'bot')),\n", "")
+		}
 	}
 	return statements
 }
@@ -137,7 +148,7 @@ func (store *Store) migrateLegacy(ctx context.Context) error {
 	switch version {
 	case userVersion:
 		return connection.Close()
-	case v37UserVersion, v38UserVersion, v39UserVersion, v40UserVersion, v41UserVersion:
+	case v37UserVersion, v38UserVersion, v39UserVersion, v40UserVersion, v41UserVersion, v42UserVersion:
 	default:
 		cause := ErrForeignDatabase
 		if appID == applicationID && version > userVersion {
@@ -168,7 +179,32 @@ func migrateFrom(ctx context.Context, connection *sql.Conn, version int) error {
 			return err
 		}
 	}
-	for _, statement := range []string{archiveBatchesTable, fmt.Sprintf("PRAGMA user_version = %d", userVersion)} {
+	if version <= v42UserVersion {
+		for _, statement := range []string{
+			"ALTER TABLE intake_acceptances ADD COLUMN author_login TEXT NOT NULL DEFAULT '' CHECK (length(CAST(author_login AS BLOB)) <= 44)",
+			"ALTER TABLE intake_acceptances ADD COLUMN author_type TEXT NOT NULL DEFAULT '' CHECK (author_type IN ('', 'user', 'bot'))",
+		} {
+			if _, err := connection.ExecContext(ctx, statement); err != nil {
+				return err
+			}
+		}
+		if _, err := connection.ExecContext(ctx, `PRAGMA writable_schema = ON`); err != nil {
+			return err
+		}
+		if _, err := connection.ExecContext(ctx, `UPDATE sqlite_schema SET sql = replace(replace(sql, '), author_login', '),
+    author_login'), '), author_type', '),
+    author_type') WHERE type = 'table' AND name = 'intake_acceptances'`); err != nil {
+			return err
+		}
+		if _, err := connection.ExecContext(ctx, `PRAGMA writable_schema = OFF`); err != nil {
+			return err
+		}
+	}
+	statements := []string{fmt.Sprintf("PRAGMA user_version = %d", userVersion)}
+	if version < v42UserVersion {
+		statements = append([]string{archiveBatchesTable}, statements...)
+	}
+	for _, statement := range statements {
 		if _, err := connection.ExecContext(ctx, statement); err != nil {
 			return err
 		}

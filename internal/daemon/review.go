@@ -918,7 +918,12 @@ func (b *daemonReviewBackend) reviewContext(ctx context.Context, checkout string
 				} else if issue, liveErr := b.daemon.liveAcceptedIssue(ctx, accepted); liveErr != nil {
 					goal = "Current accepted issue scope unavailable: " + liveErr.Error()
 				} else {
-					goal = kernel.IntakeTaskBody(accepted, issue.Title, issue.Body)
+					title, body, scopeErr := b.daemon.acceptedIssueScope(ctx, accepted, issue)
+					if scopeErr != nil {
+						goal = "Current accepted issue scope unavailable: " + scopeErr.Error()
+					} else {
+						goal = kernel.IntakeTaskBody(accepted, title, body)
+					}
 				}
 			}
 			goal = strings.ToValidUTF8(goal[:min(len(goal), 8000)], "")

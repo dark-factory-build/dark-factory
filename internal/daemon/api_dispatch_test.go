@@ -1126,7 +1126,7 @@ func TestAttemptTaskUsesCurrentAcceptedIssueBody(t *testing.T) {
 	if _, err := fixture.store.SetIntakeSourceEnabled(ctx, source.ID, source.Revision, true, mustKernelTime(t, 103)); err != nil {
 		t.Fatal(err)
 	}
-	issue := maintainer.Issue{ID: 81, NodeID: "I_attempt", Number: 9, Title: "Original title", Body: "Original scope", State: "open", URL: "https://github.com/team/issues/issues/9"}
+	issue := maintainer.Issue{ID: 81, NodeID: "I_attempt", Number: 9, Title: "Original scope", Body: "", State: "open", URL: "https://github.com/team/issues/issues/9"}
 	issue.Author.Login, issue.Author.Type = "outsider", "User"
 	fixture.daemon.intakeIssues = func(_ context.Context, repository string, repositoryID uint64, page uint32, label string, number uint64) (maintainer.IssuePage, error) {
 		return maintainer.IssuePage{RepositoryID: repositoryID, Issues: []maintainer.Issue{issue}}, nil
@@ -1176,7 +1176,7 @@ func TestAttemptTaskUsesCurrentAcceptedIssueBody(t *testing.T) {
 		t.Fatal(err)
 	}
 	liveShell, err := fixture.daemon.currentTaskText(ctx, kernel.ProviderShell, queued)
-	if err != nil || !strings.Contains(liveShell, "Edited scope") || strings.Contains(liveShell, "Original scope") {
+	if err != nil || !strings.Contains(liveShell, "Original scope") || !strings.Contains(liveShell, "Issue edited since acceptance: re-accept to apply") || strings.Contains(liveShell, "Edited scope") {
 		t.Fatalf("shell task text = %q, err=%v", liveShell, err)
 	}
 	active := prepareActiveAttemptInProjectWithProviderAndTask(t, fixture, 220, project.String(), "orchestrator", "shell", receipt.TaskID, func() {})
@@ -1186,7 +1186,7 @@ func TestAttemptTaskUsesCurrentAcceptedIssueBody(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(assignment.Task, "Edited scope") || strings.Contains(assignment.Task, "Original scope") {
+	if !strings.Contains(assignment.Task, "Original scope") || !strings.Contains(assignment.Task, "Issue edited since acceptance: re-accept to apply") || strings.Contains(assignment.Task, "Edited scope") {
 		t.Fatalf("attempt task = %q", assignment.Task)
 	}
 }
