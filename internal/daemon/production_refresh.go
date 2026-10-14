@@ -254,14 +254,9 @@ func pullRequestObservation(ctx context.Context, call maintainerMCP, repository 
 	for _, pull := range open {
 		seen[pull.Number] = true
 	}
-	knownByNumber := make(map[uint64]kernel.ProductionPullRequest, len(known))
-	for _, pull := range known {
-		knownByNumber[pull.Number] = pull
-	}
+	// The list omits mergeability, and a base advance can make an unchanged
+	// pull conflicting, so every open pull is read exactly.
 	for i, pull := range open {
-		if !pullRequestNeedsExactRead(pull, knownByNumber) {
-			continue
-		}
 		exact, err := readMaintainerPullRequests(ctx, call, repository, githubID, map[string]any{"repository": repository, "page": 1, "per_page": 1, "pull_number": pull.Number})
 		if err != nil {
 			fault(err)
@@ -286,14 +281,6 @@ func pullRequestObservation(ctx context.Context, call maintainerMCP, repository 
 	for _, value := range open {
 		if value.Number == 0 || len(value.Head) != 40 || strings.Trim(value.Head, "0123456789abcdef") != "" {
 			return kernel.ProductionObservation{}, fmt.Errorf("Maintainer returned an invalid pull request head")
-		}
-		if priorPull, ok := knownByNumber[value.Number]; ok && !pullRequestNeedsExactRead(value, knownByNumber) {
-			if value.Mergeable == nil {
-				value.Mergeable = priorPull.Mergeable
-			}
-			if value.MergeState == "" {
-				value.MergeState = priorPull.MergeState
-			}
 		}
 		pr := productionPullRequest(value)
 		if review, ok := prior[value.Number]; ok && strings.EqualFold(review.Head, value.Head) {
@@ -339,11 +326,6 @@ func pullRequestObservation(ctx context.Context, call maintainerMCP, repository 
 		result.Checks = append(result.Checks, checks...)
 	}
 	return result, nil
-}
-
-func pullRequestNeedsExactRead(pull maintainerPullRequest, known map[uint64]kernel.ProductionPullRequest) bool {
-	prior, ok := known[pull.Number]
-	return !ok || prior.Mergeable == nil || !strings.EqualFold(prior.Head, pull.Head) || !strings.EqualFold(prior.Base, pull.Base) || !strings.EqualFold(prior.BaseSHA, pull.BaseSHA)
 }
 
 func readMaintainerMergeQueue(ctx context.Context, call maintainerMCP, repository string, githubID uint64, pr kernel.ProductionPullRequest) (string, *review.GroupRun, error) {
