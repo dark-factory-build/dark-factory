@@ -373,11 +373,10 @@ func (daemon *Daemon) content(ctx context.Context, call api.Call) api.Reply {
 		if e != nil {
 			return newErrorReply(api.RemoteInvalidRequest)
 		}
-		if operator {
-			err = daemon.store.AttachContentToTask(ctx, t, pid, c, r, at)
-		} else {
-			err = daemon.store.AttachContentForOrchestrator(ctx, kd, t, c, r, at)
+		if !operator {
+			return newErrorReply(api.RemoteUnauthorized)
 		}
+		err = daemon.store.AttachContentToTask(ctx, t, pid, c, r, at)
 		if err != nil {
 			return newErrorReply(remoteErrorCode(err))
 		}

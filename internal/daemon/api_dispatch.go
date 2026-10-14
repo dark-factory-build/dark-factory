@@ -1757,14 +1757,9 @@ func (daemon *Daemon) enqueueTask(ctx context.Context, call api.Call) api.Reply 
 	if err != nil {
 		return newErrorReply(api.RemoteInvalidRequest)
 	}
-	content := make([]kernel.TaskContentReference, len(input.Content))
-	for i, pin := range input.Content {
-		if content[i].ContentID, err = decodeID(pin.ContentID, kernel.ContentIDFromBytes); err != nil {
-			return newErrorReply(api.RemoteInvalidRequest)
-		}
-		if content[i].ContentRevision, err = kernel.NewRevision(int64(pin.ContentRevision)); err != nil {
-			return newErrorReply(api.RemoteInvalidRequest)
-		}
+	content, err := decodeContentPins(input.Content)
+	if err != nil {
+		return newErrorReply(api.RemoteInvalidRequest)
 	}
 	if err := prepareTaskEnqueue(ctx, daemon.store, spec, false); err != nil {
 		return newErrorReply(remoteErrorCode(err))
@@ -1792,6 +1787,20 @@ func newTaskSpec(id kernel.TaskID, projectID kernel.ProjectID, repositoryID kern
 		spec.Prerequisites = append(spec.Prerequisites, kernel.TaskPrerequisite{TaskID: taskID, WorkRevision: workRevision})
 	}
 	return spec, nil
+}
+
+func decodeContentPins(pins []api.ContentPinInput) ([]kernel.TaskContentReference, error) {
+	content := make([]kernel.TaskContentReference, len(pins))
+	for i, pin := range pins {
+		var err error
+		if content[i].ContentID, err = decodeID(pin.ContentID, kernel.ContentIDFromBytes); err != nil {
+			return nil, err
+		}
+		if content[i].ContentRevision, err = kernel.NewRevision(int64(pin.ContentRevision)); err != nil {
+			return nil, err
+		}
+	}
+	return content, nil
 }
 
 func (daemon *Daemon) setDispatch(ctx context.Context, call api.Call) api.Reply {
@@ -2151,10 +2160,14 @@ func (daemon *Daemon) overseerEnqueueTask(ctx context.Context, call api.Call) ap
 	if err != nil {
 		return newErrorReply(api.RemoteInvalidRequest)
 	}
+	content, err := decodeContentPins(input.Content)
+	if err != nil {
+		return newErrorReply(api.RemoteInvalidRequest)
+	}
 	if err := prepareTaskEnqueue(ctx, daemon.store, spec, true); err != nil {
 		return newErrorReply(remoteErrorCode(err))
 	}
-	task, err := daemon.store.EnqueueTaskForOverseer(ctx, digest, spec, at)
+	task, err := daemon.store.EnqueueTaskForOverseer(ctx, digest, spec, at, content...)
 	if err != nil {
 		return newErrorReply(remoteErrorCode(err))
 	}

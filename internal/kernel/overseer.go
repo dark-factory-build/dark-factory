@@ -466,10 +466,7 @@ func overseerRun(ctx context.Context, connection *sql.Conn, digest AttemptDigest
 	return run, nil
 }
 
-// EnqueueTaskForOverseer creates or replays one worker task in the live
-// orchestrator's project. The task identity remains the durable idempotency
-// key; a retry with different immutable task data conflicts.
-func (store *Store) EnqueueTaskForOverseer(ctx context.Context, digest AttemptDigest, spec NewTask, at UnixMillis) (Task, error) {
+func (store *Store) EnqueueTaskForOverseer(ctx context.Context, digest AttemptDigest, spec NewTask, at UnixMillis, content ...TaskContentReference) (Task, error) {
 	if err := validateNonCarrierTask(spec); err != nil {
 		return Task{}, err
 	}
@@ -533,6 +530,11 @@ func (store *Store) EnqueueTaskForOverseer(ctx context.Context, digest AttemptDi
 	}
 	if linked {
 		if err := bindIntakeTask(ctx, tx.connection, result.ID, accepted.ID); err != nil {
+			return Task{}, tx.Rollback(err)
+		}
+	}
+	for _, pin := range content {
+		if err := attachContentTx(ctx, tx, result.ID, result.ProjectID, result.WorkRevision.Int64(), pin.ContentID, pin.ContentRevision, at, false); err != nil {
 			return Task{}, tx.Rollback(err)
 		}
 	}
