@@ -46,7 +46,8 @@ const (
 // retry it (an automatic end) and otherwise one look, so a ready issue never
 // sits ownerless; a withdrawn issue's task is not. A succeeded intake task
 // whose pull request merged needs one look once live (the first verified
-// self-release that ships it, or the merge where its repository releases
+// self-release that ships it, the first that records what it ships for a
+// merge observed before it, or the merge where its repository releases
 // nothing), dated no earlier than the merge's observation, so a pass that ran
 // before the item existed is not its look: its issue's live signal is checked
 // then (#1906). An item is due when
@@ -78,6 +79,12 @@ const overseerItems = `WITH carrier AS MATERIALIZED (SELECT t.id AS task, t.crea
 released AS MATERIALIZED (SELECT d.repository, CAST(n.value AS INTEGER) AS pull, MIN(json_extract(d.document, '$.verified_at')) AS at
 	FROM production_records AS d, json_each(d.document, '$.pull_requests') AS n
 	WHERE d.project_id = ?1 AND d.kind = 'delivery' AND d.identity LIKE 'release:%' AND json_extract(d.document, '$.state') = 'verified' GROUP BY 1, 2),
+-- The first verified release that recorded what it ships: every merge observed
+-- before it (the backlog from before releases named their pull requests) is
+-- live there, however far back its commit is.
+listing AS MATERIALIZED (SELECT repository, MIN(json_extract(document, '$.verified_at')) AS at FROM production_records
+	WHERE project_id = ?1 AND kind = 'delivery' AND identity LIKE 'release:%' AND json_extract(document, '$.state') = 'verified'
+	  AND json_array_length(document, '$.pull_requests') > 0 GROUP BY 1),
 item AS (
 	SELECT t.id, t.updated_at_ms AS version, CASE WHEN t.status IN ('blocked', 'failed') THEN 3 END AS rewakes, '' AS detail, lower(hex(t.id)) AS item_key
 	FROM tasks AS t JOIN agents AS a ON a.id = t.assigned_agent_id
@@ -103,7 +110,8 @@ item AS (
 	WHERE t.project_id = ?1 AND COALESCE(i.overseer_agent_id, ?4) = ?4 AND t.status IN ('failed', 'cancelled') AND NOT ` + taskIssueWithdrawn + `
 	UNION ALL SELECT id, MAX(live, observed), NULL, '', lower(hex(id)) FROM (SELECT t.id, r.observed_at_ms AS observed, CASE WHEN EXISTS (SELECT 1 FROM production_records
 			WHERE project_id = ?1 AND repository = r.repository AND kind = 'delivery' AND identity LIKE 'release:%')
-		THEN (SELECT at FROM released WHERE repository = r.repository AND pull = p.pull_number) ELSE r.observed_at_ms END AS live
+		THEN COALESCE((SELECT at FROM listing WHERE repository = r.repository AND r.observed_at_ms < at),
+			(SELECT at FROM released WHERE repository = r.repository AND pull = p.pull_number)) ELSE r.observed_at_ms END AS live
 	  FROM tasks AS t JOIN publication_tasks AS p ON p.task_id = t.id
 	  JOIN production_records AS r ON r.project_id = p.project_id AND r.repository = p.repository AND r.kind = 'pull_request' AND r.identity = CAST(p.pull_number AS TEXT)
 	  WHERE t.project_id = ?1 AND t.status = 'succeeded' AND json_extract(r.document, '$.state') = 'merged'

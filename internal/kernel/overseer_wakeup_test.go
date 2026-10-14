@@ -432,14 +432,16 @@ func TestOverseerWakeSkipsPublishedIntakeSuccess(t *testing.T) {
 
 // A succeeded intake task whose pull request merged wakes its overseer once,
 // when the merge is live: at the first verified self-release that ships it,
-// whether that release came before or after the merge was observed, and after
-// an upgrade whose older release records name nothing. A full pass that ran
+// whether that release came before or after the merge was observed. After an
+// upgrade whose older release records name nothing, a backlog merge is live at
+// the first release that names what it ships, even one that does not name it
+// (its commit can be far older than any history a release lists). A full pass that ran
 // before the merge was observed is not that look. The look verifies the
 // issue's live signal (#1906); later releases do not wake it again, and
 // nothing stalls into a card.
 func TestOverseerVerifiesMergedIntakeOnceLive(t *testing.T) {
 	t.Parallel()
-	for _, releaseFirst := range []bool{true, false} {
+	for _, order := range []string{"release first", "merge first", "backlog", "unshipped"} {
 		ctx := context.Background()
 		succeeded, _ := NewSuccessProposal("done")
 		store, finalizing := finalizingReleasedRun(t, RoleWorker, succeeded)
@@ -493,21 +495,33 @@ func TestOverseerVerifiesMergedIntakeOnceLive(t *testing.T) {
 		settle := overseerWakeSettle.Milliseconds()
 		release('f', 500) // recorded before releases named what they ship
 		live := int64(5000)
-		if releaseFirst {
+		switch order {
+		case "release first":
 			release('b', 2000, 7)
 			fullPass(3000, 31)
 			merge(live)
-		} else {
+		case "merge first":
 			fullPass(2000, 31)
 			merge(3000)
 			if bodies := wakeBodies(t, store, 3000+settle); len(bodies) != 0 {
 				t.Fatalf("merged but not yet live woke = %q", bodies)
 			}
 			release('b', live, 7)
+		case "backlog":
+			merge(600)
+			fullPass(1000, 31)
+			release('b', live, 9)
+		case "unshipped":
+			release('b', 2000, 9)
+			merge(3000)
+			if bodies := wakeBodies(t, store, 3000+settle); len(bodies) != 0 {
+				t.Fatalf("a merge after the listing release woke before one shipped it = %q", bodies)
+			}
+			release('d', live, 7)
 		}
 		bodies := wakeBodies(t, store, live+settle)
 		if len(bodies) != 1 || !strings.Contains(bodies[0], finalizing.TaskID.String()+` "verify" succeeded`) || !strings.Contains(bodies[0], "PR #7 merged/allow") {
-			t.Fatalf("releaseFirst=%v live merge wake = %q", releaseFirst, bodies)
+			t.Fatalf("%s: live merge wake = %q", order, bodies)
 		}
 		settleCarrier(t, store, live+settle+1, 52, "ran")
 		release('c', 9000, 7)

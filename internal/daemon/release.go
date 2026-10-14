@@ -486,7 +486,8 @@ var releasedPull = regexp.MustCompile(`(?m)\(#([0-9]{1,15})\)$`)
 // releasedPulls names the pull requests sha ships beyond since, or in its
 // last 256 commits when since is empty, so the overseer's verification wake
 // learns which release made each merge live (#1906). An unreadable history
-// ships none.
+// ships none. A backlog merge older than the list needs no entry: the wake
+// counts any merge observed before the first listing release live there.
 func releasedPulls(ctx context.Context, gitDir, since, sha string) []uint64 {
 	revisions := sha
 	if since != "" {
