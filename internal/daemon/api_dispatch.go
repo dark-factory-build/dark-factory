@@ -100,6 +100,7 @@ type Daemon struct {
 	// Changes it kept, each logged once with its project and reason; healthMu
 	// guards it for the operator's health read.
 	reclaimHead atomic.Int64
+	reclaimNext atomic.Int64
 	reclaimBusy atomic.Bool
 	keptChanges map[kernel.ChangeID][2]string
 	store       *kernel.Store

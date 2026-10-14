@@ -157,13 +157,24 @@ func (daemon *Daemon) retainedSettlement(ctx context.Context, changeParent strin
 // the durable store has changed since the last pass.
 func (daemon *Daemon) tickChangeReclaim(ctx context.Context) {
 	factory, err := daemon.store.Factory(ctx)
-	if err != nil || factory.Head.Int64() == daemon.reclaimHead.Load()-1 || !daemon.reclaimBusy.CompareAndSwap(false, true) {
+	now := daemon.now().UnixMilli()
+	next := daemon.reclaimNext.Load()
+	if err != nil || factory.Head.Int64() == daemon.reclaimHead.Load()-1 && (next == 0 || now < next) || !daemon.reclaimBusy.CompareAndSwap(false, true) {
 		return
 	}
 	head := factory.Head.Int64()
 	go func() {
 		defer daemon.reclaimBusy.Store(false)
 		daemon.reclaimChanges(ctx)
+		if at, err := daemon.timestamp(); err == nil {
+			if next, found, err := daemon.store.NextChangeReclaimAt(ctx, at); err == nil {
+				if found {
+					daemon.reclaimNext.Store(next.Int64())
+				} else {
+					daemon.reclaimNext.Store(0)
+				}
+			}
+		}
 		daemon.reclaimHead.Store(head + 1)
 	}()
 }

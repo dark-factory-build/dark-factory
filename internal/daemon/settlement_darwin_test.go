@@ -857,6 +857,42 @@ func TestReclaimChangesRemovesEmptyWorkAndKeepsDirtyWork(t *testing.T) {
 	}
 }
 
+func TestTickChangeReclaimRechecksAtTheDeadlineWithoutAStoreWrite(t *testing.T) {
+	ctx := context.Background()
+	fixture := newRecoveryFixtureWithRole(t, 0x8b, kernel.RoleWorker)
+	_, _, _ = fixture.privateSettlementWorktree(t)
+	fixture.failBeforeRuntime(t)
+	if settled, err := fixture.daemon.settleRun(ctx, fixture.changeParent, fixture.run.ID); err != nil || settled.Phase != kernel.RunTerminal {
+		t.Fatalf("settled = %+v, %v", settled, err)
+	}
+	changeID := *fixture.run.ChangeID
+	fixture.daemon.now = func() time.Time { return time.UnixMilli(400) }
+	fixture.daemon.tickChangeReclaim(ctx)
+	deadline := int64(400) + (14 * 24 * time.Hour).Milliseconds()
+	for range 1000 {
+		if fixture.daemon.reclaimNext.Load() != 0 {
+			break
+		}
+		time.Sleep(time.Millisecond)
+	}
+	if fixture.daemon.reclaimNext.Load() != deadline {
+		t.Fatalf("reclaim deadline = %d, want %d", fixture.daemon.reclaimNext.Load(), deadline)
+	}
+	fixture.daemon.now = func() time.Time { return time.UnixMilli(deadline) }
+	fixture.daemon.tickChangeReclaim(ctx)
+	for range 1000 {
+		current, found, err := fixture.store.Change(ctx, changeID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if found && current.Phase == kernel.ChangeAbandoned {
+			return
+		}
+		time.Sleep(time.Millisecond)
+	}
+	t.Fatal("reclaim did not run at the deadline without a store write")
+}
+
 // status --project shows the operator what factoryd waits on: a held health
 // condition, the dirty Change reclaim keeps by its reason, and a repository
 // whose fetch check needs setup.
