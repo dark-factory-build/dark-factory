@@ -163,20 +163,29 @@ func (daemon *Daemon) tickChangeReclaim(ctx context.Context) {
 		return
 	}
 	head := factory.Head.Int64()
+	daemon.refreshReclaimDeadline(ctx)
 	go func() {
 		defer daemon.reclaimBusy.Store(false)
 		daemon.reclaimChanges(ctx)
-		if at, err := daemon.timestamp(); err == nil {
-			if next, found, err := daemon.store.NextChangeReclaimAt(ctx, at); err == nil {
-				if found {
-					daemon.reclaimNext.Store(next.Int64())
-				} else {
-					daemon.reclaimNext.Store(0)
-				}
-			}
-		}
+		daemon.refreshReclaimDeadline(ctx)
 		daemon.reclaimHead.Store(head + 1)
 	}()
+}
+
+func (daemon *Daemon) refreshReclaimDeadline(ctx context.Context) {
+	at, err := daemon.timestamp()
+	if err != nil {
+		return
+	}
+	next, found, err := daemon.store.NextChangeReclaimAt(ctx, at)
+	if err != nil {
+		return
+	}
+	if found {
+		daemon.reclaimNext.Store(next.Int64())
+	} else {
+		daemon.reclaimNext.Store(0)
+	}
 }
 
 // reclaimChanges inspects the retained Changes the kernel's rule allows,
