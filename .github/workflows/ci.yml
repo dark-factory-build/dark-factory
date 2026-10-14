@@ -89,6 +89,20 @@ jobs:
           git fetch --depth=1 origin "$GITHUB_SHA" ${AFFECTED_BASE:+"$AFFECTED_BASE"}
           git checkout --force --detach "$GITHUB_SHA"
           git clean -ffdx
+      - name: Name reusable caches
+        run: printf 'DF_CI_CACHE_ROOT=%s/dark-factory-ci-cache\n' "$RUNNER_TEMP" >> "$GITHUB_ENV"
+      - name: Restore reusable compiler and package caches
+        uses: actions/cache/restore@caa296126883cff596d87d8935842f9db880ef25 # v5.1.0
+        with:
+          path: |
+            ${{ runner.temp }}/dark-factory-ci-cache/go-build
+            ${{ runner.temp }}/dark-factory-ci-cache/go-mod
+            ${{ runner.temp }}/dark-factory-ci-cache/corepack
+            ${{ runner.temp }}/dark-factory-ci-cache/pnpm-store
+            ${{ runner.temp }}/dark-factory-ci-cache/toolchain-archives
+          key: ci-v2-${{ runner.os }}-${{ runner.arch }}-go1.27.2-node22.20.0-${{ hashFiles('go.sum', 'web/pnpm-lock.yaml', 'web/package.json') }}-${{ github.sha }}
+          restore-keys: |
+            ci-v2-${{ runner.os }}-${{ runner.arch }}-go1.27.2-node22.20.0-${{ hashFiles('go.sum', 'web/pnpm-lock.yaml', 'web/package.json') }}-
       - name: Provide the Go toolchain
         run: |
           set -euo pipefail
@@ -98,11 +112,15 @@ jobs:
             *) echo "unsupported architecture" >&2; exit 1 ;;
           esac
           go_archive=go1.27.2.$(uname -s | tr '[:upper:]' '[:lower:]')-$go_arch.tar.gz
-          curl --fail --silent --show-error --location "https://dl.google.com/go/$go_archive" -o "$RUNNER_TEMP/$go_archive"
+          archive_path="$DF_CI_CACHE_ROOT/toolchain-archives/$go_archive"
+          mkdir -p "$DF_CI_CACHE_ROOT/toolchain-archives"
+          if [ ! -f "$archive_path" ]; then
+            curl --fail --silent --show-error --location "https://dl.google.com/go/$go_archive" -o "$archive_path"
+          fi
           checksum=$(curl --fail --silent --show-error --location "https://dl.google.com/go/$go_archive.sha256")
-          printf '%s  %s\n' "$checksum" "$RUNNER_TEMP/$go_archive" | shasum -a 256 -c -
+          printf '%s  %s\n' "$checksum" "$archive_path" | shasum -a 256 -c -
           rm -rf "$RUNNER_TEMP/go"
-          tar -xzf "$RUNNER_TEMP/$go_archive" -C "$RUNNER_TEMP"
+          tar -xzf "$archive_path" -C "$RUNNER_TEMP"
           "$RUNNER_TEMP/go/bin/go" version
           printf '%s\n' "$RUNNER_TEMP/go/bin" >> "$GITHUB_PATH"
       - name: Provide an isolated Node and Corepack pair
@@ -116,33 +134,21 @@ jobs:
           node_release=node-v22.20.0-$(uname -s | tr '[:upper:]' '[:lower:]')-$node_arch
           node_archive=$node_release.tar.gz
           node_url=https://nodejs.org/dist/v22.20.0
-          curl --fail --silent --show-error --location "$node_url/$node_archive" -o "$RUNNER_TEMP/$node_archive"
+          archive_path="$DF_CI_CACHE_ROOT/toolchain-archives/$node_archive"
+          mkdir -p "$DF_CI_CACHE_ROOT/toolchain-archives"
+          if [ ! -f "$archive_path" ]; then
+            curl --fail --silent --show-error --location "$node_url/$node_archive" -o "$archive_path"
+          fi
           curl --fail --silent --show-error --location "$node_url/SHASUMS256.txt" -o "$RUNNER_TEMP/node-shasums.txt"
-          checksum=$(awk -v archive="$node_archive" '$2 == archive { print }' "$RUNNER_TEMP/node-shasums.txt")
+          checksum=$(awk -v archive="$node_archive" '$2 == archive { print $1 }' "$RUNNER_TEMP/node-shasums.txt")
           test -n "$checksum"
-          (cd "$RUNNER_TEMP" && printf '%s\n' "$checksum" | shasum -a 256 -c -)
-          tar -xzf "$RUNNER_TEMP/$node_archive" -C "$RUNNER_TEMP"
+          printf '%s  %s\n' "$checksum" "$archive_path" | shasum -a 256 -c -
+          tar -xzf "$archive_path" -C "$RUNNER_TEMP"
           node_bin=$RUNNER_TEMP/$node_release/bin
           "$node_bin/node" --version
           "$node_bin/node" "$node_bin/corepack" --version
           printf '%s\n' "$node_bin" >> "$GITHUB_PATH"
           printf 'DF_CI_NODE=%s/node\nDF_CI_COREPACK=%s/corepack\n' "$node_bin" "$node_bin" >> "$GITHUB_ENV"
-      - name: Name reusable caches
-        id: cache-toolchain
-        run: |
-          printf 'DF_CI_CACHE_ROOT=%s/dark-factory-ci-cache\n' "$RUNNER_TEMP" >> "$GITHUB_ENV"
-          printf 'go=%s\n' "$(go env GOVERSION)" >> "$GITHUB_OUTPUT"
-      - name: Restore reusable compiler and package caches
-        uses: actions/cache/restore@caa296126883cff596d87d8935842f9db880ef25 # v5.1.0
-        with:
-          path: |
-            ${{ runner.temp }}/dark-factory-ci-cache/go-build
-            ${{ runner.temp }}/dark-factory-ci-cache/go-mod
-            ${{ runner.temp }}/dark-factory-ci-cache/corepack
-            ${{ runner.temp }}/dark-factory-ci-cache/pnpm-store
-          key: ci-v2-${{ runner.os }}-${{ runner.arch }}-${{ steps.cache-toolchain.outputs.go }}-node22.20.0-${{ hashFiles('go.sum', 'web/pnpm-lock.yaml', 'web/package.json') }}-${{ github.sha }}
-          restore-keys: |
-            ci-v2-${{ runner.os }}-${{ runner.arch }}-${{ steps.cache-toolchain.outputs.go }}-node22.20.0-${{ hashFiles('go.sum', 'web/pnpm-lock.yaml', 'web/package.json') }}-
       - name: Run the source gate
         env:
           MACOS_MODE: ${{ needs.scope.outputs.macos_mode }}
@@ -169,7 +175,8 @@ jobs:
             ${{ runner.temp }}/dark-factory-ci-cache/go-mod
             ${{ runner.temp }}/dark-factory-ci-cache/corepack
             ${{ runner.temp }}/dark-factory-ci-cache/pnpm-store
-          key: ci-v2-${{ runner.os }}-${{ runner.arch }}-${{ steps.cache-toolchain.outputs.go }}-node22.20.0-${{ hashFiles('go.sum', 'web/pnpm-lock.yaml', 'web/package.json') }}-${{ github.sha }}
+            ${{ runner.temp }}/dark-factory-ci-cache/toolchain-archives
+          key: ci-v2-${{ runner.os }}-${{ runner.arch }}-go1.27.2-node22.20.0-${{ hashFiles('go.sum', 'web/pnpm-lock.yaml', 'web/package.json') }}-${{ github.sha }}
       - name: Annotate the failure
         if: failure()
         run: ./scripts/ci-annotate.sh "$RUNNER_TEMP/macos-gate.log"
