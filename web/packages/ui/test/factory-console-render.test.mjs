@@ -16,3 +16,11 @@ test("factory floor disables animation under reduced motion", () => {
   const css = readFileSync(new URL("../src/factory-console.css", import.meta.url), "utf8");
   assert.match(css, /@media \(prefers-reduced-motion: reduce\) \{ \.dfPlant \* \{ animation: none !important; \} \}/);
 });
+
+test("desktop console navigation reserves the sidebar row", () => {
+  const css = readFileSync(new URL("../src/factory-console.css", import.meta.url), "utf8");
+  assert.match(css, /\.dfConsoleLayout > \.dfConsoleViewToggle\[aria-label="Console views"\] \{ grid-column: 2; grid-row: 1; \}/);
+  assert.match(css, /\.dfConsoleLayout > \.dfConsoleLayout__left \{ grid-column: 1; grid-row: 1 \/ span 2; \}/);
+  assert.match(css, /\.dfConsoleLayout > \.dfConsoleSidebar \{ grid-column: 2; grid-row: 2; \}/);
+  assert.doesNotMatch(css, /\.dfConsoleViewToggle\[aria-label="Console views"\] \{[^}]*position: absolute/);
+});

@@ -8,6 +8,7 @@ import { fileURLToPath } from "node:url";
 
 const preview = fileURLToPath(new URL("../examples/floor-preview.mjs", import.meta.url));
 const browser = process.env.DF_LAYOUT_BROWSER;
+const consoleCSS = readFileSync(new URL("../src/factory-console.css", import.meta.url), "utf8");
 
 test("the documented floor fixtures fit controls at phone width and stay one row on desktop", { skip: browser === undefined ? "set DF_LAYOUT_BROWSER to opt into live layout measurement" : false }, () => {
   const dir = mkdtempSync(join(tmpdir(), "df-floor-layout-"));
@@ -22,6 +23,19 @@ test("the documented floor fixtures fit controls at phone width and stay one row
       if (width === 1440) assert.equal(measurement.root.rows, 1, `${selector} wraps on desktop`);
     }
   }
+});
+
+test("desktop console navigation stays above a scrollable sidebar", { skip: browser === undefined ? "set DF_LAYOUT_BROWSER to opt into live layout measurement" : false }, () => {
+  const dir = mkdtempSync(join(tmpdir(), "df-console-layout-"));
+  const fixture = join(dir, "fixture.html");
+  writeFileSync(fixture, `<!doctype html><style>${consoleCSS}</style><main class="dfFactoryConsole"><header class="dfFactoryConsole__header"><h1>Dark Factory</h1></header><div class="dfConsoleLayout"><nav class="dfConsoleViewToggle" aria-label="Console views"><button>Floor</button><button>Agents</button><button>Work</button></nav><section class="dfConsoleLayout__left"><div style="height:600px">Floor</div></section><aside class="dfConsoleSidebar" style="height:240px"><div class="dfConsoleSidebar__panel"><p role="status">Visible status banner</p><div style="height:600px">Scrollable sidebar content</div></div></aside></div></main>`);
+  const script = `<script>requestAnimationFrame(() => { const nav = document.querySelector('[aria-label="Console views"]'); const sidebar = document.querySelector('.dfConsoleSidebar'); const banner = sidebar.querySelector('[role="status"]'); const n = nav.getBoundingClientRect(); const s = sidebar.getBoundingClientRect(); const b = banner.getBoundingClientRect(); document.body.insertAdjacentHTML('beforeend', '<pre id="df-layout">' + JSON.stringify({ above: n.bottom <= s.top + .1, bannerVisible: b.top >= s.top && b.bottom <= s.bottom, scrollable: sidebar.scrollHeight > sidebar.clientHeight }) + '</pre>'); });</script>`;
+  const wrapper = `${fixture}.wrapper.html`;
+  writeFileSync(wrapper, `${readFileSync(fixture, "utf8")}${script}`);
+  const dom = execFileSync(browser, ["--headless=new", "--no-sandbox", "--disable-gpu", "--no-first-run", "--disable-dev-shm-usage", `--user-data-dir=${mkdtempSync(join(tmpdir(), "df-chrome-"))}`, "--dump-dom", "--window-size=1440,844", `file://${wrapper}`], { encoding: "utf8" });
+  const match = dom.match(/<pre id="df-layout">([^<]+)/);
+  assert.ok(match, "browser did not emit the console layout measurement");
+  assert.deepEqual(JSON.parse(match[1]), { above: true, bannerVisible: true, scrollable: true });
 });
 
 function measure(file, width, selector, controls) {
