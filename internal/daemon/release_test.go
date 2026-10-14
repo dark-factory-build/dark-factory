@@ -682,9 +682,10 @@ func TestReleaseRefusesACommitOlderThanTheRunningBuild(t *testing.T) {
 	}
 }
 
-// A release names the pull requests its commit ships by their squash subjects,
-// which is how the overseer learns that a merge is live (#1906).
-func TestReleasedPullsNameTheSquashMergesTheCommitShips(t *testing.T) {
+// A release names which outstanding merged pull requests its commit ships, by
+// their squash subjects anywhere in its history: one followed by hundreds of
+// commits, or merged long before an upgrade, included (#1906).
+func TestReleasedPullsNameTheOutstandingMergesTheCommitShips(t *testing.T) {
 	tree := t.TempDir()
 	git := func(args ...string) string {
 		output, err := exec.Command(change.TrustedGitExecutable, append([]string{"-C", tree, "-c", "user.name=test", "-c", "user.email=test@example.invalid", "-c", "commit.gpgsign=false"}, args...)...).Output()
@@ -694,22 +695,16 @@ func TestReleasedPullsNameTheSquashMergesTheCommitShips(t *testing.T) {
 		return strings.TrimSpace(string(output))
 	}
 	git("init", "--quiet")
-	for _, subject := range []string{"Initial", "Fix intake (#1871)", "Mentions #12 but is no squash"} {
-		git("commit", "--quiet", "--allow-empty", "-m", subject)
+	git("commit", "--quiet", "--allow-empty", "-m", "Fix intake (#7)")
+	for index := range 300 {
+		git("commit", "--quiet", "--allow-empty", "-m", fmt.Sprintf("Unrelated %d, mentions #12 but is no squash", index))
 	}
-	running := git("rev-parse", "HEAD")
 	git("commit", "--quiet", "--allow-empty", "-m", "Verify merged intake (#1906)")
-	head := git("rev-parse", "HEAD")
 	gitDir := filepath.Join(tree, ".git")
-	// The first release after an upgrade names the backlog; later ones only
-	// what they add to the running release.
-	if pulls := releasedPulls(context.Background(), gitDir, "", head); !slices.Equal(pulls, []uint64{1906, 1871}) {
+	if pulls := releasedPulls(context.Background(), gitDir, git("rev-parse", "HEAD"), []uint64{1906, 99, 12, 7}); !slices.Equal(pulls, []uint64{1906, 7}) {
 		t.Fatalf("released pulls = %v", pulls)
 	}
-	if pulls := releasedPulls(context.Background(), gitDir, running, head); !slices.Equal(pulls, []uint64{1906}) {
-		t.Fatalf("pulls since the running release = %v", pulls)
-	}
-	if pulls := releasedPulls(context.Background(), gitDir, "", strings.Repeat("0", 40)); len(pulls) != 0 || pulls == nil {
+	if pulls := releasedPulls(context.Background(), gitDir, strings.Repeat("0", 40), []uint64{7}); len(pulls) != 0 || pulls == nil {
 		t.Fatalf("an unreadable history shipped %v", pulls)
 	}
 }

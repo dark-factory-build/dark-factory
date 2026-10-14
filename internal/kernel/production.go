@@ -377,6 +377,38 @@ func (store *Store) RecordDelivery(ctx context.Context, project ProjectID, repos
 	return tx.Commit(ctx)
 }
 
+// UnreleasedMergedPulls lists, newest first and at most a release's worth,
+// repository's merged intake pull requests that no verified release names: the
+// ones a release may still make live (#1906).
+func (store *Store) UnreleasedMergedPulls(ctx context.Context, project ProjectID, repository string) ([]uint64, error) {
+	tx, err := store.beginRead(ctx)
+	if err != nil {
+		return nil, err
+	}
+	defer tx.Close()
+	rows, err := tx.connection.QueryContext(ctx, `SELECT DISTINCT p.pull_number FROM publication_tasks AS p
+		JOIN intake_task_bindings AS b ON b.task_id = p.task_id
+		JOIN production_records AS r ON r.project_id = p.project_id AND r.repository = p.repository AND r.kind = 'pull_request' AND r.identity = CAST(p.pull_number AS TEXT)
+		WHERE p.project_id = ?1 AND p.repository = ?2 AND json_extract(r.document, '$.state') = 'merged'
+		  AND NOT EXISTS (SELECT 1 FROM production_records AS d, json_each(d.document, '$.pull_requests') AS n
+		      WHERE d.project_id = ?1 AND d.repository = ?2 AND d.kind = 'delivery' AND d.identity LIKE 'release:%'
+		        AND json_extract(d.document, '$.state') = 'verified' AND CAST(n.value AS INTEGER) = p.pull_number)
+		ORDER BY p.pull_number DESC LIMIT 256`, project.Bytes(), strings.ToLower(repository))
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	pulls := []uint64{}
+	for rows.Next() {
+		var number uint64
+		if err := rows.Scan(&number); err != nil {
+			return nil, err
+		}
+		pulls = append(pulls, number)
+	}
+	return pulls, rows.Err()
+}
+
 // Delivery reads the delivery row id and the project that recorded it.
 func (store *Store) Delivery(ctx context.Context, id string) (ProjectID, ProductionDelivery, bool, error) {
 	return store.delivery(ctx, `identity = ?`, id)

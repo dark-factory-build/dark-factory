@@ -348,15 +348,10 @@ func (daemon *Daemon) release(project kernel.ProjectID, root string, source chan
 		fail(err.Error())
 		return
 	}
-	// Only a running release that recorded what it shipped bounds the list;
-	// the first release after an upgrade names the backlog too.
-	since := ""
-	if running := buildinfo.Current(); running.Release() {
-		if _, prior, found, err := daemon.store.Delivery(ctx, "release:"+running.Source()); err == nil && found && len(prior.PullRequests) > 0 {
-			since = running.Source()
-		}
-	}
-	delivery.PullRequests = releasedPulls(ctx, filepath.Join(directory, "tree", ".git"), since, delivery.Revision)
+	// The merged intake pull requests no verified release names yet, kept
+	// where this commit's history ships them.
+	outstanding, _ := daemon.store.UnreleasedMergedPulls(ctx, project, selfRepository)
+	delivery.PullRequests = releasedPulls(ctx, filepath.Join(directory, "tree", ".git"), delivery.Revision, outstanding)
 	delivery.Phase = "drain"
 	_ = daemon.writeRelease(ctx, project, &delivery)
 	daemon.releaseHold.Store(true)
@@ -483,20 +478,21 @@ func deployWorker(ctx context.Context, daemon *Daemon, tree, live, sha string, r
 // releasedPull is a squash merge's subject suffix, "(#N)".
 var releasedPull = regexp.MustCompile(`(?m)\(#([0-9]{1,15})\)$`)
 
-// releasedPulls names the pull requests sha ships beyond since, or in its
-// last 256 commits when since is empty, so the overseer's verification wake
-// learns which release made each merge live (#1906). An unreadable history
-// ships none. A backlog merge older than the list needs no entry: the wake
-// counts any merge observed before the first listing release live there.
-func releasedPulls(ctx context.Context, gitDir, since, sha string) []uint64 {
-	revisions := sha
-	if since != "" {
-		revisions = since + ".." + sha
-	}
-	subjects, _ := gitOutput(ctx, gitDir, "log", "--format=%s", "-n", "256", revisions)
-	pulls := []uint64{}
+// releasedPulls keeps the pull requests among outstanding whose squash
+// commit is in sha's whole history, so the overseer's verification wake learns
+// which release made each merge live (#1906), however old its commit or late
+// its merge was observed. An unreadable history ships none.
+func releasedPulls(ctx context.Context, gitDir, sha string, outstanding []uint64) []uint64 {
+	subjects, _ := gitOutput(ctx, gitDir, "log", "--format=%s", sha)
+	shipped := map[uint64]bool{}
 	for _, match := range releasedPull.FindAllSubmatch(subjects, -1) {
-		if number, err := strconv.ParseUint(string(match[1]), 10, 53); err == nil && number > 0 {
+		if number, err := strconv.ParseUint(string(match[1]), 10, 53); err == nil {
+			shipped[number] = true
+		}
+	}
+	pulls := []uint64{}
+	for _, number := range outstanding {
+		if shipped[number] {
 			pulls = append(pulls, number)
 		}
 	}

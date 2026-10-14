@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"slices"
 	"strings"
 	"testing"
 )
@@ -894,6 +895,24 @@ func TestMergedIntakeSentBackPublishesItsCorrectionAnew(t *testing.T) {
 	if found := candidates(76); len(found) != 0 {
 		t.Fatalf("merged work published again: %+v", found)
 	}
+	// A release may still make it live until a verified release names it.
+	unreleased := func(want ...uint64) {
+		t.Helper()
+		if pulls, err := store.UnreleasedMergedPulls(ctx, worker.ProjectID, "Example/Factory"); err != nil || !slices.Equal(pulls, want) {
+			t.Fatalf("unreleased merged pulls = %v %v, want %v", pulls, err, want)
+		}
+	}
+	unreleased(5)
+	for _, state := range []string{"running", "verified"} {
+		revision := strings.Repeat("e", 40)
+		if err := store.RecordDelivery(ctx, worker.ProjectID, "example/factory", ProductionDelivery{ID: "release:" + revision, Kind: "runtime", Destination: "factoryd", Revision: revision, State: state, PullRequests: []uint64{5}}, mustTime(t, 77)); err != nil {
+			t.Fatal(err)
+		}
+		if state == "running" {
+			unreleased(5)
+		}
+	}
+	unreleased()
 	task, _, err := store.Task(ctx, worker.TaskID)
 	if err != nil {
 		t.Fatal(err)
