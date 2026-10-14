@@ -122,19 +122,27 @@ table in a fixed order, so a receipt generation still hashes as it did.
 
 ### Settled production records
 
-These move under the same cutoff, on `observed_at_ms`:
+These move under the same cutoff, on `observed_at_ms` (`settledRecords`),
+once no pull request the record names is open, observed since the cutoff, or
+named by a hot `publication_tasks` row:
 
-- a `pull_request` record whose state is `merged`, `closed` or `superseded`
-  and that no hot `publication_tasks` row names;
-- the `check` and `reviewer` records of such a pull request, and checks on
-  `main` older than the cutoff;
-- `delivery` records, except the newest `release:` delivery of each project,
-  which `overseerItems` and `production.go` read.
+- a `pull_request` record, which is then `merged` or `closed`;
+- a `check` record, including checks on `main`, which name no pull request;
+- a `reviewer` record that names a pull request (`request.PullNumber`) and is
+  not `running` or `gating`, which `RecoverRunningReviewOperations` reads;
+- a `release:` delivery, except the newest of each project, which
+  `overseerItems`, `production.go` and the release path read.
 
-`repository` records stay hot. A poll can observe an archived identity again,
-which writes a new hot row. Readers that union the archive keep the hot row
-for a given key, and the next pass archives the new copy under a new
-generation.
+`repository` records, the `worker` delivery (one row, rewritten by each
+release) and the `publish-` review operations of a Change stay hot. A release
+delivery that names a pull request a hot publication names stays, so
+`UnreleasedIntakePulls` and the overseer's `released` item still see it.
+Up to 1024 records ride in the tree pass's generation, and the hot
+transaction deletes them before the publications they read. A poll can
+observe an archived identity again, which writes a new hot row. Readers that
+union the archive keep one copy of a key: the hot one, else the newest
+generation's (`history.table`). The next pass archives the new copy under a
+new generation.
 
 ## References across the boundary
 
@@ -252,7 +260,18 @@ holds:
    about 1000 runs a week. Production records, which phase 2 moves, are most
    of the remaining file and of `integrity_check`. The backlog took 15 passes
    and 18–23 s.
-2. **Settled production records** and their union readers.
+2. **Settled production records** and their union readers: report merges,
+   `why --pull` and the failure ledger. No hot schema changes, so
+   `user_version` stays 44 and the archive pass creates the archive mirror.
+   A phase-1 build that boots on this store without its backup restored
+   fails crossing reads and its archive pass closed, since a newer
+   generation's digest covers rows it does not hash; hot work is unaffected,
+   and restoring the release backup by hand (`DEPLOY.md`) recovers.
+   Measured in the same `TestArchiveHistoryBoundsALiveShapedStore`, where
+   every synthetic record is settled: after archiving and one compaction the
+   store is 2.5 MB (41.7 MB after phase 1 on the same machine and run) and
+   `Validate` 206–211 ms (256 ms), with the row walk unchanged at 166–177 ms
+   and 8 527 statements. The backlog still took 15 passes, 9.5–9.7 s.
 3. **Fold and delete**: the content-access path joins the general pass, and
    the items under *What the split makes unnecessary* are deleted where their
    measurements hold.

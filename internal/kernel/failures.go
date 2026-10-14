@@ -45,7 +45,7 @@ func failureLedger(ctx context.Context, c *sql.Conn, archived history, scope []b
 		UNION ALL SELECT 'check', json_extract(document, '$.name'), NULL, NULL, NULL,
 			CASE WHEN json_extract(document, '$.pull_requests[0]') IS NULL THEN 'main' ELSE 'pull request #' || json_extract(document, '$.pull_requests[0]') END || ' at ' || substr(json_extract(document, '$.revision'), 1, 8) || COALESCE(' ' || (SELECT group_concat(json_extract(j.value, '$.name') || ' ' || json_extract(j.value, '$.annotations')) FROM json_each(production_records.document, '$.jobs') j), ''), observed_at_ms, ''
 			, repository, COALESCE(json_extract(document, '$.url'), '')
-		FROM production_records WHERE (?1 IS NULL OR project_id = ?1) AND kind = 'check' AND json_extract(document, '$.conclusion') IN ('failure', 'timed_out', 'startup_failure')`, project)
+		FROM `+archived.table("production_records")+` AS production_records WHERE (?1 IS NULL OR project_id = ?1) AND kind = 'check' AND json_extract(document, '$.conclusion') IN ('failure', 'timed_out', 'startup_failure')`, project)
 	if err != nil {
 		return nil, err
 	}
