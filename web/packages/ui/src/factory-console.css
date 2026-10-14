@@ -610,13 +610,6 @@
 .dfConsoleSidebar__config button { justify-self: start; margin-top: 0.5rem; }
 .dfConsoleSidebar__inherit { color: var(--df-console-muted); font-size: var(--df-text-xs); overflow-wrap: anywhere; }
 
-.dfConsoleSidebar__toggle {
-  display: flex;
-  align-items: center;
-  gap: 0.6rem;
-  min-height: 2.25rem;
-}
-
 .dfFactoryConsole__header select,
 .dfConsoleSidebar :where(input[type="text"], input:not([type]), select),
 .dfConsoleDialog :where(input[type="text"], input:not([type]), select) {
@@ -692,6 +685,15 @@ summary.dfConsoleItem__summary { cursor: pointer; }
   .dfConsoleLayout__left { min-height: 0; overflow: hidden; }
   .dfConsoleSidebar { min-height: 0; overflow-y: auto; }
   .dfConsoleSidebar { position: static; align-self: stretch; max-height: none; }
+  /* A selected agent's terminal fills the height the sidebar has left. */
+  .dfConsoleSidebar:has(> div:not([hidden]) > div:not([hidden]) > .dfConsoleSidebar__panel > .dfConsoleSidebar__terminalSlot),
+  .dfConsoleSidebar > div:not([hidden]):has(> div:not([hidden]) > .dfConsoleSidebar__panel > .dfConsoleSidebar__terminalSlot),
+  .dfConsoleSidebar > div > div:not([hidden]):has(> .dfConsoleSidebar__panel > .dfConsoleSidebar__terminalSlot),
+  .dfConsoleSidebar__panel:has(> .dfConsoleSidebar__terminalSlot),
+  .dfConsoleSidebar__terminalSlot { display: flex; flex: 1 1 auto; flex-direction: column; }
+  .dfConsoleSidebar > div > div > button { align-self: start; }
+  .dfConsoleSidebar .dfConsoleSidebar__terminalSlot .dfFactoryConsole__terminalPanel { flex: 1 1 auto; }
+  .dfConsoleSidebar .dfConsoleSidebar__terminalSlot .dfFactoryConsole__terminal { flex: 1 1 auto; height: auto; min-height: 16rem; }
 }
 
 /* SETTINGS is a modal over the console, not a panel that squeezes it. */
