@@ -285,8 +285,8 @@ func TestParseOverseerTaskAddAcceptsAnyEligibleWorker(t *testing.T) {
 }
 
 func TestParseOverseerTaskAddAcceptsContentPins(t *testing.T) {
-	command, help, ok := parse([]string{"overseer", "task", "add", "--agent", "any", "--title", "proposal", "--content", "0123456789abcdef0123456789abcdef:1"})
-	if !ok || help || len(command.content) != 1 || command.content[0].ContentRevision != 1 {
+	command, help, ok := parse([]string{"overseer", "task", "add", "--agent", "any", "--title", "proposal", "--content", "0123456789abcdef0123456789abcdef:1", "--content", "fedcba9876543210fedcba9876543210:2"})
+	if !ok || help || len(command.content) != 2 || command.content[0].ContentRevision != 1 || command.content[1].ContentRevision != 2 {
 		t.Fatalf("content pin = %+v, help=%t, ok=%t", command.content, help, ok)
 	}
 }
