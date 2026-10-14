@@ -276,3 +276,40 @@ func TestArchiveHistoryBoundsALiveShapedStore(t *testing.T) {
 		t.Fatalf("report across the archive =\n%s\nwant\n%s", strings.Join(again, "\n"), strings.Join(reported, "\n"))
 	}
 }
+
+// A settled tree whose attachment still holds data stays hot, so retention
+// removes the data before the tree moves: the append-only archive could never
+// drop it.
+func TestArchiveHistoryKeepsATreeHotUntilItsAttachmentIsRemoved(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	store, _, project, _, _ := newSharedQueueStore(t, 4)
+	defer store.Close()
+	task, err := store.EnqueueTask(ctx, NewTask{ID: taskID(t, 90), ProjectID: project.ID, IncarnationID: incarnationID(t, 91), Title: "t"}, mustTime(t, 10))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.writer.ExecContext(ctx, `INSERT INTO task_attachments(task_id, position, name, data) VALUES (?, 0, 'notes.txt', ?)`, task.ID.Bytes(), []byte("private")); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.UpdateTaskForOperator(ctx, task.ID, task.Revision, TaskPatch{Cancel: true}, mustTime(t, 11)); err != nil {
+		t.Fatal(err)
+	}
+	enabled := true
+	if _, err := store.AttachmentRetention(ctx, &enabled); err != nil {
+		t.Fatal(err)
+	}
+	const month = 30 * 24 * 60 * 60 * 1000
+	if moved, err := store.ArchiveHistory(ctx, mustTime(t, month+11)); err != nil || moved != 0 {
+		t.Fatalf("archive with attachment data = %d, %v", moved, err)
+	}
+	if err := store.ExpireTaskAttachments(ctx, mustTime(t, month+11)); err != nil {
+		t.Fatal(err)
+	}
+	if moved, err := store.ArchiveHistory(ctx, mustTime(t, month+12)); err != nil || moved == 0 {
+		t.Fatalf("archive after the attachment expired = %d, %v", moved, err)
+	}
+	if _, found, err := store.Task(ctx, task.ID); err != nil || found {
+		t.Fatalf("expired tree still hot: %v, %v", found, err)
+	}
+}

@@ -88,7 +88,10 @@ existing constant):
    row of an unsettled task names T as parent. It also means no
    `peer_questions` or `task_interventions` row joins T to an unsettled task.
    Trees connected only to settled trees move in the same generation.
-6. T is not one of its agent's three newest carrier tasks, which
+6. No attachment of T still holds data. Attachment retention removes it 30
+   days after T settles, or an operator removes it, and the append-only
+   archive could never drop it.
+7. T is not one of its agent's three newest carrier tasks, which
    `specialistSchedule` reads for the last review and its quiet streak.
 
 The rows that move with T, in child-first delete order: `terminal_diagnostics`,

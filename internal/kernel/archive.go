@@ -87,14 +87,17 @@ const (
 	// A tree is settled when its task ended, and each of its runs, before the
 	// cutoff (?1); no run still holds receipts (the receipt pass moves them
 	// first); its Change, if any, is abandoned, since reclaim and send-back act
-	// on a kept one; no pull request it published is open; and it is not one
-	// of its agent's three newest carriers (?2 is their title), which
+	// on a kept one; no pull request it published is open; no attachment of
+	// it still holds data, which retention or an operator may yet remove and
+	// the append-only archive could never drop; and it is not one of its
+	// agent's three newest carriers (?2 is their title), which
 	// specialistSchedule reads.
 	settledTasks = `SELECT t.id FROM main.tasks AS t WHERE t.status IN ('succeeded', 'failed', 'cancelled') AND t.completed_at_ms < ?1
 		AND NOT EXISTS (SELECT 1 FROM main.runs AS r WHERE r.task_id = t.id AND (r.phase <> 'terminal' OR r.terminal_at_ms >= ?1 OR EXISTS (SELECT 1 FROM main.content_accesses AS a WHERE a.run_id = r.id)))
 		AND NOT EXISTS (SELECT 1 FROM main.changes AS c WHERE c.task_id = t.id AND c.phase <> 'abandoned')
 		AND NOT EXISTS (SELECT 1 FROM main.publication_tasks AS p JOIN main.production_records AS x ON x.project_id = p.project_id AND x.repository = p.repository AND x.kind = 'pull_request' AND x.identity = CAST(p.pull_number AS TEXT)
 			WHERE p.task_id = t.id AND json_extract(x.document, '$.state') = 'open')
+		AND NOT EXISTS (SELECT 1 FROM main.task_attachments AS f WHERE f.task_id = t.id AND f.data IS NOT NULL)
 		AND NOT (t.title = ?2 AND t.id IN (SELECT c.id FROM main.tasks AS c WHERE c.assigned_agent_id = t.assigned_agent_id AND c.title = ?2 ORDER BY c.created_at_ms DESC, c.id DESC LIMIT 3))
 		ORDER BY t.id`
 	// Every pair of tasks a hot row joins, which must move together.
