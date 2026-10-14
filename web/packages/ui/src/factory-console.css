@@ -862,7 +862,7 @@ summary.dfConsoleItem__summary { cursor: pointer; }
 .dfProduction__notice p { margin-top: .4rem; }
 .dfProduction__detail { min-width: 0; overflow-wrap: anywhere; }
 .dfWorkBar { display: flex; flex-wrap: wrap; gap: .25rem; align-items: center; margin-block: .6rem; overflow: visible; }
-.dfWorkBar .dfConsoleViewToggle { flex: 0 0 auto; flex-wrap: wrap; }
+.dfWorkBar .dfConsoleViewToggle { flex: 1 1 auto; min-width: 0; flex-wrap: wrap; }
 .dfWorkBar > button { padding-inline: .4rem; }
 .dfWorkRow__head { position: relative; padding: .7rem; overflow-wrap: anywhere; }
 .dfWorkRow__head .dfConsoleItem__meta { margin-top: .3rem; }
