@@ -7,6 +7,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"strconv"
 	"strings"
 	"unicode/utf8"
 )
@@ -191,12 +192,27 @@ func createContentTx(ctx context.Context, tx *writeTx, spec NewContent, at UnixM
 
 func createSpecialistPeerQuestionTx(ctx context.Context, tx *writeTx, source TaskID, spec NewContent, at UnixMillis) error {
 	metadata, err := ParseKnowledgeMetadata(spec.SourceReferences)
-	if err != nil || (metadata.RecordType != "contribution" && metadata.RecordType != "amendment" && metadata.RecordType != "review") || metadata.TaskID == "" {
+	if err != nil || (metadata.RecordType != "contribution" && metadata.RecordType != "amendment" && metadata.RecordType != "review") {
 		return nil
 	}
-	rawTarget, err := hex.DecodeString(metadata.TaskID)
-	if err != nil {
-		return ErrInvalidValue
+	var rawTarget []byte
+	if metadata.TaskID != "" {
+		var decodeErr error
+		rawTarget, decodeErr = hex.DecodeString(metadata.TaskID)
+		if decodeErr != nil {
+			return ErrInvalidValue
+		}
+	} else {
+		if !strings.HasPrefix(metadata.RecordID, "issue:#") {
+			return nil
+		}
+		issue, parseErr := strconv.ParseUint(strings.TrimPrefix(metadata.RecordID, "issue:#"), 10, 64)
+		if parseErr != nil {
+			return nil
+		}
+		if err := tx.connection.QueryRowContext(ctx, `SELECT task_id FROM intake_acceptances WHERE project_id=? AND issue_number=? ORDER BY created_at_ms DESC, id DESC LIMIT 1`, spec.ProjectID.Bytes(), issue).Scan(&rawTarget); err != nil {
+			return nil
+		}
 	}
 	targetID, err := TaskIDFromBytes(rawTarget)
 	if err != nil {
