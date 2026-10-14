@@ -163,20 +163,21 @@ func (daemon *Daemon) tickChangeReclaim(ctx context.Context) {
 		return
 	}
 	head := factory.Head.Int64()
-	daemon.refreshReclaimDeadline(ctx)
+	passAt, err := daemon.timestamp()
+	if err != nil {
+		daemon.reclaimBusy.Store(false)
+		return
+	}
+	daemon.refreshReclaimDeadlineAt(ctx, passAt)
 	go func() {
 		defer daemon.reclaimBusy.Store(false)
-		daemon.reclaimChanges(ctx)
-		daemon.refreshReclaimDeadline(ctx)
+		daemon.reclaimChangesAt(ctx, passAt)
+		daemon.refreshReclaimDeadlineAt(ctx, passAt)
 		daemon.reclaimHead.Store(head + 1)
 	}()
 }
 
-func (daemon *Daemon) refreshReclaimDeadline(ctx context.Context) {
-	at, err := daemon.timestamp()
-	if err != nil {
-		return
-	}
+func (daemon *Daemon) refreshReclaimDeadlineAt(ctx context.Context, at kernel.UnixMillis) {
 	next, found, err := daemon.store.NextChangeReclaimAt(ctx, at)
 	if err != nil {
 		return
@@ -196,9 +197,16 @@ func (daemon *Daemon) refreshReclaimDeadline(ctx context.Context) {
 // logged once. A removal whose record failed is found again next pass and,
 // with nothing left on disk, only recorded.
 func (daemon *Daemon) reclaimChanges(ctx context.Context) int {
-	parent, git := daemon.changeParent.Load(), daemon.gitExecutable.Load()
 	at, err := daemon.timestamp()
-	if parent == nil || *parent == "" || git == nil || *git == "" || err != nil {
+	if err != nil {
+		return 0
+	}
+	return daemon.reclaimChangesAt(ctx, at)
+}
+
+func (daemon *Daemon) reclaimChangesAt(ctx context.Context, at kernel.UnixMillis) int {
+	parent, git := daemon.changeParent.Load(), daemon.gitExecutable.Load()
+	if parent == nil || *parent == "" || git == nil || *git == "" {
 		return 0
 	}
 	candidates, err := daemon.store.ReclaimableChanges(ctx, at)

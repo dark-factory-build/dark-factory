@@ -872,11 +872,15 @@ func TestTickChangeReclaimRechecksAtTheDeadlineWithoutAStoreWrite(t *testing.T) 
 	}
 	completedAt := task.CompletedAt.Int64()
 	fixture.daemon.now = func() time.Time { return time.UnixMilli(completedAt) }
+	factory, err := fixture.store.Factory(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
 	fixture.daemon.tickChangeReclaim(ctx)
 	deadline := completedAt + (14 * 24 * time.Hour).Milliseconds()
 	waitUntil := time.Now().Add(10 * time.Second)
 	for time.Now().Before(waitUntil) {
-		if fixture.daemon.reclaimNext.Load() != 0 {
+		if fixture.daemon.reclaimHead.Load() == factory.Head.Int64()+1 {
 			break
 		}
 		time.Sleep(time.Millisecond)
