@@ -42,7 +42,7 @@ const fixture = process.argv[2] === "fixture";
 const out = process.argv[fixture ? 3 : 2] ?? (fixture ? undefined : join(tmpdir(), "dark-factory-floor-preview.html"));
 const { graph, workers, crates } = publicFloor(world);
 const body = fixture
-  ? `<p style="margin:0;padding:4px 16px;background:#f5c542;color:#08131d;font:600 13px system-ui">Fixture: simulated data, static render (no clicks or live updates)</p>${renderToStaticMarkup(createElement(FactoryConsole, { status: "ready", state: fixtureFloorState, graphs: fixtureGraphs, runPaths: fixtureRunPaths, onOpenActivity() {} }))}`
+  ? `<p style="margin:0;padding:4px 16px;background:#f5c542;color:#08131d;font:600 13px system-ui">Fixture: simulated data, static render (no clicks or live updates)</p>${renderToStaticMarkup(createElement(FactoryConsole, { status: "ready", state: fixtureFloorState, graphs: fixtureGraphs, runPaths: fixtureRunPaths }))}`
   : renderToStaticMarkup(createElement(FactoryScene, { graph, workers, crates, connected: true }));
 const css = readFileSync(new URL(import.meta.resolve("@dark-factory/ui/styles.css")), "utf8");
 const html = `<!doctype html><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>${fixture ? "Console fixture" : "Floor preview"}</title><style>${css}</style><body style="margin:0;background:#08131d">${body}`;
