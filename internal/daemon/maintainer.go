@@ -29,6 +29,51 @@ type maintainerToolCall struct {
 	Arguments map[string]json.RawMessage
 }
 
+var overseerWriteTools = map[string]bool{
+	"add_issue_comment":          true,
+	"close_issue":                true,
+	"create_branch":              true,
+	"create_issue":               true,
+	"create_pull_request":        true,
+	"delete_branch":              true,
+	"enqueue_pull_request":       true,
+	"merge_pull_request":         true,
+	"publish_commit":             true,
+	"publish_pack":               true,
+	"submit_pull_request_review": true,
+	"update_pull_request_body":   true,
+}
+
+func filterOverseerTools(response json.RawMessage) (json.RawMessage, error) {
+	var envelope map[string]json.RawMessage
+	if err := json.Unmarshal(response, &envelope); err != nil {
+		return nil, err
+	}
+	var result map[string]json.RawMessage
+	if err := json.Unmarshal(envelope["result"], &result); err != nil {
+		return nil, err
+	}
+	var tools []json.RawMessage
+	if err := json.Unmarshal(result["tools"], &tools); err != nil {
+		return nil, err
+	}
+	filtered := tools[:0]
+	for _, raw := range tools {
+		var tool struct {
+			Name string `json:"name"`
+		}
+		if err := json.Unmarshal(raw, &tool); err != nil {
+			return nil, err
+		}
+		if !overseerWriteTools[tool.Name] {
+			filtered = append(filtered, raw)
+		}
+	}
+	result["tools"], _ = json.Marshal(filtered)
+	envelope["result"], _ = json.Marshal(result)
+	return json.Marshal(envelope)
+}
+
 func (daemon *Daemon) attemptMaintainer(ctx context.Context, call api.Call) api.Reply {
 	failure := func(state string) api.Reply { return api.NewContentReply(api.MaintainerResult{State: state}) }
 	digest, ok := call.AttemptDigest()
@@ -60,28 +105,13 @@ func (daemon *Daemon) attemptMaintainer(ctx context.Context, call api.Call) api.
 		if err != nil {
 			return failure("invalid")
 		}
+		if overseerWriteTools[params.Name] {
+			return failure("denied")
+		}
 		// factoryd is the one verdict authority: it reviews and
 		// enqueues every published head itself, and alone pushes exact
 		// packs, whose review-authority paths it checks before sending.
-		if params.Name == "submit_pull_request_review" || params.Name == "enqueue_pull_request" || params.Name == "publish_pack" {
-			return failure("denied")
-		}
 		request.Params = encoded
-		// A published Change carries its own worker task's intake source; the
-		// overseer publishes it from a wake task that has none.
-		sourceTask := authority.TaskID
-		if params.Name == "publish_commit" || params.Name == "create_pull_request" {
-			var branch string
-			_ = json.Unmarshal(params.Arguments["branch"], &branch)
-			_ = json.Unmarshal(params.Arguments["head"], &branch)
-			if task, closed, err := daemon.store.ChangeBranchClosedToOverseer(ctx, authority.ProjectID, branch); err != nil {
-				return failure("unavailable")
-			} else if closed {
-				return failure("denied") // a sent-back Change, or intake work factoryd publishes
-			} else if task != (kernel.TaskID{}) {
-				sourceTask = task
-			}
-		}
 		var repository, source string
 		if json.Unmarshal(params.Arguments["repository"], &repository) != nil || repository == "" {
 			return failure("invalid")
@@ -95,7 +125,7 @@ func (daemon *Daemon) attemptMaintainer(ctx context.Context, call api.Call) api.
 		if err != nil {
 			return failure("unavailable")
 		}
-		accepted, found, err := daemon.store.IntakeAcceptanceForTask(ctx, sourceTask)
+		accepted, found, err := daemon.store.IntakeAcceptanceForTask(ctx, authority.TaskID)
 		if err != nil {
 			return failure("unavailable")
 		}
@@ -128,30 +158,6 @@ func (daemon *Daemon) attemptMaintainer(ctx context.Context, call api.Call) api.
 					return failure("invalid")
 				}
 				observedAcceptance = &accepted
-			}
-			if params.Name == "create_pull_request" && accepted.Snapshot.LinearTeamID != "" {
-				// Source provenance comes from the accepted receipt, never the model.
-				params.Arguments["external_source_url"], _ = json.Marshal(accepted.Snapshot.URL)
-				params.Arguments["issue_number"] = json.RawMessage("0")
-				params.Arguments["close_on_merge"] = json.RawMessage("false")
-				delete(params.Arguments, "source_repository")
-				source = ""
-				request.Params, err = encodeMaintainerToolCall(params)
-				if err != nil {
-					return failure("invalid")
-				}
-			}
-			if params.Name == "create_pull_request" && accepted.Snapshot.LinearTeamID == "" {
-				var number uint64
-				if json.Unmarshal(params.Arguments["issue_number"], &number) != nil || number != accepted.Snapshot.IssueNumber {
-					return failure("denied")
-				}
-				if source == "" {
-					source = repository
-				}
-				if !strings.EqualFold(source, accepted.SourceRepository) {
-					return failure("denied")
-				}
 			}
 			// Accepted work keeps its exact destination, including after a default
 			// change or disabling the binding for new work.
@@ -218,6 +224,12 @@ func (daemon *Daemon) attemptMaintainer(ctx context.Context, call api.Call) api.
 			return failure("invalid")
 		}
 		return failure("unavailable")
+	}
+	if request.Method == "tools/list" {
+		response, err = filterOverseerTools(response)
+		if err != nil {
+			return failure("invalid")
+		}
 	}
 	if observedAcceptance != nil {
 		response, err = frozenAcceptedIssueResponse(request, *observedAcceptance, response)

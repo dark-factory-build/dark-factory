@@ -1291,7 +1291,10 @@ impl AppAuthority {
             ("metadata", "read"),
             ("pull_requests", "write"),
         ]);
-        if request.cross_repository_source().is_none() && request.external_source_url.is_none() {
+        if request.issue_number != 0
+            && request.cross_repository_source().is_none()
+            && request.external_source_url.is_none()
+        {
             permissions.insert("issues", "read");
         }
         // A refused lookup says nothing about a prior mutation's outcome.
@@ -1335,7 +1338,7 @@ impl AppAuthority {
         if request.external_source_url.is_some() {
             // Linear is a private backlog; a provider cannot authorize disclosure.
             validate_source_visibility(Some(true), repository.private)?;
-        } else {
+        } else if request.issue_number != 0 {
             let issue = if let Some(source) = request.cross_repository_source() {
                 let source_token = self
                     .0
@@ -1997,8 +2000,10 @@ impl CreatePullRequest {
             {
                 return Err(OperationError::InvalidInput);
             }
-        } else {
+        } else if self.issue_number != 0 {
             valid_exact_integer(self.issue_number)?;
+        } else if self.close_on_merge || self.source_repository.is_some() {
+            return Err(OperationError::InvalidInput);
         }
         valid_ref(&self.head)?;
         valid_ref(&self.base)?;
@@ -2035,6 +2040,8 @@ impl CreatePullRequest {
             format!("Refs {url}")
         } else if let Some(source) = cross_source {
             format!("Refs {source}#{}", self.issue_number)
+        } else if self.issue_number == 0 {
+            String::new()
         } else if self.close_on_merge {
             format!("Closes #{}", self.issue_number)
         } else {
@@ -2050,7 +2057,7 @@ impl CreatePullRequest {
         let mut owned = false;
         while let Some(raw) = body.rsplit('\n').next() {
             let line = raw.trim();
-            if line.eq_ignore_ascii_case(&footer) {
+            if !footer.is_empty() && line.eq_ignore_ascii_case(&footer) {
                 body = body[..body.len() - raw.len()].trim_end();
                 owned = true;
                 continue;
@@ -2096,7 +2103,13 @@ impl CreatePullRequest {
             }
         }
         if body.is_empty() {
-            Ok(format!("{}\n\n{}", footer, self.marker()?))
+            if footer.is_empty() {
+                Ok(self.marker()?)
+            } else {
+                Ok(format!("{}\n\n{}", footer, self.marker()?))
+            }
+        } else if footer.is_empty() {
+            Ok(format!("{}\n\n{}", body, self.marker()?))
         } else {
             Ok(format!("{}\n\n{}\n\n{}", body, footer, self.marker()?))
         }
@@ -8499,6 +8512,16 @@ mod tests {
         linear.close_on_merge = false;
         linear.external_source_url = Some("https://attacker.example/issue/7".into());
         assert!(linear.validate().is_err());
+        let mut source_free = create.clone();
+        source_free.issue_number = 0;
+        source_free.close_on_merge = false;
+        assert!(source_free.validate().is_ok());
+        let source_free_body = source_free.marked_body().unwrap();
+        assert!(source_free_body.contains("Exact-head change."));
+        assert!(!source_free_body.contains("#0"));
+        assert!(!source_free_body.contains("Refs") && !source_free_body.contains("Closes"));
+        source_free.close_on_merge = true;
+        assert!(source_free.validate().is_err());
         let original_digest = request_digest(&create).unwrap();
         let decoded: CreatePullRequest =
             serde_json::from_value(serde_json::to_value(&create).unwrap()).unwrap();
@@ -8518,6 +8541,7 @@ mod tests {
         for body in [
             "Refs #390",
             "Closes #390",
+            "Related: #390",
             "This fixes team/backlog#390",
             "Closes https://github.com/team/backlog/issues/390",
         ] {

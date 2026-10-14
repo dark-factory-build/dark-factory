@@ -13,6 +13,16 @@ import (
 	"github.com/dark-factory-build/dark-factory/internal/maintainer"
 )
 
+func TestFilterOverseerToolsRemovesEveryWriteTool(t *testing.T) {
+	response, err := filterOverseerTools(json.RawMessage(`{"jsonrpc":"2.0","id":1,"result":{"tools":[{"name":"observe_ref"},{"name":"publish_commit"},{"name":"create_pull_request"},{"name":"update_issue"}]}}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(response), "publish_commit") || strings.Contains(string(response), "create_pull_request") || !strings.Contains(string(response), "update_issue") || !strings.Contains(string(response), "observe_ref") {
+		t.Fatalf("filtered tools = %s", response)
+	}
+}
+
 func TestMaintainerRefusesWorkerAndInactiveOrchestrator(t *testing.T) {
 	for _, role := range []string{"worker", "orchestrator"} {
 		t.Run(role, func(t *testing.T) {

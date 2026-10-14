@@ -94,11 +94,22 @@ func (daemon *Daemon) publishSettledChange(ctx context.Context, c kernel.Publish
 		path, cleanup, err := backend.clone(ctx, repo, "", main, c.Base, "main")
 		return filepath.Join(path, ".git"), cleanup, err
 	}
+	if daemon.settledPublishCheckout != nil {
+		checkout = func(ctx context.Context, main string) (string, func(), error) {
+			return daemon.settledPublishCheckout(ctx, repo, main, c.Base, "main")
+		}
+	}
 	source, err := daemon.settledChangeGitDirectory(ctx, c)
+	if daemon.settledPublishSource != nil {
+		source, err = daemon.settledPublishSource(ctx, c)
+	}
 	if err != nil {
 		return daemon.publishFailed(ctx, c, repo, err)
 	}
 	call := backend.callResponse
+	if c.Accepted.Snapshot.LinearTeamID != "" {
+		call = backend.callResponsePrivate
+	}
 	if daemon.reviewBackend != nil { // a test's Maintainer, when it publishes
 		if fake, ok := daemon.reviewBackend(repo, id).(interface {
 			call(context.Context, string, map[string]any) (json.RawMessage, error)
@@ -263,9 +274,15 @@ func (daemon *Daemon) publishPull(ctx context.Context, c kernel.PublishableChang
 		}
 	}
 	issue := c.Accepted.Snapshot.IssueNumber
+	linearSource := c.Accepted.Snapshot.LinearTeamID != ""
+	if linearSource {
+		issue = 0
+	}
+	sourceRepository := c.Accepted.SourceRepository
+	crossSource := issue != 0 && sourceRepository != "" && !strings.EqualFold(sourceRepository, repo)
 	issueTitle := c.Accepted.Snapshot.Title
 	issueBody := c.Accepted.Snapshot.Body
-	if sourceRepository := c.Accepted.SourceRepository; sourceRepository != "" {
+	if sourceRepository != "" && !linearSource {
 		response, observeErr := call(ctx, "observe_issue", map[string]any{"repository": sourceRepository, "issue_number": issue})
 		if observeErr != nil {
 			return fmt.Errorf("observe accepted issue #%d: %w", issue, observeErr)
@@ -295,6 +312,11 @@ func (daemon *Daemon) publishPull(ctx context.Context, c kernel.PublishableChang
 	issueBody = string(redactTerminalText([]byte(issueBody)))
 	issueBody = strings.ToValidUTF8(issueBody[:min(len(issueBody), 24000)], "")
 	body := fmt.Sprintf("%s\n\nPublished by factoryd from Change %s at %s: +%d -%d across %d files from %s.\n\nThe merge queue runs the gate.", issueBody, c.Change, c.Head, added, deleted, files, from)
+	if crossSource {
+		body = qualifySourceReferences(body, sourceRepository)
+	} else if linearSource {
+		body = qualifyExternalReferences(body, c.Accepted.Snapshot.URL)
+	}
 	if c.Pull != 0 {
 		// The corrected body keeps the issue referenced while the steward waits
 		// for live acceptance. One settlement's body is written once.
@@ -302,8 +324,16 @@ func (daemon *Daemon) publishPull(ctx context.Context, c kernel.PublishableChang
 			step := fmt.Sprintf("body-%s-%d", c.Head[:8], c.Revision.Int64())
 			done, err := completed(step, new(json.RawMessage))
 			if err == nil && !done {
-				footer, body := "Refs", referenceIssue(body, issue)
-				_, err = call(ctx, "update_pull_request_body", map[string]any{"repository": repo, "operation_id": operation(step), "pull_number": c.Pull, "body": fmt.Sprintf("%s\n\n%s #%d", body, footer, issue)})
+				updatedBody := body
+				switch {
+				case crossSource:
+					updatedBody = appendPublicationFooter(updatedBody, fmt.Sprintf("Refs %s#%d", sourceRepository, issue))
+				case linearSource:
+					updatedBody = appendPublicationFooter(updatedBody, "Refs "+c.Accepted.Snapshot.URL)
+				case issue != 0:
+					updatedBody = fmt.Sprintf("%s\n\nRefs #%d", referenceIssue(updatedBody, issue), issue)
+				}
+				_, err = call(ctx, "update_pull_request_body", map[string]any{"repository": repo, "operation_id": operation(step), "pull_number": c.Pull, "body": updatedBody})
 			}
 			if err != nil {
 				return err
@@ -334,10 +364,18 @@ func (daemon *Daemon) publishPull(ctx context.Context, c kernel.PublishableChang
 		step += "-" + base
 		done, err = completed(step, &pull)
 	}
-	body = referenceIssue(body, issue)
+	if issue != 0 && !crossSource && !linearSource {
+		body = referenceIssue(body, issue)
+	}
 	if err == nil && !done {
 		arguments := map[string]any{"repository": repo, "operation_id": operation(step), "head": branch, "head_sha": c.Head, "base": "main", "base_sha": base, "title": publicationMessage(c), "body": body, "draft": false,
 			"issue_number": issue, "close_on_merge": false} // live acceptance closes the source issue
+		if crossSource {
+			arguments["source_repository"] = sourceRepository
+		}
+		if linearSource {
+			arguments["external_source_url"] = c.Accepted.Snapshot.URL
+		}
 		var response json.RawMessage
 		if response, err = call(ctx, "create_pull_request", arguments); err == nil {
 			err = json.Unmarshal(response, &pull)
@@ -365,6 +403,27 @@ func referenceIssue(body string, issue uint64) string {
 		body += fmt.Sprintf("\n\nRefs #%d", issue)
 	}
 	return body
+}
+
+var sourceClosingReference = regexp.MustCompile(`(?i)\b(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?):?(\s+\S*(?:#|/issues/)\d+)\b`)
+var bareIssueReference = regexp.MustCompile(`(^|[^\w/])#(\d+)\b`)
+
+func qualifySourceReferences(body, source string) string {
+	body = sourceClosingReference.ReplaceAllString(body, "Refs${1}")
+	return bareIssueReference.ReplaceAllString(body, "${1}"+source+"#$2")
+}
+
+func qualifyExternalReferences(body, sourceURL string) string {
+	body = sourceClosingReference.ReplaceAllString(body, "Refs${1}")
+	return bareIssueReference.ReplaceAllString(body, "${1}"+sourceURL)
+}
+
+func appendPublicationFooter(body, footer string) string {
+	body = strings.TrimSpace(body)
+	if last := body[strings.LastIndex(body, "\n")+1:]; strings.EqualFold(strings.TrimSpace(last), footer) {
+		return body
+	}
+	return body + "\n\n" + footer
 }
 
 // publicationTitle is the accepted title on one line, within the App's

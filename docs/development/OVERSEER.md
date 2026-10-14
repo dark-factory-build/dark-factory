@@ -213,18 +213,15 @@ eligible same-project handoffs can be read in one attempt.
 
 ## What you may and may not do
 
-- Publish only through the App: `publish_commit`, `create_issue`,
-  `create_pull_request`, `update_pull_request_body`, `enqueue_pull_request`,
-  and the observe tools. Never
-  `git push`, never edit the operator's checkout, never write into a retained
-  Change's worktree or branch.
-- Close a superseded pull request with `update_pull_request_body` and
-  `close: true`, naming its successor in the body, then cancel its task.
 - Verify a merged intake task once its wake line shows it live: run its
   issue's Live signal, then `update_issue` with `completed` and the quoted
   evidence, or `reopened` with the observed gap and the pull request link,
   then send that intake task back with them; factoryd publishes its
   correction as a new pull request.
+- Publication is factoryd-owned. Do not publish, create, update, merge, or
+  review pull requests through the Maintainer App. Never `git push`, never
+  edit the operator's checkout, and never write into a retained Change's
+  worktree or branch.
 - Never record a review verdict yourself. The review is a separate headless
   session started by factoryd; you read its App receipt. A BLOCK of record
   stands at its exact head (#1300): no fresh review clears it, only a new head
@@ -237,10 +234,8 @@ eligible same-project handoffs can be read in one attempt.
   `attempt why --pull N | --task ID` says where one stands and whom it waits
   on; `attempt report` measures runs, tokens and merges.
   Do not run a nested provider or grant local commands Maintainer credentials.
-- Publish through the App yourself. Never delegate publication to a worker:
-  only your launch pre-approves the Maintainer tools, so a worker's
-  `publish_commit` or `submit_pull_request_review` is refused for want of an
-  approval nobody can give, and the task ends blocked.
+- Factoryd publishes every settled Change, reviews it, queues it, merges it,
+  and releases it. Do not delegate or retry publication from the overseer.
 - Prioritize actionable changes and throughput blockers; one blocked change
   does not prevent handling another independent change in the same session.
 - When a step needs a decision you are not sure of, or a publication is
@@ -310,25 +305,20 @@ step so a retry is a replay, never a second publication:
 
 ```sh
 opid() { python3 -c "import sys,uuid; print(uuid.uuid5(uuid.NAMESPACE_URL, 'dark-factory:' + sys.argv[1] + ':' + sys.argv[2]))" "$1" "$2"; }
-# opid CHANGE_ID STEP   with STEP one of:
-#   issue, pr                                  once per change
-#   publish-1, publish-2, ...                  the first publication, one per commit
-#   publish-HEAD8-1, publish-HEAD8-2, ...      a follow-up on top of branch head HEAD8
-#   body-HEAD8                                  replacement body for pull request head HEAD8
+# opid CHANGE_ID STEP   with STEP defined by the current factoryd receipt
 ```
 
 `HEAD8` is the first eight hex digits of the commit named, so a follow-up
 commit gets ids of its own.
 
-One id per App write: a change that needs several commits (step 3) uses
-`publish-1`, `publish-2` and so on, one per commit, and the same request under
+One id per App write: use the current factoryd receipt, and the same request under
 the same id is a replay while a different request under it is refused. Before
 each write call `observe_operation` with its id. `completed` means that write
 already happened: take its result (for a commit, the head it returned) and go
 on to the next step, which for a multi-commit publication is the next commit,
 not the pull request. Never received or `planned` means it has not happened.
-For `create_pull_request`, prepare and retain the exact request and UUID before
-sending. If the attempt ends before the call, include both in
+Prepare and retain the exact request and UUID before sending. If the attempt
+ends before the call, include both in
 `attempt succeed --result` and use that durable result on the next standing
 wake. There is no in-flight checkpoint command. If an interrupted attempt has
 no recorded request/UUID, raise a human request rather than guessing or minting
@@ -359,214 +349,7 @@ read merely to obtain another representation, and never replay a write after an
 acknowledgement. If a write response is ambiguous, observe its existing operation
 id and resume from that observation.
 
-## 3. Publish the change as a branch
-
-factoryd publishes accepted intake work itself when its GitHub source issue
-is in the destination repository and you delegated it to exactly one worker
-task (one issue, one worker; a Linear or cross-repository source, or work
-split over several tasks, is yours): when that task succeeds at work
-revision 1 with a settled head, it pushes that exact head (`publish_pack`)
-to `factory/<first 12 hex of change_id>`, so the pull request head is the
-Change head, opens the pull request from the accepted source with `Refs #N`
-and keeps the issue open for live acceptance,
-records it against the worker task and reviews it; when it succeeds again
-after a send-back, it pushes the corrected head to that pull request's branch,
-replacing the head it observed there, and replaces its body. The App refuses
-your `publish_commit` and `create_pull_request` on that branch. When it cannot
-(a review-authority path, a pack over 8 MiB, a branch moved since it was
-observed, an indeterminate write), it
-wakes you once with `Escalated: factoryd cannot publish change CHANGE for task
-TASK: ...` and retries that Change revision on its own every hour, without
-waking you again: send the task back if the Change itself is the cause.
-Otherwise (the App, the Worker or GitHub refused the write) succeed without a
-human request: half an hour after that wake factoryd puts its refusals, with
-the Changes they strand, on one NEEDS YOU card, which closes once they
-publish. Record only the observed refusal, never an inferred cause, in any
-lesson. What follows is for the work factoryd does not publish.
-
-The branch is `factory/<first 12 hex of change_id>`. The task's
-`work_revision` from section 1 says which publication this is:
-
-- `1`: the first publication. The commit goes on top of `base_commit`, under
-  `publish-1`, `publish-2`, and so on. If the branch already exists, an
-  earlier run of yours stopped partway: resume at the first `publish-N` the
-  journal lacks (its `expected_head_sha` is the head the last completed one
-  returned), then at the issue and the pull request, as section 2 says.
-- above `1`: the task was sent back and the worker continued on the branch
-  it left. `observe_ref` for the branch; it exists, at `branch_head`, and the
-  commit goes on top of it under `publish-<HEAD8 of branch_head>-1`, with the
-  diff against that head, not the base. A branch that does not exist here
-  means the earlier publication never happened: treat it as the first.
-
-Set `from` to `base_commit` or `branch_head` accordingly, and set
-`branch_exists=1` when the publication branch exists or `0` when it does not.
-The published
-`branch_head` is an App-authored commit that is not in the local repository;
-fetch it and the worker's head into your clone,
-`git -C repo fetch -q origin main "$from"` and then
-`git -C repo fetch -q "$git_directory" "$head_commit"`, and run the commands
-below against `repo/.git` instead of `$git_directory`.
-
-A worker that integrated a merged prerequisite has main in its head's
-ancestry. Copying that head's files onto `from` reproduces the tree but not
-the ancestry, so GitHub merges main's own hunks against main again and
-reports a conflict that no source correction can clear. Choose the
-publication's parents:
-
-```sh
-integrated=$(git -C repo merge-base "$head_commit" origin/main)
-diff_from=$from merge_parent=-
-if ! git -C repo merge-base --is-ancestor "$integrated" "$from"; then
-    diff_from=$integrated
-    if [ "$branch_exists" = 1 ]; then merge_parent=$integrated; else from=$integrated; fi
-fi
-```
-
-`diff_from` replaces `from` in every diff below. When the branch does not
-exist yet, `from` becomes the integrated main commit itself, the valid current
-base. When it exists, `merge_parent` names the integrated commit and the first
-`publish_commit` of this publication carries it as `merge_parent_sha`: the
-published commit is then the merge the worker made, with the branch head first
-and its changes applied to the integrated tree. `-` means nothing to carry.
-
-The diff is between two commits in the repository's Git directory; nothing
-is checked out and no index is touched. The worker's own `.gitignore` decides
-what it committed, but that does not relax the worker cleanup requirement:
-generated dependencies, build output, caches, and temporary metadata must be
-absent from the head.
-
-```sh
-git --git-dir="$git_directory" diff --no-renames --name-status "$diff_from" "$head_commit" > changed.txt   # A / M / D per path, never R
-git --git-dir="$git_directory" diff --no-renames --numstat "$diff_from" "$head_commit"                     # for the delta paragraph
-git --git-dir="$git_directory" ls-tree -r "$head_commit"                                               # mode and blob per path
-```
-
-If `changed.txt` is empty, report `nothing to publish` for that change and
-continue; do not build entries or create an issue or pull request.
-
-`--no-renames` matters: a rename would otherwise arrive as one `R` line
-with two paths, and the old path's deletion would never reach the App.
-
-Prepare the entries once, into a file, rather than pasting base64 into the
-call by hand:
-
-```sh
-python3 - "$git_directory" "$head_commit" changed.txt > entries.json <<'PY'
-import base64, json, subprocess, sys
-git_dir, head, listing = sys.argv[1], sys.argv[2], sys.argv[3]
-modes = {}
-for line in subprocess.run(['git', '--git-dir', git_dir, 'ls-tree', '-r', '-z', head], check=True, capture_output=True).stdout.decode().split('\0'):
-    if line:
-        meta, path = line.split('\t', 1)
-        modes[path] = meta.split(' ')[0]
-entries = []
-for line in open(listing):                     # changed.txt from above
-    status, path = line.rstrip('\n').split('\t', 1)
-    if status == 'D':
-        entries.append({'path': path})
-        continue
-    content = subprocess.run(['git', '--git-dir', git_dir, 'cat-file', 'blob', head + ':' + path], check=True, capture_output=True).stdout
-    entries.append({'path': path, 'mode': modes[path], 'content_base64': base64.b64encode(content).decode()})
-json.dump(entries, sys.stdout)
-PY
-```
-
-Build the `changes` array for `publish_commit`: added and modified paths carry
-`content_base64` and the `mode` the tree entry shows (`100644` or
-`100755`); deleted paths carry only `path`. The App takes at most 50 entries
-per commit and 1,000,000 base64 characters per file (about 732 KiB of
-content), and refuses the `.github` directory itself,
-the CODEOWNERS locations and the dependabot config (other `.github` paths
-are publishable). More than 50 files means several commits on the same
-branch, each bound to the head the previous one returned. A file over that
-bound, a symlink (tree mode `120000`), or a refused path is a human request,
-not a workaround.
-
-Then, with `branch = factory/<first 12 hex of change_id>`:
-
-1. `observe_ref` for `main` and keep the answer as `main_head`. If it is not
-   `base_commit`, main moved since the worker started; publish anyway from
-   `from` and let the queue merge it, but say so in the body.
-2. `publish_commit` with `branch`, `expected_head_sha = from`,
-   `merge_parent_sha = merge_parent` on this first commit unless it is `-`,
-   `message` = the task title and nothing else (the App takes exactly one
-   line: no blank line, no trailers, no session link; a second line is refused
-   as `invalid_input`), and the first (or only) 50 entries. The operation id is
-   `opid "$change_id" publish-1` for a first publication and
-   `opid "$change_id" publish-<HEAD8 of from>-1` for a follow-up. It returns
-   the new head commit; a second commit uses the next number and that head,
-   and so on. The last returned head is the pull request head.
-
-## 4. Open the issue and the pull request
-
-A follow-up publication (`work_revision` above 1 with the branch present)
-already has both: the journal shows `issue` and `pr` completed, and the
-pull request number is in the `pr` operation's result. Do not create either
-again. Before review, replace its body under `opid "$change_id"
-"body-$HEAD8"`. Build a fresh body in the repository's shape, including
-what changed and why and verification, and restate its **cumulative**
-production-line delta from the review merge base to `HEAD_SHA`; never append
-only the follow-up commit's delta. Name the full `HEAD_SHA` in the body and
-claim only checks run on it: host intake launches no review while the body
-does not name the exact head, and wakes you to replace it. Fetch the new head and calculate that base
-and numstat directly:
-
-```sh
-git -C repo fetch -q origin main "$HEAD_SHA"
-review_base=$(git -C repo merge-base origin/main "$HEAD_SHA")
-git -C repo diff --numstat "$review_base" "$HEAD_SHA"
-```
-
-For source-linked work, preserve the exact `Refs #NUMBER` source footer as the
-final line of the replacement body until live acceptance is recorded.
-A body update does not reconstruct that link automatically.
-
-The supplied body must be the fresh text only: do not copy an App operation
-marker or a `Dark-Factory-Review:` line from the old body. Write it to
-`body.md`, call `observe_operation` for `body-HEAD8`, and if it is not
-completed call `update_pull_request_body` with the PR number and the contents
-of `body.md`. The App adds its own marker and returns the head it observed
-with the replacement; this metadata write has no atomic expected-head
-condition. If that head differs from `HEAD_SHA`, rebuild the cumulative body
-from the returned head under its own `body-HEAD8` operation.
-
-Intake work factoryd does not publish is yours (section 3):
-reuse its accepted source, never create an issue. For a GitHub source pass
-`issue_number` and `source_repository` (fully qualified) from the accepted
-snapshot, with `close_on_merge = false` and `Refs #N` until the steward records
-the installed live acceptance signal. For a Linear source pass
-`external_source_url` with `issue_number = 0` and `close_on_merge = false`.
-Skip `create_issue` for both.
-
-Work without a source issue needs one: `create_pull_request` needs an issue. `create_issue` with `opid "$change_id" issue`, the
-task title (cut to 256 characters, the App's bound), and a body of the task
-text plus the change id; it returns the issue number. Then read
-`observe_ref` for `main` again, immediately before the call, and use that
-answer: `create_pull_request` with `opid "$change_id" pr`, `issue_number` from that
-result, `head = branch`, `head_sha` = the last published commit, `base =
-main`, `close_on_merge = false` for a new issue, `base_sha` = main's head as just read (the App verifies the base
-branch is at that commit at that moment; `base_commit` is wrong whenever
-main moved, and a stale read is wrong whenever main moves between the read
-and the call), `draft = false`, the same title, and a body in this
-repository's shape. An operation
-id belongs to the exact request it was first sent with, so a request the App
-refuses for its content cannot be corrected under the same id: that is a
-human request, not a retry.
-
-- What changed and why: from the task and the diff, in prose.
-- Production-line delta: added minus deleted outside tests, docs and fixtures,
-  from the numstat to the full `HEAD_SHA`, which the body must name, with the
-  largest files named.
-- How it was verified: what the worker's result text says it ran, and that
-  the merge queue runs the selected `scripts/local-ci.sh` mode on the combined
-  tree. Claim nothing you did not see.
-- Never an email, an org name, an account id, or a `/Users/<name>` path.
-- End with the repository's generated-with line and nothing after it. You
-  have no session link; never invent one.
-
-Write that body to a file; the review needs it.
-
-## 5. After publication: factoryd reviews, merges and releases
+## 3. After publication: factoryd reviews, merges and releases
 
 factoryd reviews every published PR head itself once its required pull-request
 check passes (a red head goes back unreviewed): it records one exact-head
