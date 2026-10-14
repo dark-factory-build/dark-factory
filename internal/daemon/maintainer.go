@@ -44,7 +44,13 @@ var overseerWriteTools = map[string]bool{
 	"update_pull_request_body":   true,
 }
 
-func filterOverseerTools(response json.RawMessage) (json.RawMessage, error) {
+var workerEvidenceTools = map[string]bool{
+	"list_pull_requests":          true,
+	"observe_pull_request_checks": true,
+	"observe_pull_request_merge":  true,
+}
+
+func filterTools(response json.RawMessage, keep func(string) bool) (json.RawMessage, error) {
 	var envelope map[string]json.RawMessage
 	if err := json.Unmarshal(response, &envelope); err != nil {
 		return nil, err
@@ -65,13 +71,21 @@ func filterOverseerTools(response json.RawMessage) (json.RawMessage, error) {
 		if err := json.Unmarshal(raw, &tool); err != nil {
 			return nil, err
 		}
-		if !overseerWriteTools[tool.Name] {
+		if keep(tool.Name) {
 			filtered = append(filtered, raw)
 		}
 	}
 	result["tools"], _ = json.Marshal(filtered)
 	envelope["result"], _ = json.Marshal(result)
 	return json.Marshal(envelope)
+}
+
+func filterWorkerEvidenceTools(response json.RawMessage) (json.RawMessage, error) {
+	return filterTools(response, func(name string) bool { return workerEvidenceTools[name] })
+}
+
+func filterOverseerTools(response json.RawMessage) (json.RawMessage, error) {
+	return filterTools(response, func(name string) bool { return !overseerWriteTools[name] })
 }
 
 func (daemon *Daemon) attemptMaintainer(ctx context.Context, call api.Call) api.Reply {
@@ -85,7 +99,7 @@ func (daemon *Daemon) attemptMaintainer(ctx context.Context, call api.Call) api.
 		return failure("denied")
 	}
 	authority, err := daemon.store.AuthenticateAttempt(ctx, kDigest)
-	if err != nil || authority.Role != kernel.RoleOrchestrator {
+	if err != nil || authority.Role != kernel.RoleOrchestrator && authority.Role != kernel.RoleWorker {
 		return failure("denied")
 	}
 	if daemon.liveAttemptForDigest(kDigest) == nil {
@@ -95,6 +109,29 @@ func (daemon *Daemon) attemptMaintainer(ctx context.Context, call api.Call) api.
 	var request maintainerRequest
 	if !ok || json.Unmarshal(input.Request, &request) != nil || request.JSONRPC != "2.0" || len(request.ID) == 0 {
 		return failure("invalid")
+	}
+	worker := authority.Role == kernel.RoleWorker
+	workerPull := kernel.ProductionPullRequest{}
+	workerRepository := ""
+	var workerRepositoryID uint64
+	if worker {
+		workerPull, ok, err = daemon.store.TaskOpenPullRequest(ctx, authority.TaskID)
+		if err != nil || !ok {
+			return failure("denied")
+		}
+		repository, found, readErr := daemon.store.TaskRepository(ctx, authority.TaskID)
+		if readErr != nil || !found {
+			return failure("denied")
+		}
+		identity, verified, readErr := daemon.store.RepositorySourceIdentity(ctx, repository.ID)
+		if readErr != nil || !verified || identity.PublicationRepository == "" {
+			return failure("repository_unbound")
+		}
+		workerRepository = strings.ToLower(identity.PublicationRepository)
+		workerRepositoryID, ok, readErr = daemon.store.RepositoryGitHubID(ctx, repository.ID)
+		if readErr != nil || !ok || workerRepositoryID == 0 {
+			return failure("repository_unbound")
+		}
 	}
 	repositories := map[string]uint64{}
 	var observedAcceptance *kernel.IntakeAcceptance
@@ -107,6 +144,30 @@ func (daemon *Daemon) attemptMaintainer(ctx context.Context, call api.Call) api.
 		}
 		if overseerWriteTools[params.Name] {
 			return failure("denied")
+		}
+		if worker {
+			if !workerEvidenceTools[params.Name] {
+				return failure("denied")
+			}
+			var repository string
+			if json.Unmarshal(params.Arguments["repository"], &repository) != nil || !strings.EqualFold(repository, workerRepository) {
+				return failure("denied")
+			}
+			var pull uint64
+			if json.Unmarshal(params.Arguments["pull_number"], &pull) != nil || pull != workerPull.Number {
+				return failure("denied")
+			}
+			if params.Name != "list_pull_requests" {
+				var head string
+				if json.Unmarshal(params.Arguments["head_sha"], &head) != nil || !strings.EqualFold(head, workerPull.Head) {
+					return failure("denied")
+				}
+			} else {
+				var page, perPage uint64
+				if json.Unmarshal(params.Arguments["page"], &page) != nil || page != 1 || json.Unmarshal(params.Arguments["per_page"], &perPage) != nil || perPage != 1 {
+					return failure("denied")
+				}
+			}
 		}
 		// factoryd is the one verdict authority: it reviews and
 		// enqueues every published head itself, and alone pushes exact
@@ -175,6 +236,10 @@ func (daemon *Daemon) attemptMaintainer(ctx context.Context, call api.Call) api.
 				sources[strings.ToLower(accepted.SourceRepository)] = accepted.Snapshot.GitHubRepositoryID
 			}
 		}
+		if worker {
+			targets = map[string]uint64{workerRepository: workerRepositoryID}
+			sources = map[string]uint64{}
+		}
 		name := strings.ToLower(repository)
 		id := targets[name]
 		if id == 0 {
@@ -207,6 +272,9 @@ func (daemon *Daemon) attemptMaintainer(ctx context.Context, call api.Call) api.
 	default:
 		return failure("invalid")
 	}
+	if worker && request.Method == "tools/list" {
+		repositories[workerRepository] = workerRepositoryID
+	}
 	if daemon.github == nil || !daemon.github.CustomerMode() {
 		return failure("unavailable")
 	}
@@ -226,7 +294,11 @@ func (daemon *Daemon) attemptMaintainer(ctx context.Context, call api.Call) api.
 		return failure("unavailable")
 	}
 	if request.Method == "tools/list" {
-		response, err = filterOverseerTools(response)
+		if worker {
+			response, err = filterWorkerEvidenceTools(response)
+		} else {
+			response, err = filterOverseerTools(response)
+		}
 		if err != nil {
 			return failure("invalid")
 		}
