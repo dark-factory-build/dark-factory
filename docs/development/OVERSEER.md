@@ -136,8 +136,9 @@ queue while any item needs you: a finished (except an intake task with a diff,
 which factoryd publishes), blocked or failed worker task, an
 unanswered worker question, unpublished or corrected work, or a pull request
 factoryd escalated, or the failed self-release. An item you leave unhandled is woken again at most three
-times (a publish failure or failed release never), 30 minutes apart, until it changes; only wakes that named it (or
-named no item at all) and actually started count. Half an hour after its last wake, factoryd raises a
+times (a publish failure or failed release never), 30 minutes apart, until it changes; only wakes that printed it and
+actually started count; a wake too large to name everything names the oldest
+items that fit, and the rest stay due. Half an hour after its last wake, factoryd raises a
 NEEDS YOU card naming what is still unresolved. Only a human answers it, so
 your status never lists it: the operator's reply (console or `factoryctl human
 reply`) resumes that wake task with the question and the decision, cancelling

@@ -82,7 +82,6 @@ pull_request AS MATERIALIZED (SELECT project_id, repository, identity,
 	json_extract(document, '$.state') AS state, lower(json_extract(document, '$.head')) AS head
 	FROM production_records WHERE project_id = ?1 AND kind = 'pull_request'),
 carrier AS MATERIALIZED (SELECT t.id AS task, t.created_at_ms AS at, substr(t.body, instr(t.body, 'Factory causal wake: ')) AS names,
-	instr(t.body, 'wake: mode=targeted;') > 0 AS targeted,
 	EXISTS (SELECT 1 FROM runs AS r WHERE r.task_id = t.id AND r.terminal_detail IS NOT ?9 AND r.terminal_detail IS NOT ?10) AS started
 	FROM tasks AS t WHERE t.assigned_agent_id = ?4 AND t.title = ?5),
 -- When each pull request went live: the first verified release that ships it.
@@ -185,13 +184,14 @@ type overseerStalledState struct {
 	health       string
 }
 
-// overseerWakeNames is a carrier since the item's version that named it, by
-// its key (a task identity, or an escalation's reviewer record), or that named
-// no item at all (a full reconciliation, or a bare instruction when the causal
-// record overflowed). Keys are searched only in the causal record (names),
-// never the standing instruction: scanning every carrier's whole body for
-// every item made each wake tick hold the writer for tens of seconds.
-const overseerWakeNames = `at > version AND (NOT targeted OR instr(names, item_key))`
+// overseerWakeNames is a carrier since the item's version that printed its
+// key (a task identity, or an escalation's reviewer record). A full carrier
+// names only what it printed: counting it as naming every item silently lost
+// each one-look item an overflowing wake left out (#1972). Keys are searched
+// only in the causal record (names), never the standing instruction: scanning
+// every carrier's whole body for every item made each wake tick hold the
+// writer for tens of seconds.
+const overseerWakeNames = `at > version AND instr(names, item_key)`
 
 // EnqueueOverseerWakeups applies one level-triggered rule to each standing
 // overseer: while it has no unfinished wake carrier and some item is due, it
@@ -637,9 +637,10 @@ func latestOverseerTask(ctx context.Context, connection *sql.Conn, agentID Agent
 }
 
 // overseerWakeInstruction appends the causal record to the standing
-// instruction. What does not fit the provider's delivery bound is dropped in
-// order (task lines, then escalations) and the wake becomes a full
-// reconciliation; the bare instruction was checked against it when set.
+// instruction. What does not fit the provider's delivery bound is dropped
+// from the end one line at a time (task lines, then escalations) and the wake
+// becomes a full reconciliation, so it names the oldest items that fit and the
+// rest stay due; the bare instruction was checked against it when set.
 func overseerWakeInstruction(provider Provider, instruction, counts string, lines, escalations []string, prior *TaskID, full bool) string {
 	priorID := ""
 	if prior != nil {
@@ -661,9 +662,9 @@ func overseerWakeInstruction(provider Provider, instruction, counts string, line
 		case wakeBodyFits(provider, body):
 			return body
 		case len(lines) != 0:
-			lines, full = nil, true
+			lines, full = lines[:len(lines)-1], true
 		case len(escalations) != 0:
-			escalations = nil
+			escalations, full = escalations[:len(escalations)-1], true
 		default:
 			return instruction
 		}
