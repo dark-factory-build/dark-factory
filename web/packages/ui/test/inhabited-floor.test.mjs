@@ -219,7 +219,7 @@ test("a standing specialist is known by what it does on the floor, never by a sy
   const worker = (id) => scene.workers.find((item) => item.id === id);
   assert.deepEqual(worker(operationsSpecialistID).specialist, { title: "Operations specialist", remit: "Operations: make delivery reliable and every failure diagnosable.", stage: "working", text: "reviewing: make delivery reliable and every failure diagno…", next: "" });
   assert.equal(worker(securitySpecialistID).specialist.text, "waiting: waiting for a free background slot");
-  assert.match(worker(securitySpecialistID).specialist.next, /^Next review .* \(scheduled\)$/);
+  assert.equal(worker(securitySpecialistID).specialist.next, "");
   assert.equal(worker(fixtureFloorState.tasks.get("31".repeat(16)).assigned_agent_id).specialist, undefined, "an ordinary worker is not one");
   const markup = renderToStaticMarkup(createElement(FactoryScene, { graph: scene.graph, workers: scene.workers, tasks: scene.tasks, onOpenTasks() {} }));
   // Its review is inspection, board in hand; between reviews it is an ordinary sprite. Nothing is drawn over either.
@@ -228,10 +228,12 @@ test("a standing specialist is known by what it does on the floor, never by a sy
   assert.doesNotMatch(sprite(securitySpecialistID), /inspect/);
   assert.doesNotMatch(markup, /data-specialist-mark|<circle[^>]*#80ddff/, "no lens or other symbol marks a specialist");
   assert.match(markup, /aria-label="operations, Operations specialist, reviewing: make delivery reliable/);
-  assert.match(markup, /data-tooltip="security · Security specialist · waiting: waiting for a free background slot\nNext review /);
+  assert.match(markup, /data-tooltip="security · Security specialist · waiting: waiting for a free background slot/);
   assert.match(markup, /data-floor-inbox="1"/, "the tray holds the one ordinary queued task; a queued specialist review is its own");
-  // Between reviews it sleeps in the break room until its next one.
-  assert.match(markup, /data-tooltip="security · [^"]*\nNext review [^"]*\nAsleep in the break room until its next review/);
+  // A capacity hold is not asleep; a ready specialist with a scheduled review is.
+  assert.doesNotMatch(markup, /data-tooltip="security · [^"]*\nAsleep in the break room until its next review/);
+  const readyMarkup = renderToStaticMarkup(createElement(FactoryScene, { graph: scene.graph, workers: scene.workers.map((item) => item.id === securitySpecialistID ? { ...item, specialist: { ...item.specialist, stage: "ready", next: "Next review Oct 9 (scheduled)" } } : item), tasks: scene.tasks, onOpenTasks() {} }));
+  assert.match(readyMarkup, /data-tooltip="security · [^"]*\nNext review Oct 9 \(scheduled\)\nAsleep in the break room until its next review/);
   // Its running sub-agents work beside it as smaller sprites, and its tooltip counts them.
   const telemetry = { tokens_in: 1, tokens_out: 1, cost_micro_usd: 0, tool_calls: 1, api_requests: 1, subagents: 2 };
   const helped = renderToStaticMarkup(createElement(FactoryScene, { graph: scene.graph, workers: scene.workers.map((item) => item.id === operationsSpecialistID ? { ...item, telemetry } : item), tasks: scene.tasks, onOpenTasks() {} }));

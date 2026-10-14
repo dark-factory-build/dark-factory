@@ -39,7 +39,7 @@ export const fixtureState = {
 
 /** Two standing specialists: one reviewing now, one waiting for a free slot. */
 const specialist = (id, name, remit, waiting) => [id, { ...fixtureState.agents.get(thirdAgentID), id, name, project_id: projectID, idle_policy: "standing_instruction", idle_after_seconds: 3600, idle_instruction: remit, idle_run_budget: 0, idle_runs_used: 2,
-  specialist: { next_review_at_ms: waiting === "" ? 0 : 1760003600000, next_reason: waiting === "" ? "" : "scheduled", waiting, quiet_reviews: 0, open_proposals: 1, open_proposal_limit: 3, last_review_task_id: "" } }];
+  specialist: { next_review_at_ms: 0, next_reason: "", waiting, quiet_reviews: 0, open_proposals: 1, open_proposal_limit: 3, last_review_task_id: "" } }];
 export const operationsSpecialistID = "24".repeat(16);
 export const securitySpecialistID = "25".repeat(16);
 export const fixtureFloorState = {
