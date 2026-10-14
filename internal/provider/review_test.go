@@ -378,3 +378,31 @@ func TestCodexReviewGrantsEachPathOnce(t *testing.T) {
 		t.Fatalf("writable grant lost when also readable: %s", profile)
 	}
 }
+
+func TestReviewTempRootIsAllowedWithoutOpeningSharedTemp(t *testing.T) {
+	temp := "/private/tmp/dfr-abc123"
+	codexArgs := CodexReview([]string{temp})
+	codex := codexArgs[len(codexArgs)-1]
+	if !strings.Contains(codex, `"/private/tmp"="deny"`) || !strings.Contains(codex, `"/private/tmp/dfr-abc123"="write"`) {
+		t.Fatalf("Codex permissions = %s", codex)
+	}
+	settings, err := ClaudeReview([]string{temp})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var parsed struct {
+		Sandbox struct {
+			Filesystem struct {
+				AllowWrite []string `json:"allowWrite"`
+				AllowRead  []string `json:"allowRead"`
+				DenyRead   []string `json:"denyRead"`
+			} `json:"filesystem"`
+		} `json:"sandbox"`
+	}
+	if err := json.Unmarshal([]byte(settings), &parsed); err != nil {
+		t.Fatal(err)
+	}
+	if !slices.Contains(parsed.Sandbox.Filesystem.AllowWrite, "//private/tmp/dfr-abc123") || !slices.Contains(parsed.Sandbox.Filesystem.AllowRead, "//private/tmp/dfr-abc123") || !slices.Contains(parsed.Sandbox.Filesystem.DenyRead, "//private/tmp") {
+		t.Fatalf("Claude permissions = %+v", parsed.Sandbox.Filesystem)
+	}
+}
