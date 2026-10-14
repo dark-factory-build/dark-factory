@@ -518,7 +518,7 @@ export function FactoryScene({ proposals, crates, tools, onLoadNode, onInvestiga
   // Past fit, the overview can be folded to a button; the choice is this browser's.
   const [mapHidden, setMapHiddenState] = useState(() => { try { return typeof localStorage !== "undefined" && localStorage.getItem(OVERVIEW_KEY) === "hidden"; } catch { return false; } });
   const setMapHidden = (hidden: boolean) => { setMapHiddenState(hidden); try { localStorage.setItem(OVERVIEW_KEY, hidden ? "hidden" : "shown"); } catch { /* blocked storage: the choice lasts this visit */ } };
-  // Fitted, the whole floor is in view, never enlarged into a poster. The pane's size is set by CSS, never by the floor inside it, so fitting cannot feed back into it.
+  // Fitted, the whole floor fills the pane on its limiting axis. The pane's size is set by CSS, never by the floor inside it, so fitting cannot feed back into it.
   const [pane, setPane] = useState<{ width: number; height: number }>();
   // The overview's window follows scrolling without rerendering the floor.
   const viewElement = useRef<SVGRectElement>(null);
@@ -559,7 +559,7 @@ export function FactoryScene({ proposals, crates, tools, onLoadNode, onInvestiga
   // A crowd beside one machine stands below it, and an empty plant's reason below that: the scene grows, the floor does not move.
   const floorBottom = Math.max(layout.height, ...placements.map((placement) => placement.y + 24 + PADDING));
   const sceneHeight = floorBottom + (layout.stations.length === 0 ? 2 * PADDING : 0);
-  const fit = pane === undefined ? undefined : Math.min(1, pane.width / sceneWidth, pane.height / sceneHeight);
+  const fit = pane === undefined ? undefined : Math.min(pane.width / sceneWidth, pane.height / sceneHeight);
   // Zoomed to twice the fitted scale or more, a manifold lists its routes inside its own footprint.
   const close = zoom !== undefined && zoom >= 2 * (fit ?? 1);
   // Belt runs depend on where machines stand and which flows exist; readings are joined at draw time.

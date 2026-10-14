@@ -1122,7 +1122,7 @@ test("fit shows the whole floor in the pane without relaying it out, the overvie
   const svg = () => renderer.root.findAll((node) => node.props["data-graph-digest"] === graph.digest)[0];
   const style = () => svg()?.props.style ?? {};
   const height = () => Number(svg().props.viewBox.split(" ")[3]), sceneWidth = () => Number(svg().props.viewBox.split(" ")[2]);
-  const fitted = () => { const width = sceneWidth(), scale = Math.min(1, pane.clientWidth / width, pane.clientHeight / height()); return [Math.floor(width * scale), Math.floor(height() * scale)]; };
+  const fitted = () => { const width = sceneWidth(), scale = Math.min(pane.clientWidth / width, pane.clientHeight / height()); return [Math.floor(width * scale), Math.floor(height() * scale)]; };
   const wheel = (deltaY) => act(async () => listeners.wheel({ ctrlKey: true, deltaY, clientX: 300, clientY: 200, preventDefault() {} }));
   try {
     await act(async () => { renderer = create(createElement(FactoryScene, { graph, appearance: scenic, workers }), { createNodeMock: (element) => element.type === "svg" && element.props.viewBox?.startsWith("0 0 ") && element.props["data-graph-digest"] ? floor : element.type === "div" && element.props.className === "dfFactoryFloor__map" ? pane : element.type === "rect" && element.props["data-overview-view"] !== undefined ? view : {} }); });
@@ -1133,6 +1133,7 @@ test("fit shows the whole floor in the pane without relaying it out, the overvie
     assert.equal(button("Zoom out").props.disabled, true, "fitted: nothing further out to show");
     assert.deepEqual([style().width, style().height], fitted(), "fit is the whole floor, bounded by the pane's height as well as its width");
     assert.ok(style().width <= 600 && style().height <= 400);
+    assert.ok(style().width > sceneWidth(), "a pane larger than the scene enlarges the fitted floor");
     // A tall pane (a phone held upright) fits by width; the fit follows the pane, never the floor's own size.
     pane.clientWidth = 300; pane.clientHeight = 900;
     await act(async () => resized());
