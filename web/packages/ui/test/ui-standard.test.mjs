@@ -16,7 +16,7 @@ test("every console font size is a scale token and every colour token is used on
 test("badges hide at zero, icon buttons name themselves, and dates share one format", () => {
   assert.equal(renderToStaticMarkup(createElement(Badge, { n: 0 })), "");
   assert.match(renderToStaticMarkup(createElement(Badge, { n: 3 })), />3</);
-  assert.match(renderToStaticMarkup(createElement(IconButton, { icon: "gear", "aria-label": "Settings" })), /title="Settings" aria-label="Settings"/);
+  assert.match(renderToStaticMarkup(createElement(IconButton, { icon: "gear", "aria-label": "Configuration" })), /title="Configuration" aria-label="Configuration"/);
   assert.match(renderToStaticMarkup(createElement(Status, { stage: "needs-you" })), /data-stage="needs-you">needs you</);
   assert.equal(formatTime(1759779480000n), "6 Oct, 19:38 UTC");
   assert.equal(formatTime(undefined), "");

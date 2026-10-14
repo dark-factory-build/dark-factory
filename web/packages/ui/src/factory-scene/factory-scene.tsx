@@ -29,7 +29,6 @@ import {
   recordedEffort,
 } from "./scene.js";
 import { IconButton } from "../icons.js";
-import { DEFAULT_FLOOR_APPEARANCE, type FloorAppearance } from "../floor-appearance.js";
 import { breakRoomHabit, offDuty, restingItem, workerFrames, workerPhase } from "./appearance.js";
 import { catAt, catBed, chats, gossip, type Seat } from "./idle-life.js";
 import { endsAt, fromTray, isPaper, messageAt, observe, send, type FloorMessage, type Seen } from "./messages.js";
@@ -52,11 +51,11 @@ export type FactorySceneProps = Readonly<{
   onSelectEntity?: (entityId: string | undefined) => void;
   onOpenLibrary?: (projectId?: string) => void;
   onOpenBoard?: (projectId?: string) => void;
-  appearance?: FloorAppearance;
   graph: SceneGraph;
   /** Current project scope, when the floor has one. */
   projectId?: string;
   workers: readonly SceneWorker[];
+  appearance?: { scenery?: "off" | "subtle" | "rich"; animation?: "follow-device" | "off" };
   tasks?: readonly SceneTask[];
   /** Questions between live tasks: shown as they are asked and answered, and stated while they wait. */
   peerQuestions?: readonly PeerQuestionItem[];
@@ -498,14 +497,15 @@ function seatRows(seats: readonly Sitter[]) {
   return [...rows.values()].map((row) => row.sort((left, right) => left.x - right.x));
 }
 const tableOf = (rows: readonly (readonly Sitter[])[]) => rows.find((row) => row.length > 1);
+const DEFAULT_SCENE_APPEARANCE = { scenery: "subtle" as const, animation: "follow-device" as const };
 
 /** The fixtures this floor offers: each opens its panel; the coffee station is scenery. */
-export function offeredFixtures({ appearance = DEFAULT_FLOOR_APPEARANCE, onOpenBoard, onOpenMissions, onOpenTasks, onOpenLibrary }: Pick<FactorySceneProps, "appearance" | "onOpenBoard" | "onOpenMissions" | "onOpenTasks" | "onOpenLibrary">): readonly BreakRoomErrand[] {
+export function offeredFixtures({ appearance = DEFAULT_SCENE_APPEARANCE, onOpenBoard, onOpenMissions, onOpenTasks, onOpenLibrary }: Pick<FactorySceneProps, "appearance" | "onOpenBoard" | "onOpenMissions" | "onOpenTasks" | "onOpenLibrary">): readonly BreakRoomErrand[] {
   return ([["board", onOpenBoard], ["missions", onOpenMissions], ["tasks", onOpenTasks], ["shelf", onOpenLibrary], ["coffee", appearance.scenery === "off" ? undefined : true]] as const).flatMap(([errand, offer]) => offer === undefined ? [] : [errand]);
 }
 
 /** A disposable SVG projection of the operational world and current factory state. */
-export function FactoryScene({ proposals, crates, tools, onLoadNode, onInvestigate, onDiscussSource, requestedEntity, onSelectEntity, onOpenLibrary, onOpenBoard, graph, workers, appearance = DEFAULT_FLOOR_APPEARANCE, selectedWorkerId, onSelectWorker, tasks = [], peerQuestions = NO_QUESTIONS, knowledgeCues = NO_CUES, selectedTaskId, onSelectTask, onOpenTasks, onOpenMissions, onSelectHumanRequest, projectId, connected = true, reading = false, unavailable }: FactorySceneProps) {
+export function FactoryScene({ proposals, crates, tools, onLoadNode, onInvestigate, onDiscussSource, requestedEntity, onSelectEntity, onOpenLibrary, onOpenBoard, graph, workers, appearance = DEFAULT_SCENE_APPEARANCE, selectedWorkerId, onSelectWorker, tasks = [], peerQuestions = NO_QUESTIONS, knowledgeCues = NO_CUES, selectedTaskId, onSelectTask, onOpenTasks, onOpenMissions, onSelectHumanRequest, projectId, connected = true, reading = false, unavailable }: FactorySceneProps) {
   const [selectedId, setSelectedId] = useState<string>();
   // The crate pointed at or focused: the machines its change touches are lit.
   const [lit, setLit] = useState<string>();

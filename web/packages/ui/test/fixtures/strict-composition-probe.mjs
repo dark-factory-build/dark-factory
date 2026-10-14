@@ -61,12 +61,10 @@ try {
   assert.equal(counters.terminals - counters.disposes, 1, "one selected terminal must remain live before unmount");
 
   const controls = renderer.root.findByProps({ "aria-label": "Agent controls" });
-  for (const label of ["Settings", "Terminal"]) {
-    const tab = controls.findAllByType("button").find((button) => button.props.children === label);
-    assert.ok(tab);
-    await act(async () => { tab.props.onClick(); });
-  }
-  assert.equal(counters.opens, 1, "switching configuration preserves the terminal session");
+  const terminalTab = controls.findAllByType("button").find((button) => button.props.children === "Terminal");
+  assert.ok(terminalTab);
+  await act(async () => { terminalTab.props.onClick(); });
+  assert.equal(counters.opens, 1, "surviving terminal navigation preserves the terminal session");
   assert.equal(counters.acquires, 1, "switching configuration preserves terminal input ownership");
   assert.equal(counters.detaches, 0);
   assert.equal(counters.terminals - counters.disposes, 1);

@@ -10,10 +10,9 @@ import { layoutScene } from "../dist/src/factory-scene/scene.js";
 import { projectGraph, projectFloor, workRows } from "../dist/src/console-view.js";
 import { FactoryFloor, StageMeter } from "../dist/src/console-screens.js";
 import { ProjectLibrary } from "../dist/src/project-library.js";
-import { AgentPanel, SettingsDialog, TaskDetail, WorkPanel } from "../dist/src/console-sidebar.js";
+import { AgentPanel, TaskDetail, WorkPanel } from "../dist/src/console-sidebar.js";
 import { FactoryScene } from "../dist/src/factory-scene/factory-scene.js";
 import { TerminalPanel } from "../dist/src/factory-app.js";
-import { DEFAULT_FLOOR_APPEARANCE, readFloorAppearance } from "../dist/src/floor-appearance.js";
 import { fixtureState, fixtureGraphs, fixtureGraph } from "../../../fixtures/state.mjs";
 import { graphWith, hex, unit } from "../../../fixtures/graph.mjs";
 const rowButton = (row) => row.findByProps({ className: "dfConsoleItem__taskTitle dfWorkRow__title" });
@@ -47,15 +46,6 @@ function consoleElements(props) {
 
 const VIEWS = ["floor", "agents"];
 
-test("community help works disconnected without private report fields", () => {
-  const markup = render({ status: "closed", state: undefined, settingsOpen: true });
-  for (const href of ["https://darkfactory.build/feedback?kind=bug", "https://darkfactory.build/feedback?kind=feature", "https://darkfactory.build/backlog"]) {
-    assert.ok(markup.includes(`href="${href}" target="_blank" rel="noopener noreferrer"`));
-  }
-  assert.match(markup, /Report a problem/);
-  assert.doesNotMatch(markup, /Reporting and voting/);
-});
-
 const agentSelection = (id = ids.agent) => {
   const agent = fixtureState.agents.get(id);
   return { id: agent.id, name: agent.name, revision: agent.revision };
@@ -73,7 +63,6 @@ const selectedRequest = (overrides = {}) => ({
   ...overrides,
 });
 
-// Compose the runtime's independently memoized projections for fixture assertions.
 function floorScene(state, graphs, runPaths, lastRunPaths) {
   return projectFloor(state, projectGraph(graphs, [...state?.projects.keys() ?? []].sort()), runPaths, lastRunPaths);
 }
@@ -86,6 +75,17 @@ const runSample = (agentId, paths, taskId = ids.task, taskRevision = fixtureStat
   paths,
 });
 
+const shellAgent = { id: ids.agent, project_id: ids.project, name: "Shell Hand", role: "worker", provider: "shell", paused: true, model: "", reasoning_effort: "", effective_model: "", effective_reasoning_effort: "", model_source: "", revision: 10n };
+
+const withAgent = (agent) => render({
+  detail: "agent",
+  state: baseState({ agents: new Map([[agent.id, agent]]) }),
+  selectedAgent: { id: agent.id, name: agent.name, revision: agent.revision },
+  onSaveAgentConfig: () => {},
+});
+
+const inheritingAgent = () => fixtureState.agents.get("23".repeat(16));
+
 test("error banner keeps its centered layout after the paragraph reset", () => {
   const css = readFileSync(new URL("../src/factory-console.css", import.meta.url), "utf8");
   assert.match(css, /\.dfFactoryConsole :where\(h1, h2, p, dl, ul\),[\s\S]*?\.dfConsoleSidebar :where\(h1, h2, h3, p, dl, ul\)\s*\{\s*margin: 0;\s*\}/);
@@ -94,75 +94,6 @@ test("error banner keeps its centered layout after the paragraph reset", () => {
   assert.match(css, /\.dfFactoryTooltip \{[^}]*-webkit-line-clamp: 8;[^}]*pointer-events: none;/, "a tooltip stays short enough to need no scrolling, and never takes the click meant for what it covers");
   assert.match(render(), /class="dfFactoryFloor__map" role="region" aria-label="Scrollable factory floor" tabindex="0"/);
   assert.equal(css.includes("@keyframes dfFactoryScene"), false);
-});
-
-test("floor appearance is local, field-validated, and available before a connection", () => {
-  assert.deepEqual(readFloorAppearance('{"scenery":"off","dependencyLinks":"bad","labels":"names-and-counts","taskProps":false,"animation":"off"}'), {
-    ...DEFAULT_FLOOR_APPEARANCE, scenery: "off", animation: "off",
-  });
-  assert.deepEqual(readFloorAppearance('{"scenery":"subtle"}'), { ...DEFAULT_FLOOR_APPEARANCE, scenery: "subtle" });
-  assert.deepEqual(readFloorAppearance("not json"), DEFAULT_FLOOR_APPEARANCE);
-  const markup = render({ status: "closed", settingsOpen: true });
-  for (const text of ["Scenery", "Animation", "Reset floor appearance", "Saved in this browser."]) assert.match(markup, new RegExp(text));
-  assert.doesNotMatch(markup, /Dependency links|Task props|Ambient life/);
-});
-
-test("repository roots stay inside private settings", () => {
-  const project = fixtureState.projects.get(ids.project);
-  const root = "/private/operator/checkout";
-  const repositories = new Map([[project.id, [{ id: "ad".repeat(16), project_id: project.id, name: "Checkout", root, base_ref: "main", enabled: true, default: true, revision: 1n, fetch_state: "setup_required", publication_state: "ready", github_repository_id: 123456n, readiness_message: "Git checkout needs operator setup." }]]]);
-  assert.equal(render({ repositories }).includes(root), false);
-  const settings = render({ settingsOpen: true, repositories });
-  assert.match(settings, /Repositories/);
-  assert.match(settings, new RegExp(root));
-  assert.match(settings, /Fetch: setup required/);
-  assert.match(settings, /Publication: Identity verified/);
-  assert.match(settings, /base branch and Git login/);
-  assert.match(settings, /Check fetch readiness/);
-  assert.match(settings, /Refresh GitHub binding/);
-  assert.match(settings, /Git checkout needs operator setup\./);
-  assert.match(settings, /Add repository/);
-});
-
-test("floor appearance waits for storage, changes while disconnected, and resets only itself", () => {
-  const priorWindow = globalThis.window;
-  const entries = new Map([
-    ["dark-factory.floor-appearance", '{"scenery":"subtle","dependencyLinks":"overview","labels":"bad","taskProps":"bad","animation":"off"}'],
-    ["dark-factory.pairing", "keep"],
-  ]);
-  const writes = [];
-  globalThis.window = { localStorage: {
-    getItem: (key) => entries.get(key) ?? null,
-    setItem: (key, value) => { writes.push([key, value]); entries.set(key, value); },
-    removeItem: (key) => { writes.push([key]); entries.delete(key); },
-  } };
-  try {
-    let tree;
-    act(() => { tree = create(createElement(FactoryConsole, { status: "closed", state: baseState(), settingsOpen: true })); });
-    assert.deepEqual(writes, [], "loading never writes defaults");
-    const selects = tree.root.findAllByType("select").filter((node) => ["subtle", "off"].includes(node.props.value));
-    assert.equal(selects[0].props.value, "subtle");
-    assert.equal(selects[1].props.value, "off");
-    act(() => { selects[0].props.onChange({ currentTarget: { value: "off" } }); });
-    assert.deepEqual(JSON.parse(entries.get("dark-factory.floor-appearance")), { ...DEFAULT_FLOOR_APPEARANCE, scenery: "off", animation: "off" });
-    act(() => { tree.root.findAllByType("button").find((button) => button.props.children === "Reset floor appearance").props.onClick(); });
-    assert.equal(entries.has("dark-factory.floor-appearance"), false);
-    assert.equal(entries.get("dark-factory.pairing"), "keep");
-  } finally {
-    if (priorWindow === undefined) delete globalThis.window;
-    else globalThis.window = priorWindow;
-  }
-});
-
-test("blocked floor-appearance storage leaves the console renderable", () => {
-  const priorWindow = globalThis.window;
-  globalThis.window = { localStorage: { getItem: () => { throw new Error("blocked"); }, setItem: () => { throw new Error("blocked"); }, removeItem: () => { throw new Error("blocked"); } } };
-  try {
-    assert.doesNotThrow(() => act(() => { create(createElement(FactoryConsole, { status: "closed", state: baseState(), settingsOpen: true })); }));
-  } finally {
-    if (priorWindow === undefined) delete globalThis.window;
-    else globalThis.window = priorWindow;
-  }
 });
 
 test("one screen keeps Factory and the operator panels together", () => {
@@ -426,37 +357,6 @@ test("the console never shows a kernel-grammar or retired vocabulary word", () =
     }
   }
   assert.match(render({ detail: "agent" }), />Overseer</);
-});
-
-test("transitional session statuses have stable live labels and offer no factory action", () => {
-  for (const status of ["idle", "connecting", "authenticating", "syncing", "closed"]) {
-    const markup = render({ status, onSelectAgent: () => {}, onSelectHumanRequest: () => {}, onView: () => {}, onToggleSettings: () => {} });
-    assert.match(markup, new RegExp(`>${status[0].toUpperCase()}${status.slice(1)}<`));
-    assert.match(markup, /class="dfFactoryConsole__connection" aria-label="Connection status:/);
-    // SETTINGS is the only button before the factory is ready; the floor is a
-    // native disclosure, not a factory action.
-    const live = (markup.match(/<button(?![^>]*disabled)/g) ?? []).length;
-    assert.equal(live, 1, status);
-    assert.match(markup, /<button type="button" aria-pressed="false" disabled=""/);
-  }
-  const ready = render({ status: "ready" });
-  assert.match(ready, /class="dfFactoryConsole__visuallyHidden"/);
-  assert.match(ready, /role="status" aria-live="polite" aria-atomic="true"/);
-  assert.match(render({ status: "closed", error: new SessionError("connection") }), /class="dfFactoryConsole__visuallyHidden" aria-label="Connection status:/);
-});
-
-test("closed and pairing-uncertain errors have no ineffective action", () => {
-  for (const error of [new SessionError("connection", true), new SessionError("pairing_uncertain"), new ProtocolError("malformed")]) {
-    const markup = render({ status: "closed", error, onSelectAgent: () => {}, onSelectHumanRequest: () => {}, onView: () => {}, onToggleSettings: () => {} });
-    assert.match(markup, /role="alert"/);
-    // The banner offers nothing to press, and the only live buttons on a
-    // closed console is SETTINGS, which changes nothing in the factory.
-    assert.equal((markup.match(/<button(?![^>]*disabled)/g) ?? []).length, 1);
-    assert.doesNotMatch(markup, /role="alert"[^>]*>[^<]*<button/);
-    assert.equal(markup.includes("Retry connection"), false);
-    assert.equal(markup.includes("Error:"), false);
-    assert.equal(markup.includes("secret"), false);
-  }
 });
 
 test("protocol errors remain finite and never expose their message", () => {
@@ -1009,202 +909,6 @@ test("a queued edit refusal remains visible after its task leaves the queue", ()
   }
 });
 
-test("the settings modal keeps actionable settings compact", () => {
-  const markup = render({ settingsOpen: true, onToggleSettings: () => {} });
-  assert.match(markup, /<dialog class="dfConsoleDialog" aria-label="Settings">/);
-  assert.doesNotMatch(markup, /aria-label="BUILDING"/);
-  assert.doesNotMatch(markup, /<dt>DISPATCH<\/dt>/);
-  assert.doesNotMatch(markup, /aria-label="This factory"/);
-  assert.match(markup, /aria-label="Run limits"/);
-  assert.doesNotMatch(markup, /<dt>(RUN ALLOWANCE|PER-RUN LIMIT)<\/dt>/);
-  assert.equal((markup.match(/aria-label="Limits for North Workshop"/g) ?? []).length, 1);
-  assert.equal((markup.match(/aria-label="Limits for South Workshop"/g) ?? []).length, 1);
-  assert.match(markup, /value="900"/);
-  assert.match(markup, /aria-label="Pairing"/);
-  assert.match(markup, /Pairing unavailable/);
-  // The peer PR drops its own component into the same slot.
-  const paired = render({ settingsOpen: true, onToggleSettings: () => {}, pairing: createElement("p", null, "Pair a phone") });
-  assert.match(paired, /Pair a phone/);
-  assert.equal(paired.includes("Pairing unavailable"), false);
-  // The modal is over the console, so it neither closes nor replaces a sidebar.
-  const both = render({ settingsOpen: true, onToggleSettings: () => {}, selectedAgent: agentSelection() });
-  assert.match(both, /aria-label="Settings"/);
-  assert.match(both, /aria-label="Agent Builder One"/);
-});
-
-test("private GitHub settings stays behind the paired admin surface", async () => {
-  const calls = [];
-  const settings = { settingsOpen: true, onToggleSettings: () => {}, onGitHub: (request) => calls.push(request) };
-  const disconnected = render(settings);
-  assert.match(disconnected, /aria-label="GitHub settings"/);
-  assert.match(disconnected, />disconnected</);
-  assert.match(disconnected, />Connect GitHub<\/button>/);
-  let renderer;
-  act(() => { renderer = create(createElement(FactoryConsole, { status: "ready", state: baseState(), ...settings })); });
-  act(() => { renderer.root.findAllByType("button").find((button) => button.props.children === "Connect GitHub").props.onClick(); });
-  assert.ok(calls.some((request) => request.action === "connect"));
-  renderer.unmount();
-  const denied = render({ ...settings, github: { pending: false, result: { state: "denied" } } });
-  assert.match(denied, /Access expired or was denied/);
-  act(() => { renderer = create(createElement(FactoryConsole, { status: "ready", state: baseState(), ...settings, github: { pending: false, result: { state: "denied" } } })); });
-  act(() => { renderer.root.findAllByType("button").find((button) => button.props.children === "Reset GitHub access").props.onClick(); });
-  assert.equal(calls.at(-1).action, "disconnect");
-  renderer.unmount();
-  const unavailable = render({ ...settings, github: { pending: false, result: { state: "unavailable" } } });
-  assert.match(unavailable, /GitHub is unavailable/);
-  const disconnectPending = render({ ...settings, github: { pending: false, result: { state: "ok", status: { connection_id: "", state: "disconnect_pending", repositories: [] } } } });
-  assert.match(disconnectPending, /Retry disconnect/);
-  const awaitingConfirmation = render({ ...settings, github: { pending: false, result: { state: "ok", status: { connection_id: "c", state: "awaiting_confirmation", repositories: [] } } } });
-  assert.match(awaitingConfirmation, /Reset GitHub access/);
-  const connecting = render({ ...settings, github: { pending: false, result: { state: "ok", authorization: { connection_id: "c", authorization_url: "https://github.com/login/oauth/authorize", expires_at: 123n } } } });
-  assert.match(connecting, /Reset GitHub access/);
-  const expired = render({ ...settings, github: { pending: false, result: { state: "ok", status: { connection_id: "c", state: "disconnected", repositories: [] } } } });
-  assert.match(expired, /Reset GitHub access/);
-  act(() => { renderer = create(createElement(FactoryConsole, { status: "ready", state: baseState(), ...settings, github: { pending: false, result: { state: "ok", status: { connection_id: "c", state: "disconnected", repositories: [] } } } })); });
-  act(() => { renderer.root.findAllByType("button").find((button) => button.props.children === "Reset GitHub access").props.onClick(); });
-  assert.equal(calls.at(-1).action, "disconnect");
-  renderer.unmount();
-  act(() => { renderer = create(createElement(FactoryConsole, { status: "ready", state: baseState(), ...settings, github: { pending: false, result: { state: "unavailable" } } })); });
-  act(() => { renderer.root.findAllByType("button").find((button) => button.props.children === "Retry GitHub access").props.onClick(); });
-  assert.equal(calls.at(-1).action, "refresh");
-  renderer.unmount();
-  const connected = render({ ...settings, github: { pending: false, result: {
-    state: "ok",
-    status: { connection_id: "c", state: "connected", repositories: [] },
-    installations: { installations: [{ id: 7, account: { id: 8, login: "factory-org" }, suspended_at: null, html_url: "https://github.com/settings/installations/7", eligibility: "available" }], next_page: 2 },
-  } } });
-  assert.match(connected, /Refresh access/);
-  assert.match(connected, /Disconnect/);
-  assert.match(connected, /factory-org · available/);
-  assert.match(connected, /href="https:\/\/github.com\/settings\/installations\/7"/);
-  assert.match(connected, /More installations/);
-  assert.equal(connected.includes("javascript:"), false);
-  assert.equal(connected.includes("evil.example"), false);
-  assert.match(disconnected, /GitHub/);
-
-  const noInstallation = render({ ...settings, github: { pending: false, result: { state: "ok", status: { connection_id: "c", state: "connected", repositories: [] }, installations: { installations: [], installation_url: "https://github.com/apps/factory-maintainer/installations/new" } } } });
-  assert.match(noInstallation, /Install or request GitHub app access/);
-  assert.match(noInstallation, /href="https:\/\/github.com\/apps\/factory-maintainer\/installations\/new"/);
-  const pendingInstallationPages = render({ ...settings, github: { pending: false, result: { state: "ok", status: { connection_id: "c", state: "connected", repositories: [] }, installations: { installations: [], next_page: 2, installation_url: "https://github.com/apps/factory-maintainer/installations/new" } } } });
-  assert.doesNotMatch(pendingInstallationPages, /Install or request GitHub app access/);
-  const unavailableInstall = render({ ...settings, github: { pending: false, result: { state: "ok", status: { connection_id: "c", state: "connected", repositories: [] }, installations: { installations: [], installation_url: "https://evil.example\/apps\/factory\/installations\/new" } } } });
-  assert.doesNotMatch(unavailableInstall, /Install or request GitHub app access/);
-  const visibleInstall = render({ ...settings, github: { pending: false, result: { state: "ok", status: { connection_id: "c", state: "connected", repositories: [] }, installations: { installations: [{ id: 7, account: { id: 8, login: "factory-org" }, suspended_at: null, eligibility: "available" }], installation_url: "https://github.com/apps/factory-maintainer/installations/new" } } } });
-  assert.doesNotMatch(visibleInstall, /Install or request GitHub app access/);
-
-  const pagerCalls = [];
-  const pageProps = (installations) => ({ status: "ready", state: baseState(), settingsOpen: true, onToggleSettings: () => {}, onGitHub: (request) => pagerCalls.push(request), github: { pending: false, result: { state: "ok", status: { connection_id: "pager", state: "connected", repositories: [] }, installations } } });
-  act(() => { renderer = create(createElement(FactoryConsole, pageProps({ installations: [{ id: 7, account: { id: 8, login: "factory-org" }, suspended_at: null, html_url: "https://github.com/settings/installations/7", eligibility: "available" }], next_page: 2 }))); });
-  pagerCalls.length = 0;
-  act(() => { renderer.root.findAllByType("button").find((button) => button.props.children === "More installations").props.onClick(); });
-  act(() => { renderer.update(createElement(FactoryConsole, pageProps({ installations: [{ id: 8, account: { id: 9, login: "another-org" }, suspended_at: null, html_url: "https://github.com/settings/installations/8", eligibility: "available" }], next_page: 3 }))); });
-  assert.equal(renderer.root.findAllByType("button").some((button) => textOf(button) === "Previous installations"), true);
-  act(() => { renderer.root.findAllByType("button").find((button) => textOf(button) === "Refresh access").props.onClick(); });
-  assert.deepEqual(pagerCalls, [{ action: "installations", page: 2 }, { action: "refresh" }]);
-  assert.equal(renderer.root.findAllByType("button").some((button) => textOf(button) === "Previous installations"), false);
-  renderer.unmount();
-
-  const retainedInstallations = (installations) => ({ status: "ready", state: baseState(), settingsOpen: true, onToggleSettings: () => {}, onGitHub: () => {}, github: { pending: false, result: { state: "ok", status: { connection_id: "retained", state: "connected", repositories: [] }, installations } } });
-  act(() => { renderer = create(createElement(FactoryConsole, retainedInstallations({ installations: [{ id: 7, account: { id: 8, login: "factory-org" }, suspended_at: null, eligibility: "available" }], next_page: 2, installation_url: "https://github.com/apps/factory-maintainer/installations/new" }))); });
-  act(() => { renderer.update(createElement(FactoryConsole, retainedInstallations({ installations: [], installation_url: "https://github.com/apps/factory-maintainer/installations/new" }))); });
-  assert.equal(renderer.root.findAllByType("a").some((anchor) => String(anchor.props.children).includes("Install or request GitHub app access")), false);
-  renderer.unmount();
-
-  const refreshCalls = [];
-  const refreshProps = (installations) => ({ status: "ready", state: baseState(), settingsOpen: true, onToggleSettings: () => {}, onGitHub: (request) => refreshCalls.push(request), github: { pending: false, result: { state: "ok", status: { connection_id: "refresh-link", state: "connected", repositories: [] }, installations } } });
-  act(() => { renderer = create(createElement(FactoryConsole, refreshProps({ installations: [{ id: 7, account: { id: 8, login: "factory-org" }, suspended_at: null, eligibility: "available" }] }))); });
-  act(() => { renderer.root.findAllByType("button").find((button) => textOf(button) === "Refresh access").props.onClick(); });
-  act(() => { renderer.update(createElement(FactoryConsole, refreshProps({ installations: [], installation_url: "https://github.com/apps/factory-maintainer/installations/new" }))); });
-  assert.equal(refreshCalls.at(-1).action, "refresh");
-  assert.equal(renderer.root.findAllByType("a").some((anchor) => String(anchor.props.children).includes("Install or request GitHub app access")), true);
-  renderer.unmount();
-
-  const repositoryCalls = [];
-  const statusRepositories = [];
-  const repositoryProps = (repositories, delegated = statusRepositories, installationID = 7) => ({ status: "ready", state: baseState(), settingsOpen: true, onToggleSettings: () => {}, onGitHub: (request) => repositoryCalls.push(request), github: { pending: false, result: { state: "ok", status: { connection_id: "c", state: "connected", repositories: delegated }, installations: { installations: [{ id: installationID, account: { id: 8, login: "factory-org" }, suspended_at: null, eligibility: "available" }], }, repositories } } });
-  act(() => { renderer = create(createElement(FactoryConsole, repositoryProps({ repositories: [{ id: 101, full_name: "factory-org/one", permissions: { pull: true, push: true, maintain: true, admin: true } }], next_page: 2 }))); });
-  act(() => { renderer.root.findAllByType("button").find((button) => button.props.children === "Choose repositories").props.onClick(); });
-  act(() => { renderer.update(createElement(FactoryConsole, repositoryProps({ repositories: [{ id: 101, full_name: "factory-org/one", permissions: { pull: true, push: true, maintain: true, admin: true } }], next_page: 2 }))); });
-  act(() => { renderer.root.findByProps({"aria-label":"GitHub settings"}).findAllByType("input").find((input) => input.props.type === "checkbox").props.onChange({ currentTarget: { checked: true } }); });
-  await act(async () => { renderer.update(createElement(FactoryConsole, repositoryProps({ repositories: [{ id: 102, full_name: "factory-org/two", permissions: { pull: true, push: true, maintain: true, admin: true } }] }))); });
-  act(() => { renderer.root.findAllByType("button").find((button) => String(button.props.children).startsWith("Save access")).props.onClick(); });
-  assert.deepEqual(repositoryCalls.find((request) => request.action === "delegate"), { action: "delegate", repositories: [{ installation_id: 7, repository_id: 101, repository: "factory-org/one" }] });
-  renderer.unmount();
-
-  const delegated = [{ installation_id: 7, repository_id: 101, repository: "factory-org/one" }];
-  act(() => { renderer = create(createElement(FactoryConsole, repositoryProps({ repositories: [{ id: 101, full_name: "factory-org/one", permissions: { pull: true, push: true, maintain: true, admin: true } }] }, delegated))); });
-  act(() => { renderer.root.findAllByType("button").find((button) => button.props.children === "Choose repositories").props.onClick(); });
-  act(() => { renderer.update(createElement(FactoryConsole, repositoryProps({ repositories: [{ id: 101, full_name: "factory-org/one", permissions: { pull: true, push: true, maintain: true, admin: true } }] }, delegated))); });
-  assert.equal(renderer.root.findByProps({"aria-label":"GitHub settings"}).findAllByType("input").find((input) => input.props.type === "checkbox").props.checked, true);
-  act(() => { renderer.update(createElement(FactoryConsole, repositoryProps({ repositories: [{ id: 101, full_name: "factory-org/one", permissions: { pull: true, push: true, maintain: true, admin: true } }] }, []))); });
-  assert.equal(renderer.root.findByProps({"aria-label":"GitHub settings"}).findAllByType("input").find((input) => input.props.type === "checkbox").props.checked, false);
-  act(() => { renderer.update(createElement(FactoryConsole, repositoryProps({ repositories: [{ id: 101, full_name: "factory-org/one", permissions: { pull: true, push: true, maintain: true, admin: true } }] }, [], 8))); });
-  act(() => { renderer.root.findAllByType("button").find((button) => button.props.children === "Choose repositories").props.onClick(); });
-  assert.equal(renderer.root.findAllByProps({ className: "dfConsoleSidebar__list" }).length, 0);
-  act(() => { renderer.update(createElement(FactoryConsole, repositoryProps({ repositories: [{ id: 202, full_name: "factory-org/two", permissions: { pull: true, push: true, maintain: true, admin: true } }] }, [], 8))); });
-  assert.equal(renderer.root.findAllByProps({ className: "dfConsoleSidebar__list" }).length, 1);
-  renderer.unmount();
-});
-
-test("settings edits the project duration", () => {
-  const markup = render({ settingsOpen: true, onToggleSettings: () => {}, onSaveProjectLimits: () => {} });
-  assert.match(markup, /aria-label="Project limits"/);
-  assert.match(markup, /value="0"/);
-  assert.match(markup, /Max seconds per run \(0 = unlimited\)/);
-  assert.doesNotMatch(markup, /AUTONOMOUS GITHUB ISSUE WORK REQUIRES BOTH LIMITS/);
-});
-
-test("settings rejects a blank per-run duration before saving", async () => {
-  const calls = [];
-  let renderer;
-  await act(async () => {
-    renderer = create(createElement(FactoryConsole, { status: "ready", state: baseState(), settingsOpen: true, onToggleSettings: () => {}, onSaveProjectLimits: (...args) => calls.push(args) }));
-  });
-  const form = renderer.root.findByProps({ "aria-label": `Limits for ${fixtureState.projects.get(ids.project).name}` });
-  const inputs = form.findAllByType("input");
-  await act(async () => { inputs[0].props.onChange({ currentTarget: { value: "" } }); });
-  await act(async () => { form.props.onSubmit({ preventDefault: () => {} }); });
-  assert.equal(calls.length, 0);
-  assert.match(JSON.stringify(renderer.toJSON()), /Duration must be 0–86400 seconds/);
-  await act(async () => { renderer.unmount(); });
-});
-
-test("SETTINGS opens and closes as a native modal, over whatever sidebar is open", async () => {
-  const previousAct = globalThis.IS_REACT_ACT_ENVIRONMENT;
-  globalThis.IS_REACT_ACT_ENVIRONMENT = true;
-  try {
-    const calls = [];
-    const node = { showModal: () => calls.push("showModal"), close: () => calls.push("close") };
-    let renderer;
-    await act(async () => {
-      renderer = create(createElement(FactoryConsole, {
-        status: "ready",
-        state: baseState(),
-        settingsOpen: true,
-        selectedAgent: agentSelection(),
-        onToggleSettings: () => calls.push("toggle"),
-      }), { createNodeMock: () => node });
-    });
-    // The browser opens it, so ESC, the backdrop and the focus trap are its.
-    assert.deepEqual(calls, ["showModal"]);
-    const dialog = renderer.root.findByType("dialog");
-    // The agent sidebar is still mounted underneath.
-    assert.equal(renderer.root.findAll((instance) => instance.props["aria-label"] === "Agent Builder One").length, 1);
-
-    // Every exit goes through close(), so focus always returns to SETTINGS,
-    // and the close event is what tells the console the modal is gone.
-    renderer.root.findAllByType("button").find((button) => button.props["aria-label"] === "Close").props.onClick();
-    dialog.props.onClick({ target: node });
-    dialog.props.onClick({ target: {} });
-    assert.deepEqual(calls, ["showModal", "close", "close"]);
-    await act(async () => { dialog.props.onClose(); });
-    assert.deepEqual(calls.at(-1), "toggle");
-    await act(async () => { renderer.unmount(); });
-  } finally {
-    globalThis.IS_REACT_ACT_ENVIRONMENT = previousAct;
-  }
-});
-
 test("only the selected agent portrait offers appearance editing in either view", () => {
   for (const view of VIEWS) {
     const props = { view, onSelectAgent: () => {}, onEditAppearance: () => {}, graphs: fixtureGraphs };
@@ -1364,69 +1068,6 @@ test("agent and question terminal actions expose only current public intent", as
   assert.equal(markup.includes("sessionId"), false);
 });
 
-test("settings and the sidebar Agents tab forward one intent each", () => {
-  const calls = [];
-  const elements = consoleElements({ status: "ready", state: baseState(), onDetail: (value) => calls.push(value), onToggleSettings: () => calls.push("settings") });
-  elements.find((element) => element.type === "button" && element.props["aria-label"] === "Settings").props.onClick();
-  const tabs = elements.find((element) => element.props["aria-label"] === "Right panel");
-  tabs.props.children.find((element) => element.props.children === "Agents").props.onClick();
-  assert.deepEqual(calls, ["settings", "agent"]);
-});
-
-function expand(node, result = []) {
-  if (Array.isArray(node)) {
-    for (const child of node) expand(child, result);
-    return result;
-  }
-  if (!isValidElement(node)) return result;
-  if (typeof node.type === "function") {
-    // Stateful surfaces have their own renderer checks; this walk tests sibling intent callbacks.
-    if (["WorkPanel", "FactoryFloor", "ProjectLibrary"].includes(node.type.name)) return result;
-    expand(node.type(node.props), result);
-    return result;
-  }
-  result.push(node);
-  expand(node.props.children, result);
-  return result;
-}
-
-test("Pair a phone appears in settings only with authority, and shows the minted code", () => {
-  const svg = '<svg viewBox="0 0 1 1"/>';
-  const link = "https://app.darkfactory.build/remote#df_remote&node=n0&expires=1767225600";
-  const settings = { settingsOpen: true, onToggleSettings: () => {} };
-  // Pairing lives in the settings sidebar, which is the only place it shows.
-  assert.equal(render({ ...settings }).includes("Pair a phone"), false);
-  assert.match(render({ ...settings, remoteInviteAllowed: true }), /Pair a phone/);
-  assert.equal(render({ remoteInviteAllowed: true }).includes("Pair a phone"), false, "not without settings");
-  assert.match(render({ ...settings, remoteInviteAllowed: true, selectedAgent: agentSelection() }), /Pair a phone/, "the modal is over the sidebar, not behind it");
-  // Its slot still takes an explicit override.
-  assert.match(render({ ...settings, remoteInviteAllowed: true, pairing: createElement("p", null, "OTHER") }), /OTHER/);
-
-  const shown = render({ ...settings, remoteInviteAllowed: true, remoteInvite: { link, svg, expiresAtMs: 1767225600000n } });
-  assert.ok(shown.includes(`src="data:image/svg+xml;utf8,${encodeURIComponent(svg)}"`), shown);
-  assert.ok(shown.includes(link.replaceAll("&", "&amp;")));
-  assert.match(shown, /Dismiss/);
-  // The minted code is never handed to the browser as markup. The floor draws
-  // its own SVG, so the check names the invite's exact bytes.
-  assert.equal(shown.includes(svg), false);
-
-  const failed = render({ ...settings, remoteInviteAllowed: true, remoteInviteError: "not_found" });
-  assert.match(failed, /No pairing code — not found/);
-  assert.match(failed, /Dismiss/);
-  assert.equal(render({ ...settings, remoteInviteAllowed: true }).includes("Dismiss"), false);
-});
-
-const shellAgent = { id: ids.agent, project_id: ids.project, name: "Shell Hand", role: "worker", provider: "shell", paused: true, model: "", reasoning_effort: "", effective_model: "", effective_reasoning_effort: "", model_source: "", revision: 10n };
-
-const withAgent = (agent) => render({
-  detail: "agent",
-  state: baseState({ agents: new Map([[agent.id, agent]]) }),
-  selectedAgent: { id: agent.id, name: agent.name, revision: agent.revision },
-  onSaveAgentConfig: () => {},
-});
-
-const inheritingAgent = () => fixtureState.agents.get("23".repeat(16));
-
 test("the console shows the model an agent will actually run with", () => {
   // An agent that names no model still runs with one. The row and the panel
   // header say which, so a blank is never read as "no model".
@@ -1580,115 +1221,6 @@ test("the agent config offers its provider's linked accounts and the provider de
   }
 });
 
-test("settings asks the daemon for logins on open and links the one the operator names", async () => {
-  const previousAct = globalThis.IS_REACT_ACT_ENVIRONMENT;
-  globalThis.IS_REACT_ACT_ENVIRONMENT = true;
-  try {
-    const login = {
-      provider: "codex",
-      home: "/Users/operator/.codex-dogfood",
-      label: ".codex-dogfood",
-      email: "operator@example.com",
-      organization: "",
-      default_model: "gpt-6-astra",
-      default_reasoning_effort: "high",
-      linked_id: "",
-      unavailable_reason: "",
-    };
-    const asked = [];
-    const linkings = [];
-    const updates = [];
-    const props = {
-      status: "ready",
-      state: baseState(),
-      settingsOpen: true,
-      onToggleSettings: () => {},
-      onLoadAccounts: () => asked.push("asked"),
-      onLinkAccount: (candidate, label) => linkings.push([candidate.home, label]),
-      onUpdateAccount: (account, change) => updates.push([account.id, account.revision, change]),
-      accounts: [login],
-    };
-    let renderer;
-    await act(async () => { renderer = create(createElement(FactoryConsole, props)); });
-    // Discovery is an observation, so opening SETTINGS is what asks for it.
-    assert.deepEqual(asked, ["asked"]);
-    const section = renderer.root.findAllByProps({ "aria-label": "Accounts" })[0];
-    assert.ok(section !== undefined);
-    assert.equal(JSON.stringify(renderer.toJSON()).includes(login.home), false, "account paths stay out of the common flow");
-    assert.equal(JSON.stringify(renderer.toJSON()).includes(login.default_model), false, "model details stay out of account linking");
-    const label = renderer.root.findAllByType("input").find((input) => input.props.id === `df-account-label-${login.provider}-0`);
-    await act(async () => { label.props.onChange({ currentTarget: { value: "dogfood" } }); });
-    const link = renderer.root.findAllByType("button").find((button) => button.props.children === "Link");
-    await act(async () => { link.props.onClick(); });
-    assert.deepEqual(linkings, [[login.home, "dogfood"]]);
-    const account = [...props.state.accounts.values()][0];
-    const linkedLabel = renderer.root.findAllByType("input").find((input) => input.props.id === `df-linked-account-${account.id}`);
-    await act(async () => { linkedLabel.props.onChange({ currentTarget: { value: "personal" } }); });
-    const button = (name) => renderer.root.findAllByType("button").find((item) => textOf(item) === name);
-    await act(async () => { button("Save label").props.onClick(); });
-    assert.deepEqual(updates, [[account.id, account.revision, { label: "personal" }]]);
-    assert.equal(button("Unlink").props.disabled, true, "an agent still references this account");
-    await act(async () => { renderer.update(createElement(FactoryConsole, { ...props, state: { ...props.state, agents: new Map() } })); });
-    assert.equal(button("Unlink").props.disabled, false);
-    await act(async () => { button("Unlink").props.onClick(); });
-    assert.notDeepEqual(updates.at(-1)?.[2], { remove: true }, "unlinking asks for confirmation first");
-    await act(async () => { button("Confirm unlink").props.onClick(); });
-    assert.deepEqual(updates.at(-1), [account.id, account.revision, { remove: true }]);
-    await act(async () => { button("Refresh accounts").props.onClick(); });
-    assert.equal(asked.length, 2);
-
-
-    // The daemon's refusal is shown plainly rather than retried.
-    await act(async () => { renderer.update(createElement(FactoryConsole, { ...props, accountsError: "not_found" })); });
-    assert.ok(renderer.root.findAllByProps({ role: "alert" }).length > 0);
-    await act(async () => { renderer.unmount(); });
-  } finally {
-    globalThis.IS_REACT_ACT_ENVIRONMENT = previousAct;
-  }
-});
-
-test("settings rereads private GitHub state when the browser reconnects", async () => {
-  const previousAct = globalThis.IS_REACT_ACT_ENVIRONMENT;
-  globalThis.IS_REACT_ACT_ENVIRONMENT = true;
-  try {
-    const calls = [];
-    const props = { status: "ready", state: baseState(), settingsOpen: true, onToggleSettings: () => {}, onGitHub: (request) => calls.push(request) };
-    let renderer;
-    await act(async () => { renderer = create(createElement(FactoryConsole, props)); });
-    assert.deepEqual(calls, [{ action: "status" }]);
-    await act(async () => { renderer.update(createElement(FactoryConsole, { ...props, status: "connecting" })); });
-    await act(async () => { renderer.update(createElement(FactoryConsole, { ...props, status: "ready" })); });
-    assert.deepEqual(calls, [{ action: "status" }, { action: "status" }]);
-    renderer.unmount();
-  } finally {
-    globalThis.IS_REACT_ACT_ENVIRONMENT = previousAct;
-  }
-});
-
-test("settings keeps an unavailable linked account visible with recovery guidance", () => {
-  const account = [...baseState().accounts.values()][0];
-  const markup = render({ settingsOpen: true, accounts: [{
-    provider: account.provider,
-    home: account.home,
-    label: account.label,
-    email: "",
-    organization: "",
-    default_model: "",
-    default_reasoning_effort: "",
-    linked_id: account.id,
-    unavailable_reason: "login is no longer discoverable",
-  }] });
-  assert.match(markup, /Account unavailable · login is no longer discoverable\./);
-  assert.ok(markup.includes(`Sign in again using <code>${account.home}</code>, then refresh.`));
-});
-
-test("settings explains the next step when discovery finds no provider logins", () => {
-  const state = { ...baseState(), accounts: new Map() };
-  const guidance = "Sign in with your provider CLI on this Mac, then refresh.";
-  assert.ok(render({ settingsOpen: true, state, accounts: [] }).includes(guidance));
-  assert.equal(render({ settingsOpen: true, state }).includes(guidance), false, "no discovery result is not an empty result");
-});
-
 test("the RULES block saves an idle rule and sends only what changed", async () => {
   const edits = [];
   const props = { status: "ready", state: baseState(), selectedAgent: agentSelection(), onSaveAgentConfig: (config) => edits.push(config) };
@@ -1736,50 +1268,6 @@ test("overseer supervision names worker events and a seconds cooldown", () => {
   const markup = render({ state: baseState({ agents }), selectedAgent: { id: agent.id, name: agent.name, revision: agent.revision }, onSaveAgentConfig: () => {} });
   for (const text of ["Supervision", "When work changes", "supervise worker activity", "Cooldown seconds", "initial inspection, then worker events"]) assert.match(markup, new RegExp(text));
   assert.match(markup, new RegExp(`id="df-idle-after-${agent.id}"[^>]*value="10"`));
-});
-
-test("Paired devices lists what the factory granted and revokes any device but this one", async () => {
-  const own = "60".repeat(16);
-  const phone = "70".repeat(16);
-  const asked = [];
-  const revoked = [];
-  const props = {
-    status: "ready",
-    state: baseState(),
-    settingsOpen: true,
-    onToggleSettings: () => {},
-    remoteInviteAllowed: true,
-    ownClientId: own,
-    onLoadDevices: () => asked.push("asked"),
-    onRevokeDevice: (device) => revoked.push(device),
-    devices: { clients: [
-      { clientId: own, capabilities: 31, revision: 1n, createdAtMs: 1767225600000n },
-      { clientId: phone, capabilities: 7, revision: 3n, createdAtMs: 1767139200000n },
-    ], more: false },
-  };
-  let renderer;
-  await act(async () => { renderer = create(createElement(FactoryConsole, props)); });
-  // The list is an observation, so opening the panel is what asks for it.
-  assert.deepEqual(asked, ["asked"]);
-  const rows = renderer.root.findAllByProps({ className: "dfFactoryConsole__device" });
-  assert.equal(rows.length, 2);
-  const label = (row) => [].concat(row.findAllByType("span")[0].props.children).join("");
-  assert.equal(label(rows[0]), "Browser · This browser");
-  assert.equal(label(rows[1]), "Phone");
-  const buttons = () => renderer.root.findAllByType("button").filter((button) => ["Revoke", "Confirm revoke", "Keep"].includes(button.props.children));
-  assert.equal(buttons().length, 1, "only the phone can be revoked, never this console");
-  await act(async () => { buttons()[0].props.onClick(); });
-  assert.deepEqual(buttons().map((button) => button.props.children), ["Confirm revoke", "Keep"]);
-  await act(async () => { buttons().find((button) => button.props.children === "Keep").props.onClick(); });
-  assert.deepEqual(revoked, [], "Keep revokes nothing");
-  await act(async () => { buttons()[0].props.onClick(); });
-  await act(async () => { buttons().find((button) => button.props.children === "Confirm revoke").props.onClick(); });
-  assert.deepEqual(revoked, [{ clientId: phone, expectedRevision: 3n }]);
-
-  const empty = render({ settingsOpen: true, onToggleSettings: () => {}, remoteInviteAllowed: true, devices: { clients: [], more: false } });
-  assert.match(empty, /Paired devices/);
-  assert.match(empty, /nothing paired/);
-  assert.match(render({ settingsOpen: true, onToggleSettings: () => {}, remoteInviteAllowed: true, devicesError: "unauthorized" }), /Devices — unauthorized/);
 });
 
 test("task selection and floor questions open the exact existing task detail and question route", async () => {
@@ -1982,119 +1470,15 @@ test("task meter displays every canonical status without conflating cancellation
 
 
 
-test("Repositories reads only the selected project when opened", async () => {
-  const previous = globalThis.IS_REACT_ACT_ENVIRONMENT;
-  globalThis.IS_REACT_ACT_ENVIRONMENT = true;
-  let renderer;
-  const calls = [];
-  const props = () => ({ status: "ready", state: baseState(), settingsOpen: true,
-    onToggleSettings: () => {}, onLoadRepositories: (id) => calls.push(id) });
-  try {
-    await act(async () => { renderer = create(createElement(FactoryConsole, props())); });
-    assert.deepEqual(calls, [], "collapsed settings must not read private project data");
-    const section = renderer.root.findByProps({ "aria-label": "Repositories" });
-    const element = { open: true };
-    await act(async () => section.props.onToggle({ target: element, currentTarget: element }));
-    assert.deepEqual(calls, [ids.project]);
-    await act(async () => renderer.update(createElement(FactoryConsole, props())));
-    assert.deepEqual(calls, [ids.project], "response renders must not trigger another read");
-    const select = section.findAllByType("select")[0];
-    const secondProject = [...fixtureState.projects.keys()].find((id) => id !== ids.project);
-    await act(async () => select.props.onChange({ currentTarget: { value: secondProject } }));
-    assert.deepEqual(calls, [ids.project, secondProject]);
-    element.open = false;
-    await act(async () => section.props.onToggle({ target: element, currentTarget: element }));
-    await act(async () => select.props.onChange({ currentTarget: { value: ids.project } }));
-    assert.deepEqual(calls, [ids.project, secondProject], "a closed section must not load");
-  } finally {
-    if (renderer) await act(async () => renderer.unmount());
-    globalThis.IS_REACT_ACT_ENVIRONMENT = previous;
-  }
-});
-
-test("Sources follow the header project and read only on the Connections tab", async () => {
-  const previous = globalThis.IS_REACT_ACT_ENVIRONMENT;
-  globalThis.IS_REACT_ACT_ENVIRONMENT = true;
-  let renderer;
-  const calls = [];
-  const props = (extra = {}) => ({ status: "ready", state: baseState(), settingsOpen: true, onToggleSettings: () => {}, onLoadIntake: (id) => calls.push(id), ...extra });
-  try {
-    await act(async () => { renderer = create(createElement(FactoryConsole, props())); });
-    assert.equal(renderer.root.findByProps({ "aria-label": "Sources" }).findAllByType("select").length, 0, "no project picker of its own");
-    assert.match(JSON.stringify(renderer.toJSON()), /Choose a project in the header/);
-    assert.deepEqual(calls.filter((id) => id !== ids.project), [], "nothing else is read");
-    await act(async () => renderer.root.findAll((node) => node.type === "button" && node.props.role === "tab" && node.props.children === "Connections")[0].props.onClick());
-    await act(async () => renderer.update(createElement(FactoryConsole, props({ state: oneProjectState() }))));
-    assert.ok(calls.includes(ids.project), "the header project is read once Connections is shown");
-  } finally {
-    if (renderer) await act(async () => renderer.unmount());
-    globalThis.IS_REACT_ACT_ENVIRONMENT = previous;
-  }
-});
-
-test("the Tasks panel names its sources and Manage opens Settings at Connections", async () => {
-  const previous = globalThis.IS_REACT_ACT_ENVIRONMENT;
-  globalThis.IS_REACT_ACT_ENVIRONMENT = true;
-  let renderer;
-  let toggled = 0;
-  const source = { id: "88".repeat(16), project_id: ids.project, github_repository_id: 42n, repository: "example/widgets", target_repository_id: "89".repeat(16), overseer_agent_id: "", label: "factory:ready", policy: "manual", trusted_authors: [], poll_seconds: 60, admission_limit: 25, enabled: true, revision: 1n };
-  const props = (extra = {}) => ({ status: "ready", state: oneProjectState(), onToggleSettings: () => { toggled++; }, intake: new Map([[ids.project, { state: "ok", sources: [source] }]]), ...extra });
-  try {
-    await act(async () => { renderer = create(createElement(FactoryConsole, props())); });
-    const line = () => renderer.root.findByProps({ "aria-label": "Task sources" });
-    assert.match(line().children.join(""), /Sources: example\/widgets · label factory:ready/);
-    await act(async () => line().findByType("button").props.onClick());
-    assert.equal(toggled, 1);
-    await act(async () => renderer.update(createElement(FactoryConsole, props({ settingsOpen: true }))));
-    assert.equal(renderer.root.findAll((node) => node.type === "button" && node.props.role === "tab" && node.props["aria-selected"] === true)[0].props.children, "Connections");
-    await act(async () => renderer.update(createElement(FactoryConsole, props({ intake: new Map([[ids.project, { state: "ok", sources: [] }]]) }))));
-    assert.match(line().children.join(""), /No sources/);
-  } finally {
-    if (renderer) await act(async () => renderer.unmount());
-    globalThis.IS_REACT_ACT_ENVIRONMENT = previous;
-  }
-});
-
-test("Work shows issues waiting for approval as Needs you inbox rows with Accept", async () => {
-  const previous = globalThis.IS_REACT_ACT_ENVIRONMENT;
-  globalThis.IS_REACT_ACT_ENVIRONMENT = true;
-  let renderer;
-  const calls = [];
-  const waiting = { number: 17n, url: "https://github.com/example/widgets/issues/17", title: "Fix parser", body: "", author: "reporter", labels: ["bug"], content_hash: "ab".repeat(32), reason: "untrusted_author" };
-  const source = { id: "88".repeat(16), project_id: ids.project, github_repository_id: 42n, repository: "example/widgets", target_repository_id: "89".repeat(16), overseer_agent_id: "", label: "bug", policy: "trusted_authors", trusted_authors: ["owner"], poll_seconds: 60, admission_limit: 25, enabled: true, revision: 3n, sync: { last_attempt_at: 1n, last_success_at: 1n, imported_tasks: 0, state: "ok", error: "", waiting: [waiting] } };
-  try {
-    await act(async () => { renderer = create(createElement(FactoryConsole, { status: "ready", state: oneProjectState(), intake: new Map([[ids.project, { state: "ok", sources: [source] }]]), onIntakeAction: (projectId, request) => calls.push({ projectId, request }) })); });
-    const work = renderer.root.findByProps({ "aria-label": "Work" });
-    await act(async () => work.findAllByType("button").find((button) => textOf(button).startsWith("Needs you")).props.onClick());
-    const text = (node) => typeof node === "string" ? node : node.children.map(text).join(" ");
-    const row = work.findAll((node) => node.type === "li" && text(node).includes("Fix parser"))[0];
-    assert.match(text(row), /inbox/);
-    assert.match(text(row), /#17/);
-    await act(async () => row.findByProps({ "aria-label": "Accept Fix parser" }).props.onClick());
-    assert.deepEqual(calls, [{ projectId: ids.project, request: { action: "accept", source_id: source.id, expected_revision: 3n, issue_number: 17n, content_hash: "ab".repeat(32) } }]);
-    let toggled = 0;
-    const props = renderer.root.findByType(FactoryConsole).props;
-    await act(async () => renderer.update(createElement(FactoryConsole, { ...props, onToggleSettings: () => { toggled++; }, intake: new Map([[ids.project, { state: "content_changed", sources: [source] }]]) })));
-    const alert = renderer.root.findByProps({ role: "alert" });
-    assert.match(text(alert), /Could not accept:\s+content changed/);
-    await act(async () => alert.findByType("button").props.onClick());
-    assert.equal(toggled, 1, "a stale issue routes to Sources for fresh content");
-    await act(async () => renderer.update(createElement(FactoryConsole, { ...props, intakePending: new Set([ids.project]) })));
-    assert.equal(renderer.root.findByProps({ "aria-label": "Accept Fix parser" }).props.disabled, true, "a pending accept cannot be resubmitted");
-  } finally {
-    if (renderer) await act(async () => renderer.unmount());
-    globalThis.IS_REACT_ACT_ENVIRONMENT = previous;
-  }
-});
-
 test("open Work re-reads the local intake list so issues polled later reach the inbox", async (t) => {
   t.mock.timers.enable({ apis: ["setInterval"] });
   const previous = globalThis.IS_REACT_ACT_ENVIRONMENT;
   globalThis.IS_REACT_ACT_ENVIRONMENT = true;
   let renderer;
   const loads = [];
+  const actions = [];
   const source = { id: "88".repeat(16), project_id: ids.project, github_repository_id: 42n, repository: "example/widgets", target_repository_id: "89".repeat(16), overseer_agent_id: "", label: "bug", policy: "manual", trusted_authors: [], poll_seconds: 60, admission_limit: 25, enabled: true, revision: 3n };
-  const props = (sources) => ({ status: "ready", state: oneProjectState(), intake: new Map([[ids.project, { state: "ok", sources }]]), onLoadIntake: (id) => loads.push(id), onIntakeAction: () => {} });
+  const props = (sources) => ({ status: "ready", state: oneProjectState(), intake: new Map([[ids.project, { state: "ok", sources }]]), onLoadIntake: (id) => loads.push(id), onIntakeAction: (...args) => actions.push(args) });
   try {
     await act(async () => { renderer = create(createElement(FactoryConsole, props([source]))); });
     assert.deepEqual(loads, [ids.project]);
@@ -2104,241 +1488,13 @@ test("open Work re-reads the local intake list so issues polled later reach the 
     const waiting = { number: 17n, url: "https://github.com/example/widgets/issues/17", title: "Fix parser", body: "", author: "reporter", labels: [], content_hash: "ab".repeat(32), reason: "needs_manual_acceptance" };
     await act(async () => renderer.update(createElement(FactoryConsole, props([{ ...source, sync: { last_attempt_at: 2n, last_success_at: 2n, imported_tasks: 0, state: "ok", error: "", waiting: [waiting] } }]))));
     assert.equal(renderer.root.findAll((node) => node.props["aria-label"] === "Accept Fix parser").length, 1);
+    await act(async () => renderer.root.findByProps({ "aria-label": "Accept Fix parser" }).props.onClick());
+    assert.deepEqual(actions, [[ids.project, { action: "accept", source_id: source.id, expected_revision: source.revision, issue_number: waiting.number, content_hash: waiting.content_hash }]]);
   } finally {
     if (renderer) await act(async () => renderer.unmount());
     globalThis.IS_REACT_ACT_ENVIRONMENT = previous;
   }
 });
-
-test("issue review refuses a stale preview before acceptance", async () => {
-  const previous = globalThis.IS_REACT_ACT_ENVIRONMENT;
-  globalThis.IS_REACT_ACT_ENVIRONMENT = true;
-  let renderer;
-  const calls = [];
-  const source = { id: "88".repeat(16), project_id: ids.project, github_repository_id: 42n, repository: "example/widgets", target_repository_id: "89".repeat(16), overseer_agent_id: ids.orchestrator, label: "bug", policy: "manual", trusted_authors: [], poll_seconds: 60, admission_limit: 25, enabled: false, revision: 3n };
-  const review = { source_id: source.id, state: "ok", sources: [source], candidates: [{ number: 17n, url: "https://github.com/example/widgets/issues/17", title: "Fix parser", body: "Keep this exact reviewed body.", author: "reporter", labels: ["bug"], content_hash: "ab".repeat(32), reason: "needs_manual_acceptance" }], reviewed_revision: 2n, next_page: 2 };
-  try {
-    await act(async () => { renderer = create(createElement(FactoryConsole, { status: "ready", state: oneProjectState(), settingsOpen: true, onToggleSettings: () => {}, intake: new Map([[ids.project, review]]), onIntakeAction: (projectId, request) => calls.push({ projectId, request }) })); });
-    const preview = renderer.root.findByProps({ "aria-label": "Sources" }).findAll((node) => node.type === "button" && textOf(node) === "Refresh")[0];
-    await act(async () => preview.props.onClick());
-    assert.deepEqual(calls, [{ projectId: ids.project, request: { action: "preview", source_id: source.id, page: 1 } }]);
-    assert.equal(renderer.root.findAll((node) => node.type === "button" && node.props.children === "Accept").length, 0);
-    assert.equal(renderer.root.findAll((node) => node.type === "button" && node.props.children === "More issues").length, 0);
-    const sameRevisionWrongSource = {...review,reviewed_revision:source.revision,source_id:"99".repeat(16)};
-    await act(async()=>renderer.update(createElement(FactoryConsole,{...renderer.root.findByType(FactoryConsole).props,intake:new Map([[ids.project,sameRevisionWrongSource]])})));
-    assert.equal(renderer.root.findAll((node)=>node.type==="button" && node.props.children==="Accept").length,0,"another source with the same revision is not this review");
-  } finally {
-    if (renderer) await act(async () => renderer.unmount());
-    globalThis.IS_REACT_ACT_ENVIRONMENT = previous;
-  }
-});
-
-
-test("private issue review shows concise state and linked work", () => {
-  const source = { id: "88".repeat(16), project_id: ids.project, github_repository_id: 42n, repository: "example/widgets", target_repository_id: "89".repeat(16), overseer_agent_id: "", label: "bug", policy: "manual", trusted_authors: [], poll_seconds: 60, admission_limit: 25, enabled: false, revision: 3n };
-  const review = { source_id: source.id, reviewed_revision: source.revision, state: "withdrawal_pending", task_id: ids.task, imported_tasks: ["87".repeat(16)], sources: [source], candidates: [{ number: 17n, url: "https://github.com/example/widgets/issues/17", title: "Fix parser", body: "Keep this exact reviewed body.", author: "reporter", labels: ["bug"], content_hash: "ab".repeat(32), reason: "withdrawal_pending", acceptance_id: "86".repeat(16), task_id: ids.task }] };
-  const markup = render({ state: oneProjectState(), settingsOpen: true, onToggleSettings: () => {}, intake: new Map([[ids.project, review]]) });
-  assert.match(markup, /withdrawal pending/);
-  assert.match(markup, /View task/);
-  assert.match(markup, /Details/);
-  assert.match(markup, /Add source/);
-  assert.doesNotMatch(markup, /Backlog|Issue inbox/);
-  assert.doesNotMatch(markup, />Withdraw</);
-  assert.doesNotMatch(markup, /87878787878787878787878787878787/);
-  assert.doesNotMatch(markup, /private\/tmp|\/Users\//);
-});
-
-test("issue source configuration uses private checkout and overseer names", () => {
-  const checkout = { id: "89".repeat(16), project_id: ids.project, name: "Primary checkout", root: "/private/source", base_ref: "HEAD", enabled: true, default: true, revision: 1n };
-  const markup = render({ state: oneProjectState(), settingsOpen: true, onToggleSettings: () => {}, repositories: new Map([[ids.project, [checkout]]]) });
-  assert.match(markup, /Code repository/);
-  assert.match(markup, /Primary checkout/);
-  assert.match(markup, /Allow trusted authors/);
-  assert.doesNotMatch(markup, /Destination repository ID/);
-});
-
-
-test("editing an intake filter preserves migrated priority rules", async () => {
-  const previous = globalThis.IS_REACT_ACT_ENVIRONMENT;
-  globalThis.IS_REACT_ACT_ENVIRONMENT = true;
-  let renderer;
-  const calls = [];
-  const source = { id: "88".repeat(16), project_id: ids.project, github_repository_id: 42n, repository: "example/widgets", target_repository_id: "89".repeat(16), overseer_agent_id: ids.orchestrator, label: "bug", policy: "manual", trusted_authors: [], poll_seconds: 60, admission_limit: 25, enabled: false, revision: 3n, priority_default: 2, priority_by_label: { urgent: 10 } };
-  try {
-    await act(async () => { renderer = create(createElement(FactoryConsole, { status: "ready", state: oneProjectState(), settingsOpen: true, onToggleSettings: () => {}, intake: new Map([[ids.project, { state: "ok", sources: [source] }]]), onIntakeAction: (projectId, request) => calls.push(request) })); });
-    const form = renderer.root.findByProps({ "aria-label": "Sources" }).findAllByType("form").find((form) => form.findAllByType("button").some((button) => button.props.children === "Save"));
-    await act(async () => form.findAllByType("input").find((input) => input.props.value === "bug").props.onChange({ currentTarget: { value: "enhancement" } }));
-    await act(async () => form.props.onSubmit({ preventDefault() {} }));
-    assert.equal(calls.length, 1);
-    assert.equal(calls[0].configuration.label, "enhancement");
-    assert.equal(calls[0].configuration.priority_default, 2);
-    assert.deepEqual(calls[0].configuration.priority_by_label, { urgent: 10 });
-  } finally {
-    if (renderer) await act(async () => renderer.unmount());
-    globalThis.IS_REACT_ACT_ENVIRONMENT = previous;
-  }
-});
-
-
-test("revised issue content can be accepted without discarding the prior receipt", async () => {
-  const previous = globalThis.IS_REACT_ACT_ENVIRONMENT;
-  globalThis.IS_REACT_ACT_ENVIRONMENT = true;
-  let renderer;
-  const calls = [];
-  const source = { id: "88".repeat(16), project_id: ids.project, github_repository_id: 42n, repository: "example/widgets", target_repository_id: "89".repeat(16), overseer_agent_id: ids.orchestrator, label: "bug", policy: "manual", trusted_authors: [], poll_seconds: 60, admission_limit: 25, enabled: false, revision: 3n };
-  const candidate = { number: 17n, url: "https://github.com/example/widgets/issues/17", title: "Revised parser instructions", body: "The operator must review this new content.", author: "reporter", labels: ["bug"], content_hash: "cd".repeat(32), reason: "content_changed", acceptance_id: "86".repeat(16), task_id: ids.task };
-  const review = { source_id: source.id, state: "ok", sources: [source], candidates: [candidate], reviewed_revision: 3n };
-  try {
-    await act(async () => { renderer = create(createElement(FactoryConsole, { status: "ready", state: oneProjectState(), settingsOpen: true, onToggleSettings: () => {}, intake: new Map([[ids.project, review]]), onIntakeAction: (projectId, request) => calls.push(request) })); });
-    await act(async () => renderer.root.findByProps({ "aria-label": "Sources" }).findAll((node) => node.type === "button" && textOf(node) === "Refresh")[0].props.onClick());
-    const content = renderer.root.findAllByType("details").find((node) => node.findAllByType("summary").some((summary) => summary.props.children === "Details") && node.findAllByType("details").length === 1);
-    assert.equal(content.props.open, undefined, "issue bodies are collapsed until selected");
-    assert.equal(content.findAll((node) => node.type === "button" && node.props.children === "Accept").length, 1, "acceptance stays inside content review");
-    await act(async () => content.findAll((node) => node.type === "button" && node.props.children === "Accept")[0].props.onClick());
-    assert.deepEqual(calls.at(-1), { action: "accept", source_id: source.id, expected_revision: 3n, issue_number: 17n, content_hash: candidate.content_hash });
-    await act(async () => renderer.root.findAll((node) => node.type === "button" && node.props.children === "Withdraw")[0].props.onClick());
-    assert.deepEqual(calls.at(-1), { action: "withdraw", acceptance_id: candidate.acceptance_id });
-  } finally {
-    if (renderer) await act(async () => renderer.unmount());
-    globalThis.IS_REACT_ACT_ENVIRONMENT = previous;
-  }
-});
-
-
-test("a rejected create keeps the add form and its typed values", async () => {
-  const previous = globalThis.IS_REACT_ACT_ENVIRONMENT;
-  globalThis.IS_REACT_ACT_ENVIRONMENT = true;
-  let renderer;
-  const calls = [];
-  const source = { id: "88".repeat(16), project_id: ids.project, github_repository_id: 42n, repository: "example/widgets", target_repository_id: "89".repeat(16), overseer_agent_id: "", label: "bug", policy: "manual", trusted_authors: [], poll_seconds: 60, admission_limit: 25, enabled: true, revision: 1n };
-  const checkout = { id: "89".repeat(16), project_id: ids.project, name: "Widgets", root: "/private/source", base_ref: "main", enabled: true, default: true, revision: 1n };
-  try {
-    await act(async () => { renderer = create(createElement(FactoryConsole, { status: "ready", state: oneProjectState(), settingsOpen: true, onToggleSettings: () => {}, repositories: new Map([[ids.project, [checkout]]]), github: { result: { state: "ok", status: { repositories: [{ repository: "example/issues", repository_id: 42n }] } } }, intake: new Map([[ids.project, { state: "ok", sources: [source] }]]), onIntakeAction: (projectId, request) => calls.push(request) })); });
-    const sources = () => renderer.root.findByProps({ "aria-label": "Sources" });
-    await act(async () => sources().findAll((node) => node.type === "button" && textOf(node) === "Add source")[0].props.onClick());
-    const form = () => sources().findAllByType("form")[0];
-    await act(async () => form().findAllByType("input")[0].props.onChange({ currentTarget: { value: "typed-label" } }));
-    await act(async () => form().props.onSubmit({ preventDefault() {} }));
-    assert.equal(calls.at(-1).action, "create");
-    assert.equal(form().findAllByType("input")[0].props.value, "typed-label");
-    assert.ok(form().findAll((node) => node.type === "button" && textOf(node) === "Add source").length === 1, "still the add form, not the edit form");
-    assert.doesNotMatch(JSON.stringify(sources().findAll((node) => node.type === "p").map((node) => node.children)), /No sources yet/);
-  } finally {
-    if (renderer) await act(async () => renderer.unmount());
-    globalThis.IS_REACT_ACT_ENVIRONMENT = previous;
-  }
-});
-
-
-test("refreshing a changed source replaces stale configuration drafts", async () => {
-  const previous = globalThis.IS_REACT_ACT_ENVIRONMENT;
-  globalThis.IS_REACT_ACT_ENVIRONMENT = true;
-  let renderer;
-  const calls = [];
-  const source = { id: "88".repeat(16), project_id: ids.project, github_repository_id: 42n, repository: "example/widgets", target_repository_id: "89".repeat(16), overseer_agent_id: ids.orchestrator, label: "bug", policy: "manual", trusted_authors: [], poll_seconds: 60, admission_limit: 25, enabled: false, revision: 3n };
-  const props = (item) => ({ status: "ready", state: oneProjectState(), settingsOpen: true, onToggleSettings: () => {}, intake: new Map([[ids.project, { state: "ok", sources: [item] }]]), onIntakeAction: (projectId, request) => calls.push(request) });
-  try {
-    await act(async () => { renderer = create(createElement(FactoryConsole, props(source))); });
-    const changed = { ...source, revision: 4n, target_repository_id: "90".repeat(16), label: "enhancement", policy: "trusted_authors", trusted_authors: ["reviewer"] };
-    await act(async () => renderer.update(createElement(FactoryConsole, props(changed))));
-    const form = renderer.root.findByProps({ "aria-label": "Sources" }).findAllByType("form").find((form) => form.findAllByType("button").some((button) => button.props.children === "Save"));
-    await act(async () => form.props.onSubmit({ preventDefault() {} }));
-    assert.equal(calls.length, 1);
-    assert.equal(calls[0].expected_revision, 4n);
-    assert.equal(calls[0].configuration.target_repository_id, changed.target_repository_id);
-    assert.equal(calls[0].configuration.label, "enhancement");
-    assert.equal(calls[0].configuration.policy, "trusted_authors");
-    assert.deepEqual(calls[0].configuration.trusted_authors, ["reviewer"]);
-  } finally {
-    if (renderer) await act(async () => renderer.unmount());
-    globalThis.IS_REACT_ACT_ENVIRONMENT = previous;
-  }
-});
-
-
-test("new issue sources select the sole overseer and default checkout without operator IDs", async () => {
-  const previous = globalThis.IS_REACT_ACT_ENVIRONMENT;
-  globalThis.IS_REACT_ACT_ENVIRONMENT = true;
-  let renderer;
-  const calls = [];
-  const checkout = { id: "89".repeat(16), project_id: ids.project, name: "Widgets", root: "/private/source", base_ref: "release", enabled: true, default: true, revision: 1n };
-  try {
-    await act(async () => { renderer = create(createElement(FactoryConsole, { status: "ready", state: baseState({ projects: oneProjectState().projects, agents: new Map([[ids.orchestrator, { ...fixtureState.agents.get(ids.orchestrator), project_id: ids.project }]]) }), settingsOpen: true, onToggleSettings: () => {}, repositories: new Map([[ids.project, [checkout]]]), github: {result:{state:"ok",status:{repositories:[{repository:"example/issues",repository_id:42n}]}}}, onIntakeAction: (projectId, request) => calls.push(request) })); });
-    const form = renderer.root.findAllByType("form").find((form) => form.findAllByType("button").some((button) => textOf(button) === "Add source"));
-    const policy = form.findAllByType("select").find((select) => select.props.value === "manual");
-    await act(async () => policy.props.onChange({ currentTarget: { value: "trusted_authors" } }));
-    await act(async () => form.props.onSubmit({ preventDefault() {} }));
-    assert.equal(calls[0].configuration.overseer_agent_id, ids.orchestrator);
-    assert.equal(calls[0].configuration.target_repository_id, checkout.id);
-    assert.deepEqual(calls[0].configuration.trusted_authors, ["@me"]);
-    assert.equal(calls[0].configuration.poll_seconds, 60);
-    assert.equal(calls[0].configuration.admission_limit, 25);
-  } finally {
-    if (renderer) await act(async () => renderer.unmount());
-    globalThis.IS_REACT_ACT_ENVIRONMENT = previous;
-  }
-});
-
-test("open Sources reload destinations as well as sources after reconnect", async () => {
-  const previous = globalThis.IS_REACT_ACT_ENVIRONMENT;
-  globalThis.IS_REACT_ACT_ENVIRONMENT = true;
-  let renderer;
-  const sources = [], repositories = [];
-  const props = (ready) => ({ status: ready ? "ready" : "disconnected", state: oneProjectState(), settingsOpen: true, onToggleSettings: () => {}, repositories: new Map(), intake: new Map(), onLoadIntake: ready ? (id) => sources.push(id) : undefined, onLoadRepositories: ready ? (id) => repositories.push(id) : undefined });
-  try {
-    await act(async () => { renderer = create(createElement(FactoryConsole, props(true))); });
-    assert.deepEqual(repositories, [], "Sources stay unread while another tab is showing");
-    await act(async () => renderer.root.findAll((node) => node.type === "button" && node.props.role === "tab" && node.props.children === "Connections")[0].props.onClick());
-    assert.deepEqual(repositories, [ids.project]);
-    const before = sources.length;
-    await act(async () => renderer.update(createElement(FactoryConsole, props(false))));
-    await act(async () => renderer.update(createElement(FactoryConsole, props(true))));
-    assert.deepEqual(repositories, [ids.project, ids.project]);
-    assert.ok(sources.length > before);
-  } finally {
-    if (renderer) await act(async () => renderer.unmount());
-    globalThis.IS_REACT_ACT_ENVIRONMENT = previous;
-  }
-});
-
-test("one project selector scopes floor, agents, tasks and project limits across view changes", async () => {
-  let tree;
-  const graphs = new Map(fixtureGraphs).set(ids.secondProject, graphWith([unit(0x71, "south", ["south"])]));
-  const props = { status: "ready", state: fixtureState, graphs, selectedAgent: agentSelection(), onSelectAgent() {}, onSelectTask() {} };
-  await act(async () => { tree = create(createElement(FactoryConsole, props)); });
-  const choose = async (value) => act(async () => tree.root.findByProps({ "aria-label": "Project" }).props.onChange({ currentTarget: { value } }));
-  const floor = () => tree.root.findByType(FactoryFloor);
-  await choose(ids.project);
-  assert.equal(floor().props.projectId, ids.project);
-  assert.equal(floor().props.state.projects.size, 1);
-  assert.ok([...floor().props.state.agents.values()].every((agent) => agent.project_id === ids.project));
-  assert.ok([...floor().props.state.tasks.values()].every((task) => task.project_id === ids.project));
-  const units = () => floor().findByType(FactoryScene).props.graph.units.map((item) => item.label).sort();
-  assert.deepEqual(units(), ["kernel", "web"], "only the selected project's units");
-  await act(async () => { tree.update(createElement(FactoryConsole, { ...props, detail: "agent", settingsOpen: true })); });
-  await act(async () => tree.root.findAllByType("button").find((button) => button.props.children === "All agents").props.onClick());
-  const rows = tree.root.findAllByProps({ className: "dfConsoleRow dfAgentList__row" });
-  assert.equal(rows.length, [...fixtureState.agents.values()].filter((agent) => agent.project_id === ids.project && !agent.archived).length);
-  assert.ok(rows.every((row) => row.props["aria-label"].includes(fixtureState.projects.get(ids.project).name)));
-  const limits = tree.root.findByProps({ "aria-label": "Project limits" });
-  assert.ok(JSON.stringify(limits.findAllByType("h4").map((heading) => heading.children)).includes(fixtureState.projects.get(ids.project).name));
-  assert.ok(!JSON.stringify(limits.findAllByType("h4").map((heading) => heading.children)).includes(fixtureState.projects.get(ids.secondProject).name));
-  await act(async () => { tree.update(createElement(FactoryConsole, props)); });
-  assert.equal(floor().props.projectId, ids.project, "switching views retains project scope");
-  await choose("");
-  assert.equal(floor().props.state.agents.size, fixtureState.agents.size);
-  assert.deepEqual(units(), ["kernel", "south", "web"]);
-  await choose(ids.project);
-  await choose(ids.secondProject);
-  assert.equal(floor().props.projectId, ids.secondProject);
-  assert.equal(tree.root.findAllByProps({ "aria-label": `Agent ${fixtureState.agents.get(ids.agent).name}` }).length, 0, "a foreign selected agent cannot retain controls");
-  assert.deepEqual(units(), ["south"]);
-  assert.ok([...floor().props.state.tasks.values()].every((task) => task.project_id === ids.secondProject));
-  await act(async () => tree.unmount());
-});
-
-
-
 
 test("floor project changes clear task selection without restoring an old dialog", async () => {
   const task = [...fixtureState.tasks.values()].find((task) => task.project_id === ids.secondProject);
@@ -2356,58 +1512,36 @@ test("floor project changes clear task selection without restoring an old dialog
   await act(async () => tree.unmount());
 });
 
-test("settings reports the running version and the update command without any production record", () => {
-  const settings = (props) => renderToStaticMarkup(createElement(SettingsDialog, {
-    floorAppearance: DEFAULT_FLOOR_APPEARANCE, onFloorAppearanceChange() {}, onResetFloorAppearance() {},
-    state: undefined, ready: false, ...props,
-  }));
-  const markup = settings({ runtime: { version: "v0.4.2", source: "a".repeat(40), target: "darwin/arm64", build_id: "build", release: true } });
-  assert.match(markup, /Running version <code>v0\.4\.2<\/code>/);
-  assert.match(markup, /Latest release not observed/);
-  assert.match(markup, /factoryctl service uninstall --home/);
-  assert.match(markup, /factoryctl service install --home/);
-  assert.doesNotMatch(markup, /deploy-runtime\.py|up to date/i);
-  const published = settings({ release: { version: "v0.4.3", url: "https://github.com/dark-factory-build/dark-factory/releases/tag/v0.4.3" } });
-  assert.match(published, /Running version <code>not observed<\/code>/);
-  assert.match(published, /releases\/tag\/v0\.4\.3"[^>]*><code>v0\.4\.3<\/code>/);
-});
-
-test("settings tabs hide other sections, support keyboard navigation and retain drafts", async () => {
-  const previous = globalThis.IS_REACT_ACT_ENVIRONMENT;
-  globalThis.IS_REACT_ACT_ENVIRONMENT = true;
+test("one machine inspector loads its evidence on open, investigates once and discusses its own node", async (t) => {
+  const warnings = [];
+  t.mock.method(console, "error", (...args) => warnings.push(args.join(" ")));
+  const store = fixtureGraph.nodes.find((node) => node.label === "state.db"), loads = [], opens = [], tasks = [];
+  const props = { state: fixtureState, graphs: fixtureGraphs, requestedEntity: { id: store.id },
+    onLoadNode: async (project, node) => { loads.push([project, node]); return { project_id: project, node_id: node, selectors: { "go.package": "internal/kernel/store" }, evidence: [{ origin: "static", source: "go-ast", confidence: "high" }], sources: [], modules: [], observers: [] }; },
+    onOpenBoard: (...args) => opens.push(args), onAddTask: async (...args) => { tasks.push(args); return true; } };
   let renderer;
-  try {
-    await act(async () => { renderer = create(createElement(FactoryConsole, {status:"ready",state:baseState(),settingsOpen:true,onToggleSettings(){},onCreateProject(){}})); });
-    const tabs = () => renderer.root.findAllByProps({role:"tab"});
-    const panels = () => renderer.root.findAllByProps({role:"tabpanel"});
-    assert.deepEqual(tabs().map(tab=>tab.props.children),["Projects","Connections","Devices","Appearance","Updates"]);
-    const selected = (index) => {
-      assert.deepEqual(tabs().map(tab=>tab.props["aria-selected"]),tabs().map((_,i)=>i===index));
-      assert.equal(panels().filter(panel=>!panel.props.hidden).length,1);
-      assert.equal(panels()[index].props.hidden,false);
-      for (let i=0;i<tabs().length;i++) {
-        assert.equal(tabs()[i].props["aria-controls"],panels()[i].props.id);
-        assert.equal(panels()[i].props["aria-labelledby"],tabs()[i].props.id);
-        assert.equal(tabs()[i].props.tabIndex,i===index?0:-1);
-      }
-    };
-    selected(0);
-    const form=renderer.root.findAllByType("form").find(form=>form.findAllByType("button").some(button=>textOf(button)==="Create project"));
-    await act(async()=>form.findAllByType("input")[0].props.onChange({currentTarget:{value:"Unfinished project"}}));
-    await act(async()=>tabs()[1].props.onClick());
-    selected(1);
-    let focused=-1;
-    const parentElement={querySelectorAll(){return tabs().map((_,i)=>({focus(){focused=i;}}));}};
-    for (const [key,want] of [["End",4],["ArrowRight",0],["ArrowLeft",4],["Home",0]]) {
-      let prevented=false;
-      await act(async()=>tabs().find(tab=>tab.props["aria-selected"]).props.onKeyDown({key,preventDefault(){prevented=true;},currentTarget:{parentElement}}));
-      assert.equal(prevented,true);assert.equal(focused,want);selected(want);
-    }
-    assert.equal(form.findAllByType("input")[0].props.value,"Unfinished project");
-  } finally {
-    if (renderer) await act(async()=>renderer.unmount());
-    globalThis.IS_REACT_ACT_ENVIRONMENT=previous;
-  }
+  await act(async () => { renderer = create(createElement(FactoryFloor, props)); });
+  const inspector = () => renderer.root.findAllByProps({ "aria-label": "Machine inspector" });
+  const click = async (label) => { await act(async () => renderer.root.findAllByType("button").find((button) => button.children.join("") === label).props.onClick()); };
+  assert.equal(inspector().length, 1);
+  assert.deepEqual(loads, [[ids.project, store.id]], "evidence is fetched when the inspector opens, by its project and node");
+  assert.ok(inspector()[0].findAllByType("dt").some((term) => term.children.join("") === "go.package"), "the loaded selectors are shown");
+  await click("Discuss this machine");
+  assert.deepEqual(opens, [[ids.project, `${ids.project}:${store.id}`]]);
+  await click("Investigate");
+  assert.equal(tasks.length, 1);
+  assert.equal(tasks[0][0].project_id, ids.project);
+  assert.equal(tasks[0][2], "any");
+  assert.match(tasks[0][1], /Investigate the store "state\.db" in kernel/);
+  assert.match(tasks[0][1], /Nothing observes this component/);
+  assert.ok(renderer.root.findAllByType("button").some((button) => button.props.disabled && button.children.join("") === "Investigation queued"), "asking twice is not possible");
+  const other = fixtureGraph.nodes.find((node) => node.label === "web");
+  await act(async () => renderer.update(createElement(FactoryFloor, { ...props, requestedEntity: { id: other.id } })));
+  assert.equal(inspector().length, 1);
+  assert.deepEqual(loads.at(-1), [ids.project, other.id]);
+  assert.ok(renderer.root.findAllByType("button").some((button) => button.children.join("") === "Investigate"), "the old investigation does not follow the new machine");
+  assert.ok(!warnings.some((message) => message.includes("same key")), "inspectors must have distinct reconciliation identities");
+  await act(async () => renderer.unmount());
 });
 
 test("new task retains pasted files on failure, supports removal, and clears on success", async () => {
@@ -2468,29 +1602,6 @@ test("Use in a new task opens New task with removable Library chips that are sub
   await act(async () => tree.unmount());
 });
 
-test("Settings persists automatic attachment cleanup and keeps saved value on failure", async () => {
-  let saved = false, fail = false, renderer;
-  const calls = [];
-  const props = { status: "ready", state: fixtureState, settingsOpen: true, onToggleSettings() {}, onAttachmentRetention: async (enabled) => { calls.push(enabled); if (fail) throw new Error("offline"); if (enabled !== undefined) saved = enabled; return saved; } };
-  await act(async () => { renderer = create(createElement(FactoryConsole, props)); });
-  const checkbox = () => renderer.root.findByProps({ "aria-label": "Attachment storage" }).findByType("input");
-  try {
-    assert.equal(checkbox().props.checked, false);
-    await act(async () => { checkbox().props.onChange({ currentTarget: { checked: true } }); });
-    assert.equal(saved, true);
-    assert.equal(checkbox().props.checked, true);
-    fail = true;
-    await act(async () => { checkbox().props.onChange({ currentTarget: { checked: false } }); });
-    assert.equal(checkbox().props.checked, true);
-    assert.ok(renderer.root.findAllByProps({ role: "alert" }).some((node) => JSON.stringify(node.children).includes("Could not save attachment")));
-    fail = false;
-    await act(async () => { renderer.update(createElement(FactoryConsole, { ...props, settingsOpen: false })); });
-    await act(async () => { renderer.update(createElement(FactoryConsole, props)); });
-    assert.equal(checkbox().props.checked, true);
-    assert.deepEqual(calls, [undefined, true, false, undefined]);
-  } finally { await act(async () => renderer.unmount()); }
-});
-
 test("new-work admission reports acknowledgement and preserves active work", async () => {
   let acknowledge;
   const calls = [];
@@ -2526,40 +1637,6 @@ test("Missions and Production share the task dialog and preserve their origin on
     assert.deepEqual(selections, []);
     await act(async () => tree.unmount());
   }
-});
-
-test("one machine inspector loads its evidence on open, investigates once and discusses its own node", async (t) => {
-  const warnings = [];
-  t.mock.method(console, "error", (...args) => warnings.push(args.join(" ")));
-  const store = fixtureGraph.nodes.find((node) => node.label === "state.db"), loads = [], opens = [], tasks = [];
-  const props = { state: fixtureState, graphs: fixtureGraphs, requestedEntity: { id: store.id }, floorAppearance: DEFAULT_FLOOR_APPEARANCE,
-    onLoadNode: async (project, node) => { loads.push([project, node]); return { project_id: project, node_id: node, selectors: { "go.package": "internal/kernel/store" }, evidence: [{ origin: "static", source: "go-ast", confidence: "high" }], sources: [], modules: [], observers: [] }; },
-    onOpenBoard: (...args) => opens.push(args), onAddTask: async (...args) => { tasks.push(args); return true; } };
-  let renderer;
-  await act(async () => { renderer = create(createElement(FactoryFloor, props)); });
-  const inspector = () => renderer.root.findAllByProps({ "aria-label": "Machine inspector" });
-  const click = async (label) => { await act(async () => renderer.root.findAllByType("button").find((button) => button.children.join("") === label).props.onClick()); };
-  assert.equal(inspector().length, 1);
-  assert.deepEqual(loads, [[ids.project, store.id]], "evidence is fetched when the inspector opens, by its project and node");
-  assert.ok(inspector()[0].findAllByType("dt").some((term) => term.children.join("") === "go.package"), "the loaded selectors are shown");
-  await click("Discuss this machine");
-  assert.deepEqual(opens, [[ids.project, `${ids.project}:${store.id}`]]);
-  // No telemetry is worth a look: one task for the project's worker, queued behind nothing else.
-  await click("Investigate");
-  assert.equal(tasks.length, 1);
-  assert.equal(tasks[0][0].project_id, ids.project);
-  assert.equal(tasks[0][2], "any");
-  assert.match(tasks[0][1], /Investigate the store "state\.db" in kernel/);
-  assert.match(tasks[0][1], /Nothing observes this component/);
-  assert.ok(renderer.root.findAllByType("button").some((button) => button.props.disabled && button.children.join("") === "Investigation queued"), "asking twice is not possible");
-  // Another machine resets the inspector and fetches its own evidence.
-  const other = fixtureGraph.nodes.find((node) => node.label === "web");
-  await act(async () => renderer.update(createElement(FactoryFloor, { ...props, requestedEntity: { id: other.id } })));
-  assert.equal(inspector().length, 1);
-  assert.deepEqual(loads.at(-1), [ids.project, other.id]);
-  assert.ok(renderer.root.findAllByType("button").some((button) => button.children.join("") === "Investigate"), "the old investigation does not follow the new machine");
-  assert.ok(!warnings.some((message) => message.includes("same key")), "inspectors must have distinct reconciliation identities");
-  await act(async () => renderer.unmount());
 });
 
 test("opening a project shelf scopes Library without changing the floor filter", async () => {

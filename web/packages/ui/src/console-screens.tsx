@@ -16,7 +16,6 @@ import { type ProjectContentCall } from "./project-library.js";
 import type { SceneUnit, SceneMachine } from "./factory-scene/scene.js";
 import { SectionHeader, Status } from "./console-kit.js";
 import { KnowledgeActivityList, activityLabel, onBoard, type KnowledgeActivity, type KnowledgeCue } from "./project-board.js";
-import { DEFAULT_FLOOR_APPEARANCE, type FloorAppearance } from "./floor-appearance.js";
 
 function shortID(value: string): string {
   return value.slice(0, 8);
@@ -87,7 +86,7 @@ const NO_CHANGES: readonly ProductionContraption[] = [];
 /** The operational floor; every action opens an existing inspector or control. */
 export function FactoryFloor({
   changes = NO_CHANGES, changesRead = false, selectedChange, onSelectChange, state, graphs, graphErrors, onLoadNode, onAddTask, runPaths, lastRunPaths, selectedAgentId, onSelectAgent,
-  onSelectHumanRequest, selectedTaskId, onSelectTask, onOpenTasks, onOpenMissions, onOpenLibrary, onOpenBoard, requestedEntity, connected = true, floorAppearance = DEFAULT_FLOOR_APPEARANCE, projectId, activity = [], activityCues = [], onOpenActivity,
+  onSelectHumanRequest, selectedTaskId, onSelectTask, onOpenTasks, onOpenMissions, onOpenLibrary, onOpenBoard, requestedEntity, connected = true, projectId, activity = [], activityCues = [], onOpenActivity,
 }: {
   /** Recorded Board and Library operations, newest first, and the few just cued. */
   activity?: readonly KnowledgeActivity[];
@@ -116,7 +115,6 @@ export function FactoryFloor({
   requestedEntity?: { id: string };
   onSelectHumanRequest?: (request: HumanRequestItem) => void;
   connected?: boolean;
-  floorAppearance: FloorAppearance;
   projectId?: string;
   onProjectContent?: ProjectContentCall;
 }) {
@@ -161,7 +159,6 @@ export function FactoryFloor({
       onDiscussSource={onOpenBoard === undefined ? undefined : (nodeId) => { const project = projectOf(nodeId); onOpenBoard(project, project === undefined ? undefined : `${project}:${nodeId}`); }}
       proposals={{ items: proposed.proposals, selected: selectedChange, onSelect: (id) => onSelectChange?.(id) }}
       crates={crates}
-      appearance={floorAppearance}
       selectedWorkerId={selectedAgentId}
       selectedTaskId={selectedTaskId}
       graph={scene.graph}

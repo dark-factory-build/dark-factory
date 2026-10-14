@@ -114,6 +114,9 @@ const (
   factoryctl account discover
   factoryctl account list
   factoryctl account link --provider claude_code|codex --home ABSOLUTE --label TEXT
+  factoryctl account update --account ID --revision REVISION [--label TEXT] [--remove true]
+  factoryctl attachment retention [--enabled true|false]
+  factoryctl telemetry ingest --action status|mint|revoke
   factoryctl agent select-account --agent ID --revision REVISION --account ID
 	factoryctl agent select-model --agent ID --revision REVISION --model TEXT [--reasoning-effort low|medium|high|xhigh|max|ultra]
 	factoryctl agent paths --agent ID
@@ -218,6 +221,9 @@ const (
 	commandAccountsDiscover
 	commandAccountsList
 	commandAccountLink
+	commandAccountUpdate
+	commandAttachmentRetention
+	commandTelemetryIngest
 	commandAgentSelectAccount
 	commandAgentSelectModel
 	commandAgentPaths
@@ -267,6 +273,7 @@ type attemptCommand struct {
 
 	kind              commandKind
 	removeAttachments bool
+	retentionEnabled  *bool
 	operatorControl   bool
 	attemptRead       bool
 	home              string
@@ -291,6 +298,7 @@ type attemptCommand struct {
 	model               string
 	reasoningEffort     string
 	account             string
+	action              string
 	title               string
 	body                string
 	bodySet             bool
@@ -437,7 +445,7 @@ func runWithDependencies(ctx context.Context, args []string, getenv func(string)
 	if command.kind == commandRemoteStatus {
 		return runRemote(ctx, getenv, stdout, stderr)
 	}
-	if command.kind == commandProfile || command.kind == commandAgentPaths || command.kind == commandOperatorTerminalObserve || command.kind == commandWorkerOperation || command.kind == commandProjectCreate || command.kind == commandProjectRepository || command.kind == commandIntake || command.kind == commandProjectLimits || command.kind == commandAgentCreate || command.kind == commandAgentIdlePolicy || command.kind == commandAccountsDiscover || command.kind == commandAccountsList || command.kind == commandAccountLink || command.kind == commandAgentSelectAccount || command.kind == commandAgentSelectModel || command.kind == commandTaskAdd || command.kind == commandTaskSendBack || command.kind == commandTaskRead || command.kind == commandProduction || command.kind == commandTaskHistory || command.kind == commandTaskList || command.kind == commandDispatch || command.kind == commandCapacity || command.kind == commandStatus || command.kind == commandCompactStorage || command.kind == commandBackupCreate || command.kind == commandBackupVerify || command.kind == commandHumanList || command.kind == commandHumanReply || command.kind == commandHumanCancel || command.kind == commandReport || command.kind == commandAgentSet {
+	if command.kind == commandProfile || command.kind == commandAgentPaths || command.kind == commandOperatorTerminalObserve || command.kind == commandWorkerOperation || command.kind == commandProjectCreate || command.kind == commandProjectRepository || command.kind == commandIntake || command.kind == commandProjectLimits || command.kind == commandAgentCreate || command.kind == commandAgentIdlePolicy || command.kind == commandAccountsDiscover || command.kind == commandAccountsList || command.kind == commandAccountLink || command.kind == commandAccountUpdate || command.kind == commandAttachmentRetention || command.kind == commandTelemetryIngest || command.kind == commandAgentSelectAccount || command.kind == commandAgentSelectModel || command.kind == commandTaskAdd || command.kind == commandTaskSendBack || command.kind == commandTaskRead || command.kind == commandProduction || command.kind == commandTaskHistory || command.kind == commandTaskList || command.kind == commandDispatch || command.kind == commandCapacity || command.kind == commandStatus || command.kind == commandCompactStorage || command.kind == commandBackupCreate || command.kind == commandBackupVerify || command.kind == commandHumanList || command.kind == commandHumanReply || command.kind == commandHumanCancel || command.kind == commandReport || command.kind == commandAgentSet {
 		return runOperator(ctx, command, getenv, stdout, stderr)
 	}
 	if command.kind >= commandContentCreate && command.kind <= commandContentAttachments && len(args) > 0 && args[0] == "content" {
@@ -718,7 +726,7 @@ func parse(args []string) (attemptCommand, bool, bool) {
 		}
 		return attemptCommand{kind: commandProfile, seconds: uint32(seconds)}, false, true
 	}
-	if len(args) >= 1 && (args[0] == "debug" || args[0] == "status" || args[0] == "storage" || args[0] == "backup" || args[0] == "content" || args[0] == "outcome" || args[0] == "project" || args[0] == "agent" || args[0] == "account" || args[0] == "task" || args[0] == "worker" || args[0] == "dispatch" || args[0] == "capacity" || args[0] == "intake" || args[0] == "production") {
+	if len(args) >= 1 && (args[0] == "debug" || args[0] == "status" || args[0] == "storage" || args[0] == "backup" || args[0] == "content" || args[0] == "outcome" || args[0] == "project" || args[0] == "agent" || args[0] == "account" || args[0] == "task" || args[0] == "worker" || args[0] == "dispatch" || args[0] == "capacity" || args[0] == "intake" || args[0] == "production" || args[0] == "attachment" || args[0] == "telemetry") {
 		return parseOperator(args)
 	}
 	if len(args) >= 1 && args[0] == "overseer" {
@@ -1668,6 +1676,23 @@ func parseOperator(args []string) (attemptCommand, bool, bool) {
 	if len(args) == 2 && args[0] == "account" && args[1] == "list" {
 		return attemptCommand{kind: commandAccountsList}, false, true
 	}
+	if len(args) >= 2 && args[0] == "attachment" && args[1] == "retention" {
+		values, ok := pairedFlagValues(args[2:], false, "--enabled")
+		var enabled *bool
+		if value, present := values["--enabled"]; present {
+			if value != "true" && value != "false" {
+				ok = false
+			} else {
+				parsed := value == "true"
+				enabled = &parsed
+			}
+		}
+		return attemptCommand{kind: commandAttachmentRetention, retentionEnabled: enabled}, false, ok
+	}
+	if len(args) >= 2 && args[0] == "telemetry" && args[1] == "ingest" {
+		values, ok := pairedFlagValues(args[2:], false, "--action")
+		return attemptCommand{kind: commandTelemetryIngest, action: values["--action"]}, false, ok && (values["--action"] == "status" || values["--action"] == "mint" || values["--action"] == "revoke")
+	}
 	if len(args) < 2 {
 		return attemptCommand{}, false, false
 	}
@@ -1692,6 +1717,8 @@ func parseOperator(args []string) (attemptCommand, bool, bool) {
 		command.kind, command.operatorControl, names = commandOverseerAgentUpdate, true, []string{"--agent", "--revision", "--appearance"}
 	case "account link":
 		command.kind, names = commandAccountLink, []string{"--provider", "--home", "--label"}
+	case "account update":
+		command.kind, names = commandAccountUpdate, []string{"--account", "--revision", "--label", "--remove"}
 	case "task add":
 		command.kind, names = commandTaskAdd, []string{"--project", "--repository", "--agent", "--title", "--body", "--priority", "--content", "--task-id", "--incarnation-id"}
 	case "task send-back":
@@ -1716,7 +1743,7 @@ func parseOperator(args []string) (attemptCommand, bool, bool) {
 			command.project = value
 		case name == "--repository" && command.kind == commandTaskAdd && validHumanRequestKey(value):
 			command.repository = value
-		case name == "--revision" && (command.kind == commandProjectLimits || command.kind == commandAgentIdlePolicy || command.kind == commandAgentSelectAccount || command.kind == commandAgentSelectModel || command.kind == commandOverseerAgentUpdate || command.kind == commandTaskRead) && isCount && count > 0:
+		case name == "--revision" && (command.kind == commandProjectLimits || command.kind == commandAgentIdlePolicy || command.kind == commandAgentSelectAccount || command.kind == commandAgentSelectModel || command.kind == commandOverseerAgentUpdate || command.kind == commandTaskRead || command.kind == commandAccountUpdate) && isCount && count > 0:
 			command.expectedRevision = count
 		case name == "--wake-on" && command.kind == commandAgentIdlePolicy:
 			command.wakeOn = value
@@ -1736,6 +1763,10 @@ func parseOperator(args []string) (attemptCommand, bool, bool) {
 			command.root = value
 		case name == "--label" && command.kind == commandAccountLink && validOperatorText(value, 1, 128):
 			command.label = value
+		case name == "--label" && command.kind == commandAccountUpdate && validOperatorText(value, 1, 128):
+			command.label = value
+		case name == "--remove" && command.kind == commandAccountUpdate && (value == "true" || value == "false"):
+			command.removeAttachments = value == "true"
 		case name == "--role" && command.kind == commandAgentCreate && (value == "worker" || value == "orchestrator"):
 			command.role = value
 		case name == "--provider" && command.kind == commandAgentCreate:
@@ -1831,6 +1862,10 @@ func parseOperator(args []string) (attemptCommand, bool, bool) {
 		}
 	case commandAccountLink:
 		if command.provider == "" || command.root == "" || command.label == "" {
+			return attemptCommand{}, false, false
+		}
+	case commandAccountUpdate:
+		if command.account == "" || command.expectedRevision == 0 || command.label == "" && !command.removeAttachments {
 			return attemptCommand{}, false, false
 		}
 	case commandTaskAdd:
@@ -2324,6 +2359,29 @@ func runOperator(ctx context.Context, command attemptCommand, getenv func(string
 		result, callErr := client.Profile(callContext, api.ProfileInput{Seconds: command.seconds})
 		if callErr != nil {
 			return writeWebFailure(stderr, "debug profile", callErr)
+		}
+		return writeJSON(stdout, result)
+	case commandAccountUpdate:
+		label := command.label
+		var labelPtr *string
+		if label != "" {
+			labelPtr = &label
+		}
+		result, callErr := client.UpdateAccount(callContext, api.AccountUpdateInput{AccountID: command.account, ExpectedRevision: command.expectedRevision, Label: labelPtr, Remove: command.removeAttachments})
+		if callErr != nil {
+			return writeWebFailure(stderr, "account update", callErr)
+		}
+		return writeJSON(stdout, result)
+	case commandAttachmentRetention:
+		result, callErr := client.AttachmentRetention(callContext, command.retentionEnabled)
+		if callErr != nil {
+			return writeWebFailure(stderr, "attachment retention", callErr)
+		}
+		return writeJSON(stdout, result)
+	case commandTelemetryIngest:
+		result, callErr := client.TelemetryIngest(callContext, command.action)
+		if callErr != nil {
+			return writeWebFailure(stderr, "telemetry ingest", callErr)
 		}
 		return writeJSON(stdout, result)
 	case commandIntake:

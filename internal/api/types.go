@@ -282,6 +282,15 @@ type MutationResult struct {
 	HumanReply   *OverseerHumanReplyResult   `json:"human_reply,omitempty"`
 }
 
+type TelemetryIngestResult struct {
+	URL    string `json:"url"`
+	Secret string `json:"secret"`
+	Active bool   `json:"active"`
+}
+type AttachmentRetentionResult struct {
+	Enabled bool `json:"enabled"`
+}
+
 // DiscoveredAccount is a non-secret identity published by a provider login.
 // It deliberately carries neither credentials nor credential-derived tokens.
 type DiscoveredAccount struct {
@@ -304,6 +313,12 @@ type AccountLinkInput struct {
 	Provider string `json:"provider"`
 	Home     string `json:"home"`
 	Label    string `json:"label"`
+}
+type AccountUpdateInput struct {
+	AccountID        string  `json:"account_id"`
+	ExpectedRevision uint64  `json:"expected_revision"`
+	Label            *string `json:"label,omitempty"`
+	Remove           bool    `json:"remove,omitempty"`
 }
 type AgentAccountSelectInput struct {
 	AgentID          string `json:"agent_id"`
@@ -329,6 +344,9 @@ func validAccounts(value Accounts) bool {
 }
 func validAccountLinkInput(value AccountLinkInput) bool {
 	return validDiscoveredAccount(DiscoveredAccount{Provider: value.Provider, Home: value.Home, Label: value.Label})
+}
+func validAccountUpdateInput(value AccountUpdateInput) bool {
+	return validID(value.AccountID) && value.ExpectedRevision != 0 && (value.Label == nil || validText(*value.Label, 1, 128))
 }
 func validAgentAccountSelectInput(value AgentAccountSelectInput) bool {
 	return validID(value.AgentID) && validID(value.AccountID) && value.ExpectedRevision != 0

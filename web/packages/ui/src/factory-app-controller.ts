@@ -14,7 +14,6 @@ import {
   type ProjectContentOutput,
   type BrowserSession,
   type BrowserSessionOptions,
-  type TelemetryIngest,
   type AgentItem,
   type SpriteAppearance,
   type ProjectItem,
@@ -38,7 +37,6 @@ import {
   type OperationalNodeView,
 } from "@dark-factory/client";
 import { agentCurrentTask, type RunPathSample } from "./console-view.js";
-import { FactorySettingsCoordinator, type FactoryGitHubView, type FactoryRemoteInvite } from "./factory-settings-coordinator.js";
 import { HumanRequestFlow, type HumanRequestPhase } from "./human-request-flow.js";
 import { MAX_PENDING_INPUT_BYTES, TerminalController, type TerminalControllerSnapshot, type TerminalErrorSource, type TerminalSurface } from "./terminal-controller.js";
 
@@ -70,7 +68,6 @@ export type FactoryHumanRequestView = Readonly<{
   reply: string;
 }>;
 
-export type { FactoryRemoteInvite } from "./factory-settings-coordinator.js";
 
 export type FactoryAgentSelection = Readonly<{
   id: string;
@@ -139,26 +136,11 @@ export type FactoryAppSnapshot = Readonly<{
   lastRunPaths?: ReadonlyMap<string, RunPathSample>;
   edit?: FactoryEditView;
   /** True only while a ready session carries the full loopback grant. */
-  remoteInviteAllowed?: boolean;
   dispatchAllowed?: boolean;
-  remoteInvite?: FactoryRemoteInvite;
-  remoteInviteError?: string;
-  /** The identities the factory has granted, once SETTINGS asks; this console's own is marked by id. */
-  devices?: BrowserClientsView;
-  devicesError?: string;
-  ownClientId?: string;
-  /** The provider logins on the daemon's machine, once SETTINGS asks. */
-  accounts?: readonly DiscoveredAccountView[];
-  accountsPending?: boolean;
-  accountsError?: string;
-  /** Private SETTINGS observation; roots never enter StateView or STATE. */
   repositories?: ReadonlyMap<string, readonly RepositoryView[]>;
-  repositoryPending?: ReadonlySet<string>;
-  repositoryErrors?: ReadonlyMap<string, string>;
   intake?: ReadonlyMap<string, IntakeView>;
   intakePending?: ReadonlySet<string>;
   intakeErrors?: ReadonlyMap<string, string>;
-  github?: FactoryGitHubView;
 }>;
 
 export type FactoryAppStatus =
@@ -168,9 +150,9 @@ export type FactoryAppStatus =
 type HumanSession = Pick<BrowserSession, "getHumanRequestDetail" | "replyHumanRequest" | "cancelHumanRequest">;
 type TerminalSession = Pick<BrowserSession, "resolveAgentTerminal" | "openTerminal" | "close">;
 type AgentTaskSession = Pick<BrowserSession, "enqueueAgentTaskWithFiles" | "enqueueAgentTask" | "controlAgent" | "getTaskHistory" | "getTaskDetail" | "resolveAgentTerminal">;
-type ConsoleSession = Pick<BrowserSession, "updateAgent" | "setProjectLimits" | "createProject" | "getRepositories" | "mutateRepository" | "intake" | "updateTask" | "getOperationalGraph" | "getOperationalNode" | "getRunPaths" | "discoverAccounts" | "linkAccount" | "updateAccount" | "listBrowserClients" | "revokeBrowserClient" | "githubConnection" | "clientId">;
-type RemoteInviteSession = Pick<BrowserSession, "inviteRemote" | "telemetryIngest" | "capabilities">;
-type ControlledClient = Pick<BrowserClient, "connect" | "close"> & { readonly session?: HumanSession & TerminalSession & AgentTaskSession & ConsoleSession & RemoteInviteSession & Partial<Pick<BrowserSession, "projectContent" | "attachmentRetention" | "setDispatch">> };
+type ConsoleSession = Pick<BrowserSession, "updateAgent" | "setProjectLimits" | "createProject" | "getRepositories" | "mutateRepository" | "intake" | "updateTask" | "getOperationalGraph" | "getOperationalNode" | "getRunPaths" | "discoverAccounts" | "linkAccount" | "listBrowserClients" | "revokeBrowserClient" | "githubConnection" | "clientId">;
+type RemoteInviteSession = Pick<BrowserSession, "inviteRemote" | "capabilities">;
+type ControlledClient = Pick<BrowserClient, "connect" | "close"> & { readonly session?: HumanSession & TerminalSession & AgentTaskSession & ConsoleSession & RemoteInviteSession & Partial<Pick<BrowserSession, "projectContent" | "setDispatch">> };
 type ClientFactory = (options: BrowserSessionOptions) => ControlledClient;
 
 export type FactoryAppControllerOptions = {
@@ -275,14 +257,10 @@ export class FactoryAppController {
   #runPathsDue = false;
   #edit: FactoryEditView | undefined;
   #taskEditConfirmation: TaskEditConfirmation | undefined;
-  readonly #settings = new FactorySettingsCoordinator({
-    session: () => this.#client?.session,
-    ready: () => !this.#closed && this.#status === "ready",
-    generation: () => this.#generation,
-    current: (generation) => this.#current(generation),
-    errorCode: (error) => finiteError(error).code,
-    publish: () => this.#publish(),
-  });
+  readonly #repositories = new Map<string, readonly RepositoryView[]>();
+  readonly #intake = new Map<string, IntakeView>();
+  readonly #intakePending = new Set<string>();
+  readonly #intakeErrors = new Map<string, string>();
   #instructionAttempt = 0;
   #generation = 0;
   #started = false;
@@ -355,12 +333,6 @@ export class FactoryAppController {
     const session = this.#client?.session;
     if (this.#closed || this.#status !== "ready" || session?.setDispatch === undefined) throw new SessionError("unsupported");
     return session.setDispatch({ expectedRevision, enabled });
-  }
-
-  async attachmentRetention(enabled?: boolean): Promise<boolean> {
-    const session = this.#client?.session;
-    if (this.#closed || this.#status !== "ready" || session?.attachmentRetention === undefined) throw new SessionError("unsupported");
-    return session.attachmentRetention(enabled);
   }
 
   async projectContent(operation: ProjectContentOperation, input: ProjectContentInput): Promise<ProjectContentOutput> {
@@ -495,7 +467,7 @@ export class FactoryAppController {
       // only while the floor is still shown; an abandoned round owes nothing.
       const due = this.#runPathsDue;
       this.#runPathsDue = false;
-      if (!this.#current(generation)) return;
+      if (!this.#current(generation) || this.#status !== "ready") return;
       if (due && this.#runPathsTimer !== undefined) this.#pollRunPaths();
       // An agent that stopped running loses its entry; an unchanged round is
       // not a new snapshot, so the floor does not re-render on a heartbeat.
@@ -827,39 +799,63 @@ export class FactoryAppController {
   }
 
   /** The provider logins on this machine; SETTINGS explicitly asks for them. */
-  loadAccounts(): Promise<void> { return this.#settings.loadAccounts(); }
-
-  /** Link one discovered login, then reread discovery so it shows as linked. */
-  linkAccount(request: { provider: "claude_code" | "codex"; home: string; label: string }): Promise<void> {
-    return this.#settings.linkAccount(request);
+  async loadRepositories(projectId: string): Promise<void> {
+    const session = this.#client?.session;
+    if (!this.#current(this.#generation) || session === undefined || typeof session.getRepositories !== "function") return;
+    const generation = this.#generation;
+    try {
+      const repositories = await session.getRepositories(projectId);
+      if (!this.#current(generation) || this.#status !== "ready") return;
+      this.#repositories.set(projectId, repositories);
+    } catch {
+      if (!this.#current(generation) || this.#status !== "ready") return;
+      this.#repositories.delete(projectId);
+    }
+    this.#publish();
   }
-
-  updateAccount(request: Parameters<BrowserSession["updateAccount"]>[0]): Promise<void> {
-    return this.#settings.updateAccount(request);
+  async mutateRepository(request: RepositoryMutation): Promise<void> {
+    const session = this.#client?.session;
+    if (!this.#current(this.#generation) || session === undefined || typeof session.mutateRepository !== "function") return;
+    await session.mutateRepository(request);
+    await this.loadRepositories(request.projectId);
   }
-
-  loadRepositories(projectId: string): Promise<void> { return this.#settings.loadRepositories(projectId); }
-
-  mutateRepository(request: RepositoryMutation): Promise<void> { return this.#settings.mutateRepository(request); }
-
-  loadIntake(projectId: string): Promise<void> { return this.#settings.loadIntake(projectId); }
-  intakeAction(projectId: string, request: Parameters<BrowserSession["intake"]>[0]): Promise<void> { return this.#settings.intakeAction(projectId, request); }
-
-  createProject(request: { name: string; root: string }): Promise<void> { return this.#settings.createProject(request); }
-
-  loadDevices(): Promise<void> { return this.#settings.loadDevices(); }
-
-  githubConnection(request: Parameters<BrowserSession["githubConnection"]>[0]): Promise<void> { return this.#settings.githubConnection(request); }
-
-  revokeDevice(request: { clientId: string; expectedRevision: bigint }): Promise<void> { return this.#settings.revokeDevice(request); }
-
-  /** The mint is never retried: a failure is reported and the operator asks again. */
-  inviteRemote(): Promise<void> { return this.#settings.inviteRemote(); }
-
-  telemetryIngest(action: Parameters<BrowserSession["telemetryIngest"]>[0]): Promise<TelemetryIngest> { return this.#settings.telemetryIngest(action); }
-
-  dismissRemoteInvite(): void {
-    if (!this.#closed) this.#settings.dismissRemoteInvite();
+  async loadIntake(projectId: string): Promise<void> {
+    const session = this.#client?.session;
+    if (!this.#current(this.#generation) || session === undefined) return;
+    const generation = this.#generation;
+    this.#intakePending.add(projectId); this.#publish();
+    try {
+      const result = await session.intake({ action: "list", project_id: projectId });
+      if (!this.#current(generation) || this.#status !== "ready") return;
+      this.#intake.set(projectId, result); this.#intakeErrors.delete(projectId);
+    }
+    catch (error) { this.#intakeErrors.set(projectId, finiteError(error).code); }
+    finally { this.#intakePending.delete(projectId); this.#publish(); }
+  }
+  async intakeAction(projectId: string, request: Parameters<BrowserSession["intake"]>[0]): Promise<void> {
+    const session = this.#client?.session;
+    if (!this.#current(this.#generation) || session === undefined) return;
+    const generation = this.#generation;
+    if (request.action === "preview") {
+      const current = this.#intake.get(projectId);
+      if (current !== undefined) this.#intake.set(projectId, { ...current, candidates: undefined, reviewed_revision: undefined, next_page: undefined });
+    }
+    try {
+      let result = await session.intake(request);
+      if (request.action === "accept" && result.state === "accepted" && result.acceptance_id !== undefined) {
+        result = await session.intake({ action: "import", acceptance_id: result.acceptance_id });
+        if (!this.#current(generation) || this.#status !== "ready") return;
+        if (result.state === "imported") result = await session.intake({ action: "list", project_id: projectId });
+      }
+      if (request.action === "update") result = await session.intake({ action: "list", project_id: projectId });
+      if (!this.#current(generation) || this.#status !== "ready") return;
+      const current = this.#intake.get(projectId);
+      this.#intake.set(projectId, result.sources === undefined && current !== undefined ? { ...current, ...result } : result);
+      if (["content_changed", "ineligible", "withdrawn", "withdrawal_pending"].includes(result.state)) this.#intakeErrors.set(projectId, result.state);
+      else this.#intakeErrors.delete(projectId);
+    }
+    catch (error) { if (this.#current(generation) && this.#status === "ready") this.#intakeErrors.set(projectId, finiteError(error).code); }
+    this.#publish();
   }
 
   beginTerminalSurface(token: object, surfaceVersion = this.#terminalSurfaceVersion): void {
@@ -966,11 +962,8 @@ export class FactoryAppController {
       this.#discardTaskEditConfirmation();
       this.#human.clear(true);
       // A reconnect must not show a code minted for the connection that dropped.
-      this.#settings.clearRemoteInvite();
-      // GitHub is private session state; a replacement browser session must
-      // reread it rather than displaying observations from the old socket.
-      this.#settings.clearGitHub();
-      this.#settings.clearProjectSettings();
+      this.#repositories.clear();
+      this.#intake.clear();
     }
     // A wire-level state restart resnapshots on the same authenticated socket;
     // exact terminal discovery and handles remain owned by that session.
@@ -1474,22 +1467,10 @@ export class FactoryAppController {
         reply: selection.reply,
       },
       dispatchAllowed: this.#status === "ready" && ((this.#client?.session?.capabilities ?? 0) & CAPABILITIES.administration) !== 0,
-      remoteInviteAllowed: this.#settings.remoteInviteAllowed,
-      remoteInvite: this.#settings.remoteInvite,
-      remoteInviteError: this.#settings.remoteInviteError,
-      devices: this.#settings.devices,
-      devicesError: this.#settings.devicesError,
-      ownClientId: this.#settings.ownClientId,
-      accounts: this.#settings.accounts,
-      accountsPending: this.#settings.accountsPending,
-      accountsError: this.#settings.accountsError,
-      repositories: this.#settings.repositories,
-      repositoryPending: this.#settings.repositoryPending,
-      repositoryErrors: this.#settings.repositoryErrors,
-      intake: this.#settings.intake,
-      intakePending: this.#settings.intakePending,
-      intakeErrors: this.#settings.intakeErrors,
-      github: this.#settings.github,
+      repositories: this.#repositories,
+      intake: this.#intake,
+      intakePending: this.#intakePending,
+      intakeErrors: this.#intakeErrors,
       selectedAgent: this.#selectedAgent === undefined ? undefined : {
         id: this.#selectedAgent.agent.id,
         name: this.#selectedAgent.agent.name,

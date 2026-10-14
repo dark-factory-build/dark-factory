@@ -35,6 +35,9 @@ func TestParseExactOperatorCommands(t *testing.T) {
 		{name: "account discover", args: []string{"account", "discover"}},
 		{name: "account list", args: []string{"account", "list"}},
 		{name: "account link", args: []string{"account", "link", "--provider", "codex", "--home", "/Users/operator/.codex-dogfood", "--label", "dogfood"}},
+		{name: "account update", args: []string{"account", "update", "--account", id, "--revision", "7", "--label", "renamed"}},
+		{name: "attachment retention", args: []string{"attachment", "retention", "--enabled", "false"}},
+		{name: "telemetry ingest", args: []string{"telemetry", "ingest", "--action", "status"}},
 		{name: "agent select account", args: []string{"agent", "select-account", "--agent", id, "--revision", "7", "--account", strings.Repeat("cd", 16)}},
 		{name: "agent select model", args: []string{"agent", "select-model", "--agent", id, "--revision", "7", "--model", "gpt-5.6-luna", "--reasoning-effort", "medium"}},
 		{name: "task add minimal", args: []string{"task", "add", "--project", id, "--agent", id, "--title", "Tighten the queue ordering"}},
@@ -71,6 +74,9 @@ func TestParseExactOperatorCommands(t *testing.T) {
 	}
 	if _, _, ok := parse([]string{"agent", "select-model", "--agent", "any", "--revision", "7", "--model", "m"}); ok {
 		t.Fatal("`any` accepted where one agent is required")
+	}
+	if command, _, ok := parse([]string{"attachment", "retention"}); !ok || command.retentionEnabled != nil {
+		t.Fatalf("retention inspection command = %+v, ok=%v", command, ok)
 	}
 	invalid := [][]string{
 		{"project", "create", "--name", "n"},
@@ -131,6 +137,24 @@ func TestParseExactOperatorCommands(t *testing.T) {
 		if _, help, ok := parse(args); !help || !ok {
 			t.Fatalf("help form rejected: %v", args)
 		}
+	}
+}
+
+func TestAttachmentRetentionCLIInspectionPreservesOmittedEnabled(t *testing.T) {
+	fixture := newAPIFixture(t)
+	defer fixture.close(t)
+	done := serveOne(fixture.listener, func(call api.Call) api.Reply {
+		enabled, present, ok := call.AttachmentRetention()
+		if !ok || present || enabled {
+			t.Errorf("inspection request enabled=%v present=%v ok=%v", enabled, present, ok)
+		}
+		return api.NewContentReply(api.AttachmentRetentionResult{Enabled: false})
+	})
+	var stdout, stderr bytes.Buffer
+	exit := run(context.Background(), []string{"attachment", "retention"}, webEnvironment(fixture), &stdout, &stderr)
+	awaitServer(t, done)
+	if exit != 0 || stderr.Len() != 0 || !strings.Contains(stdout.String(), `"enabled":false`) {
+		t.Fatalf("retention inspection = exit %d stdout %q stderr %q", exit, stdout.String(), stderr.String())
 	}
 }
 

@@ -372,6 +372,20 @@ func TestOperatorClientMethodsUseExactPrivateWire(t *testing.T) {
 			_, err := client.SetCapacity(context.Background(), 3, 2)
 			return err
 		}},
+		{name: "account update", response: mutationResponse(), request: `{"method":"account_update","params":{"account_id":"` + id('5') + `","expected_revision":3,"label":"renamed"}}`, invoke: func(client *OperatorClient) error {
+			label := "renamed"
+			_, err := client.UpdateAccount(context.Background(), AccountUpdateInput{AccountID: id('5'), ExpectedRevision: 3, Label: &label})
+			return err
+		}},
+		{name: "attachment retention", response: successResponse(`{"enabled":false}`), request: `{"method":"attachment_retention","params":{"enabled":false}}`, invoke: func(client *OperatorClient) error {
+			enabled := false
+			_, err := client.AttachmentRetention(context.Background(), &enabled)
+			return err
+		}},
+		{name: "telemetry ingest", response: successResponse(`{"url":"https://relay.example/v1/traces","secret":"","active":false}`), request: `{"method":"telemetry_ingest","params":{"action":"status"}}`, invoke: func(client *OperatorClient) error {
+			_, err := client.TelemetryIngest(context.Background(), "status")
+			return err
+		}},
 		{name: "select agent model", response: mutationResponse(), request: `{"method":"agent_select_model","params":{"agent_id":"` + id('2') + `","expected_revision":3,"model":"gpt-5.6-luna","reasoning_effort":"medium"}}`, invoke: func(client *OperatorClient) error {
 			_, err := client.SelectAgentModel(context.Background(), AgentModelSelectInput{AgentID: id('2'), ExpectedRevision: 3, Model: "gpt-5.6-luna", ReasoningEffort: "medium"})
 			return err

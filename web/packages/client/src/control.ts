@@ -161,8 +161,6 @@ export type DiscoveredAccount = { provider: "claude_code" | "codex"; home: strin
 export type AccountsBody = { accounts: DiscoveredAccount[]; next_offset?: number };
 export type AccountLinkBody = { provider: "claude_code" | "codex"; home: string; label: string };
 export type AccountLinkResultBody = { account_id: string; revision: bigint };
-export type AccountUpdateBody = { account_id: string; expected_revision: bigint; label?: string; remove?: boolean };
-export type AccountUpdateResultBody = { account_id: string; revision: bigint };
 export type BrowserClientsGetBody = Record<string, never>;
 /** One identity the factory granted: enough to recognise and revoke it, never its key. */
 export type BrowserClientItem = { client_id: string; capabilities: CapabilityMask; revision: bigint; created_at_ms: bigint };
@@ -197,9 +195,7 @@ export type RemoteInviteResultBody = { link: string; expires_at_ms: bigint; svg:
 /** One device's Web Push subscription plus the VAPID key pair it minted for it, base64url without padding. */
 export type PushSubscribeBody = { endpoint: string; public_key: string; private_key: string };
 export type PushSubscribeResultBody = Record<string, never>;
-export type TelemetryIngestBody = { action: "status" | "mint" | "revoke" };
 /** `secret` is the bearer, non-empty only in the answer to a mint. */
-export type TelemetryIngestResultBody = { url: string; secret: string; active: boolean };
 const MAX_PUSH_ENDPOINT_BYTES = 2048;
 const BASE64URL = /^[A-Za-z0-9_-]+$/;
 /** The push services behind every browser that can install the remote console; the daemon refuses any other host. */
@@ -246,7 +242,7 @@ export type TerminalServerControlFrame =
   | { type: "TERMINAL_EXIT"; id: string; body: TerminalExitBody }
   | { type: "TERMINAL_RESET"; id: string; body: TerminalResetBody };
 
-export type ServerControlFrame = { type: "ATTACHMENT_RETENTION_RESULT"; id: string; body: { enabled: boolean } } | { type: "FACTORY_DISPATCH_RESULT"; id: string; body: FactoryDispatchResultBody } | { type: "PROJECT_CONTENT_RESULT"; id: string; body: ProjectContentResult } | HelloFrame | PairResultFrame | AuthResultFrame | StateSnapshotFrame | StateChangedFrame | HumanRequestDetailFrame
+export type ServerControlFrame = { type: "FACTORY_DISPATCH_RESULT"; id: string; body: FactoryDispatchResultBody } | { type: "PROJECT_CONTENT_RESULT"; id: string; body: ProjectContentResult } | HelloFrame | PairResultFrame | AuthResultFrame | StateSnapshotFrame | StateChangedFrame | HumanRequestDetailFrame
   | { type: "HUMAN_REQUEST_REPLY_RESULT"; id: string; body: HumanRequestReplyResultBody }
   | { type: "HUMAN_REQUEST_CANCEL_RUN_RESULT"; id: string; body: HumanRequestCancelRunResultBody }
   | { type: "TASK_ATTACHMENT_RESULT"; id: string; body: TaskAttachmentResultBody }
@@ -266,16 +262,14 @@ export type ServerControlFrame = { type: "ATTACHMENT_RETENTION_RESULT"; id: stri
   | { type: "RUN_PATHS"; id: string; body: RunPathsBody }
   | { type: "ACCOUNTS"; id: string; body: AccountsBody }
   | { type: "ACCOUNT_LINK_RESULT"; id: string; body: AccountLinkResultBody }
-  | { type: "ACCOUNT_UPDATE_RESULT"; id: string; body: AccountUpdateResultBody }
   | { type: "BROWSER_CLIENTS"; id: string; body: BrowserClientsBody }
   | { type: "BROWSER_CLIENT_REVOKE_RESULT"; id: string; body: BrowserClientRevokeResultBody }
   | { type: "GITHUB_CONNECTION_RESULT"; id: string; body: GitHubConnectionResultBody }
   | { type: "TERMINAL_TARGET"; id: string; body: TerminalTargetBody }
   | { type: "REMOTE_INVITE_RESULT"; id: string; body: RemoteInviteResultBody }
   | { type: "PUSH_SUBSCRIBE_RESULT"; id: string; body: PushSubscribeResultBody }
-  | { type: "TELEMETRY_INGEST_RESULT"; id: string; body: TelemetryIngestResultBody }
   | TerminalServerControlFrame | ErrorFrame | UnknownServerControlFrame;
-export type ClientControlFrame = { type: "ATTACHMENT_RETENTION"; id: string; body: { enabled?: boolean } } | { type: "FACTORY_DISPATCH"; id: string; body: FactoryDispatchBody } | { type: "PROJECT_CONTENT"; id: string; body: ProjectContentRequest } | PairProveFrame | AuthProveFrame | StateGetFrame | StateWatchFrame | HumanRequestDetailGetFrame
+export type ClientControlFrame = { type: "FACTORY_DISPATCH"; id: string; body: FactoryDispatchBody } | { type: "PROJECT_CONTENT"; id: string; body: ProjectContentRequest } | PairProveFrame | AuthProveFrame | StateGetFrame | StateWatchFrame | HumanRequestDetailGetFrame
   | { type: "HUMAN_REQUEST_REPLY"; id: string; body: HumanRequestReplyBody }
   | { type: "HUMAN_REQUEST_CANCEL_RUN"; id: string; body: HumanRequestCancelRunBody }
   | { type: "TASK_ATTACHMENT"; id: string; body: TaskAttachmentBody }
@@ -295,14 +289,12 @@ export type ClientControlFrame = { type: "ATTACHMENT_RETENTION"; id: string; bod
   | { type: "RUN_PATHS_GET"; id: string; body: RunPathsGetBody }
   | { type: "ACCOUNTS_DISCOVER"; id: string; body: AccountsDiscoverBody }
   | { type: "ACCOUNT_LINK"; id: string; body: AccountLinkBody }
-  | { type: "ACCOUNT_UPDATE"; id: string; body: AccountUpdateBody }
   | { type: "BROWSER_CLIENTS_GET"; id: string; body: BrowserClientsGetBody }
   | { type: "BROWSER_CLIENT_REVOKE"; id: string; body: BrowserClientRevokeBody }
   | { type: "GITHUB_CONNECTION"; id: string; body: GitHubConnectionBody }
   | { type: "TERMINAL_TARGET_GET"; id: string; body: TerminalTargetGetBody }
   | { type: "REMOTE_INVITE"; id: string; body: RemoteInviteBody }
   | { type: "PUSH_SUBSCRIBE"; id: string; body: PushSubscribeBody }
-  | { type: "TELEMETRY_INGEST"; id: string; body: TelemetryIngestBody }
   | TerminalControlFrame | ErrorFrame;
 type ControlBody = ClientControlFrame["body"] | ServerControlFrame["body"];
 
@@ -380,15 +372,6 @@ function validateControlID(type: ControlType, hasID: boolean, id: unknown): void
 function validateBody(type: ControlType, body: unknown, wire: boolean): ControlBody {
   if (!isObject(body)) malformed();
   switch (type) {
-    case "ATTACHMENT_RETENTION":
-      requireKeys(body, [], wire, ["enabled"]);
-      if (!present(body, "enabled")) return {};
-      if (typeof body.enabled !== "boolean") malformed();
-      return { enabled: body.enabled };
-    case "ATTACHMENT_RETENTION_RESULT":
-      requireKeys(body, ["enabled"], wire);
-      if (typeof body.enabled !== "boolean") malformed();
-      return { enabled: body.enabled };
     case "FACTORY_DISPATCH": requireKeys(body, ["expected_revision", "enabled"], wire); if (typeof body.enabled !== "boolean") malformed(); return { expected_revision: decimal(body.expected_revision, wire, true), enabled: body.enabled };
     case "FACTORY_DISPATCH_RESULT": requireKeys(body, ["revision", "enabled"], wire); if (typeof body.enabled !== "boolean") malformed(); return { revision: decimal(body.revision, wire, true), enabled: body.enabled };
     case "PROJECT_CONTENT": requireKeys(body, ["operation", "input"], wire); return { operation: projectContentOperation(body.operation), input: projectContentObject(body.input) };
@@ -497,8 +480,6 @@ function validateBody(type: ControlType, body: unknown, wire: boolean): ControlB
     case "ACCOUNTS": requireKeys(body, ["accounts"], wire, ["next_offset"]); { if (!Array.isArray(body.accounts) || body.accounts.length > MAX_SNAPSHOT_ENTITIES) malformed(); const next_offset = present(body, "next_offset") ? integer(body.next_offset, 1, Number.MAX_SAFE_INTEGER) : undefined; return { accounts: body.accounts.map((item) => discoveredAccount(item, wire)), ...(next_offset === undefined ? {} : { next_offset }) }; }
     case "ACCOUNT_LINK": requireKeys(body, ["provider", "home", "label"], wire); return { provider: accountProvider(body.provider), home: accountHome(body.home), label: boundedText(body.label, 1, MAX_AGENT_NAME_BYTES) };
     case "ACCOUNT_LINK_RESULT": requireKeys(body, ["account_id", "revision"], wire); return { account_id: dynamicID(body.account_id), revision: decimal(body.revision, wire, true) };
-    case "ACCOUNT_UPDATE": requireKeys(body, ["account_id", "expected_revision"], wire, ["label", "remove"]); { const hasLabel = present(body, "label"); const hasRemove = present(body, "remove"); if (hasLabel === hasRemove || hasRemove && body.remove !== true) malformed(); return { account_id: dynamicID(body.account_id), expected_revision: decimal(body.expected_revision, wire, true), ...(hasLabel ? { label: boundedText(body.label, 1, MAX_AGENT_NAME_BYTES) } : { remove: true }) }; }
-    case "ACCOUNT_UPDATE_RESULT": requireKeys(body, ["account_id", "revision"], wire); return { account_id: dynamicID(body.account_id), revision: decimal(body.revision, wire, true) };
     case "BROWSER_CLIENTS_GET": requireKeys(body, [], wire); return {};
     case "BROWSER_CLIENTS": requireKeys(body, ["clients", "more"], wire); { if (!Array.isArray(body.clients) || body.clients.length > MAX_ARRAY_ITEMS || typeof body.more !== "boolean") malformed(); return { clients: body.clients.map((item) => { if (!isObject(item)) malformed(); const client = item; requireKeys(client, ["client_id", "capabilities", "revision", "created_at_ms"], wire); return { client_id: dynamicID(client.client_id), capabilities: capabilities(client.capabilities), revision: decimal(client.revision, wire, true), created_at_ms: decimal(client.created_at_ms, wire) }; }), more: body.more }; }
     case "BROWSER_CLIENT_REVOKE": requireKeys(body, ["client_id", "expected_revision"], wire); return { client_id: dynamicID(body.client_id), expected_revision: decimal(body.expected_revision, wire, true) };
@@ -529,8 +510,6 @@ function validateBody(type: ControlType, body: unknown, wire: boolean): ControlB
     case "REMOTE_INVITE": requireKeys(body, [], wire); return {};
     case "PUSH_SUBSCRIBE": requireKeys(body, ["endpoint", "public_key", "private_key"], wire); { const endpoint = boundedText(body.endpoint, 9, MAX_PUSH_ENDPOINT_BYTES); if (/[\u0000-\u001f\u007f]/.test(endpoint) || !pushServiceEndpoint(endpoint) || typeof body.public_key !== "string" || body.public_key.length !== 87 || !BASE64URL.test(body.public_key) || typeof body.private_key !== "string" || body.private_key.length === 0 || body.private_key.length > 512 || !BASE64URL.test(body.private_key)) malformed(); return { endpoint, public_key: body.public_key, private_key: body.private_key }; }
     case "PUSH_SUBSCRIBE_RESULT": requireKeys(body, [], wire); return {};
-    case "TELEMETRY_INGEST": requireKeys(body, ["action"], wire); if (body.action !== "status" && body.action !== "mint" && body.action !== "revoke") malformed(); return { action: body.action };
-    case "TELEMETRY_INGEST_RESULT": requireKeys(body, ["url", "secret", "active"], wire); { const url = boundedText(body.url, 1, MAX_REMOTE_INVITE_LINK_BYTES); if (!/^https?:\/\//.test(url) || !url.endsWith("/v1/traces") || /[\u0000-\u001f\u007f]/.test(url) || typeof body.secret !== "string" || typeof body.active !== "boolean" || body.secret !== "" && (body.secret.length !== 43 || !BASE64URL.test(body.secret) || !body.active)) malformed(); return { url, secret: body.secret, active: body.active }; }
     case "REMOTE_INVITE_RESULT": requireKeys(body, ["link", "expires_at_ms", "svg"], wire); { const link = boundedText(body.link, 1, MAX_REMOTE_INVITE_LINK_BYTES); const svg = boundedText(body.svg, 1, MAX_REMOTE_INVITE_SVG_BYTES); if (!link.startsWith(REMOTE_INVITE_LINK_PREFIX) || /[\u0000-\u001f\u007f]/.test(link) || !svg.startsWith("<svg")) malformed(); return { link, expires_at_ms: decimal(body.expires_at_ms, wire, true), svg }; }
     case "ERROR": requireKeys(body, ["code", "retryable"], wire); if (typeof body.code !== "string" || typeof body.retryable !== "boolean") malformed(); if (!(ERROR_CODES as readonly string[]).includes(body.code)) { if (!wire) malformed(); return { code: "internal", retryable: false }; } return { code: body.code as ErrorCode, retryable: body.retryable };
   }

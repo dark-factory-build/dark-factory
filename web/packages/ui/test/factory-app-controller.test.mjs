@@ -6,7 +6,6 @@ import { SessionError } from "@dark-factory/client";
 import { FactoryConsole } from "../dist/src/index.js";
 import { FactoryAppController } from "../dist/src/factory-app-controller.js";
 import { fixtureGraph, fixtureState } from "../../../fixtures/state.mjs";
-
 const graphOf = (id, digest) => ({ ...fixtureGraph, project_id: id, digest });
 
 const challenge = "51".repeat(32);
@@ -40,7 +39,6 @@ const remoteInvite = Object.freeze({
   expiresAtMs: 1767225600000n,
   svg: "<svg viewBox=\"0 0 1 1\"/>",
 });
-
 function stateWithRequests(items) {
   return { ...fixtureState, humanRequests: new Map(items.map((item) => [item.id, item])) };
 }
@@ -114,30 +112,72 @@ function harness(overrides = {}) {
   };
 }
 
-test("private issue source updates retain other sources and invalidate the reviewed preview", async () => {
-  const sourceA = { id: "a1".repeat(16), project_id: [...fixtureState.projects.keys()][0], github_repository_id: 10n, repository: "example/a", target_repository_id: "b1".repeat(16), overseer_agent_id: "c1".repeat(16), label: "", policy: "manual", trusted_authors: [], poll_seconds: 60, admission_limit: 25, enabled: false, revision: 3n };
-  const sourceB = { ...sourceA, id: "a2".repeat(16), repository: "example/b" };
-  const revisedA = { ...sourceA, label: "bug", revision: 4n };
-  const candidate = { number: 7n, url: "https://github.com/example/a/issues/7", title: "Keep this review", body: "The exact reviewed body.", author: "reporter", labels: [], content_hash: "ab".repeat(32), reason: "manual_review" };
-  const context = harness({
-    intake: async (request) => {
-      if (request.action === "list") return { state: "ok", sources: [sourceA, sourceB] };
-      if (request.action === "preview") return { state: "ok", candidates: [candidate], reviewed_revision: sourceA.revision };
-      if (request.action === "update") return { state: "ok", sources: [revisedA] };
-      throw new Error(`unexpected intake action ${request.action}`);
-    },
-  });
-  context.controller.start();
-  context.emitStatus("ready");
-  context.emitState(fixtureState);
-  await context.controller.loadIntake(sourceA.project_id);
-  await context.controller.intakeAction(sourceA.project_id, { action: "preview", source_id: sourceA.id, page: 1 });
-  await context.controller.intakeAction(sourceA.project_id, { action: "update", source_id: sourceA.id, expected_revision: sourceA.revision, configuration: { repository: revisedA.repository, target_repository_id: revisedA.target_repository_id, overseer_agent_id: revisedA.overseer_agent_id, label: revisedA.label, policy: revisedA.policy, trusted_authors: [], poll_seconds: 60, admission_limit: 25 } });
-  const result = context.latest().intake.get(sourceA.project_id);
-  assert.deepEqual(result.sources.map((source) => source.id), [sourceA.id, sourceB.id]);
-  assert.equal(result.sources[0].revision, revisedA.revision);
-  assert.equal(result.candidates, undefined);
-  assert.equal(result.reviewed_revision, undefined);
+test("Work acceptance imports the accepted receipt before publishing intake", async () => {
+  const projectId = [...fixtureState.projects.keys()][0];
+  const calls = [];
+  const context = harness({ intake: async (request) => {
+    calls.push(request);
+    if (request.action === "accept") return { state: "accepted", acceptance_id: "receipt-1" };
+    if (request.action === "import") return { state: "imported", acceptance_id: "receipt-1", task_id: "task-1" };
+    if (request.action === "list") return { state: "ok", sources: [{ id: "waiting-1", project_id: projectId }] };
+    throw new Error(`unexpected intake action ${request.action}`);
+  } });
+  context.controller.start(); context.emitStatus("ready"); context.emitState(fixtureState);
+  await context.controller.intakeAction(projectId, { action: "accept", issue_number: 7n, content_hash: "ab".repeat(32), source_id: "a1".repeat(16), expected_revision: 1n });
+  assert.deepEqual(calls, [
+    { action: "accept", issue_number: 7n, content_hash: "ab".repeat(32), source_id: "a1".repeat(16), expected_revision: 1n },
+    { action: "import", acceptance_id: "receipt-1" },
+    { action: "list", project_id: projectId },
+  ]);
+  assert.deepEqual(context.latest().intake.get(projectId).sources.map((source) => source.id), ["waiting-1"]);
+});
+
+test("Work acceptance keeps waiting issues visible when content changes or import fails", async () => {
+  const projectId = [...fixtureState.projects.keys()][0];
+  const source = { id: "a1".repeat(16), project_id: projectId, revision: 4n, waiting: [{ number: 7n, content_hash: "ab".repeat(32) }] };
+  let mode = "changed";
+  const calls = [];
+  const context = harness({ intake: async (request) => {
+    calls.push(request);
+    if (request.action === "list") return { state: "ok", sources: [source] };
+    if (request.action === "accept" && mode === "changed") return { state: "content_changed" };
+    if (request.action === "accept") return { state: "accepted", acceptance_id: "receipt-2" };
+    if (request.action === "import") return { state: "content_changed" };
+    throw new Error(`unexpected intake action ${request.action}`);
+  } });
+  context.controller.start(); context.emitStatus("ready");
+  await context.controller.loadIntake(projectId);
+  await context.controller.intakeAction(projectId, { action: "accept", source_id: source.id, issue_number: 7n, content_hash: "cd".repeat(32), expected_revision: source.revision });
+  assert.deepEqual(context.latest().intake.get(projectId).sources, [source]);
+  assert.equal(context.latest().intake.get(projectId).state, "content_changed");
+  mode = "import-failed";
+  await context.controller.intakeAction(projectId, { action: "accept", source_id: source.id, issue_number: 7n, content_hash: "ab".repeat(32), expected_revision: source.revision });
+  assert.deepEqual(context.latest().intake.get(projectId).sources, [source]);
+  assert.equal(context.latest().intake.get(projectId).state, "content_changed");
+  assert.equal(calls.filter((request) => request.action === "list").length, 1);
+});
+
+test("a pending intake list cannot repopulate state after disconnect", async () => {
+  const projectId = [...fixtureState.projects.keys()][0];
+  let release;
+  const context = harness({ intake: async () => new Promise((resolve) => { release = resolve; }) });
+  context.controller.start(); context.emitStatus("ready");
+  const pending = context.controller.loadIntake(projectId);
+  context.emitStatus("closed");
+  release({ state: "ok", sources: [{ id: "late", project_id: projectId }] });
+  await pending;
+  assert.equal(context.latest().intake.has(projectId), false);
+});
+
+test("a pending repository read cannot repopulate state after disconnect", async () => {
+  const pending = deferred();
+  const context = harness({ getRepositories: () => pending.promise });
+  context.controller.start(); context.emitStatus("ready");
+  const read = context.controller.loadRepositories("project");
+  context.emitStatus("closed");
+  pending.resolve([{ root: "/private/late" }]);
+  await read;
+  assert.equal(context.latest().repositories.has("project"), false);
 });
 
 test("pairing is scrubbed before exact client construction and connection", () => {
@@ -174,17 +214,6 @@ test("status changes reach the host with finite closed reasons", () => {
   context.emitError(new SessionError("rate_limited", true));
   context.emitStatus("closed");
   assert.deepEqual(context.statusChanges.slice(2), [{ status: "ready" }, { status: "closed", reason: "connection" }]);
-});
-
-test("a browser reconnect clears private GitHub observations", async () => {
-  const authorization = { connection_id: "github", authorization_url: "https://github.com/login/oauth/authorize", expires_at: 123n };
-  const context = harness({ githubConnection: async (request) => request.action === "connect" ? { state: "ok", authorization } : { state: "ok", status: { connection_id: "github", state: "connected", repositories: [] } } });
-  context.controller.start();
-  context.emitStatus("ready");
-  await context.controller.githubConnection({ action: "connect" });
-  assert.equal(context.latest().github.result.authorization.connection_id, "github");
-  context.emitStatus("connecting");
-  assert.equal(context.latest().github.result, undefined);
 });
 
 test("status changes are deduplicated without affecting snapshot updates", () => {
@@ -240,7 +269,6 @@ test("task-detail pages cover a maximum outcome with one head and peer continuat
   assert.deepEqual(history, { taskId: task.id, entries: [] });
   context.controller.close();
 });
-
 test("a failed fragment scrub creates no client or browser effect", () => {
   let clients = 0;
   const snapshots = [];
@@ -937,78 +965,6 @@ test("a late path answer from an earlier revision only becomes a retained observ
   context.controller.watchRunPaths(false);
 });
 
-test("account discovery links once then refreshes its provider view", async () => {
-  const discovered = [];
-  const linked = [];
-  const updated = [];
-  const account = { provider: "codex", home: "/private/account", label: "work", email: "", organization: "", default_model: "", default_reasoning_effort: "", linked_id: "" };
-  const context = harness({
-    discoverAccounts: async () => { discovered.push(true); return [account]; },
-    updateAccount: async (request) => { updated.push(request); return { accountId: request.accountId, revision: request.expectedRevision + 1n }; },
-    linkAccount: async (request) => { linked.push(request); return { accountId: "00".repeat(16), revision: 1n }; },
-  });
-  context.controller.start();
-  context.emitStatus("ready");
-  await context.controller.loadAccounts();
-  assert.deepEqual(context.latest().accounts, [account]);
-  await context.controller.linkAccount({ provider: "codex", home: account.home, label: account.label });
-  assert.deepEqual(linked, [{ provider: "codex", home: account.home, label: account.label }]);
-  assert.equal(discovered.length, 2, "link refreshes the discovered provider view");
-  const request = { accountId: "00".repeat(16), expectedRevision: 1n, label: "personal" };
-  await context.controller.updateAccount(request);
-  assert.deepEqual(updated, [request]);
-  assert.equal(discovered.length, 3, "update refreshes the discovered provider view");
-  assert.equal(context.latest().accountsPending, false);
-});
-
-test("a remote invitation is offered, stored, dismissed, and its failure reported", async () => {
-  const context = harness();
-  context.controller.start();
-  context.emitStatus("ready");
-  assert.equal(context.latest().remoteInviteAllowed, true);
-  await context.controller.inviteRemote();
-  assert.deepEqual(context.latest().remoteInvite, { link: remoteInvite.link, svg: remoteInvite.svg, expiresAtMs: remoteInvite.expiresAtMs });
-  assert.equal(context.latest().remoteInviteError, undefined);
-  context.controller.dismissRemoteInvite();
-  assert.equal(context.latest().remoteInvite, undefined);
-
-  // The remote grant carries human_actions but never terminal_input: a paired
-  // phone is never offered the button that would propagate its own pairing.
-  for (const capabilities of [1, 7]) {
-    const weaker = harness({ capabilities });
-    weaker.controller.start();
-    weaker.emitStatus("ready");
-    assert.equal(weaker.latest().remoteInviteAllowed, false, String(capabilities));
-  }
-
-  // The mint is never retried: the finite code is what the console shows.
-  const failing = harness({ inviteRemote: async () => { throw new SessionError("not_found"); } });
-  failing.controller.start();
-  failing.emitStatus("ready");
-  await failing.controller.inviteRemote();
-  assert.equal(failing.latest().remoteInvite, undefined);
-  assert.equal(failing.latest().remoteInviteError, "not_found");
-});
-
-test("one invitation is minted at a time and a dropped connection leaves no stale code", async () => {
-  let mints = 0;
-  const release = deferred();
-  const context = harness({ inviteRemote: async () => { mints += 1; await release.promise; return remoteInvite; } });
-  context.controller.start();
-  context.emitStatus("ready");
-  const first = context.controller.inviteRemote();
-  await context.controller.inviteRemote();
-  assert.equal(mints, 1, "a second press while one mint is in flight is ignored");
-  release.resolve();
-  await first;
-  assert.equal(context.latest().remoteInvite.link, remoteInvite.link);
-
-  // The challenge belongs to the connection that minted it.
-  context.emitStatus("syncing");
-  assert.equal(context.latest().remoteInvite, undefined);
-  assert.equal(context.latest().remoteInviteAllowed, false);
-});
-
 test("closing the controller stops the run-paths timer", async (t) => {
   mock.timers.enable({ apis: ["setInterval"] });
   t.after(() => mock.timers.reset());
@@ -1100,88 +1056,6 @@ test("a structure arriving during a run-paths round is asked as soon as the roun
   assert.deepEqual(hidden, [runningAgentID]);
 });
 
-test("paired devices are listed on request, revoked once, then reread", async () => {
-  const listed = [];
-  const revoked = [];
-  const phone = { clientId: "70".repeat(16), capabilities: 7, revision: 1n, createdAtMs: 1767139200000n };
-  const context = harness({
-    listBrowserClients: async () => { listed.push(true); return { clients: listed.length === 1 ? [phone] : [], more: false }; },
-    revokeBrowserClient: async (request) => { revoked.push(request); return { clientId: request.clientId, revision: request.expectedRevision + 1n }; },
-  });
-  context.controller.start();
-  context.emitStatus("ready");
-  assert.equal(context.latest().ownClientId, "60".repeat(16));
-  await context.controller.loadDevices();
-  assert.deepEqual(context.latest().devices, { clients: [phone], more: false });
-  await context.controller.revokeDevice({ clientId: phone.clientId, expectedRevision: 1n });
-  assert.deepEqual(revoked, [{ clientId: phone.clientId, expectedRevision: 1n }]);
-  assert.equal(listed.length, 2, "a revocation rereads the list");
-  assert.deepEqual(context.latest().devices, { clients: [], more: false });
-
-  const failing = harness({ revokeBrowserClient: async () => { throw new SessionError("stale"); } });
-  failing.controller.start();
-  failing.emitStatus("ready");
-  await failing.controller.revokeDevice({ clientId: phone.clientId, expectedRevision: 1n });
-  assert.equal(failing.latest().devicesError, "stale");
-});
-
-
-test("repository mutation refusal survives its successful readback", async () => {
-  const projectId = [...fixtureState.projects.keys()][0];
-  let refuse = true;
-  const context = harness({
-    mutateRepository: async () => { if (refuse) throw new SessionError("stale"); },
-    getRepositories: async () => [],
-  });
-  const request = { action: "enabled", id: "61".repeat(16), projectId, expectedRevision: 1n, enabled: false };
-  context.controller.start();
-  context.emitStatus("ready");
-  await context.controller.mutateRepository(request);
-  assert.equal(context.latest().repositoryErrors.get(projectId), "stale");
-
-  await context.controller.loadRepositories(projectId);
-  assert.equal(context.latest().repositoryErrors.get(projectId), "stale");
-
-  refuse = false;
-  await context.controller.mutateRepository(request);
-  assert.equal(context.latest().repositoryErrors.has(projectId), false);
-});
-
-
-test("a successful repository retry clears only its own read error", async () => {
-  const projectId = [...fixtureState.projects.keys()][0];
-  let refuseRead = true;
-  const context = harness({ getRepositories: async () => { if (refuseRead) throw new SessionError("not_found"); return []; } });
-  context.controller.start();
-  context.emitStatus("ready");
-  await context.controller.loadRepositories(projectId);
-  assert.equal(context.latest().repositoryErrors.get(projectId), "not_found");
-  refuseRead = false;
-  await context.controller.loadRepositories(projectId);
-  assert.equal(context.latest().repositoryErrors.has(projectId), false);
-});
-
-
-test("explicit repository readiness survives without an unchecked readback", async () => {
-  const projectId = [...fixtureState.projects.keys()][0];
-  const repository = { id: "61".repeat(16), project_id: projectId, name: "Code", root: "/fixture/code", base_ref: "release", enabled: true, default: true, revision: 1n, fetch_state: "unchecked" };
-  let reads = 0;
-  const context = harness({
-    getRepositories: async () => { reads++; return [repository]; },
-    mutateRepository: async (request) => ({ ...repository, fetch_state: request.action === "fetch" ? "ready" : "unchecked", publication_state: request.action === "github" ? "ready" : "unchecked" }),
-  });
-  context.controller.start(); context.emitStatus("ready");
-  await context.controller.loadRepositories(projectId);
-  await context.controller.mutateRepository({ action: "fetch", projectId, repositoryId: repository.id });
-  assert.equal(reads, 1);
-  assert.equal(context.latest().repositories.get(projectId)[0].fetch_state, "ready");
-  await context.controller.mutateRepository({ action: "github", projectId, repositoryId: repository.id });
-  assert.equal(reads, 1);
-  assert.equal(context.latest().repositories.get(projectId)[0].fetch_state, "ready");
-  assert.equal(context.latest().repositories.get(projectId)[0].publication_state, "ready");
-});
-
-
 test("failed source preview cannot reuse another source's reviewed candidates or pagination", async () => {
   const projectId = [...fixtureState.projects.keys()][0];
   let rejectPreview;
@@ -1212,39 +1086,4 @@ test("failed source preview cannot reuse another source's reviewed candidates or
   assert.equal(context.latest().repositories.size, 0);
   assert.equal(context.latest().intake.size, 0);
   context.controller.close();
-});
-
-test("registering a checkout checks fetch and publication separately without losing readiness", async () => {
-  const projectId = [...fixtureState.projects.keys()][0];
-  const repository = { id: "61".repeat(16), project_id: projectId, name: "Code", root: "/fixture/code", base_ref: "release", enabled: true, default: true, revision: 1n, fetch_state: "unchecked" };
-  const calls = [];
-  const context = harness({
-    getRepositories: async () => [repository],
-    mutateRepository: async (request) => {
-      calls.push(request.action);
-      return { ...repository, fetch_state: request.action === "fetch" ? "setup_required" : "unchecked", publication_state: request.action === "github" ? "ready" : "unchecked" };
-    },
-  });
-  context.controller.start(); context.emitStatus("ready");
-  await context.controller.mutateRepository({ action: "add", projectId, name: repository.name, root: repository.root, baseRef: repository.base_ref });
-  assert.deepEqual(calls, ["add", "fetch", "github"]);
-  assert.equal(context.latest().repositories.get(projectId)[0].fetch_state, "setup_required");
-  assert.equal(context.latest().repositories.get(projectId)[0].publication_state, "ready");
-});
-
-test("registration finishing after disconnect cannot check remote access in a new session", async () => {
-  const projectId = [...fixtureState.projects.keys()][0];
-  let finish;
-  const calls = [];
-  const context = harness({ mutateRepository: async (request) => {
-    calls.push(request.action);
-    return new Promise((resolve) => { finish = resolve; });
-  } });
-  context.controller.start(); context.emitStatus("ready");
-  const pending = context.controller.mutateRepository({ action: "add", projectId, name: "Code", root: "/fixture/code", baseRef: "release" });
-  context.emitStatus("disconnected");
-  finish({ id: "61".repeat(16), revision: 1n });
-  await pending;
-  assert.deepEqual(calls, ["add"]);
-  assert.equal(context.latest().repositories.size, 0);
 });

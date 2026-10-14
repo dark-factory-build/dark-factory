@@ -428,8 +428,8 @@ SDK in the app, which the factory can add itself as an ordinary change.
   exporter. Each server invocation exports its own spans; static and
   CDN-cached responses run no code and send none, so they stay unknown, never
   idle.
-- **Secret.** The operator asks for one in the console (Settings → Devices &
-  pairing → Telemetry ingest).
+- **Secret.** The operator asks for one with `factoryctl telemetry ingest
+  --action mint` (use `status` to inspect or `revoke` to disable it).
   factoryd mints 32 random bytes, shows them once, and keeps only their
   SHA-256 in `<home>/ingest.sha256` (0600). Minting again rotates: the old
   secret stops at once. Revoking deletes the file.
