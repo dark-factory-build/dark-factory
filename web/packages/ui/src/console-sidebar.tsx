@@ -246,11 +246,8 @@ export type AddTask = (agent: AgentItem, instruction: string, mode: "queue" | "a
 /** One list for everything open: what needs you, what is in review, running and queued. */
 export function WorkPanel({
   state, rows, projectId, filter, onFilter, byMission, onByMission, missions, edit, ready, onEditTask, onAddTask, taskContent = [], onTaskContent = () => undefined, onLoadTaskDetail, onLoadTaskHistory,
-  selectedTaskId, onSelectTask, selectedHumanRequest, onSelectHumanRequest, onCloseHumanRequest, requestContent, onMission, sources, onManageSources, onIntakeAction, intake,
+  selectedTaskId, onSelectTask, selectedHumanRequest, onSelectHumanRequest, onCloseHumanRequest, requestContent, onMission, onIntakeAction, intake,
 }: {
-  /** The local source list for the shown project; undefined until loaded. */
-  sources?: readonly { id: string; repository: string; label: string; enabled: boolean }[];
-  onManageSources?: () => void;
   onIntakeAction?: (projectId: string, request: IntakeBody) => void;
   /** The shown project's last intake outcome. */
   intake?: Readonly<{ state?: string; failed: boolean; busy: boolean }>;

@@ -452,6 +452,52 @@ test("a task-less production row opens its pull request and keeps its stages", (
   assert.match(markup, /data-stage="in-review">in review/);
 });
 
+test("a Library-linked production record opens its PR and renders real review and CI stages", async () => {
+  const head = "c".repeat(40);
+  const observedAt = Date.now();
+  const records = [
+    { repository: "o/r", kind: "repository", id: "o/r", visual_id: "", observed_at: observedAt, document: {}, tasks: [], missions: [] },
+    { repository: "o/r", kind: "pull_request", id: "7", visual_id: "change:7", observed_at: observedAt, document: { number: 7, title: "Ship", url: "https://github.com/o/r/pull/7", head, state: "open", review: { head, state: "allow" } }, tasks: [], missions: [] },
+    { repository: "o/r", kind: "check", id: "ci", visual_id: "", observed_at: observedAt, document: { revision: head, scope: "head", state: "completed", conclusion: "success", pull_requests: [7] }, tasks: [], missions: [] },
+  ];
+  const linked = { id: "doc".repeat(16), revision: 1, latest_revision: 1, kind: "observation", title: "Release note", description: "", author: "worker", source_references: JSON.stringify({ record_id: "7", record_type: "pull_request" }) };
+  const priorDocument = globalThis.document, priorOpen = globalThis.open, priorAct = globalThis.IS_REACT_ACT_ENVIRONMENT;
+  globalThis.IS_REACT_ACT_ENVIRONMENT = true;
+  globalThis.document = { visibilityState: "visible", hidden: false, addEventListener() {}, removeEventListener() {} };
+  const opened = [];
+  globalThis.open = (...args) => { opened.push(args); return null; };
+  let tree;
+  try {
+    const call = async (operation, input) => {
+      if (operation === "production") return { records: input.project_id === ids.project ? records : [], next_offset: 0, total: input.project_id === ids.project ? records.length : 0 };
+      if (operation === "search") return { items: [linked], next_offset: 0 };
+      if (operation === "read") return linked;
+      if (operation === "body") return { body: "linked", complete: true };
+      if (operation === "history") return { items: [], next_offset: 0 };
+      throw new Error(`unexpected ${operation}`);
+    };
+    await act(async () => { tree = create(createElement(FactoryConsole, { status: "ready", state: fixtureState, detail: "work", onDetail() {}, onProjectContent: call })); });
+    await act(async () => { await new Promise((resolve) => setTimeout(resolve, 20)); });
+    const workMarkup = JSON.stringify(tree.toJSON());
+    assert.match(workMarkup, /Merge/);
+    assert.match(workMarkup, /CI passed/);
+    assert.doesNotMatch(workMarkup, /Production inspection/);
+    await act(async () => tree.root.findByType(FactoryFloor).props.onOpenLibrary(ids.project));
+    await act(async () => { await new Promise((resolve) => setTimeout(resolve, 50)); });
+    const library = tree.root.findByType(ProjectLibrary);
+    const releaseNote = library.findAllByType("button").find((button) => button.findAllByType("strong").some((strong) => textOf(strong) === "Release note"));
+    assert.ok(releaseNote);
+    await act(async () => releaseNote.props.onClick());
+    await act(async () => tree.root.findByType(ProjectLibrary).findAllByType("button").find((button) => textOf(button) === "Sources & history").props.onClick());
+    await act(async () => tree.root.findByType(ProjectLibrary).findAllByType("button").find((button) => textOf(button) === "View linked pull_request").props.onClick());
+    assert.deepEqual(opened, [["https://github.com/o/r/pull/7", "_blank", "noopener,noreferrer"]]);
+    assert.equal(tree.root.findAllByType(ProjectLibrary).length, 0);
+  } finally {
+    if (tree) await act(async () => tree.unmount());
+    globalThis.document = priorDocument; globalThis.open = priorOpen; globalThis.IS_REACT_ACT_ENVIRONMENT = priorAct;
+  }
+});
+
 test("a floor question opens its answer form even from By mission or a PR detail", async () => {
   const request = fixtureState.humanRequests.get(ids.request);
   let tree;
