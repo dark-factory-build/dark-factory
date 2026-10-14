@@ -805,6 +805,12 @@ test("a queued edit refusal remains visible after its task leaves the queue", ()
   }
 });
 
+test("agent panels render plain portraits without appearance editing", () => {
+  for (const view of VIEWS) {
+    const markup = render({ view, onSelectAgent: () => {}, selectedAgent: agentSelection(), graphs: fixtureGraphs });
+    assert.doesNotMatch(markup, /Edit appearance for|dfSpriteEditor/);
+  }
+});
 
 test("the floor stays on the left and the agent roster lives in the sidebar", () => {
   const floor = render({ detail: "agent" });
