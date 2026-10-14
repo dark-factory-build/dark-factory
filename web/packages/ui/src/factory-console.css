@@ -373,8 +373,7 @@
   font-size: var(--df-text-xs);
 }
 
-.dfFactoryConsole__steering,
-.dfFactoryConsole__history {
+.dfFactoryConsole__steering {
   display: grid;
   gap: 0.6rem;
   margin-top: 0.75rem;
@@ -390,13 +389,6 @@
   font: inherit;
   line-height: 1.5;
 }
-
-.dfFactoryConsole__history { border-top: 1px solid var(--df-console-rule); padding-top: 0.6rem; }
-.dfFactoryConsole__historyHeading { display: flex; align-items: center; justify-content: space-between; gap: 0.75rem; }
-.dfFactoryConsole__historyHeading h3 { margin: 0; font-size: var(--df-text-xs); }
-.dfFactoryConsole__history ol { display: grid; gap: 0.45rem; margin: 0; padding-left: 1.2rem; }
-.dfFactoryConsole__history li { display: grid; gap: 0.15rem; font-size: var(--df-text-xs); overflow-wrap: anywhere; }
-.dfFactoryConsole__history li span { color: var(--df-console-muted); }
 
 .dfFactoryConsole__pairPhone {
   display: grid;

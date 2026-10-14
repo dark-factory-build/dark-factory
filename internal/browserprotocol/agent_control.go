@@ -28,10 +28,6 @@ type AgentControlResult struct {
 	SuccessorTaskID string `json:"successor_task_id"`
 }
 
-type TaskHistoryGet struct {
-	TaskID string `json:"task_id"`
-}
-
 // TaskDetailGet reads private task text at one exact queued revision. The
 // browser never receives task bodies in a public state snapshot.
 type TaskDetailGet struct {
@@ -65,27 +61,12 @@ type TaskPeerQuestion struct {
 	CreatedAtMillis        Decimal `json:"created_at_ms"`
 	UpdatedAtMillis        Decimal `json:"updated_at_ms"`
 }
-type TaskHistory struct {
-	TaskID  string             `json:"task_id"`
-	Entries []TaskHistoryEntry `json:"entries"`
-}
-type TaskHistoryEntry struct {
-	OperationID     string  `json:"operation_id"`
-	Kind            string  `json:"kind"`
-	Actor           string  `json:"actor"`
-	Body            string  `json:"body"`
-	Status          string  `json:"status"`
-	CreatedAtMillis Decimal `json:"created_at_ms"`
-}
 
 func EncodeAgentControlResult(id string, value AgentControlResult) ([]byte, error) {
 	return encodeControl(TypeAgentControlResult, id, value)
 }
 func EncodeTaskDetail(id string, value TaskDetail) ([]byte, error) {
 	return encodeControl(TypeTaskDetail, id, value)
-}
-func EncodeTaskHistory(id string, value TaskHistory) ([]byte, error) {
-	return encodeControl(TypeTaskHistory, id, value)
 }
 
 func validAgentAction(action string) bool {
@@ -133,10 +114,6 @@ func validAgentControl(kind MessageType, body any) error {
 		} else if v.SuccessorTaskID != "" {
 			return bad()
 		}
-	case TaskHistoryGet:
-		if validateDynamicID(v.TaskID) != nil {
-			return bad()
-		}
 	case TaskDetailGet:
 		if validateDynamicID(v.TaskID) != nil || v.ExpectedRevision == 0 || v.TextOffset > MaxTaskDetailTextOffset || v.PeerOffset > MaxJSONArray || v.ExpectedHead != nil && *v.ExpectedHead == 0 || v.PeerOffset != 0 && v.ExpectedHead == nil {
 			return bad()
@@ -147,20 +124,6 @@ func validAgentControl(kind MessageType, body any) error {
 		}
 		for _, question := range v.PeerQuestions {
 			if validateDynamicID(question.ID) != nil || validateDynamicID(question.SourceTaskID) != nil || validateDynamicID(question.TargetTaskID) != nil || validateBoundedText(question.Question, 1, 2048) != nil || question.Answer != nil && validateBoundedText(*question.Answer, 0, 2048) != nil || !validPeerDeliveryState(question.RecipientDeliveryState) || !validPeerDeliveryState(question.AnswerDeliveryState) || question.Revision == 0 || question.CreatedAtMillis == 0 || question.UpdatedAtMillis < question.CreatedAtMillis {
-				return bad()
-			}
-		}
-	case TaskHistory:
-		if validateDynamicID(v.TaskID) != nil || v.Entries == nil || len(v.Entries) > MaxJSONArray {
-			return bad()
-		}
-		for _, entry := range v.Entries {
-			if validateDynamicID(entry.OperationID) != nil || !validAgentAction(entry.Kind) || validateBoundedText(entry.Actor, 1, 128) != nil || validateBoundedText(entry.Body, 0, 1024) != nil {
-				return bad()
-			}
-			switch entry.Status {
-			case "pending", "delivered", "unknown", "rejected":
-			default:
 				return bad()
 			}
 		}

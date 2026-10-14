@@ -179,14 +179,14 @@ test("a definite steering refusal is visible", () => {
   assert.match(markup, />Control not sent</);
 });
 
-test("active task control history stays mounted in a native disclosure", () => {
+test("the terminal has controls but no duplicated task history", () => {
   const markup = renderToStaticMarkup(createElement(TerminalContent, {
     terminal: terminalView({ taskTitle: "Standing inspection", controlReady: true }),
     controller: {},
   }));
-  assert.match(markup, /<details class="dfFactoryConsole__history" aria-label="Task control history"><summary>History<\/summary>/);
-  assert.match(markup, />Refresh<\/button>/);
-  assert.match(markup, />View conversation<\/button>/);
+  assert.equal(markup.includes("History"), false);
+  assert.match(markup, />Interrupt<\/button>/);
+  assert.match(markup, />Stop current<\/button>/);
 });
 
 test("a controller-owned draft and refusal survive the composer changing to a follow-up", () => {

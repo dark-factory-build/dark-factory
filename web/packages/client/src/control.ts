@@ -105,9 +105,6 @@ export type TaskEnqueueResultBody = { task_id: string; revision: bigint; agent_r
 export type AgentControlAction = "message" | "interrupt" | "stop" | "replace";
 export type AgentControlBody = { operation_id: string; task_id: string; run_id: string; expected_task_revision: bigint; expected_run_revision: bigint; action: AgentControlAction; instruction: string; successor_task_id: string; successor_incarnation_id: string };
 export type AgentControlResultBody = { operation_id: string; task_id: string; run_id: string; status: "delivered" | "delivery_unknown" | "rejected" | "stopping" | "queued"; successor_task_id: string };
-export type TaskHistoryGetBody = { task_id: string };
-export type TaskHistoryEntry = { operation_id: string; kind: AgentControlAction; actor: string; body: string; status: "pending" | "delivered" | "unknown" | "rejected"; created_at_ms: bigint };
-export type TaskHistoryBody = { task_id: string; entries: TaskHistoryEntry[] };
 export type TaskDetailGetBody = { task_id: string; expected_revision: bigint; text_offset?: bigint; peer_offset?: bigint; expected_head?: bigint };
 export type TaskPeerQuestion = { id: string; source_task_id: string; target_task_id: string; question: string; answer?: string; recipient_delivery_state: string; answer_delivery_state: string; revision: bigint; created_at_ms: bigint; updated_at_ms: bigint };
 export type TaskDetailBody = { task_id: string; revision: bigint; head: bigint; instruction: string; feedback: string; outcome?: string; next_text_offset?: bigint; peer_questions: TaskPeerQuestion[]; next_peer_offset?: bigint };
@@ -248,7 +245,6 @@ export type ServerControlFrame = { type: "FACTORY_DISPATCH_RESULT"; id: string; 
   | { type: "TASK_ATTACHMENT_RESULT"; id: string; body: TaskAttachmentResultBody }
   | { type: "TASK_ENQUEUE_RESULT"; id: string; body: TaskEnqueueResultBody }
   | { type: "AGENT_CONTROL_RESULT"; id: string; body: AgentControlResultBody }
-  | { type: "TASK_HISTORY"; id: string; body: TaskHistoryBody }
   | { type: "TASK_DETAIL"; id: string; body: TaskDetailBody }
   | { type: "AGENT_UPDATE_RESULT"; id: string; body: AgentUpdateResultBody }
   | { type: "PROJECT_LIMITS_RESULT"; id: string; body: ProjectLimitsResultBody }
@@ -275,7 +271,6 @@ export type ClientControlFrame = { type: "FACTORY_DISPATCH"; id: string; body: F
   | { type: "TASK_ATTACHMENT"; id: string; body: TaskAttachmentBody }
   | { type: "TASK_ENQUEUE"; id: string; body: TaskEnqueueBody }
   | { type: "AGENT_CONTROL"; id: string; body: AgentControlBody }
-  | { type: "TASK_HISTORY_GET"; id: string; body: TaskHistoryGetBody }
   | { type: "TASK_DETAIL_GET"; id: string; body: TaskDetailGetBody }
   | { type: "AGENT_UPDATE"; id: string; body: AgentUpdateBody }
   | { type: "PROJECT_LIMITS"; id: string; body: ProjectLimitsBody }
@@ -446,12 +441,6 @@ function validateBody(type: ControlType, body: unknown, wire: boolean): ControlB
       const successor_task_id = body.successor_task_id === "" ? "" : dynamicID(body.successor_task_id);
       if (body.status === "queued" ? successor_task_id === "" : successor_task_id !== "") malformed();
       return { operation_id: dynamicID(body.operation_id), task_id: dynamicID(body.task_id), run_id: dynamicID(body.run_id), status: body.status, successor_task_id };
-    }
-    case "TASK_HISTORY_GET": requireKeys(body, ["task_id"], wire); return { task_id: dynamicID(body.task_id) };
-    case "TASK_HISTORY": {
-      requireKeys(body, ["task_id", "entries"], wire);
-      if (!Array.isArray(body.entries) || body.entries.length > MAX_ARRAY_ITEMS) malformed();
-      return { task_id: dynamicID(body.task_id), entries: body.entries.map((entry) => taskHistoryEntry(entry, wire)) };
     }
     case "TASK_DETAIL_GET": { requireKeys(body, ["task_id", "expected_revision"], wire, ["text_offset", "peer_offset", "expected_head"]); const result: TaskDetailGetBody = { task_id: dynamicID(body.task_id), expected_revision: decimal(body.expected_revision, wire, true) }; if (present(body, "text_offset")) result.text_offset = decimal(body.text_offset, wire); if (present(body, "peer_offset")) result.peer_offset = decimal(body.peer_offset, wire); if (present(body, "expected_head")) result.expected_head = decimal(body.expected_head, wire, true); if ((result.peer_offset ?? 0n) !== 0n && result.expected_head === undefined) malformed(); return result; }
     case "TASK_DETAIL": requireKeys(body, ["task_id", "revision", "head", "instruction", "feedback", "peer_questions"], wire, ["outcome", "next_text_offset", "next_peer_offset"]); { if (!Array.isArray(body.peer_questions) || body.peer_questions.length > 1) malformed(); const result: TaskDetailBody = { task_id: dynamicID(body.task_id), revision: decimal(body.revision, wire, true), head: decimal(body.head, wire, true), instruction: boundedText(body.instruction, 0, MAX_TASK_INSTRUCTION_BYTES), feedback: boundedText(body.feedback, 0, MAX_TASK_INSTRUCTION_BYTES), peer_questions: body.peer_questions.map((item) => taskPeerQuestion(item, wire)) }; if (present(body, "outcome")) result.outcome = boundedText(body.outcome, 0, MAX_TASK_INSTRUCTION_BYTES); if (present(body, "next_text_offset")) result.next_text_offset = decimal(body.next_text_offset, wire, true); if (present(body, "next_peer_offset")) result.next_peer_offset = decimal(body.next_peer_offset, wire, true); return result; }
@@ -884,12 +873,6 @@ function sharedTaskItem(value: unknown, wire: boolean): TaskItem {
 function agentControlAction(value: unknown): AgentControlAction {
   if (value !== "message" && value !== "interrupt" && value !== "stop" && value !== "replace") malformed();
   return value;
-}
-function taskHistoryEntry(value: unknown, wire: boolean): TaskHistoryEntry {
-  if (!isObject(value)) malformed();
-  requireKeys(value, ["operation_id", "kind", "actor", "body", "status", "created_at_ms"], wire);
-  if (value.status !== "pending" && value.status !== "delivered" && value.status !== "unknown" && value.status !== "rejected") malformed();
-  return { operation_id: dynamicID(value.operation_id), kind: agentControlAction(value.kind), actor: boundedText(value.actor, 1, MAX_AGENT_NAME_BYTES), body: boundedText(value.body, 0, 1024), status: value.status, created_at_ms: decimal(value.created_at_ms, wire) };
 }
 function taskPeerQuestion(value: unknown, wire: boolean): TaskPeerQuestion {
   if (!isObject(value)) malformed();

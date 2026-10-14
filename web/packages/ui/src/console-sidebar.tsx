@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState, type ReactNode } from "react";
-import { MAX_TASK_ATTACHMENTS, MAX_TASK_ATTACHMENT_BYTES, type IntakeView, type IntakeBody, type DiscoveredAccount, type AgentItem, type GitHubConnectionBody, type GitHubDelegationBody, type HumanRequestItem, type ProjectItem, type RunTelemetry, type RepositoryView, type StateView, type TaskHistoryView, type TaskItem, type TaskPeerQuestion, type TaskContentPin } from "@dark-factory/client";
+import { MAX_TASK_ATTACHMENTS, MAX_TASK_ATTACHMENT_BYTES, type IntakeView, type IntakeBody, type DiscoveredAccount, type AgentItem, type GitHubConnectionBody, type GitHubDelegationBody, type HumanRequestItem, type ProjectItem, type RunTelemetry, type RepositoryView, type StateView, type TaskItem, type TaskPeerQuestion, type TaskContentPin } from "@dark-factory/client";
 import type { FactoryEditView, FactoryHumanRequestView } from "./factory-app-controller.js";
 import { rankLabel } from "./console-screens.js";
 import { AgentSprite } from "./factory-scene/factory-scene.js";
@@ -122,26 +122,19 @@ export function ConsoleDialog({ label, title, className = "", onClose, children 
   </dialog>;
 }
 
-export function TaskDetail({ task, onLoadTaskDetail, onLoadTaskHistory }: {
+export function TaskDetail({ task, onLoadTaskDetail }: {
   task: TaskItem;
   onLoadTaskDetail?: (task: TaskItem, peerOffset?: bigint, expectedHead?: bigint) => Promise<TaskBrief>;
-  onLoadTaskHistory?: (task: TaskItem) => Promise<TaskHistoryView>;
 }) {
   const detailLoader = useRef(onLoadTaskDetail);
-  const historyLoader = useRef(onLoadTaskHistory);
   detailLoader.current = onLoadTaskDetail;
-  historyLoader.current = onLoadTaskHistory;
   const [brief, setBrief] = useState<TaskBrief>();
   const [detailError, setDetailError] = useState(false);
-  const [history, setHistory] = useState<TaskHistoryView>();
-  const [historyError, setHistoryError] = useState(false);
   const [olderPending, setOlderPending] = useState(false);
   useEffect(() => {
     let live = true;
     setDetailError(false);
-    setHistoryError(false);
     void detailLoader.current?.(task).then((loaded) => { if (live) { setBrief(loaded); setDetailError(false); } }).catch(() => { if (live) setDetailError(true); });
-    void historyLoader.current?.(task).then((loaded) => { if (live) { setHistory(loaded); setHistoryError(false); } }).catch(() => { if (live) setHistoryError(true); });
     return () => { live = false; };
   }, [task.id, task.revision]);
   const taskDate = formatTime(task.updated_at_ms);
@@ -161,10 +154,6 @@ export function TaskDetail({ task, onLoadTaskDetail, onLoadTaskHistory }: {
         void load(task, brief.nextPeerOffset, brief.head).then((loaded) => { setBrief(loaded); setDetailError(false); }).catch(() => setDetailError(true)).finally(() => setOlderPending(false));
       }} />}
     </>}
-    <details><summary>History</summary>
-      {historyError ? <p role="alert">The factory refused this history</p> : onLoadTaskHistory === undefined ? <p>History unavailable</p> : history === undefined ? <p>Loading history</p> : history.entries.length === 0 ? <p>No history.</p> : <ol>{history.entries.map((entry) => <li key={entry.operationId}><strong>{entry.kind} · {entry.status}</strong><p>{entry.actor}{entry.body === "" ? "" : ` · ${entry.body}`}</p><time>{formatTime(entry.createdAtMs)}</time></li>)}</ol>}
-      {history?.entries.length === 32 ? <p>Showing the newest 32 events.</p> : null}
-    </details>
   </article>;
 }
 
@@ -189,7 +178,7 @@ export type AddTask = (agent: AgentItem, instruction: string, mode: "queue" | "a
 
 /** One list for everything open: what needs you, what is in review, running and queued. */
 export function WorkPanel({
-  state, rows, projectId, filter, onFilter, byMission, onByMission, missions, edit, ready, onEditTask, onAddTask, taskContent = [], onTaskContent = () => undefined, onLoadTaskDetail, onLoadTaskHistory,
+  state, rows, projectId, filter, onFilter, byMission, onByMission, missions, edit, ready, onEditTask, onAddTask, taskContent = [], onTaskContent = () => undefined, onLoadTaskDetail,
   selectedTaskId, onSelectTask, selectedHumanRequest, onSelectHumanRequest, onCloseHumanRequest, requestContent, onMission, onIntakeAction, intake,
 }: {
   onIntakeAction?: (projectId: string, request: IntakeBody) => void;
@@ -214,7 +203,6 @@ export function WorkPanel({
   taskContent?: readonly TaskContentChip[];
   onTaskContent?: (content: readonly TaskContentChip[]) => void;
   onLoadTaskDetail?: (task: TaskItem, peerOffset?: bigint, expectedHead?: bigint) => Promise<TaskBrief>;
-  onLoadTaskHistory?: (task: TaskItem) => Promise<TaskHistoryView>;
   selectedHumanRequest?: FactoryHumanRequestView;
   onSelectHumanRequest?: (request: HumanRequestItem) => void;
   onCloseHumanRequest?: () => void;

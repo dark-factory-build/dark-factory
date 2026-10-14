@@ -3,8 +3,6 @@ package daemon
 import (
 	"context"
 	"errors"
-	"strings"
-	"unicode/utf8"
 
 	"github.com/dark-factory-build/dark-factory/internal/browser"
 	"github.com/dark-factory-build/dark-factory/internal/browserprotocol"
@@ -91,54 +89,6 @@ func (backend *browserBackend) ControlAgent(ctx context.Context, principal brows
 		result.Status = "rejected"
 	default:
 		result.Status = "delivery_unknown"
-	}
-	return result, nil
-}
-
-// TaskHistory reads explicit interventions only. Observers cannot retrieve
-// private message text through the public state snapshot.
-func (backend *browserBackend) TaskHistory(ctx context.Context, rawClient [browserprotocol.ClientIDSize]byte, request browserprotocol.TaskHistoryGet) (browserprotocol.TaskHistory, error) {
-	_, release, _, err := backend.authorize(ctx, rawClient, kernel.BrowserCapabilityPrivateHumanRequestDetail)
-	if err != nil {
-		return browserprotocol.TaskHistory{}, err
-	}
-	defer release()
-	taskID, err := decodeID(request.TaskID, kernel.TaskIDFromBytes)
-	if err != nil {
-		return browserprotocol.TaskHistory{}, browser.ErrStale
-	}
-	task, found, err := backend.store.Task(ctx, taskID)
-	if err != nil {
-		return browserprotocol.TaskHistory{}, err
-	}
-	if !found {
-		return browserprotocol.TaskHistory{}, browser.ErrNotFound
-	}
-	history, err := backend.store.TaskInterventions(ctx, task.ProjectID, taskID)
-	if err != nil {
-		return browserprotocol.TaskHistory{}, err
-	}
-	result := browserprotocol.TaskHistory{TaskID: request.TaskID, Entries: []browserprotocol.TaskHistoryEntry{}}
-	for _, item := range history {
-		body := item.Payload
-		if item.Kind == kernel.TaskInterventionReplace && item.SuccessorTaskID != nil {
-			body = "Replaced by task " + item.SuccessorTaskID.String()
-		}
-		if len(body) > 1024 {
-			body = body[:1024]
-			for !utf8.ValidString(body) {
-				body = body[:len(body)-1]
-			}
-		}
-		result.Entries = append(result.Entries, browserprotocol.TaskHistoryEntry{OperationID: item.OperationID.String(), Kind: item.Kind.String(), Actor: item.Actor.String(), Body: body, Status: item.State.String(), CreatedAtMillis: browserprotocol.Decimal(item.CreatedAt.Int64())})
-		// Escaped text can occupy more wire bytes than UTF-8 storage. Keep the
-		// newest complete entries inside the control-frame bound.
-		if _, err := browserprotocol.EncodeTaskHistory(strings.Repeat("x", 64), result); errors.Is(err, browserprotocol.ErrOversized) {
-			result.Entries = result.Entries[:len(result.Entries)-1]
-			break
-		} else if err != nil {
-			return browserprotocol.TaskHistory{}, err
-		}
 	}
 	return result, nil
 }

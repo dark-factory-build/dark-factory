@@ -11,7 +11,7 @@ import (
 	"github.com/dark-factory-build/dark-factory/internal/kernel"
 )
 
-func TestBrowserAgentReplacementPreservesHistoryAndProviderLimit(t *testing.T) {
+func TestBrowserAgentReplacementPreservesProviderLimit(t *testing.T) {
 	fixture := newAdapterFixture(t, kernel.BrowserCapabilityObserve|kernel.BrowserCapabilityHumanActions|kernel.BrowserCapabilityPrivateHumanRequestDetail)
 	fixture.pair(t)
 	run := adapterRunningRun(t, fixture.store, 170)
@@ -32,22 +32,6 @@ func TestBrowserAgentReplacementPreservesHistoryAndProviderLimit(t *testing.T) {
 	result, err := fixture.backend.ControlAgent(context.Background(), principal, request)
 	if err != nil || result.Status != "queued" || result.SuccessorTaskID != request.SuccessorTaskID {
 		t.Fatalf("replace result: %+v %v", result, err)
-	}
-	history, err := fixture.backend.TaskHistory(context.Background(), rawBrowserClient(fixture.client.ID), browserprotocol.TaskHistoryGet{TaskID: task.ID.String()})
-	if err != nil || len(history.Entries) != 1 || history.Entries[0].Kind != "replace" || history.Entries[0].Status != "delivered" || !strings.Contains(history.Entries[0].Body, request.SuccessorTaskID) {
-		t.Fatalf("history: %+v %v", history, err)
-	}
-	if _, err := browserprotocol.EncodeTaskHistory("history", history); err != nil {
-		t.Fatal(err)
-	}
-}
-
-func TestBrowserTaskHistoryRequiresPrivateTextCapability(t *testing.T) {
-	fixture := newAdapterFixture(t, kernel.BrowserCapabilityObserve|kernel.BrowserCapabilityHumanActions)
-	fixture.pair(t)
-	run := adapterRunningRun(t, fixture.store, 170)
-	if _, err := fixture.backend.TaskHistory(context.Background(), rawBrowserClient(fixture.client.ID), browserprotocol.TaskHistoryGet{TaskID: run.TaskID.String()}); !errors.Is(mapBrowserError(err), browser.ErrUnauthorized) {
-		t.Fatalf("private history exposed: %v", err)
 	}
 }
 

@@ -15,7 +15,6 @@ import {
   type BrowserSessionOptions,
   type AgentItem,
   type AgentControlAction,
-  type TaskHistoryView,
   type TaskDetailView,
   type HumanRequestItem,
   type SessionErrorCode,
@@ -94,12 +93,6 @@ export type FactoryTerminalView = Readonly<{
   controlPending?: AgentControlAction;
   controlError?: SessionError | ProtocolError;
   controlStatus?: "delivered" | "delivery_unknown" | "rejected" | "stopping" | "queued";
-  /** Explicit durable receipts only; terminal keystrokes and output stay local. */
-  history?: TaskHistoryView;
-  historyPending: boolean;
-  taskDetail?: TaskDetailView;
-  taskDetailPending: boolean;
-  taskDetailError?: SessionError | ProtocolError;
   controlReady: boolean;
   queued: boolean;
   /** The mounted Xterm scrollback belongs to this agent's completed work. */
@@ -147,7 +140,7 @@ export type FactoryAppStatus =
 
 type HumanSession = Pick<BrowserSession, "getHumanRequestDetail" | "replyHumanRequest" | "cancelHumanRequest">;
 type TerminalSession = Pick<BrowserSession, "resolveAgentTerminal" | "openTerminal" | "close">;
-type AgentTaskSession = Pick<BrowserSession, "enqueueAgentTaskWithFiles" | "enqueueAgentTask" | "controlAgent" | "getTaskHistory" | "getTaskDetail" | "resolveAgentTerminal">;
+type AgentTaskSession = Pick<BrowserSession, "enqueueAgentTaskWithFiles" | "enqueueAgentTask" | "controlAgent" | "getTaskDetail" | "resolveAgentTerminal">;
 type ConsoleSession = Pick<BrowserSession, "createProject" | "getRepositories" | "intake" | "updateTask" | "getOperationalGraph" | "getOperationalNode" | "getRunPaths" | "discoverAccounts" | "linkAccount" | "listBrowserClients" | "revokeBrowserClient" | "githubConnection" | "clientId">;
 type RemoteInviteSession = Pick<BrowserSession, "inviteRemote" | "capabilities">;
 type ControlledClient = Pick<BrowserClient, "connect" | "close"> & { readonly session?: HumanSession & TerminalSession & AgentTaskSession & ConsoleSession & RemoteInviteSession & Partial<Pick<BrowserSession, "projectContent" | "setDispatch">> };
@@ -182,16 +175,6 @@ type AgentTerminalSelection = {
   controlPending?: AgentControlAction;
   controlError?: SessionError | ProtocolError;
   controlStatus?: FactoryTerminalView["controlStatus"];
-  history?: TaskHistoryView;
-  historyTaskID?: string;
-  historyTaskRevision?: bigint;
-  historyPendingTaskRevision?: bigint;
-  historyPending: boolean;
-  taskDetail?: TaskDetailView;
-  taskDetailTaskID?: string;
-  taskDetailTaskRevision?: bigint;
-  taskDetailPending: boolean;
-  taskDetailError?: SessionError | ProtocolError;
   queuedTaskID?: string;
 };
 
@@ -566,13 +549,6 @@ export class FactoryAppController {
     return this.#readTaskDetail(session, task.id, task.revision, peerOffset, expectedHead);
   }
 
-  /** Read one task's durable interventions only after the operator opens it. */
-  taskHistory(task: Pick<TaskItem, "id">): Promise<TaskHistoryView> {
-    const session = this.#client?.session;
-    if (this.#closed || this.#status !== "ready" || session === undefined) return Promise.reject(new SessionError("closed"));
-    return session.getTaskHistory(task.id);
-  }
-
   clearAgentTerminal(): void {
     if (this.#closed) return;
     this.#replaceTerminal({});
@@ -698,7 +674,6 @@ export class FactoryAppController {
       selected.controlStatus = result.status;
       selected.controlError = result.status === "delivery_unknown" ? new SessionError("connection") : undefined;
       this.#publish();
-      void this.#loadTaskHistory(selected, task.id);
       return result.status !== "delivery_unknown" && result.status !== "rejected";
     } catch (error) {
       if (!this.#current(generation) || this.#selectedAgent !== selected) return false;
@@ -707,27 +682,6 @@ export class FactoryAppController {
       this.#publish();
       return false;
     }
-  }
-
-  loadTaskHistory(): void {
-    const selected = this.#selectedAgent;
-    const taskID = selected?.task?.id ?? selected?.historyTaskID;
-    if (selected !== undefined && taskID !== undefined) void this.#loadTaskHistory(selected, taskID);
-  }
-
-  loadTaskDetail(): void {
-    const selected = this.#selectedAgent;
-    const taskID = selected?.historyTaskID;
-    const revision = selected?.historyTaskRevision;
-    if (selected !== undefined && taskID !== undefined && revision !== undefined) void this.#loadTaskDetail(selected, taskID, revision);
-  }
-
-  loadOlderTaskConversation(): void {
-    const selected = this.#selectedAgent;
-    const detail = selected?.taskDetail;
-    const taskID = selected?.historyTaskID;
-    const revision = selected?.historyTaskRevision;
-    if (selected !== undefined && detail?.nextPeerOffset !== undefined && taskID !== undefined && revision !== undefined) void this.#loadTaskDetail(selected, taskID, revision, detail.nextPeerOffset, detail.head);
   }
 
   /** The provider logins on this machine; SETTINGS explicitly asks for them. */
@@ -1165,57 +1119,6 @@ export class FactoryAppController {
     this.#pendingTerminalInput = new Uint8Array(0);
   }
 
-  async #loadTaskHistory(selected: AgentTerminalSelection, taskID: string): Promise<void> {
-    const session = this.#client?.session;
-    if (this.#closed || this.#status !== "ready" || session === undefined || selected.historyPending) return;
-    const generation = this.#generation;
-    const taskRevision = selected.task?.id === taskID ? selected.task.revision : undefined;
-    selected.historyPending = true;
-    selected.historyPendingTaskRevision = taskRevision;
-    this.#publish();
-    try {
-      const history = await session.getTaskHistory(taskID);
-      if (!this.#current(generation) || this.#selectedAgent !== selected || history.taskId !== taskID || (taskRevision !== undefined && (selected.task?.id !== taskID || selected.task.revision !== taskRevision))) return;
-      selected.history = history;
-      selected.historyTaskID = taskID;
-      selected.historyTaskRevision = taskRevision;
-    } catch (error) {
-      if (!this.#current(generation) || this.#selectedAgent !== selected) return;
-      selected.controlError = finiteError(error);
-    } finally {
-      if (this.#current(generation) && this.#selectedAgent === selected) {
-        selected.historyPending = false;
-        selected.historyPendingTaskRevision = undefined;
-        this.#publish();
-        if (selected.task?.id === taskID && selected.task.revision !== taskRevision) void this.#loadTaskHistory(selected, taskID);
-      }
-    }
-  }
-
-  async #loadTaskDetail(selected: AgentTerminalSelection, taskID: string, revision: bigint, peerOffset = 0n, expectedHead?: bigint): Promise<void> {
-    const session = this.#client?.session;
-    if (this.#closed || this.#status !== "ready" || session === undefined || selected.taskDetailPending) return;
-    const generation = this.#generation;
-    selected.taskDetailPending = true;
-    selected.taskDetailError = undefined;
-    this.#publish();
-    try {
-      const detail = await this.#readTaskDetail(session, taskID, revision, peerOffset, expectedHead);
-      if (!this.#current(generation) || this.#selectedAgent !== selected || detail.taskId !== taskID || detail.revision !== revision) return;
-      selected.taskDetail = detail;
-      selected.taskDetailTaskID = taskID;
-      selected.taskDetailTaskRevision = revision;
-    } catch (error) {
-      if (!this.#current(generation) || this.#selectedAgent !== selected) return;
-      selected.taskDetailError = finiteError(error);
-    } finally {
-      if (this.#current(generation) && this.#selectedAgent === selected) {
-        selected.taskDetailPending = false;
-        this.#publish();
-      }
-    }
-  }
-
   async #readTaskDetail(session: AgentTaskSession, taskID: string, revision: bigint, peerOffset: bigint, expectedHead?: bigint): Promise<TaskDetailView> {
     let textOffset = 0n;
     let instruction = "";
@@ -1257,23 +1160,7 @@ export class FactoryAppController {
     const changedTask = selected.task?.id !== current?.id;
     selected.task = current;
     selected.finishing = false;
-    // A terminal can settle between snapshots. Keep its final revision for
-    // the private history reader rather than asking with the running revision.
-    if (current === undefined && previous !== undefined) {
-      const completed = state.tasks.get(previous.id);
-      if (completed !== undefined) {
-        selected.historyTaskID = completed.id;
-        selected.historyTaskRevision = completed.revision;
-        selected.taskDetail = undefined;
-      }
-    }
     if (current !== undefined && selected.instructionDraft === "") selected.instructionError = undefined;
-    if (current !== undefined && (selected.historyTaskID !== current.id || selected.historyTaskRevision !== current.revision)) {
-      selected.historyTaskID = current.id;
-      selected.history = undefined;
-		selected.taskDetail = undefined;
-      void this.#loadTaskHistory(selected, current.id);
-    }
     if (changedTask) this.#dropPendingTerminalInput();
   }
 
@@ -1332,13 +1219,10 @@ export class FactoryAppController {
       instructionAttempt: sameAgent ? prior.instructionAttempt : 0,
       instructionError: sameAgent ? prior.instructionError : undefined,
       instructionPending: sameAgent ? prior.instructionPending : false,
-      historyPending: false,
-		taskDetailPending: false,
       queuedTaskID: queuedTask?.id,
     };
     this.#error = replacement.error ?? (replacement.agentId !== undefined && agent === undefined ? new SessionError("stale") : undefined);
     this.#publish();
-    if (this.#selectedAgent?.task !== undefined) void this.#loadTaskHistory(this.#selectedAgent, this.#selectedAgent.task.id);
     return true;
   }
 
@@ -1421,11 +1305,6 @@ export class FactoryAppController {
         controlPending: this.#selectedAgent.controlPending,
         controlError: this.#selectedAgent.controlError,
         controlStatus: this.#selectedAgent.controlStatus,
-        history: this.#selectedAgent.history,
-        historyPending: this.#selectedAgent.historyPending,
-		taskDetail: this.#selectedAgent.taskDetail,
-		taskDetailPending: this.#selectedAgent.taskDetailPending,
-		taskDetailError: this.#selectedAgent.taskDetailError,
         controlReady: this.#selectedAgent.task !== undefined && !this.#selectedAgent.finishing && this.#terminal?.snapshot.phase === "ready",
         queued: this.#selectedAgent.queuedTaskID !== undefined && this.#selectedAgent.task === undefined,
         hasOutputSurface: this.#terminalSurface !== undefined,

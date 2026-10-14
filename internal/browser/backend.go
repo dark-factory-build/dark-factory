@@ -250,7 +250,6 @@ type TerminalBackend interface {
 type AgentControlBackend interface {
 	Backend
 	ControlAgent(context.Context, Principal, browserprotocol.AgentControl) (browserprotocol.AgentControlResult, error)
-	TaskHistory(context.Context, [browserprotocol.ClientIDSize]byte, browserprotocol.TaskHistoryGet) (browserprotocol.TaskHistory, error)
 	TaskDetail(context.Context, [browserprotocol.ClientIDSize]byte, browserprotocol.TaskDetailGet) (browserprotocol.TaskDetail, error)
 }
 

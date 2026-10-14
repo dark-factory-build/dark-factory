@@ -12,8 +12,7 @@ import (
 
 type agentControlTestBackend struct {
 	*fakeBackend
-	mismatch   bool
-	historyErr error
+	mismatch bool
 }
 
 var _ AgentControlBackend = (*agentControlTestBackend)(nil)
@@ -24,9 +23,6 @@ func (b *agentControlTestBackend) ControlAgent(_ context.Context, _ Principal, r
 		result.OperationID = strings.Repeat("04", 16)
 	}
 	return result, nil
-}
-func (b *agentControlTestBackend) TaskHistory(_ context.Context, _ [16]byte, r browserprotocol.TaskHistoryGet) (browserprotocol.TaskHistory, error) {
-	return browserprotocol.TaskHistory{TaskID: r.TaskID, Entries: []browserprotocol.TaskHistoryEntry{}}, b.historyErr
 }
 
 // classifyingBackend names context errors the way the daemon does, so the test
@@ -50,9 +46,6 @@ func TestEveryMethodErrorIsClassifiedOnceAtTheFrame(t *testing.T) {
 		"target": func(id string) ([]byte, error) {
 			return testEncodeTerminalTargetGet(id, browserprotocol.TerminalTargetGet{AgentID: strings.Repeat("01", 16), ExpectedAgentRevision: 1, ExpectedHead: 7})
 		},
-		"history": func(id string) ([]byte, error) {
-			return testEncodeTaskHistoryGet(id, browserprotocol.TaskHistoryGet{TaskID: strings.Repeat("02", 16)})
-		},
 	}
 	for _, test := range []struct {
 		cause     error
@@ -65,7 +58,7 @@ func TestEveryMethodErrorIsClassifiedOnceAtTheFrame(t *testing.T) {
 	} {
 		fake := newFakeBackend()
 		fake.stateErr, fake.subErr, fake.detailErr, fake.targetErr = test.cause, test.cause, test.cause, test.cause
-		server := startTaskServer(t, classifyingBackend{&agentControlTestBackend{fakeBackend: fake, historyErr: test.cause}})
+		server := startTaskServer(t, classifyingBackend{&agentControlTestBackend{fakeBackend: fake}})
 		connection, _ := dialServer(t, server, testOrigin)
 		authenticate(t, connection)
 		for name, encode := range requests {
@@ -103,15 +96,6 @@ func TestAgentControlTransportCorrelatesDurableOperation(t *testing.T) {
 			}
 			if frame.Type != browserprotocol.TypeAgentControlResult || frame.ID != "control" || frame.Body.(browserprotocol.AgentControlResult).OperationID != request.OperationID {
 				t.Fatalf("result: %+v", frame)
-			}
-			payload, err = testEncodeTaskHistoryGet("history", browserprotocol.TaskHistoryGet{TaskID: request.TaskID})
-			if err != nil {
-				t.Fatal(err)
-			}
-			writeClientFrame(t, connection, payload)
-			frame = readServerFrame(t, connection)
-			if frame.Type != browserprotocol.TypeTaskHistory || frame.ID != "history" || frame.Body.(browserprotocol.TaskHistory).TaskID != request.TaskID {
-				t.Fatalf("history: %+v", frame)
 			}
 			payload, err = testEncodeTaskDetailGet("detail", browserprotocol.TaskDetailGet{TaskID: request.TaskID, ExpectedRevision: request.ExpectedTaskRevision})
 			if err != nil {

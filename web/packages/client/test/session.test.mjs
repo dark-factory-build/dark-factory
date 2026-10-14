@@ -18,7 +18,7 @@ import {
   encodeServerControl,
 } from "../dist/src/index.js";
 import { settle } from "./remote-fake.mjs";
-import { encodeAgentControlResult, encodeAuthResult, encodeHello, encodeHumanRequestCancelRunResult, encodeHumanRequestDetail, encodeHumanRequestReplyResult, encodePairResult, encodeProjectCreateResult, encodeRemoteInviteResult, encodeRepositories, encodeServerError, encodeStateChanged, encodeStateSnapshot, encodeTaskDetail, encodeTaskEnqueueResult, encodeTaskHistory, encodeTerminalAttached, encodeTerminalExit, encodeTerminalReset, encodeTerminalTarget } from "./server-frames.mjs";
+import { encodeAgentControlResult, encodeAuthResult, encodeHello, encodeHumanRequestCancelRunResult, encodeHumanRequestDetail, encodeHumanRequestReplyResult, encodePairResult, encodeProjectCreateResult, encodeRemoteInviteResult, encodeRepositories, encodeServerError, encodeStateChanged, encodeStateSnapshot, encodeTaskDetail, encodeTaskEnqueueResult, encodeTerminalAttached, encodeTerminalExit, encodeTerminalReset, encodeTerminalTarget } from "./server-frames.mjs";
 
 const challenge = "11".repeat(32);
 const daemonID = "22".repeat(16);
@@ -375,12 +375,6 @@ test("agent controls and private task history keep exact task and run identities
   socket.reply(encodeAgentControlResult(control.id, { operation_id: operationId, task_id: taskId, run_id: runID, status: "delivered", successor_task_id: "" }));
   assert.deepEqual(await controlled, { operationId, taskId, runId: runID, status: "delivered", successorTaskId: "" });
 
-  const history = session.getTaskHistory(taskId);
-  const historyGet = decodeClientControl(socket.sent.at(-1));
-  assert.deepEqual(historyGet.body, { task_id: taskId });
-  socket.reply(encodeTaskHistory(historyGet.id, { task_id: taskId, entries: [{ operation_id: operationId, kind: "interrupt", actor: "operator", body: "", status: "delivered", created_at_ms: 100n }] }));
-  assert.deepEqual(await history, { taskId, entries: [{ operationId, kind: "interrupt", actor: "operator", body: "", status: "delivered", createdAtMs: 100n }] });
-
   const taskDetail = session.getTaskDetail(taskId, 2n, { peerOffset: 1n, expectedHead: 9n });
   const taskDetailGet = decodeClientControl(socket.sent.at(-1));
   assert.deepEqual(taskDetailGet.body, { task_id: taskId, expected_revision: 2n, peer_offset: 1n, expected_head: 9n });
@@ -393,18 +387,16 @@ test("agent controls and private task history keep exact task and run identities
 test("ordinary private task reads retain correlation, authority and shared pending cleanup", async (t) => {
   const taskId = "7a".repeat(16);
   const reads = [
-    { name: "history", request: (session, id = taskId) => session.getTaskHistory(id), reply: (id, changes = {}) => encodeTaskHistory(id, { task_id: taskId, entries: [], ...changes }) },
     { name: "detail", request: (session, id = taskId) => session.getTaskDetail(id, 2n), reply: (id, changes = {}) => encodeTaskDetail(id, { task_id: taskId, revision: 2n, head: 9n, instruction: "", feedback: "", peer_questions: [], ...changes }) },
   ];
   for (const read of reads) {
-    for (const fault of ["type", "identity", ...(read.name === "detail" ? ["revision"] : [])]) {
+    for (const fault of ["identity", ...(read.name === "detail" ? ["revision"] : [])]) {
       await t.test(`${read.name}: wrong ${fault} closes and rejects`, async () => {
         const { session, socket } = await openHumanSession();
         const pending = read.request(session);
         const rejected = assert.rejects(pending, { code: "malformed" });
         const id = decodeClientControl(socket.sent.at(-1)).id;
-        const reply = fault === "type" ? reads.find((other) => other !== read).reply : read.reply;
-        socket.reply(reply(id, fault === "identity" ? { task_id: "7b".repeat(16) } : fault === "revision" ? { revision: 3n } : {}));
+        socket.reply(read.reply(id, fault === "identity" ? { task_id: "7b".repeat(16) } : { revision: 3n }));
         await rejected;
         assert.equal(socket.readyState, 3);
       });
@@ -429,41 +421,6 @@ test("ordinary private task reads retain correlation, authority and shared pendi
       session.close();
     });
   }
-  await t.test("mixed reads settle out of order, reject ERROR and close once", async () => {
-    const { session, socket } = await openHumanSession();
-    const history = reads[0].request(session);
-    const historyId = decodeClientControl(socket.sent.at(-1)).id;
-    const detail = reads[1].request(session);
-    socket.reply(reads[1].reply(decodeClientControl(socket.sent.at(-1)).id));
-    assert.equal((await detail).revision, 2n);
-    const rejected = assert.rejects(history, { code: "stale", retryable: true });
-    socket.reply(encodeServerError({ code: "stale", retryable: true }, historyId));
-    await rejected;
-    assert.equal(session.status, "ready");
-    const closed = reads.map((read) => assert.rejects(read.request(session), { code: "closed" }));
-    session.close();
-    await Promise.all(closed);
-    for (const read of reads) await assert.rejects(read.request(session), { code: "closed" });
-  });
-  await t.test("send failure rejects every pending read and fences the session", async () => {
-    const { session, socket } = await openHumanSession();
-    const history = assert.rejects(reads[0].request(session), { code: "connection" });
-    socket.send = () => { throw new Error("send failed"); };
-    await assert.rejects(reads[1].request(session), { code: "connection" });
-    await history;
-    assert.equal(socket.readyState, 3);
-  });
-  await t.test("mixed reads share the existing bounded console request budget", async () => {
-    const { session, socket } = await openHumanSession();
-    const pending = Array.from({ length: MAX_OUTSTANDING_REQUESTS }, (_, index) => reads[index % 2].request(session));
-    const rejected = pending.map((promise) => assert.rejects(promise, { code: "closed" }));
-    const sent = socket.sent.length;
-    for (const read of reads) await assert.rejects(read.request(session), { code: "rate_limited" });
-    await assert.rejects(session.getOperationalGraph(taskId), { code: "rate_limited" });
-    assert.equal(socket.sent.length, sent);
-    session.close();
-    await Promise.all(rejected);
-  });
 });
 
 test("console edits and topology carry exact bodies and correlate their results", async () => {
@@ -2218,14 +2175,14 @@ test("closed state watches reconnect only for transport loss or retryable errors
 });
 
 test("a retryable ERROR for one read rejects that read alone and keeps the session", async () => {
-  for (const request of ["HUMAN_REQUEST_DETAIL_GET", "TERMINAL_TARGET_GET", "TASK_HISTORY_GET"]) {
+  for (const request of ["HUMAN_REQUEST_DETAIL_GET", "TERMINAL_TARGET_GET"]) {
     const errors = [];
     const { session, socket } = await openHumanSession((error) => errors.push(error));
     const pending = request === "HUMAN_REQUEST_DETAIL_GET"
       ? session.getHumanRequestDetail({ requestId: "aa".repeat(16), expectedRevision: 1n })
       : request === "TERMINAL_TARGET_GET"
         ? session.resolveAgentTerminal({ agentId: "bb".repeat(16), expectedAgentRevision: 1n, expectedHead: 1n })
-        : session.getTaskHistory("cc".repeat(16));
+        : undefined;
     socket.reply(encodeServerError({ code: "rate_limited", retryable: true }, lastFrame(socket, request).id));
     await assert.rejects(pending, (error) => error instanceof SessionError && error.code === "rate_limited" && error.retryable);
     assert.equal(session.status, "ready");
