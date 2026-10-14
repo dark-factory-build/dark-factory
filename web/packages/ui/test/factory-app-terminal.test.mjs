@@ -219,166 +219,6 @@ test("a live terminal follows a same-task receipt revision without rebinding bef
   assert.equal(context.latest().terminal.phase, "ready");
 });
 
-test("completed work leaves its configured agent idle and able to enqueue a durable instruction", async () => {
-  const context = terminalHarness();
-  context.controller.start();
-  const tasks = new Map(fixtureState.tasks);
-  for (const [id, task] of tasks) if (task.assigned_agent_id === thirdAgent.id && task.status === "queued") tasks.delete(id);
-  context.ready(stateAt(42, { tasks }));
-  context.controller.selectAgent(thirdAgent);
-  assert.equal([...tasks.values()].some((task) => task.assigned_agent_id === thirdAgent.id && ["succeeded", "failed"].includes(task.status)), true);
-  assert.equal(context.latest().selectedAgent.id, thirdAgent.id);
-  assert.equal(context.latest().terminal.taskTitle, undefined);
-  assert.equal(context.latest().terminal.instructionPending, false);
-  assert.equal(context.latest().terminal.queued, false);
-  assert.equal(context.targetGates.length, 0, "idle selection must not probe for a fake terminal");
-
-  const queued = context.controller.enqueueAgentInstruction("  Investigate the build\n  ");
-  assert.equal(context.latest().terminal.instructionPending, true);
-  assert.deepEqual(context.calls.at(-1), {
-    kind: "enqueue",
-    value: { agentId: thirdAgent.id, expectedAgentRevision: thirdAgent.revision, instruction: "Investigate the build" },
-  });
-  assert.equal(await queued, true);
-  assert.equal(context.latest().selectedAgent.id, thirdAgent.id);
-  assert.equal(context.latest().terminal.instructionPending, false);
-  assert.equal(context.latest().terminal.queued, true);
-});
-
-test("a running or paused agent accepts an explicit follow-up without opening a second terminal", async () => {
-  const context = terminalHarness();
-  context.controller.start();
-  context.ready();
-  context.controller.selectAgent(agent);
-  assert.equal(context.latest().terminal.taskTitle, [...fixtureState.tasks.values()].find((task) => task.assigned_agent_id === agent.id && task.status === "running")?.title);
-  assert.equal(await context.controller.enqueueAgentInstruction("Do this after the current task", "queue"), true);
-  assert.deepEqual(context.calls.at(-1), {
-    kind: "enqueue",
-    value: { agentId: agent.id, expectedAgentRevision: agent.revision, instruction: "Do this after the current task", mode: "queue" },
-  });
-  assert.equal(context.calls.some((call) => call.kind === "resolve"), false);
-});
-
-test("shared work from a pane is queued for any eligible worker and is not the pane's queued task", async () => {
-  const context = terminalHarness();
-  context.controller.start();
-  const tasks = new Map(fixtureState.tasks);
-  for (const [id, task] of tasks) if (task.assigned_agent_id === thirdAgent.id && task.status === "queued") tasks.delete(id);
-  context.ready(stateAt(42, { tasks }));
-  context.controller.selectAgent(thirdAgent);
-  assert.equal(context.latest().terminal.queued, false);
-  assert.equal(await context.controller.enqueueAgentInstruction("Whoever is free: fix the flaky test", "any"), true);
-  assert.deepEqual(context.calls.at(-1), {
-    kind: "enqueue",
-    value: { agentId: thirdAgent.id, expectedAgentRevision: thirdAgent.revision, instruction: "Whoever is free: fix the flaky test", mode: "any" },
-  });
-  assert.equal(context.latest().terminal.queued, false, "unclaimed shared work is not this pane's queued task");
-});
-
-test("a paused agent refuses immediate work but accepts a queued follow-up", async () => {
-  const context = terminalHarness();
-  context.controller.start();
-  const tasks = new Map(fixtureState.tasks);
-  for (const [id, task] of tasks) if (task.assigned_agent_id === thirdAgent.id && task.status === "queued") tasks.delete(id);
-  context.ready(stateAt(42, { tasks }));
-  context.controller.selectAgent(thirdAgent);
-
-  const paused = { ...thirdAgent, paused: true, revision: thirdAgent.revision + 1n };
-  const agents = new Map(fixtureState.agents);
-  agents.set(paused.id, paused);
-  context.clientOptions().onState(stateAt(43, { agents, tasks }));
-
-  assert.equal(context.latest().selectedAgent.id, paused.id);
-  assert.equal(context.latest().selectedAgent.revision, paused.revision);
-  assert.equal(context.latest().terminal.paused, true);
-  assert.equal(context.latest().terminal.phase, "idle");
-  assert.equal(context.latest().error, undefined);
-  assert.equal(context.targetGates.length, 0);
-  assert.equal(await context.controller.enqueueAgentInstruction("Must not enqueue while paused"), false);
-  assert.equal(context.calls.some((call) => call.kind === "enqueue"), false);
-  assert.equal(await context.controller.enqueueAgentInstruction("Queue this for later", "queue"), true);
-  assert.deepEqual(context.calls.at(-1), {
-    kind: "enqueue",
-    value: { agentId: paused.id, expectedAgentRevision: paused.revision, instruction: "Queue this for later", mode: "queue" },
-  });
-});
-
-test("a newly running instruction turns the same idle sidebar into the real terminal", async () => {
-  const context = terminalHarness();
-  context.controller.start();
-  const initialTasks = new Map(fixtureState.tasks);
-  for (const [id, task] of initialTasks) if (task.assigned_agent_id === thirdAgent.id && task.status === "queued") initialTasks.delete(id);
-  context.ready(stateAt(42, { tasks: initialTasks }));
-  context.controller.selectAgent(thirdAgent);
-
-  const tasks = new Map(initialTasks);
-  tasks.set("51".repeat(16), {
-    id: "51".repeat(16),
-    project_id: thirdAgent.project_id,
-    assigned_agent_id: thirdAgent.id,
-    title: "Direct instruction",
-    status: "running",
-    priority: 0,
-    revision: 1n,
-  });
-  context.clientOptions().onState(stateAt(43, { tasks }));
-  assert.equal(context.latest().selectedAgent.id, thirdAgent.id);
-  assert.equal(context.latest().terminal.taskTitle, "Direct instruction");
-  const token = {};
-  context.controller.beginTerminalSurface(token);
-  context.controller.setTerminalSurface(token, { write: async () => {}, abort: () => {} });
-  await flush();
-  assert.equal(context.targetGates.length, 1);
-  context.targetGates[0].resolve(target);
-  await flush();
-  assert.equal(context.latest().terminal.phase, "ready");
-});
-
-test("current running work wins over the selected agent's queued instruction", async () => {
-  const context = terminalHarness();
-  context.controller.start();
-  const initialTasks = new Map(fixtureState.tasks);
-  for (const [id, task] of initialTasks) if (task.assigned_agent_id === thirdAgent.id && task.status === "queued") initialTasks.delete(id);
-  context.ready(stateAt(42, { tasks: initialTasks }));
-  context.controller.selectAgent(thirdAgent);
-  assert.equal(await context.controller.enqueueAgentInstruction("Do this next"), true);
-
-  const tasks = new Map(initialTasks);
-  tasks.set("51".repeat(16), {
-    id: "51".repeat(16), project_id: thirdAgent.project_id, assigned_agent_id: thirdAgent.id,
-    title: "Direct instruction", status: "queued", priority: 0, revision: 1n,
-  });
-  tasks.set("52".repeat(16), {
-    id: "52".repeat(16), project_id: thirdAgent.project_id, assigned_agent_id: thirdAgent.id,
-    title: "Already running", status: "running", priority: 1, revision: 2n,
-  });
-  context.clientOptions().onState(stateAt(43, { tasks }));
-  assert.equal(context.latest().terminal.taskTitle, "Already running");
-  assert.equal(context.latest().terminal.queued, false);
-});
-
-test("a terminal task observed before its enqueue response cannot leave the sidebar queued", async () => {
-  const response = deferred();
-  const context = terminalHarness({ enqueueImpl: () => response.promise });
-  context.controller.start();
-  const initialTasks = new Map(fixtureState.tasks);
-  for (const [id, task] of initialTasks) if (task.assigned_agent_id === thirdAgent.id && task.status === "queued") initialTasks.delete(id);
-  context.ready(stateAt(42, { tasks: initialTasks }));
-  context.controller.selectAgent(thirdAgent);
-  const submission = context.controller.enqueueAgentInstruction("Finish quickly");
-
-  const tasks = new Map(initialTasks);
-  tasks.set("51".repeat(16), {
-    id: "51".repeat(16), project_id: thirdAgent.project_id, assigned_agent_id: thirdAgent.id,
-    title: "Direct instruction", status: "succeeded", priority: 0, revision: 2n,
-  });
-  context.clientOptions().onState(stateAt(43, { tasks }));
-  response.resolve({ taskId: "51".repeat(16), revision: 2n });
-  assert.equal(await submission, true);
-  assert.equal(context.latest().terminal.queued, false);
-  assert.equal(context.latest().terminal.taskTitle, undefined);
-});
-
 test("when queued task A terminals, queued task B remains pinned", async () => {
   const context = terminalHarness();
   context.controller.start();
@@ -405,22 +245,6 @@ test("when queued task A terminals, queued task B remains pinned", async () => {
   assert.equal(context.latest().selectedAgent.id, thirdAgent.id);
   assert.equal(context.latest().terminal.phase, "idle");
   assert.equal(context.latest().terminal.queued, true, "B still owns the queued affordance");
-  const enqueues = context.calls.filter((call) => call.kind === "enqueue").length;
-  assert.equal(await context.controller.enqueueAgentInstruction("Do not create C"), false);
-  assert.equal(context.calls.filter((call) => call.kind === "enqueue").length, enqueues);
-});
-
-test("crypto-unavailable enqueue preflight stays selected with a definite failure", async () => {
-  const context = terminalHarness({ enqueueImpl: async () => { throw new SessionError("crypto_unavailable"); } });
-  context.controller.start();
-  const tasks = new Map(fixtureState.tasks);
-  for (const [id, task] of tasks) if (task.assigned_agent_id === thirdAgent.id && task.status === "queued") tasks.delete(id);
-  context.ready(stateAt(42, { tasks }));
-  context.controller.selectAgent(thirdAgent);
-  assert.equal(await context.controller.enqueueAgentInstruction("Try once"), false);
-  assert.equal(context.latest().selectedAgent.id, thirdAgent.id);
-  assert.equal(context.latest().terminal.queued, false);
-  assert.equal(context.latest().terminal.instructionError.code, "crypto_unavailable");
 });
 
 test("oversized direct input is rejected before terminal discovery", () => {
@@ -1006,7 +830,6 @@ test("terminal exit keeps the selected task pinned until durable finalization", 
   assert.equal(context.latest().terminal.taskTitle, "Review the state projection");
   assert.equal(context.latest().terminal.finishing, true);
   assert.equal(context.latest().terminal.queued, false);
-  assert.equal(await context.controller.enqueueAgentInstruction("must wait"), false);
   assert.equal(context.latest().error, undefined);
   assert.equal(context.sessionCloses(), 0);
 
@@ -1052,35 +875,6 @@ test("a completed task retains its Xterm surface and reuses it for the next task
   await flush();
   assert.equal(context.targetGates.length, 2, "the retained display accepts the next terminal without a remount");
   assert.equal(context.latest().terminal.surfaceVersion, surfaceVersion);
-});
-
-test("clean exit after the selected task terminals clears its queued identity", async () => {
-  const context = terminalHarness();
-  context.controller.start();
-  const initialTasks = new Map(fixtureState.tasks);
-  for (const [id, task] of initialTasks) if (task.assigned_agent_id === thirdAgent.id && task.status === "queued") initialTasks.delete(id);
-  context.ready(stateAt(42, { tasks: initialTasks }));
-  context.controller.selectAgent(thirdAgent);
-  assert.equal(await context.controller.enqueueAgentInstruction("Run once"), true);
-
-  const runningTask = {
-    id: "51".repeat(16), project_id: thirdAgent.project_id, assigned_agent_id: thirdAgent.id,
-    title: "Direct instruction", status: "running", priority: 0, revision: 1n,
-  };
-  const runningTasks = new Map(initialTasks);
-  runningTasks.set(runningTask.id, runningTask);
-  context.clientOptions().onState(stateAt(43, { tasks: runningTasks }));
-  const terminal = await openTerminal(context, thirdAgent);
-
-  const terminalTasks = new Map(runningTasks);
-  terminalTasks.set(runningTask.id, { ...runningTask, status: "succeeded", revision: 2n });
-  context.clientOptions().onState(stateAt(44, { tasks: terminalTasks }));
-  terminal.options.onClose();
-  terminal.options.onExit();
-  assert.equal(context.latest().selectedAgent.id, thirdAgent.id);
-  assert.equal(context.latest().terminal.phase, "idle");
-  assert.equal(context.latest().terminal.taskTitle, undefined);
-  assert.equal(context.latest().terminal.queued, false);
 });
 
 test("clean exit immediately adopts different running work at the current head", async () => {
@@ -1405,12 +1199,10 @@ test("disconnect during a durable control preserves its refusal without replay o
   context.controller.start();
   context.ready();
   await openTerminal(context);
-  context.controller.setAgentInstructionDraft("keep my draft");
   const pending = context.controller.controlAgent("message", "one message");
   context.clientOptions().onStatus("closed");
   control.reject(new SessionError("connection"));
   assert.equal(await pending, false);
-  assert.equal(context.latest().terminal.instructionDraft, "keep my draft");
   assert.equal(context.latest().terminal.controlError.code, "connection");
   context.ready();
   await flush();
@@ -1418,7 +1210,7 @@ test("disconnect during a durable control preserves its refusal without replay o
   context.controller.close();
 });
 
-test("an external archive and paused restore retain selection and draft", async () => {
+test("an external archive and paused restore retain selection", async () => {
   const context = terminalHarness();
   const running = [...fixtureState.tasks.values()].find((task) => task.assigned_agent_id === agent.id && task.status === "running");
   const completed = { ...running, status: "succeeded", revision: running.revision + 1n };
@@ -1427,16 +1219,13 @@ test("an external archive and paused restore retain selection and draft", async 
   context.controller.start();
   context.ready(stateAt(20, { tasks, agents }));
   context.controller.selectAgent(agent);
-  context.controller.setAgentInstructionDraft("retained draft");
   const archived = { ...agent, archived: true, paused: true, revision: agent.revision + 1n };
   context.clientOptions().onState(stateAt(21, { tasks, agents: new Map(agents).set(agent.id, archived) }));
   assert.equal(context.latest().selectedAgent.id, agent.id);
-  assert.equal(context.latest().terminal.instructionDraft, "retained draft");
   const restored = { ...archived, archived: false, revision: archived.revision + 1n };
   context.clientOptions().onState(stateAt(22, { tasks, agents: new Map(agents).set(agent.id, restored) }));
   assert.equal(context.latest().selectedAgent.id, agent.id);
   assert.equal(context.latest().terminal.paused, true);
-  assert.equal(context.latest().terminal.instructionDraft, "retained draft");
   assert.equal(context.calls.some((call) => call.kind === "resolve" || call.kind === "enqueue"), false);
   context.controller.close();
 });

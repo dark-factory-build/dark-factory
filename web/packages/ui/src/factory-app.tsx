@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useRef, useState, type KeyboardEvent, type ReactNode, type SyntheticEvent } from "react";
+import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { browserEndpoint, FactoryAppController, type FactoryAppSnapshot, type FactoryAppStatus, type FactoryTerminalView } from "./factory-app-controller.js";
 import { FactoryConsole, type ConsoleDetail } from "./factory-console.js";
 import { primaryAgent } from "./console-view.js";
@@ -79,7 +79,7 @@ export function FactoryApp({ onStatusChange, browserPort }: FactoryAppProps = {}
     <TerminalPanel
       terminal={agentTerminal}
     >
-      <TerminalContent terminal={agentTerminal} controller={controller} repositories={snapshot.repositories?.get(snapshot.state?.agents.get(agentTerminal.agentId)?.project_id ?? "")} />
+      <TerminalContent terminal={agentTerminal} controller={controller} />
     </TerminalPanel>
   );
   return (
@@ -152,36 +152,18 @@ export function TerminalPanel({
 export function TerminalContent({
   terminal,
   controller,
-  repositories,
 }: {
   terminal: FactoryTerminalView;
   controller: FactoryAppController;
-  repositories?: readonly import("@dark-factory/client").RepositoryView[];
 }) {
   const terminalHost = terminal.hasOutputSurface || (terminal.taskTitle !== undefined && !terminal.finishing)
     ? <TerminalHost key={`${terminal.agentId}:${terminal.surfaceVersion}`} controller={controller} surfaceVersion={terminal.surfaceVersion} />
     : undefined;
   if (terminal.finishing) return <>{terminalHost}<p className="dfFactoryConsole__instructionState">Finishing</p></>;
-  if (terminal.taskTitle !== undefined) return <>{terminalHost}<AgentTaskTools terminal={terminal} controller={controller} repositories={repositories} /></>;
-  return <>{terminalHost}<AgentIdleTools terminal={terminal} controller={controller} repositories={repositories} /></>;
-}
-
-function AgentTaskTools({ terminal, controller, repositories }: { terminal: FactoryTerminalView; controller: FactoryAppController; repositories?: readonly import("@dark-factory/client").RepositoryView[] }) {
-  return (
-    <>
-      <AgentSteering terminal={terminal} controller={controller} />
-      <AgentInstruction terminal={terminal} repositories={repositories} mode="queue" onDraftChange={(instruction) => controller.setAgentInstructionDraft(instruction)} onSubmit={(instruction, mode, repositoryId) => controller.enqueueAgentInstruction(instruction, mode, repositoryId)} />
-    </>
-  );
-}
-
-function AgentIdleTools({ terminal, controller, repositories }: { terminal: FactoryTerminalView; controller: FactoryAppController; repositories?: readonly import("@dark-factory/client").RepositoryView[] }) {
-  const mode = terminal.paused || terminal.queued ? "queue" : "now";
-  return (
-    <>
-      <AgentInstruction terminal={terminal} repositories={repositories} mode={mode} onDraftChange={(instruction) => controller.setAgentInstructionDraft(instruction)} onSubmit={(instruction, mode, repositoryId) => controller.enqueueAgentInstruction(instruction, mode, repositoryId)} />
-    </>
-  );
+  if (terminal.taskTitle !== undefined) return <>{terminalHost}<AgentSteering terminal={terminal} controller={controller} /></>;
+  if (terminal.paused) return <>{terminalHost}<p className="dfFactoryConsole__instructionState">Paused</p></>;
+  if (terminal.queued) return <>{terminalHost}<p className="dfFactoryConsole__instructionState">Queued · waiting for capacity</p></>;
+  return terminalHost ?? null;
 }
 
 function AgentSteering({ terminal, controller }: { terminal: FactoryTerminalView; controller: FactoryAppController }) {
@@ -206,74 +188,6 @@ function AgentSteering({ terminal, controller }: { terminal: FactoryTerminalView
         <button type="button" disabled={pending} onClick={() => { void controller.controlAgent("stop"); }}>Stop current</button>
       </div>
     </section>
-  );
-}
-
-export function AgentInstruction({
-  terminal,
-  repositories,
-  mode = "now",
-  onDraftChange,
-  onSubmit,
-}: {
-  terminal: FactoryTerminalView;
-  repositories?: readonly import("@dark-factory/client").RepositoryView[];
-  mode?: "now" | "queue";
-  onDraftChange?: (instruction: string) => void;
-  onSubmit: (instruction: string, mode?: "now" | "queue" | "any", repositoryId?: string) => Promise<boolean>;
-}) {
-  const [localInstruction, setLocalInstruction] = useState("");
-  const enabled = repositories?.filter((repository) => repository.enabled) ?? [];
-  const [requestedRepositoryId, setRepositoryId] = useState<string>("");
-  const repositoryId = enabled.some((repository) => repository.id === requestedRepositoryId) ? requestedRepositoryId : "";
-  const instruction = onDraftChange === undefined ? localInstruction : terminal.instructionDraft ?? "";
-  const setInstruction = (value: string) => {
-    if (onDraftChange === undefined) setLocalInstruction(value);
-    else onDraftChange(value);
-  };
-  const submit = async (event?: SyntheticEvent, target: "now" | "queue" | "any" = mode) => {
-    event?.preventDefault();
-    if ((mode === "now" && terminal.paused) || terminal.instructionPending || instruction.trim().length === 0) return;
-    const selection = repositoryId === "" ? undefined : repositoryId;
-    if (enabled.length > 1 && selection === undefined && !enabled.some((repository) => repository.default)) return;
-    if (await onSubmit(instruction, target, selection)) setInstruction("");
-  };
-  const onKeyDown = (event: KeyboardEvent<HTMLTextAreaElement>) => {
-    if ((event.metaKey || event.ctrlKey) && event.key === "Enter") void submit(event);
-  };
-  if (mode === "now" && terminal.paused) return <p className="dfFactoryConsole__instructionState">Paused</p>;
-  if (mode === "now" && terminal.queued) return <p className="dfFactoryConsole__instructionState">Queued · waiting for capacity</p>;
-  const errorCopy = terminal.instructionError === undefined
-    ? undefined
-    : ["invalid_request", "unauthorized", "stale", "too_large", "rate_limited", "not_found", "crypto_unavailable", "unsupported"].includes(terminal.instructionError.code)
-      ? "Not sent"
-      : "Send not confirmed — check tasks before retrying";
-  return (
-    <form className={`dfFactoryConsole__instruction${mode === "queue" ? " dfFactoryConsole__instruction--queue" : ""}`} onSubmit={(event) => { void submit(event); }}>
-      <label className="dfFactoryConsole__visuallyHidden" htmlFor={`df-instruction-${terminal.agentId}-${mode}`}>
-        {mode === "queue" ? `Queue follow-up work for ${terminal.agentName}` : `Instruction for ${terminal.agentName}`}
-      </label>
-      <textarea
-        id={`df-instruction-${terminal.agentId}-${mode}`}
-        value={instruction}
-        rows={3}
-        autoFocus={mode === "now"}
-        disabled={terminal.instructionPending}
-        placeholder={mode === "queue" ? "Add follow-up work…" : "Add an instruction…"}
-        onChange={(event) => setInstruction(event.target.value)}
-        onKeyDown={onKeyDown}
-      />
-      <div className="dfFactoryConsole__instructionActions">
-        {enabled.length < 2 ? null : <label>Checkout<select value={repositoryId} onChange={(event) => setRepositoryId(event.currentTarget.value)}><option value="">{enabled.some((repository) => repository.default) ? "Project default" : "Choose checkout"}</option>{enabled.map((repository) => <option key={repository.id} value={repository.id}>{repository.name}</option>)}</select></label>}
-        {errorCopy === undefined ? null : <span role="alert">{errorCopy}</span>}
-        <button type="submit" disabled={terminal.instructionPending || instruction.trim().length === 0}>
-          {terminal.instructionPending ? "Sending" : mode === "queue" ? "Add to queue" : "Start"}
-        </button>
-        <button type="button" aria-label={`Queue for any eligible worker in ${terminal.agentName}'s project`} disabled={terminal.instructionPending || instruction.trim().length === 0} onClick={() => { void submit(undefined, "any"); }}>
-          Any worker
-        </button>
-      </div>
-    </form>
   );
 }
 
