@@ -1941,6 +1941,73 @@ func TestTaskEnqueuePreflightPreservesReplayAndOverseerAuthority(t *testing.T) {
 	}
 }
 
+func TestOverseerEnqueuePinsContentWhileSchedulerRunsAndRejectsPostHocAttach(t *testing.T) {
+	fixture := newDispatchFixture(t)
+	active := prepareActiveAttempt(t, fixture, 230)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	for {
+		select {
+		case <-fixture.daemon.schedulerWake:
+		default:
+			goto drained
+		}
+	}
+drained:
+	started := make(chan struct{})
+	schedulerDone := make(chan error, 1)
+	schedulerSpec := SupervisorSpec{scheduledAttempt: func(ctx context.Context, spec SupervisorSpec) (kernel.Run, error) {
+		close(started)
+		spec.admissionObserved(false)
+		<-ctx.Done()
+		return kernel.Run{}, ctx.Err()
+	}}
+	go func() { schedulerDone <- fixture.daemon.RunScheduler(ctx, schedulerSpec) }()
+	select {
+	case <-started:
+	case <-time.After(2 * time.Second):
+		t.Fatal("scheduler did not start")
+	}
+
+	operator, err := api.NewOperatorClient(fixture.socket, fixture.operator)
+	if err != nil {
+		t.Fatal(err)
+	}
+	done := fixture.serve(t)
+	content, err := operator.ContentCreate(context.Background(), api.ContentInput{ID: testID(231), ProjectID: active.run.ProjectID.String(), Kind: "proposal", Title: "accepted proposal", Body: "body"})
+	waitDispatch(t, done)
+	if err != nil || content.Revision != 1 {
+		t.Fatalf("proposal content = %+v, %v", content, err)
+	}
+	taskID := testID(232)
+	done = fixture.serve(t)
+	_, err = active.client.OverseerEnqueueTask(context.Background(), api.OverseerTaskCreateInput{ID: taskID, IncarnationID: testID(233), Title: "accepted proposal", Content: []api.ContentPinInput{{ContentID: content.ID, ContentRevision: content.Revision}}})
+	waitDispatch(t, done)
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertSchedulerWake(t, fixture.daemon)
+	task, found, err := fixture.store.Task(context.Background(), mustTaskID(t, taskID))
+	if err != nil || !found {
+		t.Fatal(err)
+	}
+	references, err := fixture.store.TaskContentReferences(context.Background(), active.run.ProjectID, task.ID, task.WorkRevision, false)
+	if err != nil || len(references) != 1 || references[0].TaskWorkRevision.Int64() != 1 {
+		t.Fatalf("daemon enqueue references = %+v, %v", references, err)
+	}
+	done = fixture.serve(t)
+	err = active.client.ContentAttach(context.Background(), api.ContentAttachInput{TaskID: taskID, ProjectID: active.run.ProjectID.String(), ContentID: content.ID, ContentRevision: 1})
+	waitDispatch(t, done)
+	var remote *api.RemoteError
+	if !errors.As(err, &remote) || remote.Code() != api.RemoteUnauthorized {
+		t.Fatalf("post-hoc overseer attach = %v", err)
+	}
+	cancel()
+	if err := waitSchedulerDone(t, schedulerDone); err != nil && !errors.Is(err, context.Canceled) {
+		t.Fatalf("scheduler shutdown = %v", err)
+	}
+}
+
 func TestDaemonSelectAgentModelRequiresWorkerRevisionAndCompatibleControls(t *testing.T) {
 	fixture := newDispatchFixture(t)
 	client, err := api.NewOperatorClient(fixture.socket, fixture.operator)
