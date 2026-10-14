@@ -130,6 +130,11 @@ func TestEnqueueBodyBindingStartsAFreshSameHeadReview(t *testing.T) {
 	fixture, project, _, settle := publishedTask(t)
 	settle()
 	customerMode(t, fixture)
+	// The fresh review must be newer than the one it replaces, as it always
+	// is on a real clock: the reconciler acts on the newest operation, and
+	// two stamped by a frozen clock tie in an unordered sort.
+	var clock atomic.Int64
+	fixture.daemon.now = func() time.Time { return time.Unix(2000, clock.Add(1)) }
 	ctx := context.Background()
 	newBody := "edited body\n"
 	backend := &publicReviewBackend{}
