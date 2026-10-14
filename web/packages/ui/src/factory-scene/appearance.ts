@@ -13,7 +13,6 @@ export function hash(id: string): number {
   for (let i = 0; i < id.length; i++) value = Math.imul(value ^ id.charCodeAt(i), 16777619) >>> 0;
   return value;
 }
-
 /** Each worker keeps their own time, so a floor of people never moves in step. */
 export function workerPhase(id: string): number {
   return hash(id) % 5000;
@@ -184,11 +183,4 @@ export function workerFrames(worker: SceneWorker, motion?: WorkerMotion, seat?: 
     ...held,
     ...alert,
   ];
-}
-
-export function randomAppearance(random = Math.random): SpriteAppearance {
-  return Object.fromEntries([
-    ["automatic", false],
-    ...appearanceFields.map((field) => [field, Math.floor(random() * spriteOptions[field].length)]),
-  ]) as SpriteAppearance;
 }

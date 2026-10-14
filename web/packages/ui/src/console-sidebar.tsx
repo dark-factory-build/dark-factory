@@ -48,7 +48,6 @@ export function AgentPanel({
   edit,
   ready,
   onSaveConfig,
-  onEditAppearance,
   onLoadTaskDetail,
   onLoadTaskHistory,
   terminalContent,
@@ -66,7 +65,6 @@ export function AgentPanel({
   onOpenActivity?: (item: KnowledgeActivity) => void;
   ready: boolean;
   onSaveConfig?: (config: AgentConfigEdit) => void;
-  onEditAppearance?: (agent: AgentItem) => void;
   onLoadTaskDetail?: (task: TaskItem, peerOffset?: bigint, expectedHead?: bigint) => Promise<TaskBrief>;
   onLoadTaskHistory?: (task: TaskItem) => Promise<TaskHistoryView>;
   /** The selected agent's mounted terminal and durable composer. */
@@ -102,10 +100,7 @@ export function AgentPanel({
   return (
     <section className="dfConsoleSidebar__panel" aria-label={`Agent ${agent.name}`}>
       <div className="dfConsoleSidebar__heading">
-        <button type="button" className="dfAgentSpriteEdit" aria-label={`Edit appearance for ${agent.name}`} onClick={() => onEditAppearance?.(agent)} disabled={archived || onEditAppearance === undefined}>
-          <AgentSprite agent={agent} activity={state === undefined ? "waiting" : agentActivity(agent, state)} />
-          <Icon name="pencil" className="dfAgentSpriteEdit__icon" />
-        </button>
+        <AgentSprite agent={agent} activity={state === undefined ? "waiting" : agentActivity(agent, state)} />
         <div>
           <p className="dfFactoryConsole__eyebrow">{rankLabel(specialist ? "specialist" : agent.role)} · {agent.provider}{agent.effective_model === "" ? "" : ` · ${agent.effective_model}`}</p>
           <h2>{agent.name}</h2>

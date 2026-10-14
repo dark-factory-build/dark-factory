@@ -846,68 +846,6 @@ test("a queued edit refusal remains visible after its task leaves the queue", ()
   }
 });
 
-test("only the selected agent portrait offers appearance editing in either view", () => {
-  for (const view of VIEWS) {
-    const props = { view, onSelectAgent: () => {}, onEditAppearance: () => {}, graphs: fixtureGraphs };
-    assert.equal((render(props).match(/aria-label="Edit appearance for /g) ?? []).length, 0);
-    const markup = render({ ...props, selectedAgent: agentSelection() });
-    assert.equal((markup.match(/aria-label="Edit appearance for /g) ?? []).length, 1);
-    assert.match(markup, /class="dfAgentSpriteEdit" aria-label="Edit appearance for Builder One"/);
-  }
-});
-
-test("one sprite editor previews categories and saves one atomic appearance", async () => {
-  const previousAct = globalThis.IS_REACT_ACT_ENVIRONMENT;
-  globalThis.IS_REACT_ACT_ENVIRONMENT = true;
-  try {
-    const saved = [];
-    const node = { showModal: () => {}, close: () => {} };
-    let renderer;
-    await act(async () => {
-      renderer = create(createElement(FactoryConsole, {
-        status: "ready",
-        state: baseState(),
-        appearanceAgentId: ids.agent,
-        onSaveAgentAppearance: (agentId, appearance) => { saved.push([agentId, appearance]); return Promise.resolve(true); },
-        onCloseAppearance: () => {},
-      }), { createNodeMock: () => node });
-    });
-    const dialog = renderer.root.findByProps({ "aria-label": "Edit appearance for Builder One" });
-    assert.deepEqual(dialog.findAllByType("label").map((label) => label.findByType("span").children.join("")), ["Skin tone", "Hair style", "Hair colour", "Face detail", "Clothing style", "Clothing colour", "Shoes", "Tool", "Headwear"]);
-    assert.equal(dialog.findAllByProps({ className: "dfAgentSprite" }).length, 1);
-    await act(async () => { dialog.findAllByType("select")[0].props.onChange({ target: { value: "3" } }); });
-    await act(async () => { dialog.findByType("form").props.onSubmit({ preventDefault() {} }); });
-    assert.equal(saved.length, 1);
-    assert.equal(saved[0][0], ids.agent);
-    assert.equal(saved[0][1].automatic, false);
-    assert.equal(saved[0][1].skin, 3);
-    await act(async () => { renderer.unmount(); });
-  } finally {
-    globalThis.IS_REACT_ACT_ENVIRONMENT = previousAct;
-  }
-});
-
-test("a refused appearance edit keeps the editor and its draft", async () => {
-  const previousAct = globalThis.IS_REACT_ACT_ENVIRONMENT;
-  globalThis.IS_REACT_ACT_ENVIRONMENT = true;
-  try {
-    let closes = 0;
-    const node = { showModal: () => {}, close: () => { closes += 1; } };
-    let renderer;
-    await act(async () => { renderer = create(createElement(FactoryConsole, {
-      status: "ready", state: baseState(), appearanceAgentId: ids.agent,
-      edit: { target: ids.agent, pending: false, error: { code: "stale" } },
-      onSaveAgentAppearance: () => Promise.resolve(false), onCloseAppearance: () => {},
-    }), { createNodeMock: () => node }); });
-    const dialog = renderer.root.findByProps({ "aria-label": "Edit appearance for Builder One" });
-    await act(async () => { dialog.findAllByType("select")[0].props.onChange({ target: { value: "3" } }); });
-    await act(async () => { await dialog.findByType("form").props.onSubmit({ preventDefault() {} }); });
-    assert.equal(closes, 0);
-    assert.equal(dialog.findByProps({ role: "alert" }).children.join(""), "Someone else changed this. Reopen it and try again.");
-    assert.equal(dialog.findAllByType("select")[0].props.value, 3);
-    await act(async () => { renderer.unmount(); });
-  } finally { globalThis.IS_REACT_ACT_ENVIRONMENT = previousAct; }
-});
 
 test("the floor stays on the left and the agent roster lives in the sidebar", () => {
   const floor = render({ detail: "agent" });
@@ -1035,7 +973,6 @@ test("archived workers stay selectable from the archived view and expose only re
     assert.equal(text.includes("Archive worker"), false);
     assert.equal(text.includes("TERMINAL"), false);
     assert.equal(text.includes("Queue paused"), false);
-    assert.equal(renderer.root.findByProps({ className: "dfAgentSpriteEdit" }).props.disabled, true);
     await act(async () => { renderer.unmount(); });
   } finally {
     globalThis.IS_REACT_ACT_ENVIRONMENT = previousAct;

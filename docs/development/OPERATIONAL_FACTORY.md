@@ -43,7 +43,7 @@ whether it was happening, or whether we could even tell.
 
 | Keep (reconnected to the new world) | Replace | Delete |
 | --- | --- | --- |
-| Worker sprites, identity, appearance, sprite editor | `layoutScene`, `composeRoom`: rooms from directories | `internal/topology` graph, IDs and inventories |
+| Worker sprites, identity, appearance | `layoutScene`, `composeRoom`: rooms from directories | `internal/topology` graph, IDs and inventories |
 | `movement.ts` routing over doors and corridors | `wires()`: import cables become flow lines between machines | `internal/daemon/topology.go`, the `projectTopology` wire builder |
 | `idle-life.ts` (cat, chatter), `messages.ts` (paper, peer pulses) | `console-view.ts` floor selection: units and halls replace room selection | `TOPOLOGY_GET` / `TOPOLOGY`, client decode, fixtures |
 | Errands and the board/Missions/Tasks/Library fixtures | `runFootprint`: changed paths now map to operational nodes | Name-based `responsibility()` motifs, file-count `equipmentScale` |
