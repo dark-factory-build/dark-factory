@@ -99,7 +99,7 @@ type Daemon struct {
 	// The scheduler's Change reclaim pass (tickChangeReclaim), alike, and the
 	// Changes it kept, each logged once with its project and reason; healthMu
 	// guards it for the operator's health read.
-	reclaimAt   atomic.Int64
+	reclaimHead atomic.Int64
 	reclaimBusy atomic.Bool
 	keptChanges map[kernel.ChangeID][2]string
 	store       *kernel.Store

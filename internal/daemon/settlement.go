@@ -7,7 +7,6 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
-	"time"
 
 	"github.com/dark-factory-build/dark-factory/internal/change"
 	"github.com/dark-factory-build/dark-factory/internal/kernel"
@@ -154,25 +153,23 @@ func (daemon *Daemon) retainedSettlement(ctx context.Context, changeParent strin
 	return kernel.NewRetainedChangeSettlement(changeState.Revision, &head)
 }
 
-// changeReclaimBatch bounds the Changes one reclaim pass inspects, so the
-// backlog drains a few a minute without long writer holds or I/O spikes.
-const changeReclaimBatch = 4
-
-// tickChangeReclaim starts a reclaim pass off the scheduler loop, a minute
-// after the last one.
+// tickChangeReclaim starts a reclaim pass off the scheduler loop only when
+// the durable store has changed since the last pass.
 func (daemon *Daemon) tickChangeReclaim(ctx context.Context) {
-	if daemon.now().UnixNano() < daemon.reclaimAt.Load() || !daemon.reclaimBusy.CompareAndSwap(false, true) {
+	factory, err := daemon.store.Factory(ctx)
+	if err != nil || factory.Head.Int64() == daemon.reclaimHead.Load()-1 || !daemon.reclaimBusy.CompareAndSwap(false, true) {
 		return
 	}
+	head := factory.Head.Int64()
 	go func() {
 		defer daemon.reclaimBusy.Store(false)
 		daemon.reclaimChanges(ctx)
-		daemon.reclaimAt.Store(daemon.now().Add(time.Minute).UnixNano())
+		daemon.reclaimHead.Store(head + 1)
 	}()
 }
 
-// reclaimChanges inspects up to changeReclaimBatch retained Changes the
-// kernel's rule allows, removes each one's worktree and Git state
+// reclaimChanges inspects the retained Changes the kernel's rule allows,
+// removes each one's worktree and Git state
 // (change.RemoveWorktree), and records it abandoned, as a Change whose
 // worktree is gone: the task's retry makes a fresh one. A Change reopened
 // since the rule was read is skipped; one RemoveWorktree refuses is kept and
@@ -191,7 +188,7 @@ func (daemon *Daemon) reclaimChanges(ctx context.Context) int {
 	}
 	inspected, reclaimed := 0, 0
 	for _, candidate := range candidates {
-		if inspected == changeReclaimBatch || ctx.Err() != nil {
+		if ctx.Err() != nil {
 			break
 		}
 		daemon.healthMu.Lock()
