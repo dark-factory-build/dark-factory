@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import type { ProjectContentCall } from "./project-library.js";
+import type { ProjectContentCall } from "./factory-app-controller.js";
 
 export type RuntimeBuild = { version: string; source: string; target: string; build_id: string; release: boolean };
 /** The newest release the daemon has observed. Absent is no answer, not current. */

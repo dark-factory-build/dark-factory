@@ -12,10 +12,9 @@ import {
 } from "./console-view.js";
 import { FactoryScene, AgentSprite } from "./factory-scene/factory-scene.js";
 import { projectCrates, type ProductionContraption } from "./production-view.js";
-import { type ProjectContentCall } from "./project-library.js";
+import type { ProjectContentCall } from "./factory-app-controller.js";
 import type { SceneUnit, SceneMachine } from "./factory-scene/scene.js";
 import { SectionHeader, Status } from "./console-kit.js";
-import { KnowledgeActivityList, activityLabel, onBoard, type KnowledgeActivity, type KnowledgeCue } from "./project-board.js";
 
 function shortID(value: string): string {
   return value.slice(0, 8);
@@ -86,12 +85,8 @@ const NO_CHANGES: readonly ProductionContraption[] = [];
 /** The operational floor; every action opens an existing inspector or control. */
 export function FactoryFloor({
   changes = NO_CHANGES, changesRead = false, selectedChange, onSelectChange, state, graphs, graphErrors, onLoadNode, onAddTask, runPaths, lastRunPaths, selectedAgentId, onSelectAgent,
-  onSelectHumanRequest, selectedTaskId, onSelectTask, onOpenTasks, onOpenMissions, onOpenLibrary, onOpenBoard, requestedEntity, connected = true, projectId, activity = [], activityCues = [], onOpenActivity,
+  onSelectHumanRequest, selectedTaskId, onSelectTask, onOpenTasks, onOpenMissions, connected = true, projectId,
 }: {
-  /** Recorded Board and Library operations, newest first, and the few just cued. */
-  activity?: readonly KnowledgeActivity[];
-  activityCues?: readonly KnowledgeCue[];
-  onOpenActivity?: (item: KnowledgeActivity) => void;
   changes?: readonly ProductionContraption[];
   /** Whether `changes` were read on this connection; until then the work line has nothing to look at. */
   changesRead?: boolean;
@@ -110,9 +105,6 @@ export function FactoryFloor({
   onSelectTask?: (taskId: string) => void;
   onOpenTasks?: (projectId?: string) => void;
   onOpenMissions?: (projectId?: string) => void;
-  onOpenLibrary?: (projectId?: string) => void;
-  onOpenBoard?: (projectId?: string, entity?: string, id?: string, repository?: string) => void;
-  requestedEntity?: { id: string };
   onSelectHumanRequest?: (request: HumanRequestItem) => void;
   connected?: boolean;
   projectId?: string;
@@ -147,7 +139,6 @@ export function FactoryFloor({
   return <div className="dfFactoryFloor">
     <FactoryScene
       tools={<>
-        {onOpenActivity === undefined ? null : <KnowledgeActivityList items={activity} state={state} onOpen={onOpenActivity} />}
         {unplaced + refused.length + unavailable.length === 0 ? null : <details className="dfFloorMenu" name="floor-tools"><summary>Notices · {unplaced + refused.length + unavailable.length}</summary><div className="dfFloorMenu__body">
         {unplaced > 0 ? <p className="dfFactoryEntityTools__notice" role="status">{unplaced} {unplaced === 1 ? "change is" : "changes are"} not fully placed on the floor; its pull request in Work lists every path.</p> : null}
         {refused.length > 0 ? <p className="dfFactoryEntityTools__notice" role="status">Plant unavailable: {refused.join(", ")}; retrying.</p> : null}
@@ -156,7 +147,6 @@ export function FactoryFloor({
       </>}
       onLoadNode={onLoadNode === undefined ? undefined : (nodeId) => { const project = projectOf(nodeId); return project === undefined ? Promise.reject(new Error("unknown node")) : onLoadNode(project, nodeId); }}
       onInvestigate={investigate}
-      onDiscussSource={onOpenBoard === undefined ? undefined : (nodeId) => { const project = projectOf(nodeId); onOpenBoard(project, project === undefined ? undefined : `${project}:${nodeId}`); }}
       proposals={{ items: proposed.proposals, selected: selectedChange, onSelect: (id) => onSelectChange?.(id) }}
       crates={crates}
       selectedWorkerId={selectedAgentId}
@@ -169,13 +159,9 @@ export function FactoryFloor({
       reading={graphs === undefined || projects.some((id) => !graphs.has(id) && !graphErrors?.has(id))}
       tasks={scene.tasks}
       peerQuestions={peerQuestions}
-      knowledgeCues={activityCues.map((cue) => ({ key: cue.key, agentId: cue.agent_id, board: onBoard(cue), reading: cue.operation === "read", label: activityLabel(cue, state), open: onOpenActivity === undefined ? undefined : () => onOpenActivity(cue) }))}
-      requestedEntity={requestedEntity}
       onSelectTask={onSelectTask}
       onOpenTasks={onOpenTasks}
       onOpenMissions={onOpenMissions}
-      onOpenLibrary={onOpenLibrary}
-      onOpenBoard={onOpenBoard}
       onSelectHumanRequest={onSelectHumanRequest === undefined || state === undefined ? undefined : (id) => {
         const request = state.humanRequests.get(id);
         if (request !== undefined) onSelectHumanRequest(request);

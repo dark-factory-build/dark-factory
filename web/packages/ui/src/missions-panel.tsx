@@ -2,7 +2,7 @@ import { productionKey } from "./production-view.js";
 import { useEffect, useRef, useState } from "react";
 import type { AgentItem, StateView, TaskItem } from "@dark-factory/client";
 import type { ProductionContraption } from "./production-view.js";
-import type { ProjectContentCall } from "./project-library.js";
+import type { ProjectContentCall } from "./factory-app-controller.js";
 import { IconButton } from "./icons.js";
 import { Status } from "./console-kit.js";
 
@@ -122,7 +122,7 @@ export function MissionsPanel({ production = [], onProduction, requestedMission,
         <p><Status stage={text(document.state)} /> · {text(selected.kind) === "mission" ? owner?.name ?? (text(selected.owner_name) || "Owner unavailable") : text(selected.kind)}</p>
         {selected.stale ? <p role="status">The objective changed. Earlier acceptance is stale.</p> : null}
         <h4>Next action</h4><p className="dfMissions__text">{text(document.remaining_work) || anchor?.blocked_reason || (document.state === "accepted" ? "Acceptance recorded." : "Awaiting the overseer’s next recorded action.")}</p>
-        <div className="dfProjectLibrary__actions"><button type="button" disabled={Boolean(pending) || call === undefined || selected.stale === true} onClick={() => void run(() => changeState(document.state === "accepted" ? "reopened" : "accepted"), false, true)}>{document.state === "accepted" ? "Reopen outcome" : "Accept outcome"}</button></div>
+        <div className="dfConsoleViewToggle"><button type="button" disabled={Boolean(pending) || call === undefined || selected.stale === true} onClick={() => void run(() => changeState(document.state === "accepted" ? "reopened" : "accepted"), false, true)}>{document.state === "accepted" ? "Reopen outcome" : "Accept outcome"}</button></div>
         {owner === undefined ? null : <button type="button" disabled={call === undefined || onSelectAgent === undefined} onClick={() => onSelectAgent?.(owner)}>Talk to {owner.name}</button>}
         <details><summary>Acceptance criteria</summary><p className="dfMissions__text">{text(document.criteria)}</p></details>
         {text(document.reason) || text(document.conclusion) || rows(document.links).length || (Array.isArray(selected.missing_references) && selected.missing_references.length) ? <details><summary>Evidence</summary>

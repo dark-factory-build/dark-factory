@@ -788,8 +788,8 @@ summary.dfConsoleItem__summary { cursor: pointer; }
 .dfWorkLine strong { color: #edba6b; font-variant-numeric: tabular-nums; }
 .dfWorkLine__crate { display: inline-block; width: .65rem; height: .5rem; margin-right: .5rem; background: #d98a3a; border: 1px solid #f5bf73; }
 .dfWorkLine [data-fault] .dfWorkLine__crate { border-color: #f77b70; }
-:is(.dfFloorMenu, .dfKnowledgeActivity) > summary { cursor: pointer; }
-:is(.dfFloorMenu, .dfKnowledgeActivity)[open] > summary { color: var(--df-console-accent); }
+:is(.dfFloorMenu) > summary { cursor: pointer; }
+:is(.dfFloorMenu)[open] > summary { color: var(--df-console-accent); }
 .dfFactoryEntityTools .dfFloorMenu__body { position: absolute; z-index: 10; top: 100%; left: .5rem; right: .5rem; max-height: min(24rem, 55svh); overflow: auto; padding: .75rem; white-space: normal; background: #122027; border: 1px solid #3c5051; box-shadow: 0 6px 16px #0008; }
 .dfFloorMenu__body button { display: block; width: 100%; text-align: left; }
 .dfFloorMenu__body > * + * { margin-top: .4rem; }
@@ -799,9 +799,6 @@ summary.dfConsoleItem__summary { cursor: pointer; }
 .dfFactoryEntityTools__results button { max-width: 100%; overflow-wrap: anywhere; font-size: var(--df-text-xs); }
 .dfFactoryEntityTools__notice { flex-basis: 100%; display: flex; align-items: baseline; flex-wrap: wrap; gap: .4rem; margin: 0; font-size: var(--df-text-xs); }
 .dfFactoryEntityTools__selection { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: min(100%, 32rem); }
-.dfKnowledgeActivity { overflow-wrap: anywhere; }
-.dfKnowledgeActivity ul, .dfBoardQuestions ul { list-style: none; margin: .4rem 0; padding: 0; display: grid; gap: .35rem; }
-.dfKnowledgeActivity button { max-width: 100%; overflow-wrap: anywhere; text-align: left; }
 /* A recorded operation appears once, briefly; ambient life never uses this mark. */
 .dfKnowledgeCue { animation: dfKnowledgeCue 400ms ease-out both; }
 @keyframes dfKnowledgeCue { from { opacity: 0; } to { opacity: 1; } }
@@ -1125,60 +1122,17 @@ summary.dfConsoleItem__summary { cursor: pointer; }
   .dfFactoryConsole[data-mobile-view="floor"] .dfConsoleSidebar,
   .dfFactoryConsole[data-mobile-view] .dfConsoleSidebar > .dfConsoleViewToggle { display: none; }
 }
-.dfProjectLibrary { margin-top: 1rem; font-size: var(--df-text-sm); }
-.dfProjectLibrary fieldset { border: 0; padding: 0; margin: 0; min-width: 0; }
-.dfProjectLibrary label { display: grid; gap: .3rem; margin: .7rem 0; }
-.dfProjectLibrary textarea, .dfProjectLibrary input, .dfProjectLibrary select { max-width: 100%; box-sizing: border-box; }
-.dfProjectLibrary :is(input:not([type="checkbox"]), textarea, select) { width: 100%; padding: .6rem; color: var(--df-console-text); background: var(--df-console-background); border: 1px solid var(--df-console-rule); font: inherit; }
-.dfProjectLibrary label:has(> input[type="checkbox"]) { display: flex; align-items: center; }
-.dfProjectLibrary pre { white-space: pre-wrap; overflow-wrap: anywhere; max-height: 24rem; overflow: auto; }
-.dfProjectLibrary button { margin: 0; }
-.dfProjectLibrary__browser { display: grid; gap: 1.25rem; align-items: start; margin-top: 1rem; }
-.dfProjectLibrary__browser { grid-template-columns: minmax(12rem, 18rem) minmax(0, 1fr); }
-.dfProjectLibrary__documents { display: flex; flex-direction: column; min-width: 0; gap: .5rem; }
-.dfProjectLibrary__documents button { text-align: left; overflow-wrap: anywhere; }
-.dfProjectLibrary__documents button[aria-pressed="true"] { border-color: var(--df-console-accent); background: color-mix(in srgb, var(--df-console-accent) 8%, transparent); }
-.dfProjectLibrary__documents button span { display: block; font-size: var(--df-text-sm); }
-.dfProjectLibrary__actions { display: flex; flex-wrap: wrap; gap: .5rem; align-items: center; }
-.dfProjectLibrary__actions [aria-pressed="true"] { border-color: var(--df-console-accent); }
-.dfProjectLibrary__workspace { margin-top: 1rem; }
-.dfProjectLibrary__workspace > .dfProjectLibrary__actions { padding-block: 1rem; border-top: 1px solid var(--df-console-rule); }
-.dfProjectLibrary__meta { color: var(--df-console-muted); }
-.dfProjectLibrary__workspace > section[aria-label="Replies"] { border-top: 1px solid var(--df-console-rule); padding-block: 1rem; }
-.dfProjectLibrary__fields { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 16rem), 1fr)); gap: 0 1rem; }
-.dfProjectLibrary__reader { min-width: 0; overflow-wrap: anywhere; }
-@media (max-width: 640px) { .dfProjectLibrary__browser { grid-template-columns: minmax(0, 1fr); } }
-.dfProjectLibrary__toolbar, .dfProjectLibrary__revision { display: flex; flex-wrap: wrap; align-items: end; gap: .75rem; }
-.dfProjectLibrary__toolbar label, .dfProjectLibrary__revision label { margin: 0; min-width: 0; }
-.dfProjectLibrary__toolbar button, .dfProjectLibrary__revision button, .dfProjectLibrary__toolbar select, .dfProjectLibrary__toolbar input[type="search"], .dfProjectLibrary__revision input { min-height: 2.75rem; }
-.dfProjectLibrary__toolbar label:has(> input[type="checkbox"]) { min-height: 2.75rem; }
-.dfProjectLibrary__search { flex: 1 1 16rem; }
-.dfProjectLibrary__revision { margin-block: 1rem; }
-.dfProjectLibrary__revision label { width: 7rem; }
-.dfProjectLibrary__reader h3 { margin-top: 0; font-size: var(--df-text-md); }
-.dfProjectLibrary__documents > button { padding: .85rem; }
-.dfProjectLibrary__documents button strong { display: block; margin-bottom: .25rem; }
 
 .dfStatus[data-stage$="passed"], .dfStatus[data-stage="succeeded"], .dfStatus[data-stage="working"], .dfStatus[data-stage="ready"], .dfStatus[data-stage="Delivered"], .dfStatus[data-stage="accepted"], .dfStatus[data-stage$="running"], .dfStatus[data-stage="Construction"], .dfStatus[data-stage="Deploying"], .dfStatus[data-stage="Merge"], .dfStatus[data-stage="Merge queued"] { color: var(--df-console-accent); }
 .dfStatus[data-stage="Blocked"], .dfStatus[data-stage="blocked"], .dfStatus[data-stage="needs-you"], .dfStatus[data-stage="inbox"], .dfStatus[data-stage="open"], .dfStatus[data-stage="paused"], .dfStatus[data-stage="Delivery blocked"], .dfStatus[data-stage="Correction"], .dfStatus[data-stage="reopened"] { color: var(--df-console-warning); }
 .dfStatus[data-stage="Failed"], .dfStatus[data-stage="cancelled"], .dfStatus[data-stage$="failed"] { color: var(--df-console-alert); }
 
-.dfProjectLibrary button[data-knowledge-status="needs_revalidation"] { border-color: var(--df-console-warning); }
-.dfProjectLibrary button[data-knowledge-status="superseded"] { opacity: .7; }
-.dfProjectLibrary button[data-knowledge-status="tentative"] { border-style: dashed; }
 
-.dfProjectLibrary button { overflow-wrap: anywhere; white-space: normal; text-align: left; }
 
 .dfConsoleDialog:is([aria-label="Project library"], [aria-label="Project board"]) { width: min(64rem, calc(100% - 2rem)); }
 
 /* Reading space: the floor remains visible behind a single Library workspace. */
-.dfConsoleDialog.dfLibraryDialog { width: min(78rem, calc(100% - 2rem)); }
-.dfLibraryDialog .dfConsoleSidebar__panel > .dfSectionHeader:first-child { position: sticky; top: -1rem; z-index: 1; background: var(--df-console-background); padding-block: .75rem; }
-.dfProjectLibrary__views { border-bottom: 1px solid var(--df-console-rule); margin-bottom: 1rem; padding-bottom: .5rem; }
-.dfProjectLibrary__reader :is(p, pre) { line-height: 1.55; margin-block: .75rem; }
-.dfProjectLibrary__reader pre { font-family: inherit; font-size: var(--df-text-sm); }
 
-.dfProjectLibrary__workspace > section[aria-label="Replies"] > button { margin-top: .75rem; }
 
 /* The operational plant. Paint is observation, the andon lamp is state, and
    material only moves where a flow was observed. A blueprint has no telemetry

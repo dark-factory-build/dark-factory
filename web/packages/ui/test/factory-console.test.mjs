@@ -9,7 +9,6 @@ import { FactoryApp, FactoryConsole } from "../dist/src/index.js";
 import { layoutScene } from "../dist/src/factory-scene/scene.js";
 import { projectGraph, projectFloor, workRows } from "../dist/src/console-view.js";
 import { FactoryFloor, StageMeter } from "../dist/src/console-screens.js";
-import { ProjectLibrary } from "../dist/src/project-library.js";
 import { AgentPanel, TaskDetail, WorkPanel } from "../dist/src/console-sidebar.js";
 import { FactoryScene } from "../dist/src/factory-scene/factory-scene.js";
 import { TerminalPanel } from "../dist/src/factory-app.js";
@@ -449,52 +448,6 @@ test("a task-less production row opens its pull request and keeps its stages", (
   const markup = renderToStaticMarkup(createElement(WorkPanel, { state: fixtureState, rows: workRows(fixtureState, [pr]), filter: "all", onFilter() {}, byMission: false, onByMission() {}, missions: null, ready: true, onMission() {} }));
   assert.match(markup, /<a class="dfConsoleItem__taskTitle dfWorkRow__title" href="https:\/\/github.com\/o\/r\/pull\/8" target="_blank" rel="noreferrer">Taskless<\/a>/);
   assert.match(markup, /data-stage="in-review">in review/);
-});
-
-test("a Library-linked production record opens its PR and renders real review and CI stages", async () => {
-  const head = "c".repeat(40);
-  const observedAt = Date.now();
-  const records = [
-    { repository: "o/r", kind: "repository", id: "o/r", visual_id: "", observed_at: observedAt, document: {}, tasks: [], missions: [] },
-    { repository: "o/r", kind: "pull_request", id: "7", visual_id: "change:7", observed_at: observedAt, document: { number: 7, title: "Ship", url: "https://github.com/o/r/pull/7", head, state: "open", review: { head, state: "allow" } }, tasks: [], missions: [] },
-    { repository: "o/r", kind: "check", id: "ci", visual_id: "", observed_at: observedAt, document: { revision: head, scope: "head", state: "completed", conclusion: "success", pull_requests: [7] }, tasks: [], missions: [] },
-  ];
-  const linked = { id: "doc".repeat(16), revision: 1, latest_revision: 1, kind: "observation", title: "Release note", description: "", author: "worker", source_references: JSON.stringify({ record_id: "7", record_type: "pull_request" }) };
-  const priorDocument = globalThis.document, priorOpen = globalThis.open, priorAct = globalThis.IS_REACT_ACT_ENVIRONMENT;
-  globalThis.IS_REACT_ACT_ENVIRONMENT = true;
-  globalThis.document = { visibilityState: "visible", hidden: false, addEventListener() {}, removeEventListener() {} };
-  const opened = [];
-  globalThis.open = (...args) => { opened.push(args); return null; };
-  let tree;
-  try {
-    const call = async (operation, input) => {
-      if (operation === "production") return { records: input.project_id === ids.project ? records : [], next_offset: 0, total: input.project_id === ids.project ? records.length : 0 };
-      if (operation === "search") return { items: [linked], next_offset: 0 };
-      if (operation === "read") return linked;
-      if (operation === "body") return { body: "linked", complete: true };
-      if (operation === "history") return { items: [], next_offset: 0 };
-      throw new Error(`unexpected ${operation}`);
-    };
-    await act(async () => { tree = create(createElement(FactoryConsole, { status: "ready", state: fixtureState, detail: "work", onDetail() {}, onProjectContent: call })); });
-    await act(async () => { await new Promise((resolve) => setTimeout(resolve, 20)); });
-    const workMarkup = JSON.stringify(tree.toJSON());
-    assert.match(workMarkup, /Merge/);
-    assert.match(workMarkup, /CI passed/);
-    assert.doesNotMatch(workMarkup, /Production inspection/);
-    await act(async () => tree.root.findByType(FactoryFloor).props.onOpenLibrary(ids.project));
-    await act(async () => { await new Promise((resolve) => setTimeout(resolve, 50)); });
-    const library = tree.root.findByType(ProjectLibrary);
-    const releaseNote = library.findAllByType("button").find((button) => button.findAllByType("strong").some((strong) => textOf(strong) === "Release note"));
-    assert.ok(releaseNote);
-    await act(async () => releaseNote.props.onClick());
-    await act(async () => tree.root.findByType(ProjectLibrary).findAllByType("button").find((button) => textOf(button) === "Sources & history").props.onClick());
-    await act(async () => tree.root.findByType(ProjectLibrary).findAllByType("button").find((button) => textOf(button) === "View linked pull_request").props.onClick());
-    assert.deepEqual(opened, [["https://github.com/o/r/pull/7", "_blank", "noopener,noreferrer"]]);
-    assert.equal(tree.root.findAllByType(ProjectLibrary).length, 0);
-  } finally {
-    if (tree) await act(async () => tree.unmount());
-    globalThis.document = priorDocument; globalThis.open = priorOpen; globalThis.IS_REACT_ACT_ENVIRONMENT = priorAct;
-  }
 });
 
 test("a floor question opens its answer form even from By mission or a PR detail", async () => {
@@ -1044,7 +997,7 @@ test("mobile navigation switches presentation without mutating work", () => {
   const nav = elements.find((element) => element.props["aria-label"] === "Console views");
   const buttons = nav.props.children.filter((element) => element.type === "button" || element.type.name === "IconButton");
   assert.equal(buttons[0].props["aria-pressed"], true);
-  assert.deepEqual(buttons.map(textOf), ["Floor", "Agents", "Work", "Board", "Library"]);
+  assert.deepEqual(buttons.map(textOf), ["Floor", "Agents", "Work"]);
   buttons.find((button) => textOf(button) === "Work").props.onClick();
   assert.deepEqual(calls, ["work"]);
   assert.equal(elements.find((element) => element.type === "main").props["data-mobile-view"], "floor");
@@ -1185,22 +1138,21 @@ test("floor project changes clear task selection without restoring an old dialog
   await act(async () => tree.unmount());
 });
 
-test("one machine inspector loads its evidence on open, investigates once and discusses its own node", async (t) => {
+test("one machine inspector loads its evidence on open and investigates once", async (t) => {
   const warnings = [];
   t.mock.method(console, "error", (...args) => warnings.push(args.join(" ")));
-  const store = fixtureGraph.nodes.find((node) => node.label === "state.db"), loads = [], opens = [], tasks = [];
-  const props = { state: fixtureState, graphs: fixtureGraphs, requestedEntity: { id: store.id },
+  const store = fixtureGraph.nodes.find((node) => node.label === "state.db"), loads = [], tasks = [];
+  const props = { state: fixtureState, graphs: fixtureGraphs,
     onLoadNode: async (project, node) => { loads.push([project, node]); return { project_id: project, node_id: node, selectors: { "go.package": "internal/kernel/store" }, evidence: [{ origin: "static", source: "go-ast", confidence: "high" }], sources: [], modules: [], observers: [] }; },
-    onOpenBoard: (...args) => opens.push(args), onAddTask: async (...args) => { tasks.push(args); return true; } };
+    onAddTask: async (...args) => { tasks.push(args); return true; } };
   let renderer;
   await act(async () => { renderer = create(createElement(FactoryFloor, props)); });
   const inspector = () => renderer.root.findAllByProps({ "aria-label": "Machine inspector" });
   const click = async (label) => { await act(async () => renderer.root.findAllByType("button").find((button) => button.children.join("") === label).props.onClick()); };
+  await act(async () => renderer.root.findByProps({ "aria-label": `Inspect ${store.label}` }).props.onClick());
   assert.equal(inspector().length, 1);
   assert.deepEqual(loads, [[ids.project, store.id]], "evidence is fetched when the inspector opens, by its project and node");
   assert.ok(inspector()[0].findAllByType("dt").some((term) => term.children.join("") === "go.package"), "the loaded selectors are shown");
-  await click("Discuss this machine");
-  assert.deepEqual(opens, [[ids.project, `${ids.project}:${store.id}`]]);
   await click("Investigate");
   assert.equal(tasks.length, 1);
   assert.equal(tasks[0][0].project_id, ids.project);
@@ -1209,7 +1161,7 @@ test("one machine inspector loads its evidence on open, investigates once and di
   assert.match(tasks[0][1], /Nothing observes this component/);
   assert.ok(renderer.root.findAllByType("button").some((button) => button.props.disabled && button.children.join("") === "Investigation queued"), "asking twice is not possible");
   const other = fixtureGraph.nodes.find((node) => node.label === "web");
-  await act(async () => renderer.update(createElement(FactoryFloor, { ...props, requestedEntity: { id: other.id } })));
+  await act(async () => renderer.root.findByProps({ "aria-label": `Inspect ${other.label}` }).props.onClick());
   assert.equal(inspector().length, 1);
   assert.deepEqual(loads.at(-1), [ids.project, other.id]);
   assert.ok(renderer.root.findAllByType("button").some((button) => button.children.join("") === "Investigate"), "the old investigation does not follow the new machine");
@@ -1246,34 +1198,6 @@ test("new task retains pasted files on failure, supports removal, and clears on 
   } finally { globalThis.FormData = nativeFormData; await act(async () => renderer.unmount()); }
 });
 
-test("Use in a new task opens New task with removable Library chips that are submitted with the task", async () => {
-  const attempts = [];
-  let tree;
-  function Harness() { const [detail, setDetail] = useState("floor"); return createElement(FactoryConsole, { status: "ready", state: fixtureState, detail, onDetail: setDetail, onProjectContent: async () => ({ items: [], next_offset: 0 }), onAddTask: async (...args) => { attempts.push(args); return true; } }); }
-  await act(async () => { tree = create(createElement(Harness)); });
-  const guide = { content_id: "ab".repeat(16), revision: 3n, title: "Deployment guide", project_id: ids.project };
-  const notes = { content_id: "cd".repeat(16), revision: 1n, title: "Release notes", project_id: ids.project };
-  await act(async () => tree.root.findByType(FactoryFloor).props.onOpenLibrary(ids.project));
-  await act(async () => tree.root.findByType(ProjectLibrary).props.onUseInTask(guide));
-  assert.equal(tree.root.findAllByType(ProjectLibrary).length, 0, "the Library closes into the existing form");
-  await act(async () => tree.root.findByType(FactoryFloor).props.onOpenLibrary(ids.project));
-  await act(async () => tree.root.findByType(ProjectLibrary).props.onUseInTask(notes));
-  const form = () => tree.root.findByProps({ "aria-label": "New task" });
-  assert.equal(form().parent.props.open, true, "New task opens with the chosen context");
-  const chips = () => tree.root.findAllByProps({ "aria-label": "Library context" }).flatMap((list) => list.findAllByType("li").map((item) => textOf(item.findByType("span"))));
-  assert.deepEqual(chips(), ["Deployment guide · Revision 3", "Release notes · Revision 1"]);
-  const targets = form().findByType("select").findAllByType("option").map((option) => option.props.value);
-  assert.ok(targets.length > 0 && targets.every((value) => value === `any:${ids.project}` || fixtureState.agents.get(value)?.project_id === ids.project), "targets stay in the content's project");
-  await act(async () => tree.root.findByProps({ "aria-label": "Remove Release notes" }).props.onClick());
-  assert.deepEqual(chips(), ["Deployment guide · Revision 3"]);
-  const nativeFormData = globalThis.FormData;
-  globalThis.FormData = class { get(name) { return name === "target" ? `any:${ids.project}` : "Follow the guide"; } };
-  try { await act(async () => form().props.onSubmit({ preventDefault() {}, currentTarget: { reset() {} } })); } finally { globalThis.FormData = nativeFormData; }
-  assert.deepEqual(attempts[0].slice(1, 3), ["Follow the guide", "any"]);
-  assert.deepEqual(attempts[0][4], [guide], "the chip is submitted with the task");
-  assert.deepEqual(chips(), [], "an added task clears its context");
-  await act(async () => tree.unmount());
-});
 
 test("new-work admission reports acknowledgement and preserves active work", async () => {
   let acknowledge;
@@ -1311,47 +1235,8 @@ test("Missions share the task dialog and preserve their origin on close", async 
   }
 });
 
-test("opening a project shelf scopes Library without changing the floor filter", async () => {
-  const calls = [];
-  let tree;
-  await act(async () => { tree = create(createElement(FactoryConsole, { status: "ready", state: fixtureState, graphs: fixtureGraphs,
-    onProjectContent: async (operation, input) => { calls.push({ operation, input }); return { items: [], next_offset: 0 }; },
-  })); });
-  await act(async () => tree.root.findByType(FactoryFloor).props.onOpenLibrary(ids.secondProject));
-  assert.equal(tree.root.findByType(ProjectLibrary).props.initialProjectId, ids.secondProject);
-  assert.equal(tree.root.findByType(FactoryFloor).props.projectId, undefined);
-  assert.equal(tree.root.findByType(FactoryFloor).props.state.projects.size, fixtureState.projects.size);
-  assert.ok(calls.some(({ operation, input }) => operation === "search" && input.project_id === ids.secondProject));
-  await act(async () => tree.unmount());
-});
 
 
-test("Library source navigation selects the machine on the floor and keeps one inspector", async () => {
-  const [first, destination] = [fixtureGraph.nodes.find((node) => node.label === "state.db"), fixtureGraph.nodes.find((node) => node.label === "web")];
-  let tree;
-  await act(async () => { tree = create(createElement(FactoryConsole, { status: "ready", state: fixtureState, graphs: fixtureGraphs, onProjectContent: async () => ({ items: [] }) })); });
-  const assertSelection = (id) => {
-    const inspectors = tree.root.findAllByProps({ "aria-label": "Machine inspector" });
-    assert.equal(inspectors.length, id ? 1 : 0);
-    if (id) {
-      assert.equal(inspectors[0].findAllByType("code")[0].children.join(""), id);
-      assert.equal(inspectors[0].findByType("details").props.open, undefined, "evidence starts collapsed");
-    }
-  };
-  for (let visit = 0; visit < 2; visit++) {
-    await act(async () => tree.root.findByProps({ type: "search" }).props.onChange({ target: { value: first.label } }));
-    await act(async () => tree.root.findByProps({ className: "dfFactoryEntityTools__results" }).findAllByType("button").find((button) => button.children.join("") === `${first.label} · ${first.kind}`).props.onClick({ currentTarget: { closest: () => null } }));
-    assertSelection(first.id);
-    await act(async () => tree.root.findByType(FactoryFloor).props.onOpenLibrary(ids.project));
-    await act(async () => tree.root.findByType(ProjectLibrary).props.onSource(`${ids.project}:${destination.id}`));
-    assertSelection(destination.id);
-    await act(async () => tree.root.findAllByType("button").find((button) => button.children.join("") === "Focus on floor").props.onClick());
-    assertSelection(destination.id);
-  }
-  await act(async () => tree.root.findAllByType("button").find((button) => button.children.join("") === "Close").props.onClick());
-  assertSelection("");
-  await act(async () => tree.unmount());
-});
 
 test("one project is selected automatically, with no header picker, and a missions prompt when several exist", () => {
   const one = baseState({ projects: new Map([...fixtureState.projects].slice(0, 1)) });
@@ -1388,21 +1273,6 @@ test("Work lists and counts only the chosen project's requests", async () => {
   await act(async () => tree.unmount());
 });
 
-test("opening a question from the Library switches the header to its project so the reply form renders", async () => {
-  const other = fixtureState.humanRequests.get(ids.request).project_id === ids.project ? ids.secondProject : ids.project;
-  function Harness() {
-    const [chosen, setChosen] = useState();
-    return createElement(FactoryConsole, { status: "ready", state: fixtureState, onDetail() {}, detail: "work", selectedHumanRequest: chosen, onSelectHumanRequest: (request) => setChosen(selectedRequest({ request })), onCloseHumanRequest() {}, onReplyHumanRequest() {} });
-  }
-  let tree;
-  await act(async () => { tree = create(createElement(Harness)); });
-  await act(async () => tree.root.findByProps({ "aria-label": "Project" }).props.onChange({ currentTarget: { value: other } }));
-  await act(async () => tree.root.findByType(FactoryFloor).props.onOpenLibrary(other));
-  await act(async () => tree.root.findByType(ProjectLibrary).props.onRecord("human_request", ids.request, fixtureState.humanRequests.get(ids.request).project_id));
-  assert.equal(tree.root.findByProps({ "aria-label": "Project" }).props.value, fixtureState.humanRequests.get(ids.request).project_id);
-  assert.equal(tree.root.findAllByProps({ "aria-label": "Selected question" }).length > 0, true);
-  await act(async () => tree.unmount());
-});
 
 test("a specialist is grouped and states what it is doing and owes, with no browser lifecycle controls", () => {
   const worker = fixtureState.agents.get(ids.agent);
@@ -1414,7 +1284,7 @@ test("a specialist is grouped and states what it is doing and owes, with no brow
   assert.match(markup, /waiting: waiting for a free background slot/);
   assert.match(markup, /aria-label="Remit">Keep the docs true to the code\.</);
   assert.match(markup, /Next review .*\(events\) or sooner on failures/);
-  assert.match(markup, /aria-label="Contributions"/);
+  assert.doesNotMatch(markup, /aria-label="Contributions"/);
   assert.match(markup, /aria-label="Terminal"/);
   for (const absent of [">Pause<", ">Resume<", "Stop specialist", "Archive worker", 'aria-label="Agent configuration"']) assert.equal(markup.includes(absent), false, absent);
   const running = baseState({ agents: state.agents, humanRequests: new Map(), tasks: new Map([...fixtureState.tasks, ["c1".repeat(16), { ...fixtureState.tasks.get(ids.task), id: "c1".repeat(16), title: "Standing instruction", status: "running", assigned_agent_id: specialist.id }]]) });

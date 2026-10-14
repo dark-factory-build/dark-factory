@@ -6,8 +6,7 @@ import type { ScenePoint } from "./scene.js";
 /**
  * Things that really passed between people on the floor: work handed from the
  * tray to whoever starts it, a question one running task put to another, and
- * its answer, and a recorded Library or Board read (to the agent) or write (from
- * it). Each is seen as a change between two snapshots, shown once, and
+ * its answer. Each is seen as a change between two snapshots, shown once, and
  * forgotten; nothing here is stored or sent.
  */
 export type FloorEvent = Readonly<{
@@ -21,17 +20,16 @@ export type FloorEvent = Readonly<{
   subject?: string;
 }>;
 
-export type Seen = Readonly<{ tasks: ReadonlyMap<string, SceneTask["status"]>; questions: ReadonlyMap<string, boolean>; knowledge: ReadonlySet<string> }>;
-type Recorded = Readonly<{ key: string; agentId: string; reading: boolean }>;
+export type Seen = Readonly<{ tasks: ReadonlyMap<string, SceneTask["status"]>; questions: ReadonlyMap<string, boolean> }>;
 
 /** Work from the tray: an overseer's or specialist's own pass is queued to it alone, never handed over. */
 export const fromTray = (task: SceneTask) => task.title !== STANDING_TITLE;
 
 /** The first look is history, not news: it shows nothing. A task is only handed over if it was seen waiting. */
-export function observe(before: Seen | undefined, tasks: readonly SceneTask[], questions: readonly PeerQuestionItem[], recorded: readonly Recorded[] = []): Readonly<{ seen: Seen; events: readonly FloorEvent[] }> {
+export function observe(before: Seen | undefined, tasks: readonly SceneTask[], questions: readonly PeerQuestionItem[]): Readonly<{ seen: Seen; events: readonly FloorEvent[] }> {
   // ponytail: grows by one entry per question seen while this floor is open; prune by age if a floor ever stays open for weeks.
   // Questions are remembered for good: the snapshot only carries the newest, and one that drops out and comes back is not news.
-  const seen = { tasks: new Map(tasks.map((task) => [task.id, task.status])), questions: new Map([...(before?.questions ?? []), ...questions.map((question) => [question.id, question.answered] as const)]), knowledge: new Set([...(before?.knowledge ?? []), ...recorded.map((item) => item.key)]) };
+  const seen = { tasks: new Map(tasks.map((task) => [task.id, task.status])), questions: new Map([...(before?.questions ?? []), ...questions.map((question) => [question.id, question.answered] as const)]) };
   if (before === undefined) return { seen, events: [] };
   const agent = new Map(tasks.map((task) => [task.id, task.agentId]));
   const events: FloorEvent[] = tasks.flatMap((task) => task.status === "running" && before.tasks.get(task.id) === "queued" && task.agentId !== "" && fromTray(task) ? [{ key: `assign ${task.id}`, kind: "assign" as const, to: task.agentId }] : []);
@@ -40,9 +38,6 @@ export function observe(before: Seen | undefined, tasks: readonly SceneTask[], q
     if (!asker || !asked || asker === asked || was === question.answered) continue;
     events.push(question.answered ? { key: `answer ${question.id}`, kind: "answer", from: asked, to: asker, subject: question.id } : { key: `ask ${question.id}`, kind: "ask", from: asker, to: asked, subject: question.id });
   }
-  // Recorded operations arrive oldest first; a burst is one flight per agent, its newest.
-  const newest = new Map(recorded.filter((item) => item.agentId !== "" && !before.knowledge.has(item.key)).map((item) => [item.agentId, item]));
-  for (const item of newest.values()) events.push(item.reading ? { key: `read ${item.key}`, kind: "read", to: item.agentId, subject: item.key } : { key: `post ${item.key}`, kind: "post", from: item.agentId, subject: item.key });
   return { seen, events };
 }
 
