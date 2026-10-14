@@ -1956,9 +1956,16 @@ func TestOverseerEnqueuePinsContentWhileSchedulerRunsAndRejectsPostHocAttach(t *
 drained:
 	started := make(chan struct{})
 	var startedOnce sync.Once
+	secondStarted := make(chan struct{})
+	var secondOnce sync.Once
+	var probes atomic.Int64
 	schedulerDone := make(chan error, 1)
 	schedulerSpec := SupervisorSpec{scheduledAttempt: func(ctx context.Context, spec SupervisorSpec) (kernel.Run, error) {
-		startedOnce.Do(func() { close(started) })
+		if probes.Add(1) == 1 {
+			startedOnce.Do(func() { close(started) })
+		} else {
+			secondOnce.Do(func() { close(secondStarted) })
+		}
 		spec.admissionObserved(false)
 		<-ctx.Done()
 		return kernel.Run{}, ctx.Err()
@@ -1987,7 +1994,11 @@ drained:
 	if err != nil {
 		t.Fatal(err)
 	}
-	assertSchedulerWake(t, fixture.daemon)
+	select {
+	case <-secondStarted:
+	case <-time.After(2 * time.Second):
+		t.Fatal("scheduler did not observe enqueue wake")
+	}
 	task, found, err := fixture.store.Task(context.Background(), mustTaskID(t, taskID))
 	if err != nil || !found {
 		t.Fatal(err)
