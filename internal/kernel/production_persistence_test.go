@@ -627,9 +627,36 @@ func TestPublishableIntakeChangeIsFactorydsUntilPublishedOrFailed(t *testing.T) 
 	if _, err := store.writer.ExecContext(ctx, `UPDATE changes SET head_commit = ? WHERE id = ?`, head, change.ID.Bytes()); err != nil {
 		t.Fatal(err)
 	}
+	// No-intake work settled before factoryd took it over is the overseer's
+	// history, never republished; after it, a factory/ branch that already
+	// carries a pull request is not published again.
+	if len(candidates()) != 0 {
+		t.Fatalf("a no-intake Change settled before the cutover was selected: %+v", candidates())
+	}
+	var settledAt int64
+	if err := store.writer.QueryRowContext(ctx, `SELECT completed_at_ms FROM tasks WHERE id = ?`, worker.TaskID.Bytes()).Scan(&settledAt); err != nil {
+		t.Fatal(err)
+	}
+	settle := func(at int64) {
+		t.Helper()
+		if _, err := store.writer.ExecContext(ctx, `UPDATE tasks SET completed_at_ms = ?, updated_at_ms = ? WHERE id = ?`, at, at, worker.TaskID.Bytes()); err != nil {
+			t.Fatal(err)
+		}
+	}
+	settle(NonIntakePublishAfterMs)
+	if _, err := store.writer.ExecContext(ctx, `INSERT INTO production_records (project_id, repository, kind, identity, visual_id, document, observed_at_ms) VALUES (?, 'example/factory', 'pull_request', '810', '', ?, 1)`, worker.ProjectID.Bytes(), `{"branch":"`+branch+`","state":"merged"}`); err != nil {
+		t.Fatal(err)
+	}
+	if len(candidates()) != 0 {
+		t.Fatalf("a no-intake Change whose branch already had a pull request was selected: %+v", candidates())
+	}
+	if _, err := store.writer.ExecContext(ctx, `DELETE FROM production_records WHERE identity = '810'`); err != nil {
+		t.Fatal(err)
+	}
 	if len(candidates()) != 1 || !closed() || candidates()[0].Accepted.ID != (IntakeAcceptanceID{}) {
 		t.Fatalf("a repository-bound no-intake Change was not selected: candidates=%+v closed=%v", candidates(), closed())
 	}
+	settle(settledAt)
 	if _, err := store.writer.ExecContext(ctx, `INSERT INTO intake_task_bindings (task_id, acceptance_id) VALUES (?, ?)`, worker.TaskID.Bytes(), accepted.ID.Bytes()); err != nil {
 		t.Fatal(err)
 	}
