@@ -359,7 +359,7 @@ func newTestStore(t *testing.T) (*Store, string) {
 	return store, path
 }
 
-func mustTime(t *testing.T, value int64) UnixMillis {
+func mustTime(t testing.TB, value int64) UnixMillis {
 	t.Helper()
 	result, err := NewUnixMillis(value)
 	if err != nil {
@@ -368,7 +368,7 @@ func mustTime(t *testing.T, value int64) UnixMillis {
 	return result
 }
 
-func projectID(t *testing.T, seed byte) ProjectID {
+func projectID(t testing.TB, seed byte) ProjectID {
 	t.Helper()
 	result, err := ProjectIDFromBytes(bytes.Repeat([]byte{seed}, IDBytes))
 	if err != nil {
@@ -377,7 +377,7 @@ func projectID(t *testing.T, seed byte) ProjectID {
 	return result
 }
 
-func agentID(t *testing.T, seed byte) AgentID {
+func agentID(t testing.TB, seed byte) AgentID {
 	t.Helper()
 	result, err := AgentIDFromBytes(bytes.Repeat([]byte{seed}, IDBytes))
 	if err != nil {

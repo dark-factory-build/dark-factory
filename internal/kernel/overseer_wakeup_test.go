@@ -12,7 +12,7 @@ import (
 )
 
 // wakeFixture is a project with a worker and a standing overseer.
-func wakeFixture(t *testing.T) (*Store, Agent, Agent) {
+func wakeFixture(t testing.TB) (*Store, Agent, Agent) {
 	t.Helper()
 	ctx := context.Background()
 	store, err := createTestStore(ctx, filepath.Join(t.TempDir(), "kernel.db"), FactoryConfig{DispatchEnabled: true, Capacity: 2}, mustTime(t, 1))
@@ -39,7 +39,7 @@ func wakeFixture(t *testing.T) (*Store, Agent, Agent) {
 	return store, worker, overseer
 }
 
-func wakeBodies(t *testing.T, store *Store, at int64) []string {
+func wakeBodies(t testing.TB, store *Store, at int64) []string {
 	t.Helper()
 	tasks, err := store.EnqueueOverseerWakeups(context.Background(), mustTime(t, at))
 	if err != nil {
@@ -54,7 +54,7 @@ func wakeBodies(t *testing.T, store *Store, at int64) []string {
 
 // escalate records pull request number at state and head, and an escalated
 // review of it at the head escalated.
-func escalate(t *testing.T, store *Store, project ProjectID, number, state, head, escalated string, at int64) {
+func escalate(t testing.TB, store *Store, project ProjectID, number, state, head, escalated string, at int64) {
 	t.Helper()
 	insert := `INSERT INTO production_records (project_id, repository, kind, identity, visual_id, document, observed_at_ms) VALUES (?, 'example/factory', ?, ?, '', ?, ?)`
 	if _, err := store.writer.ExecContext(context.Background(), insert, project.Bytes(), "pull_request", number, `{"number":`+number+`,"state":"`+state+`","head":"`+head+`"}`, at); err != nil {
@@ -62,6 +62,38 @@ func escalate(t *testing.T, store *Store, project ProjectID, number, state, head
 	}
 	if _, err := store.writer.ExecContext(context.Background(), insert, project.Bytes(), "reviewer", "op"+number, `{"request":{"PullNumber":`+number+`,"Head":"`+strings.ToUpper(escalated)+`"},"escalation":"stuck `+number+`"}`, at); err != nil {
 		t.Fatal(err)
+	}
+}
+
+// BenchmarkOverseerItemsLiveShape keeps the reviewer escalation branch
+// measurable against the retained-store scale called out in #1881.
+func BenchmarkOverseerItemsLiveShape(b *testing.B) {
+	store, _, overseer := wakeFixture(b)
+	head := strings.Repeat("a", 40)
+	for i := 0; i < 1000; i++ {
+		escalate(b, store, overseer.ProjectID, fmt.Sprintf("%d", i+1), "open", head, head, 1000+int64(i))
+	}
+	args := overseerItemArgs(overseer, 120_000, nil)
+	connection, err := store.readerConnection(context.Background())
+	if err != nil {
+		b.Fatal(err)
+	}
+	b.Cleanup(func() { _ = connection.Close() })
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		rows, err := connection.QueryContext(context.Background(), overseerStalledItems, args...)
+		if err != nil {
+			b.Fatal(err)
+		}
+		for rows.Next() {
+		}
+		if err := rows.Err(); err != nil {
+			rows.Close()
+			b.Fatal(err)
+		}
+		if err := rows.Close(); err != nil {
+			b.Fatal(err)
+		}
 	}
 }
 
