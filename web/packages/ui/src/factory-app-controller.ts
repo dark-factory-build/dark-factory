@@ -32,6 +32,8 @@ import {
   type OperationalGraphView,
   type OperationalNodeView,
 } from "@dark-factory/client";
+
+export type ProjectContentCall = (operation: ProjectContentOperation, input: ProjectContentInput) => Promise<ProjectContentOutput>;
 import { agentCurrentTask, type RunPathSample } from "./console-view.js";
 import { HumanRequestFlow, type HumanRequestPhase } from "./human-request-flow.js";
 import { MAX_PENDING_INPUT_BYTES, TerminalController, type TerminalControllerSnapshot, type TerminalErrorSource, type TerminalSurface } from "./terminal-controller.js";

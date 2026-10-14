@@ -2,7 +2,6 @@ import { useEffect, useRef, useState, type ReactNode } from "react";
 import { MAX_TASK_ATTACHMENTS, MAX_TASK_ATTACHMENT_BYTES, type IntakeView, type IntakeBody, type DiscoveredAccount, type AgentItem, type GitHubConnectionBody, type GitHubDelegationBody, type HumanRequestItem, type ProjectItem, type RunTelemetry, type RepositoryView, type StateView, type TaskHistoryView, type TaskItem, type TaskPeerQuestion, type TaskContentPin } from "@dark-factory/client";
 import type { FactoryEditView, FactoryHumanRequestView } from "./factory-app-controller.js";
 import { rankLabel } from "./console-screens.js";
-import { activityLabel, type KnowledgeActivity } from "./project-board.js";
 import { AgentSprite } from "./factory-scene/factory-scene.js";
 import { telemetryLine } from "./factory-scene/scene.js";
 import { agentStatus, agentCurrentTask, agentActivity, isSpecialist, needsYou, specialistStatus, type WorkRow, type WorkState } from "./console-view.js";
@@ -43,14 +42,9 @@ export function AgentPanel({
   state,
   terminalContent,
   telemetry,
-  contributions = [],
-  onOpenActivity,
 }: {
   agent: AgentItem;
   state: StateView | undefined;
-  /** A specialist's recorded Board and Library operations, already filtered to it. */
-  contributions?: readonly KnowledgeActivity[];
-  onOpenActivity?: (item: KnowledgeActivity) => void;
   /** The selected agent's mounted terminal and durable composer. */
   terminalContent?: ReactNode;
   /** What the current run's agent CLI recorded; absent when it recorded nothing. */
@@ -79,7 +73,7 @@ export function AgentPanel({
         </div>
       </div>
 
-      {specialist && state !== undefined ? <SpecialistSummary agent={agent} state={state} contributions={contributions} onOpenActivity={onOpenActivity} /> : <p className="dfConsoleSidebar__status"><Status stage={archived ? "archived" : activity} /></p>}
+      {specialist && state !== undefined ? <SpecialistSummary agent={agent} state={state} /> : <p className="dfConsoleSidebar__status"><Status stage={archived ? "archived" : activity} /></p>}
       {queueHint === undefined || specialist ? null : <p className="dfConsoleSidebar__inherit">{queueHint}</p>}
       {effort === "" ? null : <p className="dfConsoleSidebar__inherit" aria-label={`Recorded by the agent: ${effort}`}>{effort}</p>}
 
@@ -91,19 +85,14 @@ export function AgentPanel({
 }
 
 /** What a specialist is doing, owes and has done; nothing here is inferred beyond what the factory serves. */
-function SpecialistSummary({ agent, state, contributions, onOpenActivity }: {
-  agent: AgentItem; state: StateView; contributions: readonly KnowledgeActivity[]; onOpenActivity?: (item: KnowledgeActivity) => void;
+function SpecialistSummary({ agent, state }: {
+  agent: AgentItem; state: StateView;
 }) {
   const { stage, text, next, remit } = specialistStatus(agent, state);
-  const mine = contributions.filter((item) => item.agent_id === agent.id);
   return <>
     <p className="dfConsoleSidebar__status"><Status stage={stage}>{text}</Status></p>
     {remit === "" ? null : <p className="dfConsoleItem__meta" aria-label="Remit">{remit}</p>}
     {next === "" ? null : <p className="dfConsoleSidebar__inherit">{next}</p>}
-    <section className="dfConsoleSidebar__section" aria-label="Contributions">
-      <h3>Contributions</h3>
-      {mine.length === 0 ? <p className="dfFactoryConsole__empty">No recorded contributions yet.</p> : <ul>{mine.map((item) => <li key={item.key}><button type="button" disabled={!onOpenActivity} onClick={() => onOpenActivity?.(item)}>{activityLabel(item, state)}</button></li>)}</ul>}
-    </section>
   </>;
 }
 

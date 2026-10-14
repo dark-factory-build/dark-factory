@@ -524,8 +524,8 @@ test("resting workers take fair, uninterrupted turns at the break-room furniture
   for (const implement of ["board", "missions", "tasks"]) assert.ok(workerFrames(crowd[0], { action: "still", frame: 0, at: 0 }, undefined, implement).includes("person.held.clipboard.chest"), implement);
   // The floor draws exactly the furniture the nook has; with the scenery off, only the implements, never the coffee.
   assert.equal((render().match(/data-break-room=/g) ?? []).length, breakRoomNook(floorFor(graph)).furniture.length);
-  assert.equal(breakRoomNook(floorFor(graph)).furniture.length, 1, "with no panels to open, only the coffee stands there");
-  assert.deepEqual(render({ appearance: { scenery: "off", animation: "on" }, onOpenBoard() {}, onOpenMissions() {}, onOpenTasks() {}, onOpenLibrary() {} }).match(/data-break-room="\w+"/g), ['data-break-room="shelf"', 'data-break-room="board"', 'data-break-room="missions"', 'data-break-room="tasks"']);
+  assert.equal(breakRoomNook(floorFor(graph)).furniture.length, 3, "the board and shelf remain scenery beside the coffee");
+  assert.deepEqual(render({ appearance: { scenery: "off", animation: "on" }, onOpenMissions() {}, onOpenTasks() {} }).match(/data-break-room="\w+"/g), ['data-break-room="shelf"', 'data-break-room="board"', 'data-break-room="missions"', 'data-break-room="tasks"']);
 });
 
 test("a floor mounted late still starts seated, then someone gets up, stands at the furniture, and comes back", async () => {
@@ -543,7 +543,7 @@ test("a floor mounted late still starts seated, then someone gets up, stands at 
   globalThis.cancelAnimationFrame = (id) => frames.delete(id);
   const resting = Array.from({ length: 10 }, (_, index) => ({ ...workers[0], id: `habit-${String(index).padStart(2, "0")}`, activity: "idle", location: "resting", nodeId: undefined }));
   // The floor offers its library, so readers have a shelf to visit.
-  const libraryOpen = { onOpenLibrary() {} };
+  const libraryOpen = {};
   let renderer;
   try {
     // Every commit is looked at, not only where things settle: a worker drawn at the
@@ -813,14 +813,14 @@ test("stationary tasks link the existing queue and questions", () => {
   assert.doesNotMatch(noObservation, /data-human-request-id=/);
 });
 
-test("the separate desks are gone: the break room's implements open their panels", () => {
-  const markup = render({ projectId: "project-a", onOpenTasks() {}, onOpenMissions() {}, onOpenBoard() {}, onOpenLibrary() {} });
+test("the board and shelf remain passive scenery while live-work implements open their panels", () => {
+  const markup = render({ projectId: "project-a", onOpenTasks() {}, onOpenMissions() {} });
   assert.doesNotMatch(markup, /data-floor-tray-desk|data-common-table/);
-  assert.equal((markup.match(/>(BOARD|MISSIONS|TASKS|LIBRARY)</g) ?? []).length, 4, "each implement signed once");
+  assert.equal((markup.match(/>(MISSIONS|TASKS)</g) ?? []).length, 2, "only live-work implements are signed");
   assert.match(markup, /data-break-room="tasks" data-floor-inbox="0"[^>]*aria-label="Open Tasks"[^>]*role="button"[^>]*tabindex="0"/);
   assert.match(markup, /data-break-room="missions"[^>]*data-tooltip="Missions · inspect objectives"[^>]*aria-label="Open Missions"[^>]*role="button"[^>]*tabindex="0"/);
-  assert.match(markup, /data-break-room="board"[^>]*aria-label="Open discussion board"[^>]*role="button"[^>]*tabindex="0"/);
-  assert.match(markup, /data-break-room="shelf"[^>]*aria-label="Open project library"[^>]*role="button"[^>]*tabindex="0"/);
+  assert.match(markup, /data-break-room="board"(?![^>]*role="button")/);
+  assert.match(markup, /data-break-room="shelf"(?![^>]*role="button")/);
   // Without a panel to open, an implement is scenery, not a dead button.
   assert.doesNotMatch(render({ projectId: "project-a" }), /data-break-room="missions"[^>]*role="button"/);
 });
@@ -1050,20 +1050,6 @@ test("everyone not at work has a stool beside a machine, and nothing stands in a
   assert.match(waiting, /working; location not yet observed/);
 });
 
-test("the shelf opens the floor's project library", async () => {
-  globalThis.IS_REACT_ACT_ENVIRONMENT = true;
-  const opened = [];
-  let tree;
-  await act(async () => { tree = create(createElement(FactoryScene, { graph, appearance: scenic, workers: [], projectId: "floor-project", appearance: { scenery: "off", animation: "off" }, onOpenLibrary: (id) => opened.push(id) })); });
-  assert.deepEqual(opened, [], "rendering ambient furniture does not retrieve library content");
-  const shelves = tree.root.findAllByProps({ "aria-label": "Open project library" });
-  assert.equal(shelves.length, 1);
-  assert.equal(shelves[0].props["data-tooltip"], "Library · documents");
-  await act(async () => shelves[0].props.onKeyDown({ key: "Enter", preventDefault() {} }));
-  assert.deepEqual(opened, ["floor-project"]);
-  await act(async () => tree.unmount());
-});
-
 test("an outside gate says not connected or no calls instead of claiming it cannot be seen", () => {
   const caption = (observation) => render({ graph: sceneGraph([unit("api", { machines: [machine("api-in", "ingress")] })], { parties: [machine("linear", "external", { reading: { ...unread, observation } })], flows: [] }), workers: [] });
   assert.match(caption("unobserved"), /not connected/);
@@ -1208,7 +1194,8 @@ test("a fold's inspector lists its routes and shows only the chosen route's evid
   const text = () => JSON.stringify(renderer.toJSON());
   const click = (label) => act(async () => inspector().findAllByType("button").find((button) => button.children.join("") === label).props.onClick());
   try {
-    await act(async () => { renderer = create(createElement(FactoryScene, { graph: folded, appearance: scenic, workers: [], onLoadNode, requestedEntity: { id: "api:docks" } })); });
+    await act(async () => { renderer = create(createElement(FactoryScene, { graph: folded, appearance: scenic, workers: [], onLoadNode })); });
+    await act(async () => renderer.root.findByProps({ "aria-label": "Inspect 3 routes" }).props.onClick());
     assert.deepEqual(inspector().findByProps({ "aria-label": "Folded routes" }).findAllByType("button").map((button) => button.children.join("")), ["/a", "/b", "/c"]);
     assert.deepEqual(loads, [], "a fold loads nothing until a route is chosen");
     await click("/a");
@@ -1233,7 +1220,9 @@ test("a fold's inspector lists its routes and shows only the chosen route's evid
   loads.length = 0;
   let member;
   try {
-    await act(async () => { member = create(createElement(FactoryScene, { graph: folded, appearance: scenic, workers: [], onLoadNode, requestedEntity: { id: "n1" } })); });
+    await act(async () => { member = create(createElement(FactoryScene, { graph: folded, appearance: scenic, workers: [], onLoadNode })); });
+    await act(async () => member.root.findByProps({ "aria-label": "Inspect 3 routes" }).props.onClick());
+    await act(async () => member.root.findAllByType("button").find((button) => button.children.join("") === "/b").props.onClick());
     assert.deepEqual(loads, ["n1"]);
     assert.match(JSON.stringify(member.toJSON()), /Back to folded routes/);
     assert.match(JSON.stringify(member.root.findByProps({ "aria-label": "Machine inspector" }).findByType("h3").children), /3 routes/);
@@ -1242,7 +1231,8 @@ test("a fold's inspector lists its routes and shows only the chosen route's evid
   }
   // A public floor names the routes without loading anything.
   let publicRenderer;
-  await act(async () => { publicRenderer = create(createElement(FactoryScene, { graph: folded, appearance: scenic, workers: [], requestedEntity: { id: "api:docks" } })); });
+  await act(async () => { publicRenderer = create(createElement(FactoryScene, { graph: folded, appearance: scenic, workers: [] })); });
+  await act(async () => publicRenderer.root.findByProps({ "aria-label": "Inspect 3 routes" }).props.onClick());
   const list = publicRenderer.root.findByProps({ "aria-label": "Folded routes" });
   assert.deepEqual(list.findAllByType("li").map((item) => item.children.join("")), ["/a", "/b", "/c"]);
   assert.equal(list.findAllByType("button").length, 0, "public floors have no evidence to load");
