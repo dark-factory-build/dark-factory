@@ -371,9 +371,10 @@ func TestOverseerWakeInstructionFallsBackToFull(t *testing.T) {
 	}
 }
 
-// A succeeded intake task with a diff is factoryd's to publish, and stays so
-// once its merged Change is reclaimed; any other success, an empty intake one
-// whose Change was reclaimed included, still gets the overseer's one look.
+// A succeeded intake task with a diff is factoryd's to publish; once its pull
+// request merged (here with its Change reclaimed) it is the overseer's to
+// verify (TestOverseerVerifiesMergedIntakeOnceLive); any other success, an
+// empty intake one whose Change was reclaimed included, gets one look.
 func TestOverseerWakeSkipsPublishedIntakeSuccess(t *testing.T) {
 	t.Parallel()
 	for _, mode := range []string{"plain", "intake", "reclaimed", "empty"} {
@@ -423,9 +424,80 @@ func TestOverseerWakeSkipsPublishedIntakeSuccess(t *testing.T) {
 				t.Fatal(err)
 			}
 		}
-		if bodies := wakeBodies(t, store, 1_000_000); len(bodies) != map[bool]int{false: 1, true: 0}[intake && mode != "empty"] {
+		if bodies := wakeBodies(t, store, 1_000_000); len(bodies) != map[bool]int{false: 1, true: 0}[mode == "intake"] {
 			t.Fatalf("%s wake = %q", mode, bodies)
 		}
+	}
+}
+
+// A succeeded intake task whose pull request merged wakes its overseer once,
+// when the merge is live: at the project's first verified self-release after
+// the merge. That one look verifies the issue's live signal (#1906); later
+// releases do not wake it again, and nothing stalls into a card.
+func TestOverseerVerifiesMergedIntakeOnceLive(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	succeeded, _ := NewSuccessProposal("done")
+	store, finalizing := finalizingReleasedRun(t, RoleWorker, succeeded)
+	defer store.Close()
+	change, _, err := store.Change(ctx, *finalizing.ChangeID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	moved, _ := NewCommitID(change.Selection.format, bytes.Repeat([]byte{0xd2}, change.Selection.format.oidLength()))
+	settlement, _ := NewRetainedChangeSettlement(change.Revision, &moved)
+	if _, err := store.FinalizeWorkerRun(ctx, finalizing.ID, finalizing.Revision, settlement, mustTime(t, 80)); err != nil {
+		t.Fatal(err)
+	}
+	for _, statement := range []string{`PRAGMA foreign_keys = OFF`, `INSERT INTO intake_task_bindings(task_id, acceptance_id) VALUES (?, zeroblob(16))`, `PRAGMA foreign_keys = ON`} {
+		args := []any{finalizing.TaskID.Bytes()}[:strings.Count(statement, "?")]
+		if _, err := store.writer.ExecContext(ctx, statement, args...); err != nil {
+			t.Fatal(err)
+		}
+	}
+	overseer, err := store.CreateAgent(ctx, NewAgent{ID: agentID(t, 3), ProjectID: finalizing.ProjectID, Name: "overseer", Role: RoleOrchestrator, Provider: ProviderCodex, ToolBudgetLimit: 2}, mustTime(t, 82))
+	if err != nil {
+		t.Fatal(err)
+	}
+	policy, after, instruction := IdleStandingInstruction, uint32(1), "Supervise."
+	if _, err := store.UpdateAgent(ctx, overseer.ID, overseer.Revision, AgentPatch{IdlePolicy: &policy, IdleAfterSeconds: &after, IdleInstruction: &instruction}, mustTime(t, 83)); err != nil {
+		t.Fatal(err)
+	}
+	release := func(sha byte, verifiedAt int64) {
+		t.Helper()
+		revision := strings.Repeat(string(sha), 40)
+		delivery := ProductionDelivery{ID: "release:" + revision, Kind: "runtime", Destination: "factoryd", Revision: revision, State: "verified", VerifiedAt: verifiedAt, PullRequests: []uint64{}}
+		if err := store.RecordDelivery(ctx, finalizing.ProjectID, "dark-factory-build/dark-factory", delivery, mustTime(t, verifiedAt)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	release('a', 50)
+	head := hex.EncodeToString(moved.Bytes())
+	pr := ProductionPullRequest{Number: 7, Title: "Ship", URL: "https://github.com/example/factory/pull/7", Head: head, Branch: "factory/" + change.ID.String()[:12], Base: "main", State: "merged", Review: ProductionReview{Head: head, State: "allow"}}
+	if err := store.RecordPublication(ctx, finalizing.ProjectID, finalizing.TaskID, "example/factory", pr, mustTime(t, 84)); err != nil {
+		t.Fatal(err)
+	}
+	settle := overseerWakeSettle.Milliseconds()
+	if bodies := wakeBodies(t, store, 1000); len(bodies) != 0 {
+		t.Fatalf("merged but not yet live woke = %q", bodies)
+	}
+	release('b', 2000)
+	bodies := wakeBodies(t, store, 2000+settle)
+	if len(bodies) != 1 || !strings.Contains(bodies[0], finalizing.TaskID.String()+` "verify" succeeded`) || !strings.Contains(bodies[0], "PR #7 merged/allow") {
+		t.Fatalf("live merge wake = %q", bodies)
+	}
+	settleCarrier(t, store, 2000+settle+1, 31, "ran")
+	release('c', 9000)
+	for _, at := range []int64{9000 + settle, 9000 + OverseerRewakeAfter.Milliseconds()*5} {
+		if bodies := wakeBodies(t, store, at); len(bodies) != 0 {
+			t.Fatalf("verified merge re-woke at %d = %q", at, bodies)
+		}
+	}
+	if requests, err := store.OperatorHumanRequests(ctx); err != nil || len(requests) != 0 {
+		t.Fatalf("a verified merge stalled into a card: %+v %v", requests, err)
+	}
+	if items, err := store.OverseerItems(ctx, finalizing.ProjectID, mustTime(t, 2000+overseerVerifyWindow.Milliseconds())); err != nil || len(items) != 0 {
+		t.Fatalf("items past the verification window = %+v %v", items, err)
 	}
 }
 

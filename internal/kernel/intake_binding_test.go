@@ -145,19 +145,20 @@ func TestCancelledIntakeCanBeWithdrawnThenImported(t *testing.T) {
 	}
 }
 
-// An intake task wakes its configured overseer after an automatic end the
-// overseer could retry, and not after an operator's cancel or once its issue
-// is withdrawn.
+// An intake task that failed or was cancelled wakes its configured overseer,
+// or every overseer when none is configured, so its ready issue never sits
+// ownerless; not once its issue is withdrawn.
 func TestFailedIntakeWakesItsConfiguredOverseer(t *testing.T) {
 	t.Parallel()
 	for _, test := range []struct {
-		name, status            string
-		expired, withdrawn, due bool
+		name, status                          string
+		expired, withdrawn, unconfigured, due bool
 	}{
-		{"failed", "failed", false, false, true},
-		{"expired", "cancelled", true, false, true},
-		{"operator cancel", "cancelled", false, false, false},
-		{"withdrawn", "failed", false, true, false},
+		{"failed", "failed", false, false, false, true},
+		{"expired", "cancelled", true, false, false, true},
+		{"operator cancel", "cancelled", false, false, false, true},
+		{"no configured overseer", "cancelled", false, false, true, true},
+		{"withdrawn", "failed", false, true, false, false},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			ctx := context.Background()
@@ -180,6 +181,11 @@ func TestFailedIntakeWakesItsConfiguredOverseer(t *testing.T) {
 			}
 			if test.withdrawn {
 				if _, err := store.writer.ExecContext(ctx, `UPDATE intake_acceptances SET withdrawn_at_ms = 1000 WHERE id = ?`, accepted.ID.Bytes()); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if test.unconfigured {
+				if _, err := store.writer.ExecContext(ctx, `UPDATE intake_acceptances SET overseer_agent_id = NULL WHERE id = ?`, accepted.ID.Bytes()); err != nil {
 					t.Fatal(err)
 				}
 			}

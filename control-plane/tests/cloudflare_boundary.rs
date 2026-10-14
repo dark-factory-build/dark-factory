@@ -337,6 +337,7 @@ fn declared_output_schemas_name_the_fields_the_results_carry() {
             ][..],
         ),
         ("create_issue", "IssueResult", &["number", "url"][..]),
+        ("update_issue", "IssueResult", &["number", "url"][..]),
         (
             "list_deployments.deployments",
             "DeploymentResult",
@@ -502,6 +503,7 @@ fn every_repository_tool_requires_the_repository_it_acts_on() {
         "observe_file",
         "observe_tree",
         "create_issue",
+        "update_issue",
         "observe_issue",
         "create_pull_request",
         "update_pull_request_body",
@@ -555,6 +557,16 @@ fn every_repository_tool_requires_the_repository_it_acts_on() {
             "update_pull_request_body",
             &["repository", "operation_id", "pull_number", "body"][..],
         ),
+        (
+            "update_issue",
+            &[
+                "repository",
+                "operation_id",
+                "issue_number",
+                "state_reason",
+                "comment",
+            ][..],
+        ),
     ] {
         let declared = own_required(tool);
         for field in required {
@@ -593,6 +605,7 @@ fn mcp_surface_is_installation_bound_and_typed() {
         "observe_tree",
         "observe_operation",
         "create_issue",
+        "update_issue",
         "observe_issue",
         "create_pull_request",
         "update_pull_request_body",
