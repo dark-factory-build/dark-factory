@@ -44,7 +44,7 @@ export type AuthResultBody = { client_id: string; capabilities: CapabilityMask }
 export type ErrorBody = { code: ErrorCode; retryable: boolean };
 
 export type FactoryItem = { dispatch_enabled: boolean; capacity: number; active_runs: number; revision: bigint };
-export type ProjectItem = { id: string; name: string; max_run_seconds: number; revision: bigint };
+export type ProjectItem = { id: string; name: string; revision: bigint };
 /**
  * `model` and `reasoning_effort` are the agent's own overrides; empty means it
  * inherits. `effective_*` is what the run will actually use, and `model_source`
@@ -110,8 +110,6 @@ export type TaskPeerQuestion = { id: string; source_task_id: string; target_task
 export type TaskDetailBody = { task_id: string; revision: bigint; head: bigint; instruction: string; feedback: string; outcome?: string; next_text_offset?: bigint; peer_questions: TaskPeerQuestion[]; next_peer_offset?: bigint };
 export type AgentUpdateBody = { agent_id: string; expected_revision: bigint; appearance?: SpriteAppearance; model?: string; reasoning_effort?: string; account_id?: string; paused?: boolean; archived?: boolean; idle_policy?: IdlePolicy; idle_after_seconds?: number; idle_instruction?: string; idle_wake_on?: IdleWakeOn };
 export type AgentUpdateResultBody = { agent_id: string; revision: bigint };
-export type ProjectLimitsBody = { project_id: string; expected_revision: bigint; max_run_seconds: number };
-export type ProjectLimitsResultBody = { project_id: string; revision: bigint };
 export type FactoryDispatchBody = { expected_revision: bigint; enabled: boolean };
 export type FactoryDispatchResultBody = { revision: bigint; enabled: boolean };
 export type ProjectCreateBody = { project_id: string; name: string; root: string };
@@ -247,7 +245,6 @@ export type ServerControlFrame = { type: "FACTORY_DISPATCH_RESULT"; id: string; 
   | { type: "AGENT_CONTROL_RESULT"; id: string; body: AgentControlResultBody }
   | { type: "TASK_DETAIL"; id: string; body: TaskDetailBody }
   | { type: "AGENT_UPDATE_RESULT"; id: string; body: AgentUpdateResultBody }
-  | { type: "PROJECT_LIMITS_RESULT"; id: string; body: ProjectLimitsResultBody }
   | { type: "PROJECT_CREATE_RESULT"; id: string; body: ProjectCreateResultBody }
   | { type: "REPOSITORIES"; id: string; body: RepositoriesBody }
   | { type: "REPOSITORY_MUTATE_RESULT"; id: string; body: RepositoryMutateResultBody }
@@ -273,7 +270,6 @@ export type ClientControlFrame = { type: "FACTORY_DISPATCH"; id: string; body: F
   | { type: "AGENT_CONTROL"; id: string; body: AgentControlBody }
   | { type: "TASK_DETAIL_GET"; id: string; body: TaskDetailGetBody }
   | { type: "AGENT_UPDATE"; id: string; body: AgentUpdateBody }
-  | { type: "PROJECT_LIMITS"; id: string; body: ProjectLimitsBody }
   | { type: "PROJECT_CREATE"; id: string; body: ProjectCreateBody }
   | { type: "REPOSITORIES_GET"; id: string; body: RepositoriesGetBody }
   | { type: "REPOSITORY_MUTATE"; id: string; body: RepositoryMutateBody }
@@ -446,8 +442,6 @@ function validateBody(type: ControlType, body: unknown, wire: boolean): ControlB
     case "TASK_DETAIL": requireKeys(body, ["task_id", "revision", "head", "instruction", "feedback", "peer_questions"], wire, ["outcome", "next_text_offset", "next_peer_offset"]); { if (!Array.isArray(body.peer_questions) || body.peer_questions.length > 1) malformed(); const result: TaskDetailBody = { task_id: dynamicID(body.task_id), revision: decimal(body.revision, wire, true), head: decimal(body.head, wire, true), instruction: boundedText(body.instruction, 0, MAX_TASK_INSTRUCTION_BYTES), feedback: boundedText(body.feedback, 0, MAX_TASK_INSTRUCTION_BYTES), peer_questions: body.peer_questions.map((item) => taskPeerQuestion(item, wire)) }; if (present(body, "outcome")) result.outcome = boundedText(body.outcome, 0, MAX_TASK_INSTRUCTION_BYTES); if (present(body, "next_text_offset")) result.next_text_offset = decimal(body.next_text_offset, wire, true); if (present(body, "next_peer_offset")) result.next_peer_offset = decimal(body.next_peer_offset, wire, true); return result; }
     case "AGENT_UPDATE": requireKeys(body, ["agent_id", "expected_revision"], wire, ["appearance", "model", "reasoning_effort", "account_id", "paused", "archived", "idle_policy", "idle_after_seconds", "idle_instruction", "idle_wake_on"]); { const result: AgentUpdateBody = { agent_id: dynamicID(body.agent_id), expected_revision: decimal(body.expected_revision, wire, true) }; if (present(body, "appearance")) result.appearance = spriteAppearance(body.appearance, wire); if (present(body, "model")) result.model = boundedText(body.model, 0, MAX_AGENT_MODEL_BYTES); if (present(body, "reasoning_effort")) result.reasoning_effort = boundedText(body.reasoning_effort, 0, MAX_AGENT_MODEL_BYTES); if (present(body, "account_id")) result.account_id = body.account_id === "" ? "" : dynamicID(body.account_id); if (present(body, "paused")) { if (typeof body.paused !== "boolean") malformed(); result.paused = body.paused; } if (present(body, "archived")) { if (typeof body.archived !== "boolean") malformed(); result.archived = body.archived; } if (present(body, "idle_policy")) result.idle_policy = idlePolicy(body.idle_policy); if (present(body, "idle_after_seconds")) result.idle_after_seconds = integer(body.idle_after_seconds, 0, MAX_IDLE_AFTER_SECONDS); if (present(body, "idle_instruction")) result.idle_instruction = boundedText(body.idle_instruction, 0, MAX_TASK_INSTRUCTION_BYTES); if (present(body, "idle_wake_on")) result.idle_wake_on = wakeOn(body.idle_wake_on); return result; }
     case "AGENT_UPDATE_RESULT": requireKeys(body, ["agent_id", "revision"], wire); return { agent_id: dynamicID(body.agent_id), revision: decimal(body.revision, wire, true) };
-    case "PROJECT_LIMITS": requireKeys(body, ["project_id", "expected_revision", "max_run_seconds"], wire); return { project_id: dynamicID(body.project_id), expected_revision: decimal(body.expected_revision, wire, true), max_run_seconds: integer(body.max_run_seconds, 0, 86400) };
-    case "PROJECT_LIMITS_RESULT": requireKeys(body, ["project_id", "revision"], wire); return { project_id: dynamicID(body.project_id), revision: decimal(body.revision, wire, true) };
     case "PROJECT_CREATE": requireKeys(body, ["project_id", "name", "root"], wire); return { project_id: dynamicID(body.project_id), name: boundedText(body.name, 1, MAX_PROJECT_NAME_BYTES), root: boundedText(body.root, 1, 4096) };
     case "PROJECT_CREATE_RESULT": requireKeys(body, ["project_id", "revision"], wire); return { project_id: dynamicID(body.project_id), revision: decimal(body.revision, wire, true) };
     case "REPOSITORIES_GET": requireKeys(body, ["project_id"], wire); return { project_id: dynamicID(body.project_id) };
@@ -638,9 +632,8 @@ function factoryItem(value: unknown, wire: boolean): FactoryItem {
   if (active_runs > capacity + 1) malformed(); return { dispatch_enabled: value.dispatch_enabled, capacity, active_runs, revision: decimal(value.revision, wire, true) };
 }
 function projectItem(value: unknown, wire: boolean): ProjectItem {
-  if (!isObject(value)) malformed(); requireKeys(value, ["id", "name", "revision"], wire, ["max_run_seconds"]);
-  const max_run_seconds = present(value, "max_run_seconds") ? integer(value.max_run_seconds, 0, 86400) : 0;
-  return { id: dynamicID(value.id), name: boundedText(value.name, 1, MAX_PROJECT_NAME_BYTES), max_run_seconds, revision: decimal(value.revision, wire, true) };
+  if (!isObject(value)) malformed(); requireKeys(value, ["id", "name", "revision"], wire);
+  return { id: dynamicID(value.id), name: boundedText(value.name, 1, MAX_PROJECT_NAME_BYTES), revision: decimal(value.revision, wire, true) };
 }
 function spriteAppearance(value: unknown, wire: boolean): SpriteAppearance {
   if (!isObject(value)) malformed();

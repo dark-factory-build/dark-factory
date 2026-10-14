@@ -26,6 +26,7 @@ const (
 	v41UserVersion = 41
 	v42UserVersion = 42
 	v43UserVersion = 43
+	v44UserVersion = 44
 )
 
 var browserSecurityEventStatements = []string{
@@ -71,13 +72,29 @@ func legacySchemaStatements(version int) []string {
 	statements := slices.DeleteFunc(slices.Clone(schemaStatements), func(statement string) bool {
 		return statement == archivedTasksTable || statement == archiveBatchesTable && version < v42UserVersion
 	})
+	restoreProjectCeilings := func() {
+		for index, statement := range statements {
+			if strings.HasPrefix(statement, "CREATE TABLE project_tokens ") {
+				statements[index] = strings.Replace(statement, "    tokens_used INTEGER NOT NULL CHECK (tokens_used >= 0)", "    token_limit INTEGER NOT NULL CHECK (token_limit >= 0),\n    tokens_used INTEGER NOT NULL CHECK (tokens_used >= 0)", 1)
+			}
+			if strings.HasPrefix(statement, "CREATE TABLE projects ") {
+				statements[index] = strings.Replace(statement, "    revision INTEGER NOT NULL CHECK (revision >= 1),", "    run_budget_limit INTEGER NOT NULL DEFAULT 0 CHECK (run_budget_limit >= 0),\n    runs_used INTEGER NOT NULL DEFAULT 0 CHECK (runs_used >= 0),\n    max_run_seconds INTEGER NOT NULL DEFAULT 0 CHECK (max_run_seconds BETWEEN 0 AND 86400),\n    revision INTEGER NOT NULL CHECK (revision >= 1),", 1)
+			}
+		}
+	}
+	if version == v44UserVersion {
+		restoreProjectCeilings()
+		return statements
+	}
 	if version == v43UserVersion {
+		restoreProjectCeilings()
 		return statements
 	}
 	if version == v41UserVersion || version == v42UserVersion {
 		for index, statement := range statements {
 			statements[index] = strings.ReplaceAll(statement, "    author_login TEXT NOT NULL DEFAULT '' CHECK (length(CAST(author_login AS BLOB)) <= 44),\n    author_type TEXT NOT NULL DEFAULT '' CHECK (author_type IN ('', 'user', 'bot')),\n", "")
 		}
+		restoreProjectCeilings()
 		return statements
 	}
 	pairs := []string{humanContinuationColumns, "", "'peer_question')),", "'peer_question', 'continuation')),"}
@@ -100,6 +117,7 @@ func legacySchemaStatements(version int) []string {
 			statements[index] = strings.ReplaceAll(statements[index], "    author_login TEXT NOT NULL DEFAULT '' CHECK (length(CAST(author_login AS BLOB)) <= 44),\n    author_type TEXT NOT NULL DEFAULT '' CHECK (author_type IN ('', 'user', 'bot')),\n", "")
 		}
 	}
+	restoreProjectCeilings()
 	return statements
 }
 
@@ -151,7 +169,7 @@ func (store *Store) migrateLegacy(ctx context.Context) error {
 	switch version {
 	case userVersion:
 		return connection.Close()
-	case v37UserVersion, v38UserVersion, v39UserVersion, v40UserVersion, v41UserVersion, v42UserVersion, v43UserVersion:
+	case v37UserVersion, v38UserVersion, v39UserVersion, v40UserVersion, v41UserVersion, v42UserVersion, v43UserVersion, v44UserVersion:
 	default:
 		cause := ErrForeignDatabase
 		if appID == applicationID && version > userVersion {
@@ -176,6 +194,18 @@ func (store *Store) migrateLegacy(ctx context.Context) error {
 func migrateFrom(ctx context.Context, connection *sql.Conn, version int) error {
 	if err := validateSchemaVersion(ctx, connection, version, legacySchemaStatements(version)); err != nil {
 		return err
+	}
+	if version < userVersion {
+		for _, statement := range []string{
+			"ALTER TABLE projects DROP COLUMN run_budget_limit",
+			"ALTER TABLE projects DROP COLUMN runs_used",
+			"ALTER TABLE projects DROP COLUMN max_run_seconds",
+			"ALTER TABLE project_tokens DROP COLUMN token_limit",
+		} {
+			if _, err := connection.ExecContext(ctx, statement); err != nil {
+				return err
+			}
+		}
 	}
 	if version < v41UserVersion {
 		if err := migrateToV41(ctx, connection, version); err != nil {

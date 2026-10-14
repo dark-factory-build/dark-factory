@@ -75,7 +75,13 @@ func downgradeHome(t *testing.T, store *Store, version int, extra ...string) {
 	t.Helper()
 	var statements []string
 	if version < userVersion {
-		statements = []string{"DROP TABLE archived_tasks", fmt.Sprintf("PRAGMA user_version = %d", version)}
+		statements = []string{
+			"ALTER TABLE projects ADD COLUMN run_budget_limit INTEGER NOT NULL DEFAULT 0 CHECK (run_budget_limit >= 0)",
+			"ALTER TABLE projects ADD COLUMN runs_used INTEGER NOT NULL DEFAULT 0 CHECK (runs_used >= 0)",
+			"ALTER TABLE projects ADD COLUMN max_run_seconds INTEGER NOT NULL DEFAULT 0 CHECK (max_run_seconds BETWEEN 0 AND 86400)",
+			"ALTER TABLE project_tokens ADD COLUMN token_limit INTEGER NOT NULL DEFAULT 0 CHECK (token_limit >= 0)",
+			"DROP TABLE archived_tasks", fmt.Sprintf("PRAGMA user_version = %d", version),
+		}
 		if version < v43UserVersion {
 			statements = append([]string{"ALTER TABLE intake_acceptances DROP COLUMN author_type", "ALTER TABLE intake_acceptances DROP COLUMN author_login"}, statements...)
 		}
@@ -240,35 +246,35 @@ func snapshotRows(t *testing.T, ctx context.Context, connection *sql.Conn) map[s
 func TestSchemaDigestsArePinned(t *testing.T) {
 	t.Parallel()
 	sum := sha256.Sum256([]byte(strings.Join(schemaStatements, "\n")))
-	if got := hex.EncodeToString(sum[:]); got != "80f1743d1f79b695a4c12af6af597f409a6a1299605298cdf56f4a3b4d8c0552" {
+	if got := hex.EncodeToString(sum[:]); got != "8ec2d351c12a13ad9ba03cea5d5dd2194366ee7a916f790fcc60fdcf4294639f" {
 		t.Errorf("current schema digest = %s", got)
 	}
 	sum = sha256.Sum256([]byte(strings.Join(legacySchemaStatements(v43UserVersion), "\n")))
-	if got := hex.EncodeToString(sum[:]); got != "47033df270e009ce367c000577adc68053ffb4838adda7d4a64447c6aa65dee5" {
+	if got := hex.EncodeToString(sum[:]); got != "dd3a34e6e1e9838d35ab3f58a3f721ab50aae9fdba643f5deb63ea4cc27d7622" {
 		t.Errorf("v43 schema digest = %s", got)
 	}
 	sum = sha256.Sum256([]byte(strings.Join(legacySchemaStatements(v42UserVersion), "\n")))
-	if got := hex.EncodeToString(sum[:]); got != "29b677239205a73e850defc4bd3bc72ea43d0197a51ebeb7c6a45d4c83aee669" {
+	if got := hex.EncodeToString(sum[:]); got != "d1a14bbc6ece50bd5663cddca622d47da816b51a745ea71a91a7c18453ed8c6c" {
 		t.Errorf("v42 schema digest = %s", got)
 	}
 	sum = sha256.Sum256([]byte(strings.Join(legacySchemaStatements(v41UserVersion), "\n")))
-	if got := hex.EncodeToString(sum[:]); got != "eac1732ec587d300a18fdbe1058ffc64468f1abf9ff20ad0c765cbab1e8de5d0" {
+	if got := hex.EncodeToString(sum[:]); got != "d386ae5811ef91b686f7e597b04e6e2e376a36e095f4f23cb94d58f3725f047e" {
 		t.Errorf("v41 schema digest = %s", got)
 	}
 	sum = sha256.Sum256([]byte(strings.Join(legacySchemaStatements(v40UserVersion), "\n")))
-	if got := hex.EncodeToString(sum[:]); got != "97d786b424ca0c3097e97738821298f75b60f3a29c49629fdc47de5dba623268" {
+	if got := hex.EncodeToString(sum[:]); got != "72b0fb536b67311d14405944e08376787f72a4cc5394c390df3b8ef97ef9dfe4" {
 		t.Errorf("v40 schema digest = %s", got)
 	}
 	sum = sha256.Sum256([]byte(strings.Join(legacySchemaStatements(v39UserVersion), "\n")))
-	if got := hex.EncodeToString(sum[:]); got != "3a54481cb3246bb70309c06135c4b61d5efc739bcf5c38b6432aa4b698f5f25b" {
+	if got := hex.EncodeToString(sum[:]); got != "591deabdaab5f0492e4e51dacb0369eb1429a2b84aa1175bb842eeeaa44e9d81" {
 		t.Errorf("v39 schema digest = %s", got)
 	}
 	sum = sha256.Sum256([]byte(strings.Join(legacySchemaStatements(v38UserVersion), "\n")))
-	if got := hex.EncodeToString(sum[:]); got != "29c9a3043f03be927336f6331f7c7ce24bcab875fb4607fc55003b688739fc2e" {
+	if got := hex.EncodeToString(sum[:]); got != "cb29f8757bc5e68cc6ce18dc414f2e690349f838a74d06350c34ac597a2bbbf4" {
 		t.Errorf("v38 schema digest = %s", got)
 	}
 	sum = sha256.Sum256([]byte(strings.Join(legacySchemaStatements(v37UserVersion), "\n")))
-	if got := hex.EncodeToString(sum[:]); got != "819c191d4e411ad35a2f7cf19db739d0492d0f8cf1c9c5fe0bd50a5197b5bb6c" {
+	if got := hex.EncodeToString(sum[:]); got != "006791c6a8e9f984bfe82a56e67134d307d7db04706392a9cfa31a4bc2552ef0" {
 		t.Errorf("v37 schema digest = %s", got)
 	}
 }

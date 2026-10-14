@@ -136,13 +136,6 @@ func (store *Store) AdmitNext(ctx context.Context, keys AdmissionKeys, at UnixMi
 	if at.Int64() < task.UpdatedAt.Int64() {
 		return AdmissionResult{}, tx.Rollback(ErrRevisionConflict)
 	}
-	project, found, err := projectByID(ctx, tx.connection, task.ProjectID)
-	if err != nil || !found {
-		if err == nil {
-			err = ErrCorruptState
-		}
-		return AdmissionResult{}, tx.Rollback(err)
-	}
 	if err := validateAdmissionLocatorOwnership(ctx, tx.connection, keys); err != nil {
 		return AdmissionResult{}, tx.Rollback(err)
 	}
@@ -201,13 +194,6 @@ func (store *Store) AdmitNext(ctx context.Context, keys AdmissionKeys, at UnixMi
 	}
 	_, err = tx.connection.ExecContext(ctx, `UPDATE task_prerequisites AS prerequisite SET consumed_run_id = (SELECT source_run.id FROM tasks AS upstream JOIN runs AS source_run ON source_run.task_id = upstream.id AND source_run.project_id = upstream.project_id AND source_run.task_incarnation_id = upstream.incarnation_id AND source_run.admitted_task_work_revision = prerequisite.upstream_work_revision AND source_run.phase = 'terminal' AND source_run.terminal_kind = 'succeeded' WHERE upstream.id = prerequisite.upstream_task_id AND upstream.status = 'succeeded' AND upstream.work_revision = prerequisite.upstream_work_revision) WHERE prerequisite.task_id = ? AND consumed_run_id IS NULL`, task.ID.Bytes())
 	if err != nil {
-		return AdmissionResult{}, tx.Rollback(err)
-	}
-	updated, updateErr := tx.connection.ExecContext(ctx, `UPDATE projects SET runs_used = runs_used + 1, revision = revision + 1, updated_at_ms = ? WHERE id = ? AND revision = ?`, at.Int64(), project.ID.Bytes(), project.Revision.Int64())
-	if err := requireOneRow(updated, updateErr); err != nil {
-		return AdmissionResult{}, tx.Rollback(err)
-	}
-	if err := appendInvalidations(ctx, tx.connection, at, []pendingInvalidation{{kind: EntityProject, id: project.ID.Bytes(), revision: project.Revision.Int64() + 1}}); err != nil {
 		return AdmissionResult{}, tx.Rollback(err)
 	}
 	inserted, err := tx.connection.ExecContext(ctx, `INSERT INTO terminal_sessions(id, run_id, state, unresolved_reason, revision, declared_at_ms, activated_at_ms, closed_at_ms, updated_at_ms) VALUES(?, ?, 'declared', NULL, 1, ?, NULL, NULL, ?)`, keys.TerminalSessionID.Bytes(), keys.RunID.Bytes(), at.Int64(), at.Int64())
