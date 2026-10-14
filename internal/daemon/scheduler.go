@@ -173,7 +173,10 @@ func (daemon *Daemon) RunScheduler(ctx context.Context, spec SupervisorSpec) err
 					daemon.validationDue = tick.Add(storeValidationInterval)
 					// The store holds writes and snapshots itself; dispatch
 					// resumes when a later validation passes.
-					if err := daemon.store.Validate(ownedCtx); errors.Is(err, kernel.ErrCorruptState) {
+					started := time.Now()
+					err := daemon.store.Validate(ownedCtx)
+					LogFactoryd(daemon.log, "factoryd: store validation took %s\n", time.Since(started).Round(time.Millisecond))
+					if errors.Is(err, kernel.ErrCorruptState) {
 						LogFactoryd(daemon.log, "factoryd: durable validation hold: %v\n", err)
 					}
 				}
@@ -185,7 +188,13 @@ func (daemon *Daemon) RunScheduler(ctx context.Context, spec SupervisorSpec) err
 						for _, id := range expired {
 							LogFactoryd(daemon.log, "factoryd: task %s %s\n", id, kernel.BlockedExpiryReason)
 						}
-						timed("ArchiveHistory", func() { _, err = daemon.store.ArchiveHistory(ownedCtx, at) })
+						// Each pass moves one batch; the first after a deploy
+						// moves the backlog.
+						timed("ArchiveHistory", func() {
+							for moved := 1; moved > 0 && err == nil; {
+								moved, err = daemon.store.ArchiveHistory(ownedCtx, at)
+							}
+						})
 						if err != nil {
 							LogFactoryd(daemon.log, "factoryd: history archive: %v\n", err)
 						}

@@ -538,7 +538,7 @@ func (store *Store) Status(ctx context.Context) (StatusSummary, error) {
 	if err := tx.connection.QueryRowContext(ctx, `SELECT
 		(SELECT COUNT(*) FROM projects),
 		(SELECT COUNT(*) FROM agents),
-		(SELECT COUNT(*) FROM tasks),
+		(SELECT COUNT(*) FROM tasks) + (SELECT COUNT(*) FROM archived_tasks),
 		(SELECT COUNT(*) FROM human_requests WHERE status IN ('open', 'delivering', 'delivery_unknown')),
 		(SELECT COUNT(*) FROM accounts)`).Scan(&status.Projects, &status.Agents, &status.Tasks, &status.HumanRequests, &status.Accounts); err != nil {
 		return StatusSummary{}, err

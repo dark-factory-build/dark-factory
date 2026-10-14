@@ -123,6 +123,8 @@ func validateIntake(ctx context.Context, connection *sql.Conn) error {
 		SELECT 1 FROM intake_acceptances a JOIN tasks t ON t.id = a.task_id
 		LEFT JOIN intake_task_bindings b ON b.task_id = t.id
 		WHERE b.acceptance_id IS NULL OR b.acceptance_id <> a.id OR t.incarnation_id <> a.incarnation_id
+		UNION ALL
+		SELECT 1 FROM archived_tasks a JOIN tasks t ON t.id = a.task_id
 	)`).Scan(&invalid); err != nil {
 		return err
 	}

@@ -9,9 +9,9 @@ import (
 	"strings"
 )
 
-// Open migrates the six earlier versions. v42 adds archive_batches, which
-// the transaction itself proves, and moves no history; v43 persists intake
-// author identity; v41 folds the
+// Open migrates the seven earlier versions. v44 adds archived_tasks and v42
+// archive_batches, which the transaction itself proves, and neither moves
+// history; v43 persists intake author identity; v41 folds the
 // continuations table onto the human request each row awaited; v40 drops
 // browser_security_events, a log nothing read; v39 names the retryable
 // failure code 'transient' where v38 named 'runner_exit', which nothing ever
@@ -25,6 +25,7 @@ const (
 	v40UserVersion = 40
 	v41UserVersion = 41
 	v42UserVersion = 42
+	v43UserVersion = 43
 )
 
 var browserSecurityEventStatements = []string{
@@ -67,9 +68,11 @@ var v40Continuations = []string{
 }
 
 func legacySchemaStatements(version int) []string {
-	statements := slices.Clone(schemaStatements)
-	if version < v42UserVersion {
-		statements = slices.DeleteFunc(statements, func(statement string) bool { return statement == archiveBatchesTable })
+	statements := slices.DeleteFunc(slices.Clone(schemaStatements), func(statement string) bool {
+		return statement == archivedTasksTable || statement == archiveBatchesTable && version < v42UserVersion
+	})
+	if version == v43UserVersion {
+		return statements
 	}
 	if version == v41UserVersion || version == v42UserVersion {
 		for index, statement := range statements {
@@ -101,7 +104,7 @@ func legacySchemaStatements(version int) []string {
 }
 
 // validateOpenableSnapshot accepts a current database or an exact v37, v38,
-// v39, v40 or v41 one, whose durable controls are checked inside the migration
+// v39, v40, v41, v42 or v43 one, whose durable controls are checked inside the migration
 // before it commits.
 func validateOpenableSnapshot(ctx context.Context, connection *sql.Conn) error {
 	if _, version, err := inspectIdentity(ctx, connection); err != nil {
@@ -129,7 +132,7 @@ func validateContentGitPins(ctx context.Context, connection *sql.Conn) error {
 	return nil
 }
 
-// migrateLegacy takes an exact v37, v38, v39, v40 or v41 home to the current
+// migrateLegacy takes an exact v37, v38, v39, v40, v41, v42 or v43 home to the current
 // schema in one transaction, or leaves it byte-untouched and refuses; it
 // refuses any other earlier version. Open calls it with the writer before the
 // store is published, and before refreshing its pinned sidecar facts, which the
@@ -148,7 +151,7 @@ func (store *Store) migrateLegacy(ctx context.Context) error {
 	switch version {
 	case userVersion:
 		return connection.Close()
-	case v37UserVersion, v38UserVersion, v39UserVersion, v40UserVersion, v41UserVersion, v42UserVersion:
+	case v37UserVersion, v38UserVersion, v39UserVersion, v40UserVersion, v41UserVersion, v42UserVersion, v43UserVersion:
 	default:
 		cause := ErrForeignDatabase
 		if appID == applicationID && version > userVersion {
@@ -200,7 +203,7 @@ func migrateFrom(ctx context.Context, connection *sql.Conn, version int) error {
 			return err
 		}
 	}
-	statements := []string{fmt.Sprintf("PRAGMA user_version = %d", userVersion)}
+	statements := []string{archivedTasksTable, fmt.Sprintf("PRAGMA user_version = %d", userVersion)}
 	if version < v42UserVersion {
 		statements = append([]string{archiveBatchesTable}, statements...)
 	}

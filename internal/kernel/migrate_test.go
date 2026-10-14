@@ -13,7 +13,9 @@ import (
 	"testing"
 )
 
-// A current home opens untouched; a v41 home (without archive_batches), a v40
+// A current home opens untouched; a v43 home (without archived_tasks), a v42
+// one (also without the intake author columns), a v41 one (also without
+// archive_batches), a v40
 // one (also with a continuations table), a v39 one (also with
 // browser_security_events), a
 // v38 one (also with runs naming 'runner_exit' for 'transient') and a v37 one
@@ -21,7 +23,7 @@ import (
 // record a transient failure.
 func TestCurrentAndLegacyHomesOpenWithEveryRow(t *testing.T) {
 	t.Parallel()
-	for _, version := range []int{userVersion, v42UserVersion, v41UserVersion, v40UserVersion, v39UserVersion, v38UserVersion, v37UserVersion} {
+	for _, version := range []int{userVersion, v43UserVersion, v42UserVersion, v41UserVersion, v40UserVersion, v39UserVersion, v38UserVersion, v37UserVersion} {
 		t.Run(fmt.Sprintf("v%d", version), func(t *testing.T) { testHomeOpensWithEveryRow(t, version) })
 	}
 }
@@ -72,7 +74,10 @@ func downgradeHome(t *testing.T, store *Store, version int, extra ...string) {
 	t.Helper()
 	var statements []string
 	if version < userVersion {
-		statements = []string{"ALTER TABLE intake_acceptances DROP COLUMN author_type", "ALTER TABLE intake_acceptances DROP COLUMN author_login", fmt.Sprintf("PRAGMA user_version = %d", version)}
+		statements = []string{"DROP TABLE archived_tasks", fmt.Sprintf("PRAGMA user_version = %d", version)}
+		if version < v43UserVersion {
+			statements = append([]string{"ALTER TABLE intake_acceptances DROP COLUMN author_type", "ALTER TABLE intake_acceptances DROP COLUMN author_login"}, statements...)
+		}
 		if version < v42UserVersion {
 			statements = append([]string{"DROP TABLE archive_batches"}, statements...)
 		}
@@ -233,8 +238,16 @@ func snapshotRows(t *testing.T, ctx context.Context, connection *sql.Conn) map[s
 func TestSchemaDigestsArePinned(t *testing.T) {
 	t.Parallel()
 	sum := sha256.Sum256([]byte(strings.Join(schemaStatements, "\n")))
-	if got := hex.EncodeToString(sum[:]); got != "47033df270e009ce367c000577adc68053ffb4838adda7d4a64447c6aa65dee5" {
+	if got := hex.EncodeToString(sum[:]); got != "80f1743d1f79b695a4c12af6af597f409a6a1299605298cdf56f4a3b4d8c0552" {
 		t.Errorf("current schema digest = %s", got)
+	}
+	sum = sha256.Sum256([]byte(strings.Join(legacySchemaStatements(v43UserVersion), "\n")))
+	if got := hex.EncodeToString(sum[:]); got != "47033df270e009ce367c000577adc68053ffb4838adda7d4a64447c6aa65dee5" {
+		t.Errorf("v43 schema digest = %s", got)
+	}
+	sum = sha256.Sum256([]byte(strings.Join(legacySchemaStatements(v42UserVersion), "\n")))
+	if got := hex.EncodeToString(sum[:]); got != "29b677239205a73e850defc4bd3bc72ea43d0197a51ebeb7c6a45d4c83aee669" {
+		t.Errorf("v42 schema digest = %s", got)
 	}
 	sum = sha256.Sum256([]byte(strings.Join(legacySchemaStatements(v41UserVersion), "\n")))
 	if got := hex.EncodeToString(sum[:]); got != "eac1732ec587d300a18fdbe1058ffc64468f1abf9ff20ad0c765cbab1e8de5d0" {
