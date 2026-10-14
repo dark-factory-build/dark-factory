@@ -263,12 +263,15 @@ func (daemon *Daemon) publishPull(ctx context.Context, c kernel.PublishableChang
 		}
 	}
 	issue := c.Accepted.Snapshot.IssueNumber
-	if c.Accepted.Snapshot.LinearTeamID != "" {
+	linearSource := c.Accepted.Snapshot.LinearTeamID != ""
+	if linearSource {
 		issue = 0
 	}
+	sourceRepository := c.Accepted.SourceRepository
+	crossSource := issue != 0 && sourceRepository != "" && !strings.EqualFold(sourceRepository, repo)
 	issueTitle := c.Accepted.Snapshot.Title
 	issueBody := c.Accepted.Snapshot.Body
-	if sourceRepository := c.Accepted.SourceRepository; sourceRepository != "" {
+	if sourceRepository != "" && !linearSource {
 		response, observeErr := call(ctx, "observe_issue", map[string]any{"repository": sourceRepository, "issue_number": issue})
 		if observeErr != nil {
 			return fmt.Errorf("observe accepted issue #%d: %w", issue, observeErr)
@@ -305,8 +308,11 @@ func (daemon *Daemon) publishPull(ctx context.Context, c kernel.PublishableChang
 			step := fmt.Sprintf("body-%s-%d", c.Head[:8], c.Revision.Int64())
 			done, err := completed(step, new(json.RawMessage))
 			if err == nil && !done {
-				footer, body := "Refs", referenceIssue(body, issue)
-				_, err = call(ctx, "update_pull_request_body", map[string]any{"repository": repo, "operation_id": operation(step), "pull_number": c.Pull, "body": fmt.Sprintf("%s\n\n%s #%d", body, footer, issue)})
+				updatedBody := body
+				if issue != 0 && !linearSource && !crossSource {
+					updatedBody = referenceIssue(updatedBody, issue)
+				}
+				_, err = call(ctx, "update_pull_request_body", map[string]any{"repository": repo, "operation_id": operation(step), "pull_number": c.Pull, "body": updatedBody})
 			}
 			if err != nil {
 				return err
@@ -337,16 +343,16 @@ func (daemon *Daemon) publishPull(ctx context.Context, c kernel.PublishableChang
 		step += "-" + base
 		done, err = completed(step, &pull)
 	}
-	if issue != 0 {
+	if issue != 0 && !crossSource && !linearSource {
 		body = referenceIssue(body, issue)
 	}
 	if err == nil && !done {
 		arguments := map[string]any{"repository": repo, "operation_id": operation(step), "head": branch, "head_sha": c.Head, "base": "main", "base_sha": base, "title": publicationMessage(c), "body": body, "draft": false,
 			"issue_number": issue, "close_on_merge": false} // live acceptance closes the source issue
-		if issue != 0 && c.Accepted.SourceRepository != "" && !strings.EqualFold(c.Accepted.SourceRepository, repo) {
-			arguments["source_repository"] = c.Accepted.SourceRepository
+		if crossSource {
+			arguments["source_repository"] = sourceRepository
 		}
-		if c.Accepted.Snapshot.LinearTeamID != "" {
+		if linearSource {
 			arguments["external_source_url"] = c.Accepted.Snapshot.URL
 		}
 		var response json.RawMessage

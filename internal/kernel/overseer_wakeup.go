@@ -113,7 +113,7 @@ item AS (
 		THEN (SELECT at FROM released WHERE repository = r.repository AND pull = p.pull_number) ELSE r.observed_at_ms END AS live
 	  FROM tasks AS t JOIN publication_tasks AS p ON p.task_id = t.id
 	  JOIN production_records AS r ON r.project_id = p.project_id AND r.repository = p.repository AND r.kind = 'pull_request' AND r.identity = CAST(p.pull_number AS TEXT)
-	  WHERE t.project_id = ?1 AND t.status = 'succeeded' AND EXISTS (SELECT 1 FROM changes AS c WHERE c.task_id = t.id AND c.phase = 'retained') AND NOT EXISTS (SELECT 1 FROM changes AS c WHERE c.task_id = t.id AND c.phase = 'abandoned') AND json_extract(r.document, '$.state') = 'merged'
+	  WHERE t.project_id = ?1 AND t.status = 'succeeded' AND json_extract(r.document, '$.state') = 'merged'
 	    AND EXISTS (SELECT 1 FROM intake_task_bindings AS b WHERE b.task_id = t.id) AND NOT ` + taskIssueWithdrawn + `) WHERE live IS NOT NULL
 	-- Only the newest of identical escalations (same pull, head and reason)
 	-- names a reviewer item. The cheap open-PR and head filters run first; a

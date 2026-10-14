@@ -232,7 +232,7 @@ func TestFactorydPublishesASettledIntakeChange(t *testing.T) {
 	publishedExactly(t, app, source, c.Head)
 	body := pull["body"].(string)
 	if pull["head_sha"] != c.Head || pull["issue_number"] != uint64(9) || pull["source_repository"] != "feed/issues" || pull["close_on_merge"] != false || pull["base_sha"] != c.Base ||
-		strings.Contains(body, "example.com") || strings.Contains(body, "/Users/") || !strings.Contains(body, "Current operator scope") || strings.Contains(body, "Implemented it") || !strings.Contains(body, c.Head) || !strings.Contains(body, "+51 -1 across 52 files") || !strings.HasSuffix(body, "The merge queue runs the gate.\n\nRefs #9") {
+		strings.Contains(body, "example.com") || strings.Contains(body, "/Users/") || !strings.Contains(body, "Current operator scope") || strings.Contains(body, "Implemented it") || !strings.Contains(body, c.Head) || !strings.Contains(body, "+51 -1 across 52 files") || !strings.HasSuffix(body, "The merge queue runs the gate.") {
 		t.Fatalf("pull request = %+v", pull)
 	}
 	if pr := readProductionPull(t, fixture.store, c.Task.ProjectID, 31); pr.Head != c.Head || pr.Branch != "factory/"+c.Change.String()[:12] {
@@ -627,6 +627,23 @@ func TestAPartialIntakeChangeReferencesItsIssue(t *testing.T) {
 	}
 	if pull := app.writes[len(app.writes)-1]["arguments"].(map[string]any); pull["close_on_merge"] != false || pull["issue_number"] != uint64(9) || !strings.Contains(pull["body"].(string), "Current operator scope") || strings.Contains(pull["body"].(string), "Fixes #9") {
 		t.Fatalf("pull request = %+v", pull)
+	}
+}
+
+func TestLinearPublicationUsesExternalSourceWithoutIssueObservation(t *testing.T) {
+	fixture, c, source, app, checkout := publishFixture(t, 1, false)
+	c.Accepted.SourceRepository = "linear/acme"
+	c.Accepted.Snapshot.LinearTeamID = "ENG"
+	c.Accepted.Snapshot.URL = "https://linear.app/acme/issue/ENG-7/intake"
+	if err := fixture.daemon.publishChange(context.Background(), c, "team/repo", source, app.call, checkout); err != nil {
+		t.Fatal(err)
+	}
+	if app.issueRepository != "" {
+		t.Fatalf("Linear publication observed a GitHub issue in %q", app.issueRepository)
+	}
+	pull := app.writes[len(app.writes)-1]["arguments"].(map[string]any)
+	if pull["issue_number"] != uint64(0) || pull["source_repository"] != nil || pull["external_source_url"] != c.Accepted.Snapshot.URL || strings.Contains(pull["body"].(string), "#0") {
+		t.Fatalf("Linear pull request = %+v", pull)
 	}
 }
 

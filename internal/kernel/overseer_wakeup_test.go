@@ -493,8 +493,12 @@ func TestOverseerWakeSkipsPublishedIntakeSuccess(t *testing.T) {
 				t.Fatal(err)
 			}
 		}
-		if bodies := wakeBodies(t, store, 1_000_000); len(bodies) != 0 {
-			t.Fatalf("%s wake = %q", mode, bodies)
+		want := 0
+		if mode == "reclaimed" {
+			want = 1
+		}
+		if bodies := wakeBodies(t, store, 1_000_000); len(bodies) != want {
+			t.Fatalf("%s wake = %q, want %d", mode, bodies, want)
 		}
 	}
 }
