@@ -18,7 +18,6 @@ func TestConsoleControlBounds(t *testing.T) {
 		// Every mutable member is optional; only the identity and the observed
 		// revision are required.
 		`{"type":"AGENT_UPDATE","id":"x","body":{"agent_id":"` + agent + `","expected_revision":"7"}}`,
-		`{"type":"PROJECT_LIMITS","id":"x","body":{"project_id":"` + agent + `","expected_revision":"7","max_run_seconds":900}}`,
 		`{"type":"TASK_UPDATE","id":"x","body":{"task_id":"` + task + `","expected_revision":"7"}}`,
 		`{"type":"TASK_UPDATE","id":"x","body":{"task_id":"` + task + `","expected_revision":"7","status":"queued"}}`,
 	} {
@@ -28,7 +27,6 @@ func TestConsoleControlBounds(t *testing.T) {
 	}
 	for _, frame := range []string{
 		`{"type":"AGENT_UPDATE","id":"x","body":{"agent_id":"` + agent + `","expected_revision":"0"}}`,
-		`{"type":"PROJECT_LIMITS","id":"x","body":{"project_id":"` + agent + `","expected_revision":"7","max_run_seconds":86401}}`,
 		`{"type":"AGENT_UPDATE","id":"x","body":{"agent_id":"` + agent + `","expected_revision":"7","model":"` + strings.Repeat("m", MaxAgentModelBytes+1) + `"}}`,
 		`{"type":"AGENT_UPDATE","id":"x","body":{"agent_id":"` + agent + `","expected_revision":"7","reasoning_effort":"` + strings.Repeat("e", MaxAgentModelBytes+1) + `"}}`,
 		// Cancellation is the only status transition the console may ask for.
@@ -132,23 +130,6 @@ func TestRunPathsBounds(t *testing.T) {
 		if _, err := DecodeServerControl([]byte(frame)); err != ErrMalformed {
 			t.Fatalf("%s accepted: %v", frame, err)
 		}
-	}
-}
-
-func TestProjectLimitsRequireExplicitValues(t *testing.T) {
-	const prefix = `{"type":"PROJECT_LIMITS","id":"x","body":{"project_id":"02020202020202020202020202020202","expected_revision":"7"`
-	for name, fields := range map[string]string{
-		"duration omitted": "",
-		"duration null":    `,"max_run_seconds":null`,
-	} {
-		t.Run(name, func(t *testing.T) {
-			if _, err := DecodeClientControl([]byte(prefix + fields + `}}`)); err != ErrMalformed {
-				t.Fatalf("incomplete limits accepted: %v", err)
-			}
-		})
-	}
-	if _, err := DecodeClientControl([]byte(prefix + `,"max_run_seconds":0}}`)); err != nil {
-		t.Fatalf("explicit unlimited refused: %v", err)
 	}
 }
 
