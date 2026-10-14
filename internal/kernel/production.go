@@ -570,6 +570,13 @@ func PublishFailureID(change ChangeID, revision Revision) string {
 	return fmt.Sprintf("publish-%s-%d", change, revision.Int64())
 }
 
+// NonIntakePublishAfterMs is when factoryd took over publishing work that has no
+// intake issue (#1923). Before it the overseer published that work, often on
+// the same factory/ branch, with no publication_tasks row (#810 is #1944's
+// branch), so only tasks settled after the overseer last published (13 Oct
+// 2026 10:33Z) are factoryd's to publish.
+const NonIntakePublishAfterMs int64 = 1791887640000 // 2026-10-13T10:34:00Z
+
 // PublishableChanges lists, oldest first, the current settled Changes of
 // succeeded tasks bound to a repository factoryd publishes, whose
 // head differs from their base, with no publish failure at that Change
@@ -593,6 +600,9 @@ func (store *Store) PublishableChanges(ctx context.Context, at UnixMillis) ([]Pu
 		      AND r.identity = CAST(p.pull_number AS TEXT) AND json_extract(r.document, '$.state') = 'open')
 		WHERE c.phase = 'retained' AND t.status = 'succeeded' AND a.withdrawn_at_ms IS NULL AND c.head_commit <> c.base_commit
 		  AND EXISTS (SELECT 1 FROM task_repository_bindings b WHERE b.task_id = c.task_id)
+		  AND (b.task_id IS NOT NULL OR p.pull_number IS NOT NULL OR (t.completed_at_ms >= ?
+		      AND NOT EXISTS (SELECT 1 FROM production_records r WHERE r.project_id = c.project_id AND r.kind = 'pull_request'
+		          AND json_extract(r.document, '$.branch') = 'factory/' || substr(lower(hex(c.id)), 1, 12))))
 		  AND (p.pull_number IS NOT NULL OR NOT EXISTS (SELECT 1 FROM publication_tasks q WHERE (q.change_id = c.id OR q.task_id = c.task_id)
 		      AND NOT EXISTS (SELECT 1 FROM production_records r JOIN runs u ON u.id = c.settled_run_id
 		          WHERE r.project_id = q.project_id AND r.repository = q.repository AND r.kind = 'pull_request' AND r.identity = CAST(q.pull_number AS TEXT)
@@ -604,7 +614,7 @@ func (store *Store) PublishableChanges(ctx context.Context, at UnixMillis) ([]Pu
 		      AND (json_extract(r.document, '$.retryable') = 0 OR
 		          ((json_extract(r.document, '$.retryable') = 1 OR json_extract(r.document, '$.retryable') IS NULL)
 		              AND r.observed_at_ms + ? > ?)))
-		ORDER BY c.updated_at_ms`, at.Int64(), PublishRetryAfter.Milliseconds(), at.Int64())
+		ORDER BY c.updated_at_ms`, NonIntakePublishAfterMs, at.Int64(), PublishRetryAfter.Milliseconds(), at.Int64())
 	if err != nil {
 		return nil, err
 	}
