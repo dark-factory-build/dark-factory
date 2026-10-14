@@ -377,6 +377,40 @@ func (store *Store) RecordDelivery(ctx context.Context, project ProjectID, repos
 	return tx.Commit(ctx)
 }
 
+// UnreleasedIntakePulls lists, newest first and all of them, repository's
+// published intake pull requests, merged or not yet seen to be, that no
+// verified release names: the ones a release may still make live (#1906). Its
+// history decides which it ships, so a merge refresh has yet to observe still
+// counts; one closed unmerged never ships.
+func (store *Store) UnreleasedIntakePulls(ctx context.Context, project ProjectID, repository string) ([]uint64, error) {
+	tx, err := store.beginRead(ctx)
+	if err != nil {
+		return nil, err
+	}
+	defer tx.Close()
+	rows, err := tx.connection.QueryContext(ctx, `SELECT DISTINCT p.pull_number FROM publication_tasks AS p
+		JOIN intake_task_bindings AS b ON b.task_id = p.task_id
+		JOIN production_records AS r ON r.project_id = p.project_id AND r.repository = p.repository AND r.kind = 'pull_request' AND r.identity = CAST(p.pull_number AS TEXT)
+		WHERE p.project_id = ?1 AND p.repository = ?2 AND json_extract(r.document, '$.state') <> 'closed'
+		  AND NOT EXISTS (SELECT 1 FROM production_records AS d, json_each(d.document, '$.pull_requests') AS n
+		      WHERE d.project_id = ?1 AND d.repository = ?2 AND d.kind = 'delivery' AND d.identity LIKE 'release:%'
+		        AND json_extract(d.document, '$.state') = 'verified' AND CAST(n.value AS INTEGER) = p.pull_number)
+		ORDER BY p.pull_number DESC`, project.Bytes(), strings.ToLower(repository))
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	pulls := []uint64{}
+	for rows.Next() {
+		var number uint64
+		if err := rows.Scan(&number); err != nil {
+			return nil, err
+		}
+		pulls = append(pulls, number)
+	}
+	return pulls, rows.Err()
+}
+
 // Delivery reads the delivery row id and the project that recorded it.
 func (store *Store) Delivery(ctx context.Context, id string) (ProjectID, ProductionDelivery, bool, error) {
 	return store.delivery(ctx, `identity = ?`, id)
@@ -553,7 +587,9 @@ func PublishFailureID(change ChangeID, revision Revision) string {
 // revision recorded within PublishRetryAfter of at: with no publication of
 // that Change or task, at any work revision, or above work revision 1
 // settled since factoryd last published that Change on its still-open pull
-// request (publication_tasks.created_at_ms).
+// request (publication_tasks.created_at_ms). A merged pull request no longer
+// counts once a run admitted after its merge settled the Change: a task sent
+// back because its live signal failed after release (#1906) is published anew.
 func (store *Store) PublishableChanges(ctx context.Context, at UnixMillis) ([]PublishableChange, error) {
 	tx, err := store.beginRead(ctx)
 	if err != nil {
@@ -568,7 +604,10 @@ func (store *Store) PublishableChanges(ctx context.Context, at UnixMillis) ([]Pu
 		      AND r.identity = CAST(p.pull_number AS TEXT) AND json_extract(r.document, '$.state') = 'open')
 		WHERE c.phase = 'retained' AND t.status = 'succeeded' AND a.withdrawn_at_ms IS NULL AND c.head_commit <> c.base_commit
 		  AND ((a.id IS NOT NULL AND `+factorydPublishesAcceptance+`) OR (a.id IS NULL AND EXISTS (SELECT 1 FROM publication_tasks repair WHERE repair.project_id = c.project_id AND repair.task_id = c.task_id)))
-		  AND (p.pull_number IS NOT NULL OR NOT EXISTS (SELECT 1 FROM publication_tasks q WHERE q.change_id = c.id OR q.task_id = c.task_id))
+		  AND (p.pull_number IS NOT NULL OR NOT EXISTS (SELECT 1 FROM publication_tasks q WHERE (q.change_id = c.id OR q.task_id = c.task_id)
+		      AND NOT EXISTS (SELECT 1 FROM production_records r JOIN runs u ON u.id = c.settled_run_id
+		          WHERE r.project_id = q.project_id AND r.repository = q.repository AND r.kind = 'pull_request' AND r.identity = CAST(q.pull_number AS TEXT)
+		            AND json_extract(r.document, '$.state') = 'merged' AND u.admitted_at_ms > r.observed_at_ms)))
 		  AND NOT EXISTS (SELECT 1 FROM production_records r WHERE r.project_id = c.project_id AND r.kind = 'reviewer'
 		      AND r.identity = 'publish-' || lower(hex(c.id)) || '-' || c.revision
 		      AND r.observed_at_ms <= ?

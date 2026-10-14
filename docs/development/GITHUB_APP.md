@@ -394,6 +394,15 @@ remain separate. Rotate
 the `DARK_FACTORY_MAINTAINER_PERMISSION_REVISION` secret before promoting a v6
 build.
 
+`update_issue` (owner decision, 14 Oct 2026, #1906) keeps
+`maintainer-operations-v6`: it mints the same `issues: write` token
+`create_issue` does, so no permission and no secret changes. It comments on
+one issue and sets its state (`completed` or `not_planned` closes it,
+`reopened` leaves it open), and refuses any issue that does not carry
+`factory:ready`. factoryd forwards it only for a project's destination
+repository. The comment carries the App's operation marker; a replay that
+finds its comment only repeats the state write.
+
 `maintainer-operations-v5` grants exactly what
 `maintainer-operations-v4` granted. It adds one bounded
 `close_pull_request` operation, so the revision changes as the surface's

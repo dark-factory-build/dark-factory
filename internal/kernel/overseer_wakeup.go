@@ -41,9 +41,15 @@ const (
 // it, and the Change item covers a publication that never happens. While
 // factoryd records
 // that Change revision's publication refused, the item is that refusal, at the
-// Change's version however often the hourly retry repeats it. An intake task the
-// overseer could retry (an automatic end) is an item too; an operator's cancel
-// and a withdrawn issue's task are not. An item is due when
+// Change's version however often the hourly retry repeats it. A failed or
+// cancelled intake task is an item too, re-woken while the overseer could
+// retry it (an automatic end) and otherwise one look, so a ready issue never
+// sits ownerless; a withdrawn issue's task is not. A succeeded intake task
+// whose pull request merged needs one look once live (the first verified
+// self-release that ships it, or the merge where its repository releases
+// nothing), dated no earlier than the merge's observation, so a pass that ran
+// before the item existed is not its look: its issue's live signal is checked
+// then (#1906). An item is due when
 // no carrier named it since that version; after that, at most once per
 // OverseerRewakeAfter, while no carrier that named it started (one look), or
 // while it persists and at most its rewakes did: one wake and three re-wakes
@@ -76,6 +82,10 @@ carrier AS MATERIALIZED (SELECT t.id AS task, t.created_at_ms AS at, substr(t.bo
 	instr(t.body, 'wake: mode=targeted;') > 0 AS targeted,
 	EXISTS (SELECT 1 FROM runs AS r WHERE r.task_id = t.id AND r.terminal_detail IS NOT ?9 AND r.terminal_detail IS NOT ?10) AS started
 	FROM tasks AS t WHERE t.assigned_agent_id = ?4 AND t.title = ?5),
+-- When each pull request went live: the first verified release that ships it.
+released AS MATERIALIZED (SELECT d.repository, CAST(n.value AS INTEGER) AS pull, MIN(json_extract(d.document, '$.verified_at')) AS at
+	FROM production_records AS d, json_each(d.document, '$.pull_requests') AS n
+	WHERE d.project_id = ?1 AND d.kind = 'delivery' AND d.identity LIKE 'release:%' AND json_extract(d.document, '$.state') = 'verified' GROUP BY 1, 2),
 item AS (
 	SELECT t.id, t.updated_at_ms AS version, CASE WHEN t.status IN ('blocked', 'failed') THEN 3 END AS rewakes, '' AS detail, lower(hex(t.id)) AS item_key
 	FROM tasks AS t JOIN agents AS a ON a.id = t.assigned_agent_id
@@ -95,11 +105,17 @@ item AS (
 	       OR EXISTS (SELECT 1 FROM publication_tasks AS p JOIN production_records AS r
 	           ON r.project_id = p.project_id AND r.repository = p.repository AND r.kind = 'pull_request' AND r.identity = CAST(p.pull_number AS TEXT)
 	           WHERE p.change_id = c.id AND json_extract(r.document, '$.state') = 'open' AND c.updated_at_ms > p.created_at_ms))
-	UNION ALL SELECT t.id, t.updated_at_ms, 3, '', lower(hex(t.id)) FROM tasks AS t
+	UNION ALL SELECT t.id, t.updated_at_ms, CASE WHEN ` + taskEndedAutomatically + ` THEN 3 END, '', lower(hex(t.id)) FROM tasks AS t
 	JOIN intake_task_bindings AS b ON b.task_id = t.id
 	JOIN intake_acceptances AS i ON i.id = b.acceptance_id
-	JOIN agents AS o ON o.id = i.overseer_agent_id
-	WHERE t.project_id = ?1 AND o.id = ?4 AND ` + taskEndedAutomatically + ` AND NOT ` + taskIssueWithdrawn + `
+	WHERE t.project_id = ?1 AND COALESCE(i.overseer_agent_id, ?4) = ?4 AND t.status IN ('failed', 'cancelled') AND NOT ` + taskIssueWithdrawn + `
+	UNION ALL SELECT id, MAX(live, observed), NULL, '', lower(hex(id)) FROM (SELECT t.id, r.observed_at_ms AS observed, CASE WHEN EXISTS (SELECT 1 FROM production_records
+			WHERE project_id = ?1 AND repository = r.repository AND kind = 'delivery' AND identity LIKE 'release:%')
+		THEN (SELECT at FROM released WHERE repository = r.repository AND pull = p.pull_number) ELSE r.observed_at_ms END AS live
+	  FROM tasks AS t JOIN publication_tasks AS p ON p.task_id = t.id
+	  JOIN production_records AS r ON r.project_id = p.project_id AND r.repository = p.repository AND r.kind = 'pull_request' AND r.identity = CAST(p.pull_number AS TEXT)
+	  WHERE t.project_id = ?1 AND t.status = 'succeeded' AND json_extract(r.document, '$.state') = 'merged'
+	    AND EXISTS (SELECT 1 FROM intake_task_bindings AS b WHERE b.task_id = t.id) AND NOT ` + taskIssueWithdrawn + `) WHERE live IS NOT NULL
 	-- Only the newest of identical escalations (same pull, head and reason)
 	-- names a reviewer item. The cheap open-PR and head filters run first; a
 	-- correlated NOT EXISTS over every reviewer record held the writer for
@@ -557,7 +573,8 @@ const overseerWakeLine = `SELECT printf('- %s "%s" %s rev=%d', lower(hex(t.id)),
 		FROM publication_tasks AS p JOIN production_records AS r ON r.project_id = p.project_id AND r.repository = p.repository AND r.kind = 'pull_request' AND r.identity = CAST(p.pull_number AS TEXT)
 		WHERE p.task_id = t.id OR p.change_id IN (SELECT id FROM changes WHERE task_id = t.id) ORDER BY p.created_at_ms DESC LIMIT 1), '')
 	|| COALESCE(': ' || replace(substr(COALESCE(t.blocked_reason, (SELECT h.question_text FROM human_requests AS h JOIN runs AS u ON u.id = h.run_id
-		WHERE u.task_id = t.id AND h.status IN ('open', 'delivering', 'delivery_unknown') LIMIT 1)), 1, 120), char(10), ' '), '')
+		WHERE u.task_id = t.id AND h.status IN ('open', 'delivering', 'delivery_unknown') LIMIT 1),
+		(SELECT u.terminal_detail FROM runs AS u WHERE u.task_id = t.id AND t.status IN ('failed', 'cancelled') ORDER BY u.terminal_at_ms DESC LIMIT 1)), 1, 120), char(10), ' '), '')
 FROM tasks AS t WHERE t.id = due.id`
 
 const overseerWakeCounts = `WITH open_pr AS (SELECT p.repository, CAST(json_extract(p.document, '$.number') AS INTEGER) AS number, json_extract(p.document, '$.head') AS head,

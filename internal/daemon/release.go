@@ -14,6 +14,7 @@ import (
 	"regexp"
 	"runtime"
 	"slices"
+	"strconv"
 	"strings"
 	"sync"
 	"syscall"
@@ -347,6 +348,10 @@ func (daemon *Daemon) release(project kernel.ProjectID, root string, source chan
 		fail(err.Error())
 		return
 	}
+	// The intake pull requests no verified release names yet, kept where
+	// this commit's history ships them, observed merged or not.
+	outstanding, _ := daemon.store.UnreleasedIntakePulls(ctx, project, selfRepository)
+	delivery.PullRequests = releasedPulls(ctx, filepath.Join(directory, "tree", ".git"), delivery.Revision, outstanding)
 	delivery.Phase = "drain"
 	_ = daemon.writeRelease(ctx, project, &delivery)
 	daemon.releaseHold.Store(true)
@@ -468,6 +473,31 @@ func deployWorker(ctx context.Context, daemon *Daemon, tree, live, sha string, r
 		return fmt.Errorf("%w: %s", err, lines[len(lines)-1])
 	}
 	return nil
+}
+
+// releasedPull is a squash merge's subject suffix, "(#N)".
+var releasedPull = regexp.MustCompile(`(?m)\(#([0-9]{1,15})\)$`)
+
+// releasedPulls keeps the pull requests among outstanding whose squash
+// commit is in sha's whole history, so the overseer's verification wake learns
+// which release made each merge live (#1906), however old its commit or late
+// its merge was observed. An unreadable history ships none.
+func releasedPulls(ctx context.Context, gitDir, sha string, outstanding []uint64) []uint64 {
+	subjects, _ := gitOutput(ctx, gitDir, "log", "--format=%s", sha)
+	shipped := map[uint64]bool{}
+	for _, match := range releasedPull.FindAllSubmatch(subjects, -1) {
+		if number, err := strconv.ParseUint(string(match[1]), 10, 53); err == nil {
+			shipped[number] = true
+		}
+	}
+	pulls := []uint64{}
+	for _, number := range outstanding {
+		// A delivery names at most 256; the rest stay outstanding for the next.
+		if shipped[number] && len(pulls) < 256 {
+			pulls = append(pulls, number)
+		}
+	}
+	return pulls
 }
 
 // releaseDescends refuses a commit that is not the running build or one of

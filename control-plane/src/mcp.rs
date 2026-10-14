@@ -14,7 +14,7 @@ use crate::{
         ListIssues, ListPullRequests, ObserveFile, ObserveIssue, ObservePullRequestChecks,
         ObservePullRequestMerge, ObserveRef, ObserveRepository, ObserveRepositoryChecks,
         ObserveTree, OperationError, PublishCommit, PublishPack, SubmitPullRequestReview,
-        UpdatePullRequestBody, canonical_operation_id,
+        UpdateIssue, UpdatePullRequestBody, canonical_operation_id,
     },
     journal::DeliveryJournal,
 };
@@ -427,6 +427,32 @@ fn tools() -> Value {
             "additionalProperties": false
         },
         "annotations": {"readOnlyHint": true, "destructiveHint": false, "openWorldHint": true}
+    }, {
+        "name": "update_issue",
+        "title": "Close or reopen a factory:ready issue",
+        "description": "Comment on one issue that carries factory:ready and set its state: state_reason completed or not_planned closes it, reopened leaves or makes it open. Any other issue is refused. Verify the issue's live signal first and put the evidence or the observed gap in the comment. Replays require the same operation UUID and request.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "repository": {"type": "string", "pattern": "^[A-Za-z0-9-]{1,39}/[A-Za-z0-9._-]{1,100}$"},
+                "operation_id": {"type": "string", "pattern": "^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$"},
+                "issue_number": {"type": "integer", "minimum": 1},
+                "state_reason": {"type": "string", "enum": ["completed", "not_planned", "reopened"]},
+                "comment": {"type": "string", "minLength": 1, "maxLength": 16000}
+            },
+            "required": ["repository", "operation_id", "issue_number", "state_reason", "comment"],
+            "additionalProperties": false
+        },
+        "outputSchema": {
+            "type": "object",
+            "properties": {
+                "number": {"type": "integer"},
+                "url": {"type": "string"}
+            },
+            "required": ["number", "url"],
+            "additionalProperties": false
+        },
+        "annotations": {"readOnlyHint": false, "destructiveHint": false, "idempotentHint": true, "openWorldHint": true}
     }, {
         "name": "create_pull_request",
         "title": "Create an exact-head pull request",
@@ -913,6 +939,17 @@ async fn call_tool(id: Value, request: &Map<String, Value>, mcp: &McpState) -> R
             };
             match mcp.app.observe_issue(arguments).await {
                 Ok(result) => serialized_tool_result(id, &result, "Issue state was observed."),
+                Err(error) => operation_error(id, error),
+            }
+        }
+        Some("update_issue") => {
+            let Ok(arguments) = serde_json::from_value::<UpdateIssue>(arguments) else {
+                return json_rpc_error(id, -32602, "Invalid params");
+            };
+            match mcp.app.update_issue(&mcp.journal, arguments).await {
+                Ok(result) => {
+                    serialized_tool_result(id, &result, "Issue state is durably recorded.")
+                }
                 Err(error) => operation_error(id, error),
             }
         }

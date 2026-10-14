@@ -176,6 +176,9 @@ pub(crate) enum RefusalReason {
     /// Determinate: the same commit truncates every time.
     #[error("the commit's tree is too large for GitHub to return whole")]
     TreeTruncated,
+    /// `update_issue` acts only on issues the factory accepted.
+    #[error("the issue does not carry factory:ready")]
+    NotFactoryReady,
 }
 
 /// Which pre-execution rejection classes appeared. More than one can:
@@ -434,6 +437,23 @@ pub(crate) struct CreateIssue {
 pub(crate) struct IssueResult {
     pub(crate) number: i64,
     pub(crate) url: String,
+}
+
+/// The one label whose issues `update_issue` may close or reopen: work the
+/// factory accepted, verified against its live signal after release (#1906).
+pub(crate) const FACTORY_READY_LABEL: &str = "factory:ready";
+
+/// Comment on a `factory:ready` issue and set its state: `reopened` leaves it
+/// open, `completed` or `not_planned` closes it. The comment carries the App's
+/// operation marker, so a lost response is reconciled without commenting twice.
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct UpdateIssue {
+    pub(crate) repository: String,
+    pub(crate) operation_id: String,
+    pub(crate) issue_number: i64,
+    pub(crate) state_reason: String,
+    pub(crate) comment: String,
 }
 
 /// One file's exact bytes at one exact commit.
@@ -1483,6 +1503,78 @@ impl AppAuthority {
         }
     }
 
+    /// The issue must carry `factory:ready`; no other issue's state is this
+    /// App's to change. Comment first, then set the state, which repeats
+    /// harmlessly, so a replay that finds its comment only finishes the state.
+    #[cfg(target_arch = "wasm32")]
+    pub(crate) async fn update_issue(
+        &self,
+        journal: &DeliveryJournal,
+        mut request: UpdateIssue,
+    ) -> Result<IssueResult, OperationError> {
+        request.validate()?;
+        let repository = RepositoryName::requested(&mut request.repository)?;
+        let operation = request.operation("update_issue")?;
+        let state = journal
+            .begin_operation(&operation)
+            .await
+            .map_err(|_| OperationError::Unavailable)?;
+        if let Some(result) = completed_or_conflict::<IssueResult>(&state)? {
+            return Ok(result);
+        }
+        let token = self
+            .0
+            .installation_token(
+                repository,
+                BTreeMap::from([("issues", "write"), ("metadata", "read")]),
+            )
+            .await?;
+        let issue = self.0.read_issue(&token, request.issue_number).await?;
+        if !issue.is_real_issue() {
+            return Err(OperationError::Conflict);
+        }
+        if !issue
+            .labels
+            .iter()
+            .any(|label| label.name.eq_ignore_ascii_case(FACTORY_READY_LABEL))
+        {
+            return Err(OperationError::Refused(RefusalReason::NotFactoryReady));
+        }
+        let commented = match journal
+            .mark_operation(&operation, OperationTransition::Executing)
+            .await
+            .map_err(|_| OperationError::Unavailable)?
+        {
+            OperationRecord::Claimed => match self.0.comment_issue(&token, &request).await {
+                Ok(()) => true,
+                Err(_) => matches!(self.0.issue_commented(&token, &request).await, Ok(true)),
+            },
+            OperationRecord::Completed(result) => {
+                return serde_json::from_str(&result).map_err(|_| OperationError::Unavailable);
+            }
+            OperationRecord::Conflict => return Err(OperationError::Conflict),
+            OperationRecord::Executing | OperationRecord::Indeterminate => {
+                self.0.issue_commented(&token, &request).await?
+            }
+            OperationRecord::New | OperationRecord::Planned => {
+                return Err(OperationError::Unavailable);
+            }
+        };
+        let result = match commented {
+            true => self.0.set_issue_state(&token, &request).await,
+            false => Err(OperationError::Indeterminate),
+        };
+        match result {
+            Ok(result) => complete(journal, &operation, result).await,
+            Err(_) => {
+                let _ = journal
+                    .mark_operation(&operation, OperationTransition::Indeterminate)
+                    .await;
+                Err(OperationError::Indeterminate)
+            }
+        }
+    }
+
     #[cfg(target_arch = "wasm32")]
     pub(crate) async fn submit_pull_request_review(
         &self,
@@ -2479,6 +2571,43 @@ impl CreateIssue {
         } else {
             Ok(format!("{}\n\n{}", self.body, self.marker()?))
         }
+    }
+}
+
+impl UpdateIssue {
+    fn validate(&mut self) -> Result<(), OperationError> {
+        canonical_operation_id(&mut self.operation_id)?;
+        valid_exact_integer(self.issue_number)?;
+        if !matches!(
+            self.state_reason.as_str(),
+            "completed" | "not_planned" | "reopened"
+        ) {
+            return Err(OperationError::InvalidInput);
+        }
+        valid_text(&self.comment, 1, 16_000, true)?;
+        free_of_operation_marker(&self.comment)
+    }
+
+    #[cfg(target_arch = "wasm32")]
+    fn operation(&self, kind: &str) -> Result<Operation, OperationError> {
+        operation(kind, &self.operation_id, self)
+    }
+
+    fn state(&self) -> &'static str {
+        if self.state_reason == "reopened" {
+            "open"
+        } else {
+            "closed"
+        }
+    }
+
+    fn marked_comment(&self) -> Result<String, OperationError> {
+        Ok(format!(
+            "{}\n\n{OPERATION_MARKER_PREFIX}{}:{} -->",
+            self.comment,
+            self.operation_id,
+            request_digest(self)?
+        ))
     }
 }
 
@@ -4241,6 +4370,84 @@ impl Authority {
         .await?;
         pull.body_result(request)?
             .ok_or(OperationError::Indeterminate)
+    }
+
+    async fn comment_issue(
+        &self,
+        token: &RepositoryToken,
+        request: &UpdateIssue,
+    ) -> Result<(), OperationError> {
+        #[derive(Serialize)]
+        struct Body {
+            body: String,
+        }
+        let _: serde_json::Value = github_json_request(
+            worker::Method::Post,
+            &format!(
+                "https://api.github.com/repos/{}/{}/issues/{}/comments",
+                token.repository.owner, token.repository.name, request.issue_number
+            ),
+            token.as_str(),
+            Some(&Body {
+                body: request.marked_comment()?,
+            }),
+        )
+        .await?;
+        Ok(())
+    }
+
+    /// ponytail: reads the issue's first 100 comments; on a longer thread a
+    /// lost comment response stays indeterminate rather than commenting twice.
+    async fn issue_commented(
+        &self,
+        token: &RepositoryToken,
+        request: &UpdateIssue,
+    ) -> Result<bool, OperationError> {
+        #[derive(Deserialize)]
+        struct Comment {
+            body: Option<String>,
+        }
+        let comments: Vec<Comment> = github_json(
+            &format!(
+                "https://api.github.com/repos/{}/{}/issues/{}/comments?per_page=100",
+                token.repository.owner, token.repository.name, request.issue_number
+            ),
+            token.as_str(),
+        )
+        .await?;
+        let marked = request.marked_comment()?;
+        Ok(comments
+            .iter()
+            .any(|comment| comment.body.as_deref() == Some(marked.as_str())))
+    }
+
+    async fn set_issue_state(
+        &self,
+        token: &RepositoryToken,
+        request: &UpdateIssue,
+    ) -> Result<IssueResult, OperationError> {
+        #[derive(Serialize)]
+        struct Body<'a> {
+            state: &'a str,
+            state_reason: &'a str,
+        }
+        let issue: Issue = github_json_request(
+            worker::Method::Patch,
+            &format!(
+                "https://api.github.com/repos/{}/{}/issues/{}",
+                token.repository.owner, token.repository.name, request.issue_number
+            ),
+            token.as_str(),
+            Some(&Body {
+                state: request.state(),
+                state_reason: &request.state_reason,
+            }),
+        )
+        .await?;
+        if issue.number != request.issue_number || issue.state != request.state() {
+            return Err(OperationError::Indeterminate);
+        }
+        issue.into_result()
     }
 
     async fn reconcile_review(
@@ -8184,6 +8391,47 @@ mod tests {
             .validate()
             .is_err()
         );
+
+        let update = UpdateIssue {
+            repository: "dark-factory-build/dark-factory".into(),
+            operation_id: "0C8A5C44-7F1F-11F0-952E-ACDE48001122".into(),
+            issue_number: 1906,
+            state_reason: "completed".into(),
+            comment: "Live signal met: no stale ready issue.".into(),
+        };
+        let mut checked = update.clone();
+        assert!(checked.validate().is_ok());
+        assert_eq!(checked.operation_id, "0c8a5c44-7f1f-11f0-952e-acde48001122");
+        assert_eq!(checked.state(), "closed");
+        assert!(checked.marked_comment().unwrap().starts_with(
+            "Live signal met: no stale ready issue.\n\n<!-- dark-factory-operation:0c8a5c44-"
+        ));
+        let reopened = UpdateIssue {
+            state_reason: "reopened".into(),
+            ..update.clone()
+        };
+        assert_eq!(reopened.state(), "open");
+        for invalid in [
+            UpdateIssue {
+                state_reason: "open".into(),
+                ..update.clone()
+            },
+            UpdateIssue {
+                comment: String::new(),
+                ..update.clone()
+            },
+            UpdateIssue {
+                comment: "<!-- dark-factory-operation:forged -->".into(),
+                ..update.clone()
+            },
+            UpdateIssue {
+                issue_number: 0,
+                ..update.clone()
+            },
+        ] {
+            let mut invalid = invalid;
+            assert!(invalid.validate().is_err(), "{invalid:?}");
+        }
 
         let observe_issue = ObserveIssue {
             repository: "dark-factory-build/dark-factory".into(),

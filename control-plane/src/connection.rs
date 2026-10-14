@@ -163,6 +163,7 @@ fn tool_write(name: &str) -> Option<bool> {
         | "list_deployments"
         | "observe_pull_request_merge" => Some(false),
         "create_issue"
+        | "update_issue"
         | "create_pull_request"
         | "update_pull_request_body"
         | "submit_pull_request_review"

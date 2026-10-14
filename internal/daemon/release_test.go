@@ -11,6 +11,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"strings"
 	"sync/atomic"
 	"syscall"
@@ -678,5 +679,40 @@ func TestReleaseRefusesACommitOlderThanTheRunningBuild(t *testing.T) {
 		if err := releaseDescends(ctx, "ROOT", tree, running, sha); err != nil {
 			t.Fatalf("release %s = %v", sha, err)
 		}
+	}
+}
+
+// A release names which outstanding merged pull requests its commit ships, by
+// their squash subjects anywhere in its history: one followed by hundreds of
+// commits, or merged long before an upgrade, included (#1906).
+func TestReleasedPullsNameTheOutstandingMergesTheCommitShips(t *testing.T) {
+	tree := t.TempDir()
+	git := func(args ...string) string {
+		output, err := exec.Command(change.TrustedGitExecutable, append([]string{"-C", tree, "-c", "user.name=test", "-c", "user.email=test@example.invalid", "-c", "commit.gpgsign=false"}, args...)...).Output()
+		if err != nil {
+			t.Fatalf("git %v: %v", args, err)
+		}
+		return strings.TrimSpace(string(output))
+	}
+	git("init", "--quiet")
+	git("commit", "--quiet", "--allow-empty", "-m", "Fix intake (#7)")
+	for index := range 300 {
+		git("commit", "--quiet", "--allow-empty", "-m", fmt.Sprintf("Unrelated %d, mentions #12 but is no squash", index))
+	}
+	git("commit", "--quiet", "--allow-empty", "-m", "Verify merged intake (#1906)")
+	gitDir := filepath.Join(tree, ".git")
+	if pulls := releasedPulls(context.Background(), gitDir, git("rev-parse", "HEAD"), []uint64{1906, 99, 12, 7}); !slices.Equal(pulls, []uint64{1906, 7}) {
+		t.Fatalf("released pulls = %v", pulls)
+	}
+	// Hundreds of newer unshipped ones do not crowd out a shipped one.
+	var outstanding []uint64
+	for number := uint64(2300); number > 2000; number-- {
+		outstanding = append(outstanding, number)
+	}
+	if pulls := releasedPulls(context.Background(), gitDir, git("rev-parse", "HEAD"), append(outstanding, 7)); !slices.Equal(pulls, []uint64{7}) {
+		t.Fatalf("shipped pull behind 300 unshipped = %v", pulls)
+	}
+	if pulls := releasedPulls(context.Background(), gitDir, strings.Repeat("0", 40), []uint64{7}); len(pulls) != 0 || pulls == nil {
+		t.Fatalf("an unreadable history shipped %v", pulls)
 	}
 }
