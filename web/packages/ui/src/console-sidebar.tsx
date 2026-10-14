@@ -6,7 +6,7 @@ import { activityLabel, type KnowledgeActivity } from "./project-board.js";
 import { AgentSprite } from "./factory-scene/factory-scene.js";
 import { telemetryLine } from "./factory-scene/scene.js";
 import { agentStatus, agentCurrentTask, agentActivity, isSpecialist, needsYou, specialistStatus, type WorkRow, type WorkState } from "./console-view.js";
-import { productionKey, productionStages } from "./production-view.js";
+import { productionStages } from "./production-view.js";
 import { AnswerControls } from "./console-interactions.js";
 import { Icon, IconButton } from "./icons.js";
 import { Badge, SectionHeader, Status, formatTime } from "./console-kit.js";
@@ -223,10 +223,10 @@ export type WorkFilter = "all" | WorkState;
 const FILTERS: readonly [WorkFilter, string][] = [["all", "All"], ["needs-you", "Needs you"], ["in-review", "In review"]];
 
 /** One Work row: title, then chips, then meta, always the same shape; the title button stretches over the whole row. */
-function WorkRowShell({ title, chips, meta, onOpen, disabled = false, pressed, expanded, children }: { title: ReactNode; chips: ReactNode; meta: ReactNode; onOpen?: () => void; disabled?: boolean; pressed?: boolean; expanded?: boolean; children?: ReactNode }) {
+function WorkRowShell({ title, chips, meta, onOpen, href, disabled = false, pressed, expanded, children }: { title: ReactNode; chips: ReactNode; meta: ReactNode; onOpen?: () => void; href?: string; disabled?: boolean; pressed?: boolean; expanded?: boolean; children?: ReactNode }) {
   return <li className="dfConsoleItem dfWorkRow">
     <div className="dfWorkRow__head">
-      <button type="button" className="dfConsoleItem__taskTitle dfWorkRow__title" disabled={disabled || onOpen === undefined} aria-pressed={pressed} aria-expanded={expanded} onClick={onOpen}>{title}</button>
+      {href ? <a className="dfConsoleItem__taskTitle dfWorkRow__title" href={href} target="_blank" rel="noreferrer">{title}</a> : <button type="button" className="dfConsoleItem__taskTitle dfWorkRow__title" disabled={disabled || onOpen === undefined} aria-pressed={pressed} aria-expanded={expanded} onClick={onOpen}>{title}</button>}
       <span className="dfWorkMeta">{chips}</span>
       {meta ? <span className="dfConsoleItem__meta">{meta}</span> : null}
     </div>
@@ -241,7 +241,7 @@ export type AddTask = (agent: AgentItem, instruction: string, mode: "queue" | "a
 /** One list for everything open: what needs you, what is in review, running and queued. */
 export function WorkPanel({
   state, rows, projectId, filter, onFilter, byMission, onByMission, missions, edit, ready, onEditTask, onAddTask, taskContent = [], onTaskContent = () => undefined, onLoadTaskDetail, onLoadTaskHistory,
-  selectedTaskId, onSelectTask, selectedHumanRequest, onSelectHumanRequest, onCloseHumanRequest, requestContent, onSelectProduction, onMission, onIntakeAction, intake,
+  selectedTaskId, onSelectTask, selectedHumanRequest, onSelectHumanRequest, onCloseHumanRequest, requestContent, onMission, onIntakeAction, intake,
 }: {
   onIntakeAction?: (projectId: string, request: IntakeBody) => void;
   /** The shown project's last intake outcome. */
@@ -270,7 +270,6 @@ export function WorkPanel({
   onSelectHumanRequest?: (request: HumanRequestItem) => void;
   onCloseHumanRequest?: () => void;
   requestContent?: ReactNode;
-  onSelectProduction: (key: string) => void;
   onMission: (task: TaskItem) => void;
 }) {
   const [overseer, setOverseer] = useState(false);
@@ -282,7 +281,7 @@ export function WorkPanel({
   const chips = (row: WorkRow) => <>
     <Status stage={row.state} />{row.request === undefined || row.request.status === "open" ? null : <Status stage={row.request.status} />}
     {row.origin === "mission" && row.task ? <button type="button" onClick={() => onMission(row.task!)}>mission</button> : row.origin === undefined ? null : <span className="dfConsoleItem__meta">{row.origin}</span>}
-    {row.pr?.pullRequest ? <><button type="button" onClick={() => onSelectProduction(productionKey(row.pr!))}>PR #{row.pr.pullRequest.number}</button>{productionStages(row.pr).map((stage) => <Status stage={stage} key={stage} />)}</> : null}
+    {row.pr?.pullRequest ? <><a href={row.pr.pullRequest.url || `https://github.com/${row.pr.repository}/pull/${row.pr.pullRequest.number}`} target="_blank" rel="noreferrer">PR #{row.pr.pullRequest.number}</a>{productionStages(row.pr).map((stage) => <Status stage={stage} key={stage} />)}</> : null}
   </>;
   const item = (row: WorkRow) => {
     const { task, request } = row;
@@ -302,7 +301,7 @@ export function WorkPanel({
         {selected ? <div className="dfConsoleItem__detail">{requestContent}</div> : null}
       </WorkRowShell>;
     }
-    return <WorkRowShell key={row.key} title={row.title} chips={chips(row)} meta={meta} disabled={!ready} pressed={task && selectedTaskId === task.id} onOpen={task ? (onSelectTask && (() => onSelectTask(task.id))) : () => onSelectProduction(productionKey(row.pr!))}>
+    return <WorkRowShell key={row.key} title={row.title} chips={chips(row)} meta={meta} disabled={!ready} pressed={task && selectedTaskId === task.id} href={task ? undefined : row.pr?.pullRequest ? row.pr.pullRequest.url || `https://github.com/${row.pr.repository}/pull/${row.pr.pullRequest.number}` : undefined} onOpen={task ? (onSelectTask && (() => onSelectTask(task.id))) : undefined}>
       {blocked && task.blocked_reason ? <p className="dfConsoleItem__meta">{task.blocked_reason}</p> : null}
       {!blocked || onEditTask === undefined ? null : <div className="dfConsoleSidebar__taskActions"><button type="button" aria-label={`Retry ${task.title}`} disabled={!ready || edit?.pending === true} onClick={() => { void onEditTask(task, { retry: true }); }}>Retry</button><button type="button" aria-label={`Cancel ${task.title}`} disabled={!ready || edit?.pending === true} onClick={() => { void onEditTask(task, { cancel: true }); }}>Cancel</button></div>}
     </WorkRowShell>;

@@ -12,5 +12,6 @@ test("a never-connected console claims no remembered state", () => {
   for (const claim of ["last known", "Last known", "last observed", "Last observed", "Resume new work"]) assert.equal(never.includes(claim), false, claim);
   assert.match(never, /Not connected yet/);
   assert.match(never, />New work</);
-  assert.match(render({ state: fixtureState }), /Last observed state/);
+  assert.doesNotMatch(render({ state: fixtureState }), /Last observed state/);
+  assert.match(render({ state: fixtureState }), /aria-label="Work"/);
 });

@@ -437,43 +437,65 @@ test("an overseer pass is hidden until asked for, but its request row is not", (
 test("a succeeded task linked to an open PR is in review with its PR cell", () => {
   const done = { ...fixtureState.tasks.get(ids.task), status: "succeeded" };
   const state = baseState({ tasks: new Map([[done.id, done]]), humanRequests: new Map() });
-  const pr = { visualId: "change:1", projectId: done.project_id, repository: "o/r", tasks: [done.id], missions: [], pullRequest: { number: 7, state: "open", title: "Ship", head: "a".repeat(40) }, review: { state: "pending" }, checks: [], deliveries: [], reviewers: [], completed: false, completedAt: 0, status: "open", nextAction: "" };
-  const markup = renderToStaticMarkup(createElement(WorkPanel, { state, rows: workRows(state, [pr]), filter: "all", onFilter() {}, byMission: false, onByMission() {}, missions: null, ready: true, onSelectProduction() {}, onMission() {} }));
+  const pr = { visualId: "change:1", projectId: done.project_id, repository: "o/r", tasks: [done.id], missions: [], pullRequest: { number: 7, state: "open", title: "Ship", url: "https://github.com/o/r/pull/7", head: "a".repeat(40) }, review: { state: "pending" }, checks: [], deliveries: [], reviewers: [], completed: false, completedAt: 0, status: "open", nextAction: "" };
+  const markup = renderToStaticMarkup(createElement(WorkPanel, { state, rows: workRows(state, [pr]), filter: "all", onFilter() {}, byMission: false, onByMission() {}, missions: null, ready: true, onMission() {} }));
   assert.match(markup, /data-stage="in-review">in review/);
-  assert.match(markup, /PR #7/);
+  assert.match(markup, /<a href="https:\/\/github.com\/o\/r\/pull\/7" target="_blank" rel="noreferrer">PR #7<\/a>/);
+  assert.doesNotMatch(markup, /aria-label="Production inspection"/);
   assert.match(markup, /Review the state projection/);
 });
 
-test("a selected PR never traps the Work tab: Open mission and a project switch both return", async () => {
-  const done = { ...fixtureState.tasks.get(ids.task), status: "succeeded" };
-  const state = baseState({ tasks: new Map([[done.id, done]]), humanRequests: new Map() });
-  const head = "a".repeat(40);
+test("a task-less production row opens its pull request and keeps its stages", () => {
+  const pr = { visualId: "change:taskless", projectId: ids.project, repository: "o/r", tasks: [], missions: [], pullRequest: { number: 8, state: "open", title: "Taskless", url: "https://github.com/o/r/pull/8", head: "b".repeat(40) }, review: { state: "pending" }, checks: [], deliveries: [], reviewers: [], completed: false, completedAt: 0, status: "open", nextAction: "" };
+  const markup = renderToStaticMarkup(createElement(WorkPanel, { state: fixtureState, rows: workRows(fixtureState, [pr]), filter: "all", onFilter() {}, byMission: false, onByMission() {}, missions: null, ready: true, onMission() {} }));
+  assert.match(markup, /<a class="dfConsoleItem__taskTitle dfWorkRow__title" href="https:\/\/github.com\/o\/r\/pull\/8" target="_blank" rel="noreferrer">Taskless<\/a>/);
+  assert.match(markup, /data-stage="in-review">in review/);
+});
+
+test("a Library-linked production record opens its PR and renders real review and CI stages", async () => {
+  const head = "c".repeat(40);
+  const observedAt = Date.now();
   const records = [
-    { repository: "o/r", kind: "repository", id: "o/r", visual_id: "", observed_at: Date.now(), document: {}, tasks: [], missions: [] },
-    { repository: "o/r", kind: "pull_request", id: "7", visual_id: "change:7", observed_at: Date.now(), document: { number: 7, title: "Ship", head, state: "open", review: { head, state: "allow" } }, tasks: [done.id], missions: ["m1"] },
+    { repository: "o/r", kind: "repository", id: "o/r", visual_id: "", observed_at: observedAt, document: {}, tasks: [], missions: [] },
+    { repository: "o/r", kind: "pull_request", id: "7", visual_id: "change:7", observed_at: observedAt, document: { number: 7, title: "Ship", url: "https://github.com/o/r/pull/7", head, state: "open", review: { head, state: "allow" } }, tasks: [], missions: [] },
+    { repository: "o/r", kind: "check", id: "ci", visual_id: "", observed_at: observedAt, document: { revision: head, scope: "head", state: "completed", conclusion: "success", pull_requests: [7] }, tasks: [], missions: [] },
   ];
-  const priorDocument = globalThis.document, priorAct = globalThis.IS_REACT_ACT_ENVIRONMENT;
+  const linked = { id: "doc".repeat(16), revision: 1, latest_revision: 1, kind: "observation", title: "Release note", description: "", author: "worker", source_references: JSON.stringify({ record_id: "7", record_type: "pull_request" }) };
+  const priorDocument = globalThis.document, priorOpen = globalThis.open, priorAct = globalThis.IS_REACT_ACT_ENVIRONMENT;
   globalThis.IS_REACT_ACT_ENVIRONMENT = true;
   globalThis.document = { visibilityState: "visible", hidden: false, addEventListener() {}, removeEventListener() {} };
+  const opened = [];
+  globalThis.open = (...args) => { opened.push(args); return null; };
   let tree;
   try {
-    const call = async (op, input) => op === "production" ? { records: input.project_id === done.project_id ? records : [], next_offset: 0, total: 2 } : { items: [], next_offset: 0 };
-    function Harness() { const [detail, setDetail] = useState("work"); return createElement(FactoryConsole, { status: "ready", state, detail, onDetail: setDetail, onProjectContent: call }); }
-    await act(async () => { tree = create(createElement(Harness)); });
+    const call = async (operation, input) => {
+      if (operation === "production") return { records: input.project_id === ids.project ? records : [], next_offset: 0, total: input.project_id === ids.project ? records.length : 0 };
+      if (operation === "search") return { items: [linked], next_offset: 0 };
+      if (operation === "read") return linked;
+      if (operation === "body") return { body: "linked", complete: true };
+      if (operation === "history") return { items: [], next_offset: 0 };
+      throw new Error(`unexpected ${operation}`);
+    };
+    await act(async () => { tree = create(createElement(FactoryConsole, { status: "ready", state: fixtureState, detail: "work", onDetail() {}, onProjectContent: call })); });
     await act(async () => { await new Promise((resolve) => setTimeout(resolve, 20)); });
-    const shown = () => tree.root.findAllByProps({ "aria-label": "Work" }).length === 1 && tree.root.findByProps({ "aria-label": "Work" }).parent.parent.props.hidden !== true;
-    const prButton = () => tree.root.findAllByType("button").find((button) => textOf(button).startsWith("PR #"));
-    await act(async () => prButton().props.onClick());
-    assert.equal(shown(), false, "the PR detail replaces the list");
-    await act(async () => tree.root.findAllByType("button").find((button) => textOf(button).startsWith("Open mission")).props.onClick());
-    assert.equal(shown(), true, "Open mission leaves the PR detail");
-    assert.equal(tree.root.findByProps({ "aria-label": "Work filter" }).findAllByType("button").find((button) => textOf(button) === "By mission").props["aria-pressed"], true);
-    await act(async () => tree.root.findByProps({ "aria-label": "Work filter" }).findAllByType("button")[0].props.onClick());
-    await act(async () => prButton().props.onClick());
-    assert.equal(shown(), false);
-    await act(async () => tree.root.findByProps({ "aria-label": "Project" }).props.onChange({ currentTarget: { value: ids.secondProject } }));
-    assert.equal(shown(), true, "a stale selection falls back to the list");
-  } finally { if (tree) await act(async () => tree.unmount()); globalThis.document = priorDocument; globalThis.IS_REACT_ACT_ENVIRONMENT = priorAct; }
+    const workMarkup = JSON.stringify(tree.toJSON());
+    assert.match(workMarkup, /Merge/);
+    assert.match(workMarkup, /CI passed/);
+    assert.doesNotMatch(workMarkup, /Production inspection/);
+    await act(async () => tree.root.findByType(FactoryFloor).props.onOpenLibrary(ids.project));
+    await act(async () => { await new Promise((resolve) => setTimeout(resolve, 50)); });
+    const library = tree.root.findByType(ProjectLibrary);
+    const releaseNote = library.findAllByType("button").find((button) => button.findAllByType("strong").some((strong) => textOf(strong) === "Release note"));
+    assert.ok(releaseNote);
+    await act(async () => releaseNote.props.onClick());
+    await act(async () => tree.root.findByType(ProjectLibrary).findAllByType("button").find((button) => textOf(button) === "Sources & history").props.onClick());
+    await act(async () => tree.root.findByType(ProjectLibrary).findAllByType("button").find((button) => textOf(button) === "View linked pull_request").props.onClick());
+    assert.deepEqual(opened, [["https://github.com/o/r/pull/7", "_blank", "noopener,noreferrer"]]);
+    assert.equal(tree.root.findAllByType(ProjectLibrary).length, 0);
+  } finally {
+    if (tree) await act(async () => tree.unmount());
+    globalThis.document = priorDocument; globalThis.open = priorOpen; globalThis.IS_REACT_ACT_ENVIRONMENT = priorAct;
+  }
 });
 
 test("a floor question opens its answer form even from By mission or a PR detail", async () => {
@@ -1220,7 +1242,7 @@ test("task selection and floor questions open the exact existing task detail and
 
 test("removed history controls leave inspected task detail intact", () => {
   const agentMarkup = renderToStaticMarkup(createElement(AgentPanel, { agent: fixtureState.agents.get(ids.agent), state: fixtureState, ready: true }));
-  const workMarkup = renderToStaticMarkup(createElement(WorkPanel, { state: fixtureState, rows: workRows(fixtureState, []), filter: "all", onFilter() {}, byMission: false, onByMission() {}, missions: null, ready: true, onSelectProduction() {}, onMission() {} }));
+  const workMarkup = renderToStaticMarkup(createElement(WorkPanel, { state: fixtureState, rows: workRows(fixtureState, []), filter: "all", onFilter() {}, byMission: false, onByMission() {}, missions: null, ready: true, onMission() {} }));
   const detailMarkup = renderToStaticMarkup(createElement(TaskDetail, { task: fixtureState.tasks.get(ids.task), onLoadTaskDetail: async () => ({ taskId: ids.task, revision: 1n, head: 1n, instruction: "kept", feedback: "", peerQuestions: [] }) }));
   assert.doesNotMatch(agentMarkup, /Recent work|aria-label="History"/);
   assert.doesNotMatch(workMarkup, /Recent work|aria-label="History"/);
@@ -1495,11 +1517,10 @@ test("new-work admission reports acknowledgement and preserves active work", asy
   await act(async () => tree.unmount());
 });
 
-test("Missions and Production share the task dialog and preserve their origin on close", async () => {
+test("Missions share the task dialog and preserve their origin on close", async () => {
   const { MissionsPanel } = await import("../dist/src/missions-panel.js");
-  const { ProductionPanel } = await import("../dist/src/production-panel.js");
   const historical = { ...fixtureState.tasks.get(ids.task), id: "fe".repeat(16), status: "succeeded", title: "Delivered historical task" };
-  for (const [origin, Panel] of [["missions", MissionsPanel], ["production", ProductionPanel]]) {
+  for (const [origin, Panel] of [["missions", MissionsPanel]]) {
     const navigations = [], selections = []; let tree;
     await act(async () => { tree = create(createElement(FactoryConsole, {status: "ready", state: fixtureState, detail: origin, onDetail: value => navigations.push(value), onSelectTask: id => selections.push(id), onLoadTaskDetail: async task => ({taskId: task.id, revision: task.revision, instruction: "Retained instruction", feedback: "", peerQuestions: []})})); });
     await act(async () => tree.root.findByType(Panel).props.onOpenTask(historical));
