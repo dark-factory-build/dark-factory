@@ -64,7 +64,15 @@ ORDER BY version LIMIT 33`
 const overseerStalledItems = overseerItems + `SELECT last, CASE WHEN id IS NULL THEN detail || CASE WHEN instr(detail, ' [reviewer:') > 0 THEN '' ELSE ' ' || item_key END ELSE (` + overseerWakeLine + `) END,
 	named_at + ?6 <= ?3, named_at + ?6 FROM counted AS due WHERE wakes > rewakes AND ?7 + ?8 >= 0 ORDER BY last, version`
 
-const overseerItems = `WITH carrier AS MATERIALIZED (SELECT t.id AS task, t.created_at_ms AS at, substr(t.body, instr(t.body, 'Factory causal wake: ')) AS names,
+const overseerItems = `WITH reviewer AS MATERIALIZED (SELECT e.repository, e.identity, e.observed_at_ms AS at,
+	json_extract(e.document, '$.escalation') AS escalation,
+	json_extract(e.document, '$.request.PullNumber') AS pull_number,
+	lower(json_extract(e.document, '$.request.Head')) AS head
+	FROM production_records AS e WHERE e.project_id = ?1 AND e.kind = 'reviewer'),
+pull_request AS MATERIALIZED (SELECT project_id, repository, identity,
+	json_extract(document, '$.state') AS state, lower(json_extract(document, '$.head')) AS head
+	FROM production_records WHERE project_id = ?1 AND kind = 'pull_request'),
+carrier AS MATERIALIZED (SELECT t.id AS task, t.created_at_ms AS at, substr(t.body, instr(t.body, 'Factory causal wake: ')) AS names,
 	instr(t.body, 'wake: mode=targeted;') > 0 AS targeted,
 	EXISTS (SELECT 1 FROM runs AS r WHERE r.task_id = t.id AND r.terminal_detail IS NOT ?9 AND r.terminal_detail IS NOT ?10) AS started
 	FROM tasks AS t WHERE t.assigned_agent_id = ?4 AND t.title = ?5),
@@ -97,15 +105,12 @@ item AS (
 	-- correlated NOT EXISTS over every reviewer record held the writer for
 	-- seconds on each scheduler tick (12 Oct 2026).
 	UNION ALL SELECT NULL, at, 0, 'Escalated: ' || escalation, '[reviewer:' || identity || ']' FROM (
-	  SELECT e.observed_at_ms AS at, json_extract(e.document, '$.escalation') AS escalation, e.identity,
-	    row_number() OVER (PARTITION BY e.repository, json_extract(e.document, '$.request.PullNumber'), lower(json_extract(e.document, '$.request.Head')), json_extract(e.document, '$.escalation')
-	      ORDER BY e.observed_at_ms DESC, e.identity DESC) AS newest
-	  FROM production_records AS e
-	  JOIN production_records AS p ON p.project_id = e.project_id AND p.repository = e.repository AND p.kind = 'pull_request'
-	    AND p.identity = CAST(json_extract(e.document, '$.request.PullNumber') AS TEXT)
-	  WHERE e.project_id = ?1 AND e.kind = 'reviewer' AND COALESCE(json_extract(e.document, '$.escalation'), '') <> ''
-	    AND json_extract(p.document, '$.state') = 'open'
-	    AND lower(json_extract(p.document, '$.head')) = lower(json_extract(e.document, '$.request.Head'))
+	  SELECT e.at, e.escalation, e.identity,
+	    row_number() OVER (PARTITION BY e.repository, e.pull_number, e.head, e.escalation
+	      ORDER BY e.at DESC, e.identity DESC) AS newest
+	  FROM reviewer AS e
+	  JOIN pull_request AS p ON p.project_id = ?1 AND p.repository = e.repository AND p.identity = CAST(e.pull_number AS TEXT)
+	  WHERE COALESCE(e.escalation, '') <> '' AND p.state = 'open' AND p.head = e.head
 	) WHERE newest = 1
 	UNION ALL SELECT NULL, COALESCE(json_extract(d.document, '$.failed_at'), d.observed_at_ms), 0, CASE json_extract(d.document, '$.state')
 	  WHEN 'failed' THEN printf('Escalated: factoryd %s failed in phase %s: %s', d.identity, json_extract(d.document, '$.phase'), replace(json_extract(d.document, '$.reason'), char(10), ' '))
