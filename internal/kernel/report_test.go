@@ -181,7 +181,21 @@ func TestReportIncludesMainCheckWithoutPullRequest(t *testing.T) {
 		t.Fatal(err)
 	}
 	lines, err := store.Report(context.Background(), &project.ID, 0, 3600000)
-	if err != nil || len(lines) != 3 || !strings.Contains(lines[0], "failure new x1") || !strings.Contains(lines[0], "main at aaaaaaaa") {
+	if err != nil || len(lines) != 3 || !strings.Contains(lines[0], "failure new x1") || !strings.Contains(lines[0], "example/factory") || !strings.Contains(lines[0], check.URL) || !strings.Contains(lines[0], "main at aaaaaaaa") {
+		t.Fatalf("report = %q, %v", lines, err)
+	}
+}
+
+func TestReportIncludesCheckRepositoryAndRunURL(t *testing.T) {
+	t.Parallel()
+	store, _, project, _ := newAdmissionStore(t, RoleOrchestrator, 1)
+	defer store.Close()
+	check := ProductionCheck{ID: "main:127", Name: "main", Revision: strings.Repeat("b", 40), Scope: "main", State: "completed", Conclusion: "failure", URL: "https://github.com/dark-factory-build/dark-factory-site/actions/runs/38629320865"}
+	if err := store.RecordProductionObservation(context.Background(), project.ID, ProductionObservation{Repository: "dark-factory-build/dark-factory-site", ObservedAt: 10, Checks: []ProductionCheck{check}}, mustTime(t, 10)); err != nil {
+		t.Fatal(err)
+	}
+	lines, err := store.Report(context.Background(), &project.ID, 0, 3600000)
+	if err != nil || len(lines) != 3 || !strings.Contains(strings.Join(lines, "\n"), "dark-factory-build/dark-factory-site") || !strings.Contains(strings.Join(lines, "\n"), check.URL) {
 		t.Fatalf("report = %q, %v", lines, err)
 	}
 }

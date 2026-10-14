@@ -124,7 +124,7 @@ func (store *Store) Report(ctx context.Context, project *ProjectID, since, bucke
 		if entry.first >= since {
 			age = "new"
 		}
-		lines = append(lines, fmt.Sprintf("failure %s x%d last=%s %s: %s", age, entry.count, time.UnixMilli(entry.last).UTC().Format("2006-01-02T15:04Z"), entry.signature, entry.example))
+		lines = append(lines, fmt.Sprintf("failure %s x%d last=%s %s: repository=%s run=%s %s", age, entry.count, time.UnixMilli(entry.last).UTC().Format("2006-01-02T15:04Z"), entry.signature, entry.repository, entry.url, entry.example))
 	}
 	lines = append(lines, fmt.Sprintf("lessons=%d reads=%d citations=%d stale=%d", lessons, reads, citations, stale))
 	lines = append(lines, fmt.Sprintf("wal_bytes=%d", walBytes))
