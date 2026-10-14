@@ -1312,8 +1312,19 @@ func (b *daemonReviewBackend) call(ctx context.Context, name string, arguments m
 }
 
 func (b *daemonReviewBackend) callResponse(ctx context.Context, name string, arguments map[string]any) (json.RawMessage, error) {
+	return b.callResponseMethod(ctx, "tools/call", name, arguments)
+}
+
+// callResponsePrivate asks the broker to enforce the private-destination
+// fence for write tools. Linear is a private backlog, so publication must
+// prove the destination is private before sending any Git mutation.
+func (b *daemonReviewBackend) callResponsePrivate(ctx context.Context, name string, arguments map[string]any) (json.RawMessage, error) {
+	return b.callResponseMethod(ctx, "factory/tools/call_private", name, arguments)
+}
+
+func (b *daemonReviewBackend) callResponseMethod(ctx context.Context, method, name string, arguments map[string]any) (json.RawMessage, error) {
 	params := map[string]any{"name": name, "arguments": arguments}
-	request := map[string]any{"jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": params}
+	request := map[string]any{"jsonrpc": "2.0", "id": 1, "method": method, "params": params}
 	encoded, err := json.Marshal(request)
 	if err != nil {
 		return nil, err
@@ -1326,7 +1337,12 @@ func (b *daemonReviewBackend) callResponse(ctx context.Context, name string, arg
 			}
 		}
 	}
-	response, err := b.daemon.github.MCP(ctx, encoded, repositories)
+	var response json.RawMessage
+	if b.daemon.githubMCP != nil {
+		response, err = b.daemon.githubMCP(ctx, encoded, repositories)
+	} else {
+		response, err = b.daemon.github.MCP(ctx, encoded, repositories)
+	}
 	if err != nil {
 		return nil, err
 	}

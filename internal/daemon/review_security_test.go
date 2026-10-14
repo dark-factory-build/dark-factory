@@ -21,6 +21,31 @@ import (
 	"github.com/dark-factory-build/dark-factory/internal/review"
 )
 
+func TestLinearPublicationUsesPrivateMaintainerMethod(t *testing.T) {
+	var method string
+	daemon := &Daemon{}
+	daemon.githubMCP = func(_ context.Context, request json.RawMessage, repositories map[string]uint64) (json.RawMessage, error) {
+		var envelope struct {
+			Method string `json:"method"`
+		}
+		if err := json.Unmarshal(request, &envelope); err != nil {
+			t.Fatal(err)
+		}
+		method = envelope.Method
+		if repositories["team/repo"] != 42 {
+			t.Fatalf("repositories = %v", repositories)
+		}
+		return json.RawMessage(`{"jsonrpc":"2.0","id":1,"result":{"structuredContent":{"ok":true},"content":[],"isError":false}}`), nil
+	}
+	backend := &daemonReviewBackend{daemon: daemon, repository: "team/repo", repositoryID: 42}
+	if _, err := backend.callResponsePrivate(context.Background(), "publish_pack", map[string]any{"repository": "team/repo"}); err != nil {
+		t.Fatal(err)
+	}
+	if method != "factory/tools/call_private" {
+		t.Fatalf("method = %q", method)
+	}
+}
+
 func TestReviewContextUsesCurrentAcceptedIssue(t *testing.T) {
 	fixture, project := reviewPublicFixture(t)
 	ctx := context.Background()

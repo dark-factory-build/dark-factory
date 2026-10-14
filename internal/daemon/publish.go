@@ -99,6 +99,9 @@ func (daemon *Daemon) publishSettledChange(ctx context.Context, c kernel.Publish
 		return daemon.publishFailed(ctx, c, repo, err)
 	}
 	call := backend.callResponse
+	if c.Accepted.Snapshot.LinearTeamID != "" {
+		call = backend.callResponsePrivate
+	}
 	if daemon.reviewBackend != nil { // a test's Maintainer, when it publishes
 		if fake, ok := daemon.reviewBackend(repo, id).(interface {
 			call(context.Context, string, map[string]any) (json.RawMessage, error)
