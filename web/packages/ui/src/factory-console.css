@@ -1107,7 +1107,7 @@ summary.dfConsoleItem__summary { cursor: pointer; }
 .dfConsoleSidebar__panel > h3 { margin: .75rem 0; font-size: var(--df-text-sm); }
 
 .dfFactoryConsole { position: relative; }
-.dfMobileNav { margin-bottom: 1rem; }
+.dfConsoleViewToggle[aria-label="Console views"] { margin-bottom: 1rem; }
 @media (max-width: 1024px) {
   .dfConsoleLayout__left .dfConsoleViewToggle { display: none; }
   .dfFactoryConsole[data-mobile-view="detail"] .dfConsoleLayout__left,
@@ -1115,7 +1115,7 @@ summary.dfConsoleItem__summary { cursor: pointer; }
   .dfFactoryConsole[data-mobile-view] .dfConsoleSidebar > .dfConsoleViewToggle { display: none; }
 }
 @media (min-width: 1025px) {
-  .dfMobileNav { position: absolute; top: 4rem; right: max(0px, calc((100% - 90rem) / 2)); z-index: 2; }
+  .dfConsoleViewToggle[aria-label="Console views"] { position: absolute; top: 4rem; right: max(0px, calc((100% - 90rem) / 2)); z-index: 2; }
 }
 
 .dfStatus[data-stage$="passed"], .dfStatus[data-stage="succeeded"], .dfStatus[data-stage="working"], .dfStatus[data-stage="ready"], .dfStatus[data-stage="Delivered"], .dfStatus[data-stage="accepted"], .dfStatus[data-stage$="running"], .dfStatus[data-stage="Construction"], .dfStatus[data-stage="Deploying"], .dfStatus[data-stage="Merge"], .dfStatus[data-stage="Merge queued"] { color: var(--df-console-accent); }

@@ -36,7 +36,7 @@ try {
   await waitFor(() => counters.states === 2, "factory state did not render");
   // Work is home: the default agent arriving with the state never takes the panel from it.
   for (let index = 0; index < 20; index += 1) await act(async () => { await new Promise((resolve) => setImmediate(resolve)); });
-  const pressed = renderer.root.findByProps({ "aria-label": "Right panel" }).findAllByType("button").filter((button) => button.props["aria-pressed"] === true).map((button) => button.props["aria-label"] ?? button.props.title ?? String(button.props.children));
+  const pressed = renderer.root.findByProps({ "aria-label": "Console views" }).findAllByType("button").filter((button) => button.props["aria-pressed"] === true).map((button) => button.props["aria-label"] ?? button.props.title ?? String(button.props.children));
   assert.equal(pressed.length, 1);
   assert.match(pressed[0], /Work/, `right panel is ${pressed[0]}`);
   // The sidebar roster is the keyboard-reachable terminal entry.

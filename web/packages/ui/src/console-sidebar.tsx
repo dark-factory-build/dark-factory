@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState, type ReactNode } from "react";
-import { MAX_TASK_ATTACHMENTS, MAX_TASK_ATTACHMENT_BYTES, type IntakeView, type IntakeBody, type DiscoveredAccount, type AgentItem, type GitHubConnectionBody, type GitHubDelegationBody, type HumanRequestItem, type ProjectItem, type RunTelemetry, type RepositoryView, type StateView, type TaskHistoryView, type TaskItem, type TaskPeerQuestion } from "@dark-factory/client";
+import { MAX_TASK_ATTACHMENTS, MAX_TASK_ATTACHMENT_BYTES, type IntakeView, type IntakeBody, type DiscoveredAccount, type AgentItem, type GitHubConnectionBody, type GitHubDelegationBody, type HumanRequestItem, type ProjectItem, type RunTelemetry, type RepositoryView, type StateView, type TaskItem, type TaskPeerQuestion } from "@dark-factory/client";
 import type { FactoryEditView, FactoryHumanRequestView } from "./factory-app-controller.js";
 import { rankLabel } from "./console-screens.js";
 import { AgentSprite } from "./factory-scene/factory-scene.js";
@@ -176,7 +176,7 @@ export type AddTask = (agent: AgentItem, instruction: string, mode: "queue" | "a
 
 /** One list for everything open: what needs you, what is in review, running and queued. */
 export function WorkPanel({
-  state, rows, projectId, filter, onFilter, byMission, onByMission, missions, edit, ready, onEditTask, onAddTask, onLoadTaskDetail, onLoadTaskHistory,
+  state, rows, projectId, filter, onFilter, byMission, onByMission, missions, edit, ready, onEditTask, onAddTask, onLoadTaskDetail,
   selectedTaskId, onSelectTask, selectedHumanRequest, onSelectHumanRequest, onCloseHumanRequest, requestContent, onMission, onIntakeAction, intake,
 }: {
   onIntakeAction?: (projectId: string, request: IntakeBody) => void;

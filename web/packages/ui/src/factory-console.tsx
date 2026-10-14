@@ -207,7 +207,7 @@ export function FactoryConsole({
           </p>
         )}
 
-        <nav className="dfConsoleViewToggle dfMobileNav" aria-label="Console views">
+        <nav className="dfConsoleViewToggle" aria-label="Console views">
           <button type="button" aria-pressed={detail === "floor"} disabled={!ready || onDetail === undefined} onClick={() => { onDetail?.("floor"); }}>Floor</button>
           <button type="button" aria-pressed={detail !== "floor" && selectedDetail === "agent"} disabled={!ready || onDetail === undefined} onClick={showAgents}>Agents</button>
           <IconButton icon="list" aria-pressed={detail !== "floor" && selectedDetail === "work"} disabled={!ready || onDetail === undefined} onClick={showWork}>Work <Badge n={waiting} /></IconButton>
