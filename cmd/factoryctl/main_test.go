@@ -284,6 +284,13 @@ func TestParseOverseerTaskAddAcceptsAnyEligibleWorker(t *testing.T) {
 	}
 }
 
+func TestParseOverseerTaskAddAcceptsContentPins(t *testing.T) {
+	command, help, ok := parse([]string{"overseer", "task", "add", "--agent", "any", "--title", "proposal", "--content", "0123456789abcdef0123456789abcdef:1"})
+	if !ok || help || len(command.content) != 1 || command.content[0].ContentRevision != 1 {
+		t.Fatalf("content pin = %+v, help=%t, ok=%t", command.content, help, ok)
+	}
+}
+
 func TestOverseerTaskRetryCLIUsesAtomicAPIRequest(t *testing.T) {
 	fixture := newAPIFixture(t)
 	defer fixture.close(t)
@@ -313,6 +320,38 @@ func TestOverseerTaskRetryCLIUsesAtomicAPIRequest(t *testing.T) {
 	result := awaitServer(t, done)
 	if exit != 0 || result.err != nil || stderr.Len() != 0 {
 		t.Fatalf("retry CLI = exit %d, server %v, stderr %q", exit, result.err, stderr.String())
+	}
+}
+
+func TestOverseerTaskAddCLIForwardsContentPins(t *testing.T) {
+	fixture := newAPIFixture(t)
+	defer fixture.close(t)
+	t.Setenv("DARK_FACTORY_ATTEMPT_TOKEN_FILE", fixture.attemptPath)
+	taskID, incarnationID, contentID := strings.Repeat("5", 32), strings.Repeat("6", 32), strings.Repeat("7", 32)
+	done := serveOne(fixture.listener, func(call api.Call) api.Reply {
+		if call.Kind() != api.CallOverseerEnqueueTask {
+			t.Errorf("call kind = %v", call.Kind())
+		}
+		input, ok := call.OverseerTaskCreateInput()
+		if !ok || input.ID != taskID || input.IncarnationID != incarnationID || len(input.Content) != 1 || input.Content[0].ContentID != contentID || input.Content[0].ContentRevision != 1 {
+			t.Errorf("enqueue input = %+v, ok=%v", input, ok)
+		}
+		reply, err := api.NewMutationReply(api.MutationResult{Head: 18, Revision: 8})
+		if err != nil {
+			t.Errorf("new reply: %v", err)
+		}
+		return reply
+	})
+	var stdout, stderr bytes.Buffer
+	exit := run(context.Background(), []string{"overseer", "task", "add", "--agent", "any", "--title", "proposal", "--content", contentID + ":1", "--task-id", taskID, "--incarnation-id", incarnationID}, func(name string) string {
+		if name == "DARK_FACTORY_SOCKET" {
+			return fixture.socket
+		}
+		return ""
+	}, &stdout, &stderr)
+	result := awaitServer(t, done)
+	if exit != 0 || result.err != nil || stderr.Len() != 0 {
+		t.Fatalf("content CLI = exit %d, server %v, stderr %q", exit, result.err, stderr.String())
 	}
 }
 
@@ -494,7 +533,7 @@ func TestUsageFailureNamesTheSubcommandUsageLine(t *testing.T) {
 		{[]string{"overseer", "status", "--offset", "0", "--task", "private"}, "factoryctl overseer status: invalid arguments\nusage: factoryctl overseer status [--task ID] [--offset N --head HEAD] [--text-offset RUNES --head HEAD]\n"},
 		{[]string{"intake", "create", "--project", id, "--configuration", "{"}, "factoryctl intake create: invalid arguments\nusage: factoryctl intake create --project ID --repository OWNER/REPO|--linear-team TEAM_ID --target-repository ID [--overseer ID] [--label LABEL] [--policy manual|trusted-authors] [--trusted-author LOGIN ...] [--poll-seconds N] [--admission-limit N] [--priority N] [--source ID] [--configuration JSON]\n"},
 		{[]string{"overseer", "status", "--task", id, "--text-offset", "0", "--head", "1"}, "factoryctl overseer status: invalid arguments\nusage: factoryctl overseer status [--task ID] [--offset N --head HEAD] [--text-offset RUNES --head HEAD]\n"},
-		{[]string{"overseer", "task", "add", "--agent", "any", "--title", "t", "--prerequisite", id + ":1", "--priority", "1000001"}, "factoryctl overseer task add: invalid arguments\nusage: factoryctl overseer task add --agent ID|any --title TEXT [--body TEXT] [--priority N] [--prerequisite TASK_ID:WORK_REVISION ...] [--conflict-path PATH ...] [--task-id ID --incarnation-id ID]\n"},
+		{[]string{"overseer", "task", "add", "--agent", "any", "--title", "t", "--prerequisite", id + ":1", "--priority", "1000001"}, "factoryctl overseer task add: invalid arguments\nusage: factoryctl overseer task add --agent ID|any --title TEXT [--body TEXT] [--priority N] [--content ID:REVISION ...] [--prerequisite TASK_ID:WORK_REVISION ...] [--conflict-path PATH ...] [--task-id ID --incarnation-id ID]\n"},
 		{[]string{"task", "add", "--project", id, "--agent", "any", "--title", "t", "--priority", "-1000001"}, "factoryctl task add: invalid arguments\nusage: factoryctl task add --project ID [--repository ID] --agent ID|any --title TEXT [--body TEXT] [--priority N] [--content ID:REVISION[,ID:REVISION...]] [--task-id ID --incarnation-id ID]\n"},
 		{[]string{"web", "revoke", id, "--revision", "9223372036854775808"}, "factoryctl web revoke: invalid arguments\nusage: factoryctl web revoke CLIENT_ID --revision REVISION\n"},
 		{[]string{"web", "revoke", id, "--revision", "0"}, "factoryctl web revoke: invalid arguments\nusage: factoryctl web revoke CLIENT_ID --revision REVISION\n"},

@@ -442,7 +442,6 @@ func (client *OperatorClient) EnqueueTask(ctx context.Context, input EnqueueTask
 	return client.client.mutate(ctx, "enqueue_task", input)
 }
 
-// validEnqueueTaskInput bounds content pins like the console (eight per task).
 func validEnqueueTaskInput(input EnqueueTaskInput) bool {
 	for _, pin := range input.Content {
 		if !validID(pin.ContentID) || pin.ContentRevision == 0 || pin.ContentRevision > uint64(^uint64(0)>>1) {
@@ -1258,7 +1257,19 @@ func validSnapshot(snapshot DashboardSnapshot) bool {
 
 func validOverseerTaskCreateInput(input OverseerTaskCreateInput) bool {
 	return validID(input.ID) && validOptionalID(input.AssignedAgentID) && validID(input.IncarnationID) && input.ID != input.IncarnationID &&
-		validText(input.Title, 1, 1024) && validText(input.Body, 0, 131072) && input.Priority >= -1_000_000 && input.Priority <= 1_000_000
+		validText(input.Title, 1, 1024) && validText(input.Body, 0, 131072) && input.Priority >= -1_000_000 && input.Priority <= 1_000_000 && validContentPins(input.Content)
+}
+
+func validContentPins(content []ContentPinInput) bool {
+	if len(content) > 8 {
+		return false
+	}
+	for _, pin := range content {
+		if !validID(pin.ContentID) || pin.ContentRevision == 0 || pin.ContentRevision > uint64(^uint64(0)>>1) {
+			return false
+		}
+	}
+	return true
 }
 
 func validOverseerTaskUpdateInput(input OverseerTaskUpdateInput) bool {

@@ -488,8 +488,6 @@ func validTerminalObservation(value TerminalObservation) bool {
 	return value.Text == ""
 }
 
-// Project content is deliberately a small wire DTO. Bodies are never placed
-// in list responses; callers use the explicit bounded body reader.
 type Content struct {
 	RepositoryID     string `json:"repository_id,omitempty"`
 	ProjectedStatus  string `json:"projected_status,omitempty"`
@@ -984,6 +982,7 @@ type OverseerTaskCreateInput struct {
 	Priority        int64                   `json:"priority"`
 	Prerequisites   []TaskPrerequisiteInput `json:"prerequisites,omitempty"`
 	ConflictPaths   []string                `json:"conflict_paths,omitempty"`
+	Content         []ContentPinInput       `json:"content,omitempty"`
 }
 
 type TaskPrerequisiteInput struct {

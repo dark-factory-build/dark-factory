@@ -101,46 +101,6 @@ func TestAttemptContentUsesLiveProjectAndProvenance(t *testing.T) {
 	}
 }
 
-func TestContentAttachmentsEnforceAttemptRoleAndPinWork(t *testing.T) {
-	t.Parallel()
-	store, worker, _ := runningWorkerRun(t)
-	defer store.Close()
-	ctx := context.Background()
-	content, err := store.CreateContent(ctx, contentSpec(t, worker.ProjectID, 45, "evidence"), mustTime(t, 40))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := store.AttachContentForOrchestrator(ctx, worker.CredentialDigest, worker.TaskID, content.ID, content.Revision, mustTime(t, 42)); !errors.Is(err, ErrUnauthorized) {
-		t.Fatalf("worker attachment = %v", err)
-	}
-
-	orchestratorStore, overseer, _ := runningOrchestratorRun(t)
-	defer orchestratorStore.Close()
-	if overseer.ProjectID != worker.ProjectID {
-		t.Fatal("fixtures used different projects")
-	}
-	target, err := orchestratorStore.EnqueueTask(ctx, NewTask{ID: taskID(t, 47), ProjectID: overseer.ProjectID, AssignedAgentID: overseer.AgentID, IncarnationID: incarnationID(t, 48), Title: "selected"}, mustTime(t, 43))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := orchestratorStore.AttachContentForOrchestrator(ctx, overseer.CredentialDigest, target.ID, content.ID, content.Revision, mustTime(t, 44)); err == nil {
-		t.Fatal("cross-store attachment unexpectedly succeeded")
-	}
-	// The orchestrator fixture has its own store/database; create the same
-	// revision there before checking the queued target pin.
-	localContent, err := orchestratorStore.CreateContent(ctx, contentSpec(t, overseer.ProjectID, 49, "selected"), mustTime(t, 45))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := orchestratorStore.AttachContentForOrchestrator(ctx, overseer.CredentialDigest, target.ID, localContent.ID, localContent.Revision, mustTime(t, 46)); err != nil {
-		t.Fatal(err)
-	}
-	references, err := orchestratorStore.TaskContentReferences(ctx, overseer.ProjectID, target.ID, target.WorkRevision, false)
-	if err != nil || len(references) != 1 || references[0].TaskWorkRevision != target.WorkRevision || references[0].ContentRevision != localContent.Revision {
-		t.Fatalf("attachment references = %+v, %v", references, err)
-	}
-}
-
 func TestAttemptContentRejectsRevokedCredentialWithoutMutation(t *testing.T) {
 	t.Parallel()
 	store, run, keys := runningWorkerRun(t)
@@ -159,6 +119,28 @@ func TestAttemptContentRejectsRevokedCredentialWithoutMutation(t *testing.T) {
 	}
 	if _, err := store.Content(ctx, spec.ID, 1); !errors.Is(err, ErrNotFound) {
 		t.Fatalf("revoked write leaked content = %v", err)
+	}
+}
+
+func TestOverseerEnqueuePinsContentAtInitialWorkRevision(t *testing.T) {
+	t.Parallel()
+	store, overseer, _ := runningOrchestratorRun(t)
+	defer store.Close()
+	ctx := context.Background()
+	proposalSpec := contentSpec(t, overseer.ProjectID, 125, "accepted proposal")
+	proposalSpec.Kind = ContentObservation
+	proposalSpec.SourceReferences = `{"status":"tentative","record_type":"proposal"}`
+	content, err := store.CreateContent(ctx, proposalSpec, mustTime(t, 40))
+	if err != nil {
+		t.Fatal(err)
+	}
+	task, err := store.EnqueueTaskForOverseer(ctx, overseer.CredentialDigest, NewTask{ID: taskID(t, 126), ProjectID: overseer.ProjectID, IncarnationID: incarnationID(t, 127), Title: "accepted proposal"}, mustTime(t, 41), TaskContentReference{ContentID: content.ID, ContentRevision: content.Revision})
+	if err != nil {
+		t.Fatal(err)
+	}
+	references, err := store.TaskContentReferences(ctx, overseer.ProjectID, task.ID, task.WorkRevision, false)
+	if err != nil || len(references) != 1 || references[0].TaskWorkRevision.Int64() != 1 || references[0].ContentRevision.Int64() != 1 {
+		t.Fatalf("enqueue references = %+v, %v", references, err)
 	}
 }
 
@@ -209,30 +191,6 @@ func TestTaskContentAttachmentBoundIsEnforced(t *testing.T) {
 		}
 		if index == contentPageSize && !errors.Is(err, ErrInvalidValue) {
 			t.Fatalf("attachment bound = %v", err)
-		}
-	}
-}
-
-func TestOrchestratorTaskContentAttachmentBoundIsEnforced(t *testing.T) {
-	t.Parallel()
-	store, overseer, _ := runningOrchestratorRun(t)
-	defer store.Close()
-	ctx := context.Background()
-	target, err := store.EnqueueTask(ctx, NewTask{ID: taskID(t, 125), ProjectID: overseer.ProjectID, AssignedAgentID: overseer.AgentID, IncarnationID: incarnationID(t, 126), Title: "bounded selected task"}, mustTime(t, 200))
-	if err != nil {
-		t.Fatal(err)
-	}
-	for index := 0; index < contentPageSize+1; index++ {
-		content, err := store.CreateContent(ctx, contentSpec(t, overseer.ProjectID, byte(130+index), "orchestrator attachment"), mustTime(t, int64(210+index)))
-		if err != nil {
-			t.Fatal(err)
-		}
-		err = store.AttachContentForOrchestrator(ctx, overseer.CredentialDigest, target.ID, content.ID, content.Revision, mustTime(t, int64(300+index)))
-		if index < contentPageSize && err != nil {
-			t.Fatalf("orchestrator attachment %d = %v", index, err)
-		}
-		if index == contentPageSize && !errors.Is(err, ErrInvalidValue) {
-			t.Fatalf("orchestrator attachment bound = %v", err)
 		}
 	}
 }

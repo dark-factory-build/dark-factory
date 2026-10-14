@@ -49,8 +49,6 @@ func bindMissionDecision(ctx context.Context, c *sql.Conn, project ProjectID, ki
 	return err
 }
 
-// ContentKind is a string so ordinary project content can grow without a
-// closed Go enum or a daemon release.
 type ContentKind string
 
 const (
@@ -495,38 +493,6 @@ func (store *Store) AttachContentToTask(ctx context.Context, task TaskID, projec
 	return tx.Commit(ctx)
 }
 
-// AttachContentForOrchestrator lets a live orchestrator pin a selected
-// revision on a queued task in the same project. The target work revision is
-// captured in the reference so later task revisions cannot retarget history.
-func (store *Store) AttachContentForOrchestrator(ctx context.Context, digest AttemptDigest, task TaskID, content ContentID, revision Revision, at UnixMillis) error {
-	tx, authority, err := store.beginContentAttemptWrite(ctx, digest, at)
-	if err != nil {
-		return err
-	}
-	defer tx.Close()
-	if authority.Role != RoleOrchestrator {
-		return tx.Rollback(ErrUnauthorized)
-	}
-	var taskProject []byte
-	var taskWorkRevision int64
-	if err := tx.connection.QueryRowContext(ctx, `SELECT project_id, work_revision FROM tasks WHERE id = ?`, task.Bytes()).Scan(&taskProject, &taskWorkRevision); err != nil {
-		if err == sql.ErrNoRows {
-			err = ErrNotFound
-		}
-		return tx.Rollback(err)
-	}
-	if string(taskProject) != string(authority.ProjectID.Bytes()) {
-		return tx.Rollback(ErrUnauthorized)
-	}
-	if err := contentScope(ctx, tx.connection, authority, content, revision.Int64()); err != nil {
-		return tx.Rollback(err)
-	}
-	if err := attachContentTx(ctx, tx, task, authority.ProjectID, taskWorkRevision, content, revision, at, false); err != nil {
-		return tx.Rollback(err)
-	}
-	return tx.Commit(ctx)
-}
-
 func attachContentTx(ctx context.Context, tx *writeTx, task TaskID, project ProjectID, taskWorkRevision int64, content ContentID, revision Revision, at UnixMillis, started bool) error {
 	var contentProject []byte
 	if err := tx.connection.QueryRowContext(ctx, "SELECT project_id FROM project_content_revisions WHERE id = ? AND revision = ?", content.Bytes(), revision.Int64()).Scan(&contentProject); err != nil {
@@ -578,8 +544,6 @@ func attachContentTx(ctx context.Context, tx *writeTx, task TaskID, project Proj
 	return err
 }
 
-// ContentForAttempt is the shared non-browser read path. The project is
-// derived from the live bearer, so a caller cannot browse another project.
 func (store *Store) ContentForAttempt(ctx context.Context, digest AttemptDigest, id ContentID, revision int64) (ContentRevision, error) {
 	tx, err := store.beginRead(ctx)
 	if err != nil {

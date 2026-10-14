@@ -1941,6 +1941,127 @@ func TestTaskEnqueuePreflightPreservesReplayAndOverseerAuthority(t *testing.T) {
 	}
 }
 
+func TestOverseerEnqueuePinsContentWhileSchedulerRunsAndRejectsPostHocAttach(t *testing.T) {
+	fixture := newDispatchFixture(t)
+	active := prepareActiveAttempt(t, fixture, 230)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	for {
+		select {
+		case <-fixture.daemon.schedulerWake:
+		default:
+			goto drained
+		}
+	}
+drained:
+	started := make(chan struct{})
+	var startedOnce sync.Once
+	var probes atomic.Int64
+	admitted := make(chan struct{})
+	var admittedOnce sync.Once
+	var admissionErr atomic.Value
+	keysReady := make(chan struct{})
+	var admissionKeys kernel.AdmissionKeys
+	at, err := kernel.NewUnixMillis(2000)
+	if err != nil {
+		t.Fatal(err)
+	}
+	schedulerDone := make(chan error, 1)
+	schedulerSpec := SupervisorSpec{scheduledAttempt: func(ctx context.Context, spec SupervisorSpec) (kernel.Run, error) {
+		probe := probes.Add(1)
+		if probe == 1 {
+			startedOnce.Do(func() { close(started) })
+		}
+		<-keysReady
+		admission, err := fixture.store.AdmitNext(context.Background(), admissionKeys, at)
+		if err != nil {
+			admissionErr.Store(err)
+			spec.admissionObserved(false)
+			return kernel.Run{}, err
+		}
+		spec.admissionObserved(admission.Admitted())
+		if admission.Admitted() {
+			admittedOnce.Do(func() { close(admitted) })
+		}
+		if admission.Run == nil {
+			return kernel.Run{}, nil
+		}
+		return *admission.Run, nil
+	}}
+	go func() { schedulerDone <- fixture.daemon.RunScheduler(ctx, schedulerSpec) }()
+	select {
+	case <-started:
+	case <-time.After(2 * time.Second):
+		t.Fatal("scheduler did not start")
+	}
+
+	operator, err := api.NewOperatorClient(fixture.socket, fixture.operator)
+	if err != nil {
+		t.Fatal(err)
+	}
+	done := fixture.serve(t)
+	if _, err := operator.CreateAgent(context.Background(), api.CreateAgentInput{ID: testID(237), ProjectID: active.run.ProjectID.String(), Name: "worker", Role: "worker", Provider: "codex"}); err != nil {
+		t.Fatal(err)
+	}
+	waitDispatch(t, done)
+	bearer := bytes.Repeat([]byte{240}, 32)
+	digestBytes := sha256.Sum256(bearer)
+	digest, err := kernel.AttemptDigestFromBytes(digestBytes[:])
+	if err != nil {
+		t.Fatal(err)
+	}
+	candidate, err := kernel.ChangeIDFromBytes(mustIDBytes(t, testID(249)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	proof, err := kernel.ResultProofDigestFromBytes(bytes.Repeat([]byte{251}, 32))
+	if err != nil {
+		t.Fatal(err)
+	}
+	admissionKeys = kernel.AdmissionKeys{ResultProofDigest: proof, RunID: mustRunID(t, testID(241)), TerminalSessionID: mustTerminalSessionID(t, testID(242)), AttemptDigest: digest, CandidateChangeID: candidate, RuntimeRoot: filepath.Join(filepath.Dir(fixture.socket), "runtime-240"), Resources: kernel.AdmissionResourceIDs{RuntimeRoot: mustResourceID(t, testID(245)), RunnerProcess: mustResourceID(t, testID(246)), ProviderProcess: mustResourceID(t, testID(247)), ProviderGroup: mustResourceID(t, testID(248))}}
+	close(keysReady)
+	done = fixture.serve(t)
+	content, err := operator.ContentCreate(context.Background(), api.ContentInput{ID: testID(234), ProjectID: active.run.ProjectID.String(), Kind: "observation", Title: "accepted proposal", Body: "body", SourceReferences: `{"status":"tentative","record_type":"proposal"}`})
+	waitDispatch(t, done)
+	if err != nil || content.Revision != 1 {
+		t.Fatalf("proposal content = %+v, %v", content, err)
+	}
+	taskID := testID(235)
+	done = fixture.serve(t)
+	_, err = active.client.OverseerEnqueueTask(context.Background(), api.OverseerTaskCreateInput{ID: taskID, AssignedAgentID: testID(237), IncarnationID: testID(236), Title: "accepted proposal", Content: []api.ContentPinInput{{ContentID: content.ID, ContentRevision: content.Revision}}})
+	waitDispatch(t, done)
+	if err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-admitted:
+	case <-time.After(2 * time.Second):
+		if err, ok := admissionErr.Load().(error); ok {
+			t.Fatalf("admission = %v", err)
+		}
+		t.Fatal("scheduler did not admit enqueued task")
+	}
+	task, found, err := fixture.store.Task(context.Background(), mustTaskID(t, taskID))
+	if err != nil || !found {
+		t.Fatal(err)
+	}
+	references, err := fixture.store.TaskContentReferences(context.Background(), active.run.ProjectID, task.ID, task.WorkRevision, false)
+	if err != nil || len(references) != 1 || references[0].TaskWorkRevision.Int64() != 1 {
+		t.Fatalf("daemon enqueue references = %+v, %v", references, err)
+	}
+	done = fixture.serve(t)
+	err = active.client.ContentAttach(context.Background(), api.ContentAttachInput{TaskID: taskID, ProjectID: active.run.ProjectID.String(), ContentID: content.ID, ContentRevision: 1})
+	waitDispatch(t, done)
+	var remote *api.RemoteError
+	if !errors.As(err, &remote) || remote.Code() != api.RemoteUnauthorized {
+		t.Fatalf("post-hoc overseer attach = %v", err)
+	}
+	cancel()
+	if err := waitSchedulerDone(t, schedulerDone); err != nil && !errors.Is(err, context.Canceled) {
+		t.Fatalf("scheduler shutdown = %v", err)
+	}
+}
+
 func TestDaemonSelectAgentModelRequiresWorkerRevisionAndCompatibleControls(t *testing.T) {
 	fixture := newDispatchFixture(t)
 	client, err := api.NewOperatorClient(fixture.socket, fixture.operator)

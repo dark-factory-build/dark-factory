@@ -79,7 +79,7 @@ const (
   factoryctl terminal observe --project ID --task ID --run ID [--cursor N] [--max-bytes N] [--text]
   factoryctl attempt send-back --task ID [--head SHA] --note TEXT
   factoryctl overseer status [--task ID] [--offset N --head HEAD] [--text-offset RUNES --head HEAD]
-	factoryctl overseer task add --agent ID|any --title TEXT [--body TEXT] [--priority N] [--prerequisite TASK_ID:WORK_REVISION ...] [--conflict-path PATH ...] [--task-id ID --incarnation-id ID]
+	factoryctl overseer task add --agent ID|any --title TEXT [--body TEXT] [--priority N] [--content ID:REVISION ...] [--prerequisite TASK_ID:WORK_REVISION ...] [--conflict-path PATH ...] [--task-id ID --incarnation-id ID]
   factoryctl overseer task update --task ID --revision REVISION [--title TEXT] [--body TEXT] [--priority N] [--agent ID] [--cancel] [--retry]
   factoryctl overseer task send-back --task ID [--head SHA] --note TEXT
   factoryctl overseer agent pause|resume|archive|restore --agent ID --revision REVISION
@@ -1994,6 +1994,18 @@ func parseOverseer(args []string) (attemptCommand, bool, bool) {
 	validatedStringFlag("--body", &command.body, func(value string) bool {
 		return (command.kind == commandOverseerTaskAdd || command.kind == commandOverseerTaskUpdate) && validOperatorText(value, 0, 131072)
 	})
+	flags.Func("content", "", func(value string) error {
+		parts := strings.SplitN(value, ":", 2)
+		if command.kind != commandOverseerTaskAdd || len(parts) != 2 || !key(parts[0]) {
+			return errors.New("invalid flag value")
+		}
+		revision, ok := parseRevision(parts[1])
+		if !ok || len(command.content) == 8 {
+			return errors.New("invalid flag value")
+		}
+		command.content = append(command.content, api.ContentPinInput{ContentID: parts[0], ContentRevision: revision})
+		return nil
+	})
 	validatedStringFlag("--priority", &priority, func(value string) bool {
 		parsed, err := strconv.ParseInt(value, 10, 64)
 		return err == nil && value == strconv.FormatInt(parsed, 10) && parsed >= -1_000_000 && parsed <= 1_000_000 && (command.kind == commandOverseerTaskAdd || command.kind == commandOverseerTaskUpdate)
@@ -2753,7 +2765,7 @@ func runOverseer(ctx context.Context, command attemptCommand, getenv func(string
 				return writeWebFailure(stderr, "overseer task add", idErr)
 			}
 		}
-		result, err = client.OverseerEnqueueTask(callContext, api.OverseerTaskCreateInput{ID: id, AssignedAgentID: anyWorkerAgent(command.agent), IncarnationID: incarnation, Title: command.title, Body: command.body, Priority: command.priority, Prerequisites: command.prerequisites, ConflictPaths: command.conflictPaths})
+		result, err = client.OverseerEnqueueTask(callContext, api.OverseerTaskCreateInput{ID: id, AssignedAgentID: anyWorkerAgent(command.agent), IncarnationID: incarnation, Title: command.title, Body: command.body, Priority: command.priority, Prerequisites: command.prerequisites, ConflictPaths: command.conflictPaths, Content: command.content})
 	case commandOverseerTaskUpdate:
 		input := api.OverseerTaskUpdateInput{TaskID: command.id, ExpectedRevision: command.expectedRevision, Cancel: command.cancel, Retry: command.retry, RemoveAttachments: command.removeAttachments}
 		if command.title != "" {
