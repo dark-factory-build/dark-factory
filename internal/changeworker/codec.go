@@ -90,8 +90,7 @@ type Config struct {
 	// Retained is the Change to reopen instead of making a fresh worktree.
 	Retained *Result
 	// ProviderTask selects and verifies the provider's closed delivery path.
-	// Shell seals it on fd 11 and Claude receives a terminal-safe prompt. It is
-	// empty for Codex, whose task remains in the daemon behind the attempt API.
+	// Shell seals it on fd 11; Claude and Codex receive it in their prompt.
 	ProviderTask []byte
 }
 
@@ -263,7 +262,7 @@ func validateConfig(config Config) error {
 	} else if !validChangeName(config.FinalName) {
 		return invalidContract(nil)
 	}
-	if _, _, err := prepareProviderTask(config.Provider, config.ProviderTask); err != nil {
+	if _, _, err := provider.PrepareTask(config.Provider, config.ProviderTask); err != nil {
 		return invalidContract(err)
 	}
 	if _, err := change.NewRepositoryIdentity(config.RepositoryIdentity.Device(), config.RepositoryIdentity.Inode()); err != nil {
@@ -278,16 +277,6 @@ func validateConfig(config Config) error {
 		}
 	}
 	return nil
-}
-
-func prepareProviderTask(kind kernel.Provider, task []byte) (provider.TaskDelivery, []byte, error) {
-	if kind != kernel.ProviderShell {
-		if len(task) != 0 {
-			return 0, nil, provider.ErrInvalid
-		}
-		return provider.TaskDeliveryAttemptAPI, nil, nil
-	}
-	return provider.PrepareTask(kind, task)
 }
 
 func roleFromString(value string) (kernel.AgentRole, error) {

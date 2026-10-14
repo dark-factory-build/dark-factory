@@ -218,12 +218,12 @@ func TestKnowledgeFallbackDoesNotRecordOmittedSupplies(t *testing.T) {
 	active := prepareActiveAttemptInProjectWithProvider(t, f, 81, testID(81), "orchestrator", "claude_code")
 	lesson := seedContextKnowledge(t, f, active.run.ProjectID, 201, kernel.ContentLesson, kernel.KnowledgeMetadata{Status: "tentative", Evidence: []string{"source"}}, "a useful lesson")
 	task := bytes.Repeat([]byte{'t'}, runner.MaxProviderTaskBytes)
-	launch, _, err := f.daemon.prepareKnowledgeTask(context.Background(), active.run, task, true)
+	launch, supplied, err := f.daemon.prepareKnowledgeTask(context.Background(), active.run, task, true)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if string(launch) != knowledgeTaskFetchInstruction {
-		t.Fatalf("oversized task lost fetch fallback: %q", knowledgeTextPrefix(string(launch), 100))
+	if string(launch) != taskFetchInstruction || len(supplied) != 0 {
+		t.Fatalf("oversized task lost fetch fallback: %q, %d receipts", knowledgeTextPrefix(string(launch), 100), len(supplied))
 	}
 	accesses, err := contentAccesses(context.Background(), f.store, active.run.ProjectID, kernel.ContentAccess{ContentID: lesson.ID, ContentRevision: lesson.Revision})
 	if err != nil {
@@ -233,6 +233,21 @@ func TestKnowledgeFallbackDoesNotRecordOmittedSupplies(t *testing.T) {
 		if a.Kind == "supplied" {
 			t.Fatal("fallback recorded omitted knowledge")
 		}
+	}
+}
+
+// An ordinary native launch carries its task and knowledge in the prompt and
+// returns the supply receipts the supervisor records at activation.
+func TestKnowledgeLaunchCarriesTaskAndKnowledge(t *testing.T) {
+	f := newDispatchFixture(t)
+	active := prepareActiveAttemptInProjectWithProvider(t, f, 82, testID(82), "orchestrator", "codex")
+	lesson := seedContextKnowledge(t, f, active.run.ProjectID, 202, kernel.ContentLesson, kernel.KnowledgeMetadata{Status: "tentative", Evidence: []string{"source"}}, "a useful lesson")
+	launch, supplied, err := f.daemon.prepareKnowledgeTask(context.Background(), active.run, []byte("do the useful thing"), true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.HasPrefix(launch, []byte("do the useful thing")) || !bytes.Contains(launch, []byte(lesson.ID.String())) || len(supplied) == 0 || supplied[0].ContentID != lesson.ID {
+		t.Fatalf("launch = %q, receipts %+v", launch, supplied)
 	}
 }
 

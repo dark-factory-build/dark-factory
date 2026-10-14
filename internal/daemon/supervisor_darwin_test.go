@@ -172,8 +172,8 @@ func TestCodexContinuationContextPreservesMaximumOriginalTask(t *testing.T) {
 	if err == nil || framed != nil {
 		t.Fatalf("maximum Codex API continuation framing: bytes=%d err=%v", len(framed), err)
 	}
-	launchTask, err := providerTaskForContinuationLaunch(kernel.ProviderCodex, task, contexts)
-	if err != nil || string(launchTask) != continuationTaskFetchInstruction {
+	launchTask, err := providerTaskForContinuationLaunch(kernel.ProviderCodex, contexts, task)
+	if err != nil || string(launchTask) != taskFetchInstruction {
 		t.Fatalf("maximum Codex launch task = %q, %v", launchTask, err)
 	}
 	if _, _, err := provider.PrepareTask(kernel.ProviderCodex, launchTask); err != nil {
@@ -184,13 +184,20 @@ func TestCodexContinuationContextPreservesMaximumOriginalTask(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	got, err := providerTaskForContinuationLaunch(kernel.ProviderClaudeCode, short, contexts)
+	got, err := providerTaskForContinuationLaunch(kernel.ProviderClaudeCode, contexts, short)
 	if err != nil || !bytes.Equal(got, want) {
 		t.Fatalf("short native continuation changed: %q, %v", got, err)
 	}
-	shell, err := providerTaskForContinuationLaunch(kernel.ProviderShell, []byte("printf ok"), contexts)
+	shell, err := providerTaskForContinuationLaunch(kernel.ProviderShell, contexts, []byte("printf ok"))
 	if err != nil || !bytes.Contains(shell, []byte("# Factory continuation context:")) || !bytes.Contains(shell, []byte("# condition=")) {
 		t.Fatalf("shell continuation comments = %q, %v", shell, err)
+	}
+	// Knowledge can overflow a fresh native launch too; shell has no pointer.
+	if got, err := providerTaskForContinuationLaunch(kernel.ProviderCodex, nil, append(task, 'x')); err != nil || string(got) != taskFetchInstruction {
+		t.Fatalf("oversized fresh native launch = %q, %v", got, err)
+	}
+	if got, err := providerTaskForContinuationLaunch(kernel.ProviderShell, nil, make([]byte, runner.MaxProviderTaskBytes+1)); err == nil {
+		t.Fatalf("oversized shell launch = %d bytes", len(got))
 	}
 }
 
@@ -220,12 +227,17 @@ func runSupervisorCodexFixture() error {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	task, err := client.Task(ctx)
-	if err != nil {
-		return err
+	// The task ends the prompt; only the oversized pointer sends it to attempt task.
+	_, task, _ := strings.Cut(os.Args[len(os.Args)-1], "\n\nTask:\n")
+	if task == taskFetchInstruction {
+		fetched, err := client.Task(ctx)
+		if err != nil {
+			return err
+		}
+		task = fetched.Task
 	}
 	// The Library line follows every task; fixture directives precede it.
-	directive, _, _ := strings.Cut(task.Task, "\n\nProject knowledge")
+	directive, _, _ := strings.Cut(task, "\n\nProject knowledge")
 	if directive == "capacity" {
 		// Codex's capacity warning, glyph and message styled apart; the real
 		// CLI then idles at its prompt.
@@ -233,7 +245,7 @@ func runSupervisorCodexFixture() error {
 		time.Sleep(30 * time.Second)
 		return nil
 	}
-	if strings.Contains(task.Task, "# Task attachments:") {
+	if strings.Contains(task, "# Task attachments:") {
 		contents, err := os.ReadFile(filepath.Join(os.Getenv("DARK_FACTORY_TASK_ATTACHMENTS"), "attachment-1.png"))
 		if err != nil || !bytes.Equal(contents, []byte{0, 1, 255}) {
 			return fmt.Errorf("provider attachment bytes: %v", err)
@@ -305,9 +317,9 @@ func runSupervisorCodexFixture() error {
 			return fmt.Errorf("source is not a worktree: %w", err)
 		}
 	}
-	for _, value := range append(append([]string(nil), os.Args[1:]...), os.Environ()...) {
-		if strings.Contains(value, task.Task) {
-			return errors.New("private task crossed the Codex argv/environment boundary")
+	for _, value := range append(append([]string(nil), os.Args[1:len(os.Args)-1]...), os.Environ()...) {
+		if strings.Contains(value, task) {
+			return errors.New("private task crossed the Codex argv/environment boundary outside its prompt")
 		}
 	}
 	size, err := unix.IoctlGetWinsize(0, unix.TIOCGWINSZ)
@@ -341,7 +353,7 @@ func runSupervisorCodexFixture() error {
 			}
 		}
 	}
-	_, err = client.Succeed(ctx, fmt.Sprintf("%s\nPTY=%dx%d", task.Task, size.Col, size.Row))
+	_, err = client.Succeed(ctx, fmt.Sprintf("%s\nPTY=%dx%d", task, size.Col, size.Row))
 	return err
 }
 
@@ -530,12 +542,13 @@ func TestSupervisorRunsOrchestratorInItsPrivateHomeWithoutAChange(t *testing.T) 
 }
 
 // runSupervisorClaudeFixture stands in for the Claude CLI: it starts from
-// the bootstrap prompt, the last argv element after "--", with nothing typed
-// into its terminal, and fetches its task through the attempt API as that
-// prompt says. The task never appears in argv.
+// the prompt, the last argv element after "--", with nothing typed into its
+// terminal, and reads its task there without calling attempt task. Its
+// result counts the long task's sentence in that prompt.
 func runSupervisorClaudeFixture() error {
-	if len(os.Args) < 2 || os.Args[len(os.Args)-2] != "--" || !strings.Contains(os.Args[len(os.Args)-1], `argv ["attempt","task"] before doing anything else`) {
-		return fmt.Errorf("launch argv lacks the bootstrap prompt")
+	_, task, found := strings.Cut(os.Args[len(os.Args)-1], "\n\nTask:\n")
+	if len(os.Args) < 2 || os.Args[len(os.Args)-2] != "--" || !found {
+		return fmt.Errorf("launch argv lacks the prompt task")
 	}
 	client, err := api.NewAttemptClientFromEnvironment(os.Getenv("DARK_FACTORY_SOCKET"))
 	if err != nil {
@@ -543,16 +556,7 @@ func runSupervisorClaudeFixture() error {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	task, err := client.Task(ctx)
-	if err != nil {
-		return err
-	}
-	for _, arg := range os.Args {
-		if strings.Contains(arg, task.Task) {
-			return fmt.Errorf("task reached argv")
-		}
-	}
-	result := "exact"
+	result := fmt.Sprint(strings.Count(task, "Codify the operator scripts and the deploy order. "))
 	// Stand in for the real CLI's own transcript write, so a later launch's
 	// on-disk check (provider.claudeSessionSelection) can observe this exact
 	// session the same way it would against the real tool. The escaping here
@@ -572,10 +576,9 @@ func runSupervisorClaudeFixture() error {
 	return err
 }
 
-// Claude starts from the bootstrap prompt and fetches a task longer than a
-// terminal line through the attempt API, as Codex does, through the real
-// runner, worker and PTY.
-func TestSupervisorClaudeFetchesALongTaskThroughTheAttemptAPI(t *testing.T) {
+// Claude receives a task longer than a terminal line whole in its prompt, as
+// Codex does, through the real runner, worker and PTY, with no attempt task.
+func TestSupervisorClaudeReceivesALongTaskInItsPrompt(t *testing.T) {
 	task := strings.Repeat("Codify the operator scripts and the deploy order. ", 128)
 	fixture := newSupervisorFixture(t, "unused shell task")
 	if err := replaceSupervisorAgentLaunchControls(fixture.storePath, fixture.agentID, kernel.ProviderClaudeCode, "", ""); err != nil {
@@ -593,7 +596,7 @@ func TestSupervisorClaudeFetchesALongTaskThroughTheAttemptAPI(t *testing.T) {
 		t.Fatalf("RunNext: %v", err)
 	}
 	fixture.assertTerminal(t, run, kernel.OutcomeSucceeded)
-	if run.Proposal == nil || run.Proposal.Result() != "exact" {
+	if run.Proposal == nil || run.Proposal.Result() != "128" {
 		t.Fatalf("Claude receipt = %+v", run.Proposal)
 	}
 	fixture.assertReleased(t, run)

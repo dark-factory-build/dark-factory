@@ -17,6 +17,22 @@ import (
 	"github.com/dark-factory-build/dark-factory/internal/api"
 )
 
+// The attempt tool starts and lists itself, always loaded, with no reachable
+// daemon: an unavailable attempt API cannot keep a provider from starting.
+func TestAttemptMCPListsAnAlwaysLoadedToolWithoutTheDaemon(t *testing.T) {
+	input := `{"jsonrpc":"2.0","id":1,"method":"initialize"}
+{"jsonrpc":"2.0","id":2,"method":"tools/list"}
+`
+	var output bytes.Buffer
+	if runAttemptMCP(context.Background(), strings.NewReader(input), &output, func(string) string { return "/nonexistent/socket" }) != 0 {
+		t.Fatal("MCP failed")
+	}
+	lines := strings.Split(strings.TrimSpace(output.String()), "\n")
+	if len(lines) != 2 || !strings.Contains(lines[0], `"serverInfo"`) || !strings.Contains(lines[1], `"_meta":{"anthropic/alwaysLoad":true}`) {
+		t.Fatalf("unexpected startup: %s", output.String())
+	}
+}
+
 func TestAttemptMCPUsesExistingAuthAndExactTask(t *testing.T) {
 	fixture := newAPIFixture(t)
 	defer fixture.close(t)

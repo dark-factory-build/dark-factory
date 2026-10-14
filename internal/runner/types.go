@@ -32,7 +32,7 @@ const (
 	// Individual delivery paths may impose a smaller bound.
 	MaxProviderTaskBytes = 128 << 10
 	// MaxNativeTaskBytes is the smaller bound imposed by the Claude and Codex
-	// attempt-API delivery path. Keep producers of their tasks on this ceiling.
+	// prompt delivery path. Keep producers of their tasks on this ceiling.
 	MaxNativeTaskBytes = 8 << 10
 	ProviderTaskPath   = "/dev/fd/11"
 	providerTaskFD     = 11
@@ -43,7 +43,8 @@ const (
 	MaxEnvironmentEntryBytes = 8192
 	// MaxArgumentBytes is shared with producers of exact argv entries so a
 	// value accepted before admission cannot fail only after a launch is built.
-	MaxArgumentBytes = 8192
+	// A native prompt is its fixed instructions plus MaxNativeTaskBytes.
+	MaxArgumentBytes = 16 << 10
 )
 
 // These are the complete fixed top-level runtime names emitted by the runner.

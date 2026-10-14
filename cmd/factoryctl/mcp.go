@@ -52,7 +52,8 @@ func runAttemptMCP(ctx context.Context, input io.Reader, output io.Writer, geten
 			response["result"] = map[string]any{}
 		case "tools/list":
 			response["result"] = map[string]any{"tools": []any{map[string]any{
-				"name": "factory", "description": "Run an attempt-scoped factoryctl command. Pass argv without factoryctl; no shell expansion. Commands:\n" + strings.Join(documented, "\n"),
+				// alwaysLoad keeps Claude Code from deferring this one tool behind ToolSearch.
+				"name": "factory", "_meta": map[string]any{"anthropic/alwaysLoad": true}, "description": "Run an attempt-scoped factoryctl command. Pass argv without factoryctl; no shell expansion. Commands:\n" + strings.Join(documented, "\n"),
 				"inputSchema": map[string]any{"type": "object", "properties": map[string]any{"argv": map[string]any{"type": "array", "items": map[string]string{"type": "string"}, "minItems": 2, "maxItems": 64}}, "required": []string{"argv"}, "additionalProperties": false},
 			}}}
 		case "tools/call":

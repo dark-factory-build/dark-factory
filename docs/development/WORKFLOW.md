@@ -141,8 +141,10 @@ revision identifiers; bodies are loaded in bounded prefixes or on demand.
 Context includes author, a bounded evidence reference and any explicit supersedes
 link. A correction claim does not silently rewrite or invalidate earlier evidence;
 mark obsolete guidance superseded through its ordinary revision action.
-Codex and Claude fetch the actual assignment through `attempt task` when knowledge
-is present. Access records distinguish selection, context bytes served, and body
+Codex and Claude receive the assignment and its knowledge in their launch
+prompt, recorded as supplied when the run activates; only a launch too large
+for the prompt sends them to `attempt task`, which records it when served.
+Access records distinguish selection, context bytes served, and body
 pages served; none claims understanding or application. A later assignment fetch
 shows a checkpoint when a selected document has changed. Unknown branch or
 environment applicability fails closed for automatic selection; explicit historical
