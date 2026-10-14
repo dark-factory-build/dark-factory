@@ -231,7 +231,7 @@ func TestFactorydPublishesASettledIntakeChange(t *testing.T) {
 	}
 	publishedExactly(t, app, source, c.Head)
 	body := pull["body"].(string)
-	if pull["head_sha"] != c.Head || pull["issue_number"] != uint64(9) || pull["source_repository"] != nil || pull["close_on_merge"] != false || pull["base_sha"] != c.Base ||
+	if pull["head_sha"] != c.Head || pull["issue_number"] != uint64(9) || pull["source_repository"] != "feed/issues" || pull["close_on_merge"] != false || pull["base_sha"] != c.Base ||
 		strings.Contains(body, "example.com") || strings.Contains(body, "/Users/") || !strings.Contains(body, "Current operator scope") || strings.Contains(body, "Implemented it") || !strings.Contains(body, c.Head) || !strings.Contains(body, "+51 -1 across 52 files") || !strings.HasSuffix(body, "The merge queue runs the gate.\n\nRefs #9") {
 		t.Fatalf("pull request = %+v", pull)
 	}

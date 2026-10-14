@@ -79,7 +79,7 @@ test('two principals: callback, pagination, refresh, replay, grants and revocati
           assert.equal(body.force, false);
           return json({ ref: `refs/heads/${url.pathname.split('/').at(-1)}`, object: { type: 'commit', sha: body.sha } });
         }
-        if (url.pathname.includes('/git/ref/')) return json({ ref: `refs/heads/${url.pathname.split('/').at(-1)}`, object: { type: 'commit', sha: (url.pathname.endsWith('/topic-recovery') ? 'b' : 'a').repeat(40) } });
+        if (url.pathname.includes('/git/ref/')) return json({ ref: `refs/heads/${url.pathname.split('/').at(-1)}`, object: { type: 'commit', sha: (url.pathname.endsWith('/topic-recovery') ? 'b' : url.pathname.endsWith('/topic-source-free') ? 'c' : 'a').repeat(40) } });
         if (url.pathname.endsWith('/pulls')) {
           if (request.method === 'POST') {
             recoveryPostCount++;
@@ -89,7 +89,7 @@ test('two principals: callback, pagination, refresh, replay, grants and revocati
               number: 100 + recoveryPostCount, node_id: `PR_recovery_${recoveryPostCount}`,
               html_url: `https://github.com/team/shared/pull/${100 + recoveryPostCount}`,
               title: body.title, body: body.body, draft: body.draft,
-              head: { ref: body.head, sha: 'b'.repeat(40) }, base: { ref: body.base, sha: 'a'.repeat(40) },
+              head: { ref: body.head, sha: body.head === 'topic-source-free' ? 'c'.repeat(40) : 'b'.repeat(40) }, base: { ref: body.base, sha: 'a'.repeat(40) },
               state: 'open', mergeable: true, mergeable_state: 'clean',
             });
             if (recoveryPostMode === 'success') return json(recoveryPulls.at(-1), 201);
@@ -439,7 +439,7 @@ test('two principals: callback, pagination, refresh, replay, grants and revocati
     // issue_number 0 is valid only with no source and no automatic closure.
     recoveryPostMode = 'success';
     const sourceFree = { repository: 'team/shared', operation_id: '6d1f0f8e-7f1f-11f0-952e-acde48001130', issue_number: 0,
-      head: 'topic-source-free', head_sha: 'b'.repeat(40), base: 'main', base_sha: 'a'.repeat(40), title: 'source-free publication', body: 'exact work', draft: false, close_on_merge: false };
+      head: 'topic-source-free', head_sha: 'c'.repeat(40), base: 'main', base_sha: 'a'.repeat(40), title: 'source-free publication', body: 'exact work', draft: false, close_on_merge: false };
     const sourceFreeReply = (await (await call(alice, 'create_pull_request', sourceFree)).json()).result;
     assert.equal(sourceFreeReply.isError, false, JSON.stringify(sourceFreeReply));
     assert.equal(sourceFreeReply.structuredContent.number, 105);
