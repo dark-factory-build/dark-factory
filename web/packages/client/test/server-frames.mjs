@@ -12,7 +12,6 @@ export function encodeHumanRequestCancelRunResult(id, body) { return encodeServe
 export function encodeTaskEnqueueResult(id, body) { return encodeServerControl({ type: "TASK_ENQUEUE_RESULT", id, body }); }
 export function encodeProjectCreateResult(id, body) { return encodeServerControl({ type: "PROJECT_CREATE_RESULT", id, body }); }
 export function encodeRepositories(id, body) { return encodeServerControl({ type: "REPOSITORIES", id, body }); }
-export function encodeRepositoryMutateResult(id, body) { return encodeServerControl({ type: "REPOSITORY_MUTATE_RESULT", id, body }); }
 export function encodeAgentControlResult(id, body) { return encodeServerControl({ type: "AGENT_CONTROL_RESULT", id, body }); }
 export function encodeTaskHistory(id, body) { return encodeServerControl({ type: "TASK_HISTORY", id, body }); }
 export function encodeTaskDetail(id, body) { return encodeServerControl({ type: "TASK_DETAIL", id, body }); }

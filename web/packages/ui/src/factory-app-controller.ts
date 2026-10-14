@@ -16,7 +16,6 @@ import {
   type BrowserSessionOptions,
   type AgentItem,
   type SpriteAppearance,
-  type ProjectItem,
   type AgentControlAction,
   type TaskHistoryView,
   type TaskDetailView,
@@ -24,7 +23,6 @@ import {
   type SessionErrorCode,
   type SessionStatus,
   type DiscoveredAccountView,
-  type RepositoryMutation,
   type RepositoryView,
   type IntakeView,
   type StateView,
@@ -150,7 +148,7 @@ export type FactoryAppStatus =
 type HumanSession = Pick<BrowserSession, "getHumanRequestDetail" | "replyHumanRequest" | "cancelHumanRequest">;
 type TerminalSession = Pick<BrowserSession, "resolveAgentTerminal" | "openTerminal" | "close">;
 type AgentTaskSession = Pick<BrowserSession, "enqueueAgentTaskWithFiles" | "enqueueAgentTask" | "controlAgent" | "getTaskHistory" | "getTaskDetail" | "resolveAgentTerminal">;
-type ConsoleSession = Pick<BrowserSession, "updateAgent" | "setProjectLimits" | "createProject" | "getRepositories" | "mutateRepository" | "intake" | "updateTask" | "getOperationalGraph" | "getOperationalNode" | "getRunPaths" | "discoverAccounts" | "linkAccount" | "listBrowserClients" | "revokeBrowserClient" | "githubConnection" | "clientId">;
+type ConsoleSession = Pick<BrowserSession, "updateAgent" | "createProject" | "getRepositories" | "intake" | "updateTask" | "getOperationalGraph" | "getOperationalNode" | "getRunPaths" | "discoverAccounts" | "linkAccount" | "listBrowserClients" | "revokeBrowserClient" | "githubConnection" | "clientId">;
 type RemoteInviteSession = Pick<BrowserSession, "inviteRemote" | "capabilities">;
 type ControlledClient = Pick<BrowserClient, "connect" | "close"> & { readonly session?: HumanSession & TerminalSession & AgentTaskSession & ConsoleSession & RemoteInviteSession & Partial<Pick<BrowserSession, "projectContent" | "setDispatch">> };
 type ClientFactory = (options: BrowserSessionOptions) => ControlledClient;
@@ -533,25 +531,6 @@ export class FactoryAppController {
     return false;
   }
 
-  /** Save one project's future allowance against its exact revision. */
-  async updateProjectLimits(project: Pick<ProjectItem, "id" | "revision">, limits: { maxRunSeconds: number }): Promise<void> {
-    const session = this.#client?.session;
-    if (this.#closed || this.#status !== "ready" || session === undefined || this.#edit?.pending === true) return;
-    const generation = this.#generation;
-    const edit: FactoryEditView = { target: project.id, pending: true };
-    this.#edit = edit;
-    this.#publish();
-    try {
-      await session.setProjectLimits({ projectId: project.id, expectedRevision: project.revision, ...limits });
-      if (!this.#current(generation) || this.#edit !== edit) return;
-      this.#edit = undefined;
-    } catch (error) {
-      if (!this.#current(generation) || this.#edit !== edit) return;
-      this.#edit = { target: project.id, pending: false, error: finiteError(error) };
-    }
-    this.#publish();
-  }
-
   /** Keep operator-authored task text outside a transient sidebar component. */
   setAgentInstructionDraft(instruction: string): void {
     const selected = this.#selectedAgent;
@@ -812,12 +791,6 @@ export class FactoryAppController {
       this.#repositories.delete(projectId);
     }
     this.#publish();
-  }
-  async mutateRepository(request: RepositoryMutation): Promise<void> {
-    const session = this.#client?.session;
-    if (!this.#current(this.#generation) || session === undefined || typeof session.mutateRepository !== "function") return;
-    await session.mutateRepository(request);
-    await this.loadRepositories(request.projectId);
   }
   async loadIntake(projectId: string): Promise<void> {
     const session = this.#client?.session;

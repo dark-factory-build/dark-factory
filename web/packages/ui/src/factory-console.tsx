@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
-import type { AgentItem, OperationalNodeView, ProjectItem, RepositoryMutation, SpriteAppearance, TaskHistoryView, TaskItem } from "@dark-factory/client";
+import type { AgentItem, OperationalNodeView, SpriteAppearance, TaskHistoryView, TaskItem } from "@dark-factory/client";
 import { type FactoryAgentSelection, type FactoryAppSnapshot, type FactoryHumanRequestView } from "./factory-app-controller.js";
 import { AgentList, FactoryFloor } from "./console-screens.js";
 import { AgentPanel, ConsoleDialog, HumanRequestPanel, WorkPanel, TaskDetail, editErrorCopy, type AgentConfigEdit, type AgentPanelView, type TaskEdit, type TaskBrief, type TaskScope, type TaskContentChip, type AddTask, type WorkFilter } from "./console-sidebar.js";
@@ -32,7 +32,6 @@ export type FactoryConsoleProps = FactoryAppSnapshot & {
   appearanceAgentId?: string;
   onEditAppearance?: (agent: AgentItem) => void;
   onCloseAppearance?: () => void;
-  onSaveProjectLimits?: (project: Pick<ProjectItem, "id" | "revision">, limits: { maxRunSeconds: number }) => void;
   onEditTask?: (task: TaskItem, change: TaskEdit) => Promise<boolean>;
   onAddTask?: AddTask;
   onLoadTaskDetail?: (task: TaskItem, peerOffset?: bigint, expectedHead?: bigint) => Promise<TaskBrief>;
@@ -44,8 +43,6 @@ export type FactoryConsoleProps = FactoryAppSnapshot & {
   onReplyHumanRequest?: () => void;
   onCancelHumanRequest?: () => void;
   onCloseHumanRequest?: () => void;
-  onLoadRepositories?: (projectId: string) => void;
-  onMutateRepository?: (request: RepositoryMutation) => void;
   intake?: ReadonlyMap<string, import("@dark-factory/client").IntakeView>;
   intakePending?: ReadonlySet<string>;
   intakeErrors?: ReadonlyMap<string, string>;
@@ -111,7 +108,6 @@ export function FactoryConsole({
   appearanceAgentId,
   onEditAppearance,
   onCloseAppearance,
-  onSaveProjectLimits,
   onEditTask,
   onAddTask,
   onLoadTaskDetail,
@@ -122,9 +118,6 @@ export function FactoryConsole({
   onReplyHumanRequest,
   onCancelHumanRequest,
   onCloseHumanRequest,
-  repositories,
-  onLoadRepositories,
-  onMutateRepository,
   intake,
   intakePending,
   intakeErrors,
@@ -311,7 +304,6 @@ export function FactoryConsole({
                 />}
                 onSelectProduction={selectProduction}
                 onMission={(task) => openMission(task.project_id, task.mission_id!)}
-                sources={sources}
                 onIntakeAction={ready ? onIntakeAction : undefined}
                 intake={projectId === undefined ? undefined : { state: intake?.get(projectId)?.state, failed: intakeErrors?.has(projectId) === true, busy: intakePending?.has(projectId) === true }}
               /></div>
