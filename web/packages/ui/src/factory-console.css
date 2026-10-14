@@ -809,7 +809,6 @@ summary.dfConsoleItem__summary { cursor: pointer; }
 .dfMissions article { display: grid; gap: 0.65rem; margin-top: 0; padding-top: .65rem; }
 .dfMissions :where(p, ul) { margin: 0; }
 .dfTaskConversation li { display: grid; gap: .35rem; overflow-wrap: anywhere; margin-bottom: .75rem; }
-.dfTaskConversation small { color: var(--df-console-muted); }
 .dfMissions article h3 { margin: 0; color: var(--df-console-text); font-size: var(--df-text-md); letter-spacing: 0.02em; }
 .dfMissions h4 { margin: 0.5rem 0 0; color: var(--df-console-muted); font-size: var(--df-text-xs); }
 .dfMissions article > button { justify-self: start; }

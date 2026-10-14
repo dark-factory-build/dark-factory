@@ -4,6 +4,7 @@ import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { act, create } from "react-test-renderer";
 import { AgentInstruction, TerminalContent, TerminalPanel } from "../dist/src/factory-app.js";
+import { TaskConversation } from "../dist/src/console-sidebar.js";
 const textOf = (node) => [].concat(node.props.children).flat(Infinity).filter((child) => typeof child === "string").join("").trim();
 
 function terminalView(overrides = {}) {
@@ -31,6 +32,34 @@ function panel(terminal = terminalView()) {
     createElement("div", { className: "terminal-surface" }, "live terminal surface"),
   );
 }
+
+test("answered task conversation keeps the question and answer text without delivery details", () => {
+  const markup = renderToStaticMarkup(createElement(TaskConversation, {
+    brief: {
+      taskId: "task-1",
+      revision: 1n,
+      head: 2n,
+      instruction: "",
+      feedback: "",
+      peerQuestions: [{
+        id: "question-1",
+        source_task_id: "source-task",
+        target_task_id: "target-task",
+        question: "What changed?",
+        answer: "The sidebar is simpler.",
+        recipient_delivery_state: "delivered",
+        answer_delivery_state: "delivered",
+        revision: 1n,
+        created_at_ms: 1n,
+        updated_at_ms: 1n,
+      }],
+    },
+  }));
+  assert.match(markup, /What changed\?/);
+  assert.match(markup, /The sidebar is simpler\./);
+  assert.equal(markup.includes("Recipient delivery"), false);
+  assert.equal(markup.includes("Answer delivery"), false);
+});
 
 test("the terminal is a quiet sidebar", () => {
   const markup = renderToStaticMarkup(panel(terminalView({ taskTitle: "Repair finalization" })));
