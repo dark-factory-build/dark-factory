@@ -885,7 +885,7 @@ func CodexReview(writable []string, readable ...string) []string {
 			add(resolved, i < len(writable))
 		}
 	}
-	return []string{"-c", `default_permissions="dark-factory-review"`, "-c", codexProfile("dark-factory-review", grants, "{enabled=false}")}
+	return []string{"-c", `default_permissions="dark-factory-review"`, "-c", codexProfile("dark-factory-review", grants, "{enabled=false,allow_local_binding=true}")}
 }
 
 // claudeSettings confines a Claude Code run to the same grants Codex gets.
