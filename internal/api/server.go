@@ -35,6 +35,9 @@ const (
 	CallBackupVerify
 	CallAccountsDiscover
 	CallAccountLink
+	CallAccountUpdate
+	CallAttachmentRetention
+	CallTelemetryIngest
 	CallAgentSelectAccount
 	CallAgentSelectModel
 	CallAgentPaths
@@ -167,6 +170,8 @@ type Call struct {
 	enabled            bool
 	capacity           uint16
 	account            AccountLinkInput
+	accountUpdate      AccountUpdateInput
+	telemetryAction    string
 	selection          AgentAccountSelectInput
 	accountsOffset     uint32
 	modelSelection     AgentModelSelectInput
@@ -303,6 +308,15 @@ func (call Call) Capacity() (uint64, uint16, bool) {
 
 func (call Call) AccountLinkInput() (AccountLinkInput, bool) {
 	return call.account, call.kind == CallAccountLink
+}
+func (call Call) AccountUpdateInput() (AccountUpdateInput, bool) {
+	return call.accountUpdate, call.kind == CallAccountUpdate
+}
+func (call Call) AttachmentRetention() (bool, bool, bool) {
+	return call.enabled, call.expectedRevision != 0, call.kind == CallAttachmentRetention
+}
+func (call Call) TelemetryAction() (string, bool) {
+	return call.telemetryAction, call.kind == CallTelemetryIngest
 }
 
 func (call Call) AgentAccountSelectInput() (AgentAccountSelectInput, bool) {
@@ -961,6 +975,30 @@ func decodeCall(domain byte, bearer credential, encoded []byte) (Call, RemoteErr
 		if err := decodeExact(request.Params, &call.account); err != nil || !validAccountLinkInput(call.account) {
 			return Call{}, RemoteInvalidRequest
 		}
+	case CallAccountUpdate:
+		if err := decodeExact(request.Params, &call.accountUpdate); err != nil || !validAccountUpdateInput(call.accountUpdate) {
+			return Call{}, RemoteInvalidRequest
+		}
+	case CallAttachmentRetention:
+		var input struct {
+			Enabled *bool `json:"enabled"`
+		}
+		if err := decodeExact(request.Params, &input); err != nil {
+			return Call{}, RemoteInvalidRequest
+		}
+		call.enabled = input.Enabled != nil && *input.Enabled
+		call.expectedRevision = 0
+		if input.Enabled != nil {
+			call.expectedRevision = 1
+		}
+	case CallTelemetryIngest:
+		var input struct {
+			Action string `json:"action"`
+		}
+		if err := decodeExact(request.Params, &input); err != nil || (input.Action != "status" && input.Action != "mint" && input.Action != "revoke") {
+			return Call{}, RemoteInvalidRequest
+		}
+		call.telemetryAction = input.Action
 	case CallAgentSelectAccount:
 		if err := decodeExact(request.Params, &call.selection); err != nil || !validAgentAccountSelectInput(call.selection) {
 			return Call{}, RemoteInvalidRequest
@@ -1177,6 +1215,12 @@ func methodKind(method string) (CallKind, byte) {
 		return CallAccountsDiscover, operatorDomain
 	case "account_link":
 		return CallAccountLink, operatorDomain
+	case "account_update":
+		return CallAccountUpdate, operatorDomain
+	case "attachment_retention":
+		return CallAttachmentRetention, operatorDomain
+	case "telemetry_ingest":
+		return CallTelemetryIngest, operatorDomain
 	case "agent_select_account":
 		return CallAgentSelectAccount, operatorDomain
 	case "task":

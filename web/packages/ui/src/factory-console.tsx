@@ -2,19 +2,17 @@ import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import type { DiscoveredAccount, AccountItem, AgentItem, GitHubConnectionBody, OperationalNodeView, ProjectItem, RepositoryMutation, SpriteAppearance, TaskHistoryView, TaskItem, TelemetryIngest, TelemetryIngestBody } from "@dark-factory/client";
 import { type FactoryAgentSelection, type FactoryAppSnapshot, type FactoryHumanRequestView } from "./factory-app-controller.js";
 import { AgentList, FactoryFloor } from "./console-screens.js";
-import { AgentPanel, ConsoleDialog, HumanRequestPanel, WorkPanel, TaskDetail, SettingsDialog, editErrorCopy, type AgentConfigEdit, type AgentPanelView, type TaskEdit, type TaskBrief, type TaskContentChip, type AddTask, type WorkFilter } from "./console-sidebar.js";
+import { AgentPanel, ConsoleDialog, HumanRequestPanel, WorkPanel, TaskDetail, editErrorCopy, type AgentConfigEdit, type AgentPanelView, type TaskEdit, type TaskBrief, type TaskScope, type TaskContentChip, type AddTask, type WorkFilter } from "./console-sidebar.js";
 import { ProjectLibrary, type ProjectContentCall } from "./project-library.js";
 import { activityTarget, onBoard, useKnowledgeActivity, type KnowledgeActivity } from "./project-board.js";
 import { useProduction } from "./production-data.js";
 import { deriveProductionView, inProgressProduction, productionKey } from "./production-view.js";
 import { ProductionPanel, asTask } from "./production-panel.js";
 import { MissionsPanel } from "./missions-panel.js";
-import { RemoteInvitePanel, TelemetryIngestPanel } from "./remote-invite.js";
 import { agentTelemetry, needsYou, workRows } from "./console-view.js";
 import { IconButton } from "./icons.js";
 import { Badge } from "./console-kit.js";
 import { SpriteEditor } from "./factory-scene/sprite-editor.js";
-import { DEFAULT_FLOOR_APPEARANCE, loadFloorAppearance, resetFloorAppearance, saveFloorAppearance, type FloorAppearance } from "./floor-appearance.js";
 
 export type ConsoleDetail = "work" | "agent" | "floor";
 
@@ -180,20 +178,6 @@ export function FactoryConsole({
     onSelectAgent(agent);
   };
   const showAgents = () => { setBrowsingAgents(true); onDetail?.("agent"); };
-  const [floorAppearance, setFloorAppearance] = useState<FloorAppearance>(DEFAULT_FLOOR_APPEARANCE);
-  const floorAppearanceLoaded = useRef(false);
-  useEffect(() => {
-    setFloorAppearance(loadFloorAppearance());
-    floorAppearanceLoaded.current = true;
-  }, []);
-  const changeFloorAppearance = (appearance: FloorAppearance) => {
-    setFloorAppearance(appearance);
-    if (floorAppearanceLoaded.current) saveFloorAppearance(appearance);
-  };
-  const resetAppearance = () => {
-    resetFloorAppearance();
-    setFloorAppearance(DEFAULT_FLOOR_APPEARANCE);
-  };
   const [dispatchPending, setDispatchPending] = useState(false);
   const [dispatchNotice, setDispatchNotice] = useState("");
   const [dispatchError, setDispatchError] = useState("");
@@ -292,7 +276,6 @@ export function FactoryConsole({
               setDispatchPending(true); setDispatchError(""); setDispatchNotice("");
               void onSetDispatch(state.factory.revision, !state.factory.dispatch_enabled).then((result) => setDispatchNotice(result.enabled ? "New work resumed." : "New work paused. Active processes continue."), () => setDispatchError("The admission change could not be confirmed. Check connection and administrator access, then refresh before retrying.")).finally(() => setDispatchPending(false));
             }}>{dispatchPending ? "Waiting…" : state?.factory.dispatch_enabled ? "Pause new work" : state ? "Resume new work" : "New work"}</IconButton>
-            <IconButton icon="gear" aria-label="Settings" aria-pressed={settingsOpen === true} disabled={onToggleSettings === undefined} onClick={onToggleSettings} />
           </div>
           <div
             className={ready || error !== undefined ? "dfFactoryConsole__visuallyHidden" : "dfFactoryConsole__connection"}
@@ -322,7 +305,7 @@ export function FactoryConsole({
         </nav>}
         <div className="dfConsoleLayout">
           <section className="dfConsoleLayout__left dfFactoryConsole__section" aria-label="Factory floor">
-            <FactoryFloor activity={knowledgeActivity.recent} activityCues={knowledgeActivity.cues} onOpenActivity={ready ? openActivity : undefined} requestedEntity={requestedEntity} onOpenBoard={(project, entity, id, repository) => openKnowledge(true, project, entity, id, repository)} changes={productionItems} changesRead={productionData.read} selectedChange={selectedProduction} onSelectChange={selectProduction} onProjectContent={onProjectContent} onOpenLibrary={(id) => openKnowledge(false, id)} onOpenTasks={ready ? (id) => openWork(id, false) : undefined} onOpenMissions={ready ? (id) => openWork(id, true) : undefined} projectId={projectId} floorAppearance={floorAppearance} selectedTaskId={selectedTask?.id} onSelectTask={ready ? goTask : undefined} selectedAgentId={selectedDetail === "agent" ? selectedAgent?.id : undefined} state={scopedState} graphs={graphs} graphErrors={graphErrors} onLoadNode={onLoadNode} onAddTask={ready ? onAddTask : undefined} runPaths={runPaths} lastRunPaths={lastRunPaths} onSelectAgent={ready ? chooseAgent : undefined} onSelectHumanRequest={ready ? selectRequest : undefined} connected={ready} />
+            <FactoryFloor activity={knowledgeActivity.recent} activityCues={knowledgeActivity.cues} onOpenActivity={ready ? openActivity : undefined} requestedEntity={requestedEntity} onOpenBoard={(project, entity, id, repository) => openKnowledge(true, project, entity, id, repository)} changes={productionItems} changesRead={productionData.read} selectedChange={selectedProduction} onSelectChange={selectProduction} onProjectContent={onProjectContent} onOpenLibrary={(id) => openKnowledge(false, id)} onOpenTasks={ready ? (id) => openWork(id, false) : undefined} onOpenMissions={ready ? (id) => openWork(id, true) : undefined} projectId={projectId} selectedTaskId={selectedTask?.id} onSelectTask={ready ? goTask : undefined} selectedAgentId={selectedDetail === "agent" ? selectedAgent?.id : undefined} state={scopedState} graphs={graphs} graphErrors={graphErrors} onLoadNode={onLoadNode} onAddTask={ready ? onAddTask : undefined} runPaths={runPaths} lastRunPaths={lastRunPaths} onSelectAgent={ready ? chooseAgent : undefined} onSelectHumanRequest={ready ? selectRequest : undefined} connected={ready} />
           </section>
 
           <aside className="dfConsoleSidebar" aria-label="Selected detail">
@@ -408,48 +391,6 @@ export function FactoryConsole({
       {!libraryOpen ? null : <ConsoleDialog key={knowledgeView.board ? "board" : "library"} label={knowledgeView.board ? "Discussion board" : "Project library"} title={knowledgeView.board ? "Board" : "Library"} className="dfLibraryDialog" onClose={() => setLibraryOpen(false)}>
         <ProjectLibrary open initialProjectId={knowledgeView.project} key={`${knowledgeView.project}:${knowledgeView.board}:${knowledgeView.entity}:${knowledgeView.id}:${knowledgeView.revision}`} board={knowledgeView.board} repository={knowledgeView.repository} entity={knowledgeView.entity} initialID={knowledgeView.id} initialRevision={knowledgeView.revision} onSource={(entity) => { selectProject(entity.split(":")[0]); setRequestedEntity({ id: entity.slice(entity.indexOf(":") + 1) }); setLibraryOpen(false); onDetail?.("floor"); }} onRecord={openKnowledgeRecord} state={state} call={ready ? onProjectContent : undefined} onUseInTask={onAddTask === undefined ? undefined : (chip) => { setTaskContent((chips) => [...chips.filter((item) => item.project_id === chip.project_id && item.content_id !== chip.content_id), chip]); setLibraryOpen(false); openWork(chip.project_id, false); }} />
       </ConsoleDialog>}
-      {settingsOpen !== true ? null : (
-        <SettingsDialog
-          onAttachmentRetention={ready ? onAttachmentRetention : undefined}
-          projectId={projectId}
-          initialTab={settingsTab}
-          floorAppearance={floorAppearance}
-          onFloorAppearanceChange={changeFloorAppearance}
-          onResetFloorAppearance={resetAppearance}
-          state={state}
-          ready={ready}
-          accounts={accounts}
-          accountsPending={accountsPending}
-          accountsError={accountsError}
-          onLoadAccounts={onLoadAccounts}
-          onLinkAccount={onLinkAccount}
-          onUpdateAccount={onUpdateAccount}
-          repositories={repositories}
-          repositoryPending={repositoryPending}
-          repositoryErrors={repositoryErrors}
-          onLoadRepositories={onLoadRepositories}
-          onMutateRepository={onMutateRepository}
-          onCreateProject={onCreateProject}
-          intake={intake}
-          intakePending={intakePending}
-          intakeErrors={intakeErrors}
-          onIntakeAction={onIntakeAction}
-          onSelectTask={goTask === undefined ? undefined : (id) => { onToggleSettings?.(); goTask(id); }}
-          github={github}
-          onGitHub={onGitHub}
-          edit={edit}
-          onSaveProjectLimits={onSaveProjectLimits}
-          pairing={pairing ?? (!remoteInviteAllowed ? undefined : (
-            <>
-              <RemoteInvitePanel invite={remoteInvite} error={remoteInviteError} onInvite={onInviteRemote} onDismiss={onDismissRemoteInvite} devices={devices} devicesError={devicesError} ownClientId={ownClientId} onLoadDevices={onLoadDevices} onRevokeDevice={onRevokeDevice} />
-              {onTelemetryIngest === undefined ? null : <TelemetryIngestPanel onIngest={onTelemetryIngest} />}
-            </>
-          ))}
-          runtime={productionData.runtime}
-          release={productionData.release}
-          onClose={onToggleSettings}
-        />
-      )}
       {appearanceAgent === undefined || onSaveAgentAppearance === undefined || onCloseAppearance === undefined ? null : <SpriteEditor agent={appearanceAgent} pending={edit?.target === appearanceAgent.id && edit.pending} error={edit?.target === appearanceAgent.id ? editError : undefined} onSave={(appearance) => onSaveAgentAppearance(appearanceAgent.id, appearance)} onClose={onCloseAppearance} />}
     </div>
   );

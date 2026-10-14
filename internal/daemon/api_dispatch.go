@@ -420,6 +420,12 @@ func (daemon *Daemon) dispatch(ctx context.Context, call api.Call) api.Reply {
 		return daemon.discoverOperatorAccounts(ctx, offset)
 	case api.CallAccountLink:
 		return daemon.linkOperatorAccount(ctx, call)
+	case api.CallAccountUpdate:
+		return daemon.updateOperatorAccount(ctx, call)
+	case api.CallAttachmentRetention:
+		return daemon.attachmentRetention(ctx, call)
+	case api.CallTelemetryIngest:
+		return daemon.telemetryIngest(ctx, call)
 	case api.CallAgentSelectAccount:
 		return daemon.selectAgentAccount(ctx, call)
 	case api.CallAgentSelectModel:
@@ -1446,6 +1452,62 @@ func (daemon *Daemon) linkOperatorAccount(ctx context.Context, call api.Call) ap
 		return newErrorReply(remoteErrorCode(err))
 	}
 	return daemon.mutation(ctx, account.Revision)
+}
+
+func (daemon *Daemon) updateOperatorAccount(ctx context.Context, call api.Call) api.Reply {
+	input, ok := call.AccountUpdateInput()
+	if !ok {
+		return newErrorReply(api.RemoteInvalidRequest)
+	}
+	id, err := decodeID(input.AccountID, kernel.AccountIDFromBytes)
+	if err != nil {
+		return newErrorReply(api.RemoteInvalidRequest)
+	}
+	expected, err := kernel.NewRevision(int64(input.ExpectedRevision))
+	if err != nil {
+		return newErrorReply(api.RemoteInvalidRequest)
+	}
+	at, err := daemon.timestamp()
+	if err != nil {
+		return newErrorReply(api.RemoteInternal)
+	}
+	account, err := daemon.store.UpdateAccount(ctx, id, expected, input.Label, input.Remove, at)
+	if err != nil {
+		return newErrorReply(remoteErrorCode(err))
+	}
+	return daemon.mutation(ctx, account.Revision)
+}
+
+func (daemon *Daemon) attachmentRetention(ctx context.Context, call api.Call) api.Reply {
+	enabled, hasEnabled, ok := call.AttachmentRetention()
+	if !ok {
+		return newErrorReply(api.RemoteInvalidRequest)
+	}
+	var value *bool
+	if hasEnabled {
+		value = &enabled
+	}
+	result, err := daemon.store.AttachmentRetention(ctx, value)
+	if err != nil {
+		return newErrorReply(remoteErrorCode(err))
+	}
+	return api.NewContentReply(api.AttachmentRetentionResult{Enabled: result})
+}
+
+func (daemon *Daemon) telemetryIngest(ctx context.Context, call api.Call) api.Reply {
+	action, ok := call.TelemetryAction()
+	if !ok {
+		return newErrorReply(api.RemoteInvalidRequest)
+	}
+	relay, err := daemon.relayRuntime()
+	if err != nil {
+		return newErrorReply(remoteErrorCode(err))
+	}
+	url, secret, active, err := relay.ingest(action)
+	if err != nil {
+		return newErrorReply(remoteErrorCode(err))
+	}
+	return api.NewContentReply(api.TelemetryIngestResult{URL: url, Secret: secret, Active: active})
 }
 
 func (daemon *Daemon) selectAgentAccount(ctx context.Context, call api.Call) api.Reply {

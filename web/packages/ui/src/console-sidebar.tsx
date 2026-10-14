@@ -1,7 +1,6 @@
-import { useEffect, useId, useRef, useState, type FormEvent, type ReactNode } from "react";
+import { useEffect, useRef, useState, type FormEvent, type ReactNode } from "react";
 import { MAX_TASK_ATTACHMENTS, MAX_TASK_ATTACHMENT_BYTES, MAX_TASK_PRIORITY, type IntakeView, type IntakeBody, type DiscoveredAccount, type AccountItem, type AgentItem, type IdleWakeOn, type GitHubConnectionBody, type GitHubDelegationBody, type HumanRequestItem, type ProjectItem, type RepositoryMutation, type RunTelemetry, type RepositoryView, type StateView, type TaskHistoryView, type TaskItem, type TaskPeerQuestion, type TaskContentPin } from "@dark-factory/client";
 import type { FactoryEditView, FactoryHumanRequestView } from "./factory-app-controller.js";
-import type { FactoryGitHubView } from "./factory-settings-coordinator.js";
 import { rankLabel } from "./console-screens.js";
 import { activityLabel, type KnowledgeActivity } from "./project-board.js";
 import { AgentSprite } from "./factory-scene/factory-scene.js";
@@ -11,7 +10,6 @@ import { productionKey, productionStages } from "./production-view.js";
 import { AnswerControls } from "./console-interactions.js";
 import { Icon, IconButton } from "./icons.js";
 import { Badge, SectionHeader, Status, formatTime } from "./console-kit.js";
-import type { FloorAppearance } from "./floor-appearance.js";
 import type { PublishedRelease, RuntimeBuild } from "./production-data.js";
 
 /** Only the controls the operator actually changed; the rest are left alone. */
@@ -20,6 +18,8 @@ export type AgentConfigEdit = Readonly<{ model?: string; reasoningEffort?: strin
 export type TaskEdit = Readonly<{ title?: string; body?: string; priority?: number; assignedAgentId?: string; cancel?: boolean; retry?: boolean }>;
 export type TaskBrief = Readonly<{ taskId: string; revision: bigint; head: bigint; instruction: string; feedback: string; outcome?: string; peerQuestions: readonly TaskPeerQuestion[]; nextPeerOffset?: bigint }>;
 export type AgentPanelView = "terminal" | "config";
+export type TaskScope = { agent_id: string } | { project_id: string };
+type TaskCursor = { beforeUpdatedAtMs?: bigint; beforeTaskId?: string };
 
 /** One private peer-conversation page, shared by queued and completed work. */
 export function TaskConversation({ brief, onOlder, pending = false }: { brief: TaskBrief; onOlder?: () => void; pending?: boolean }) {
@@ -637,7 +637,7 @@ function QueuedTask({
  * the console rather than squeezing it: <dialog> owns ESC, the backdrop, the
  * focus trap and focus return, so every exit goes through close().
  */
-export function SettingsDialog({
+export function ConfigurationPanel({
   onAttachmentRetention,
   floorAppearance,
   onFloorAppearanceChange,

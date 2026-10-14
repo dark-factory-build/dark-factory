@@ -46,7 +46,7 @@ type ObserveOptions = Readonly<{
 }>;
 
 /** Owns SETTINGS-only observations and remote invitation state. */
-export class FactorySettingsCoordinator {
+export class FactoryConfigurationCoordinator {
   readonly #owner: SettingsOwner;
   readonly #pending = observations(() => new Set<string>());
   readonly #errors = observations(() => new Map<string, string>());

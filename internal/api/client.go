@@ -325,6 +325,33 @@ func (client *OperatorClient) LinkAccount(ctx context.Context, input AccountLink
 	}
 	return client.client.mutate(ctx, "account_link", input)
 }
+func (client *OperatorClient) UpdateAccount(ctx context.Context, input AccountUpdateInput) (MutationResult, error) {
+	if !validAccountUpdateInput(input) {
+		return MutationResult{}, ErrInvalidInput
+	}
+	return client.client.mutate(ctx, "account_update", input)
+}
+func (client *OperatorClient) AttachmentRetention(ctx context.Context, enabled *bool) (AttachmentRetentionResult, error) {
+	var result AttachmentRetentionResult
+	if err := client.client.call(ctx, "attachment_retention", struct {
+		Enabled *bool `json:"enabled"`
+	}{enabled}, &result); err != nil {
+		return AttachmentRetentionResult{}, err
+	}
+	return result, nil
+}
+func (client *OperatorClient) TelemetryIngest(ctx context.Context, action string) (TelemetryIngestResult, error) {
+	if action != "status" && action != "mint" && action != "revoke" {
+		return TelemetryIngestResult{}, ErrInvalidInput
+	}
+	var result TelemetryIngestResult
+	if err := client.client.call(ctx, "telemetry_ingest", struct {
+		Action string `json:"action"`
+	}{action}, &result); err != nil {
+		return TelemetryIngestResult{}, err
+	}
+	return result, nil
+}
 
 func (client *OperatorClient) SelectAgentAccount(ctx context.Context, input AgentAccountSelectInput) (MutationResult, error) {
 	if !validAgentAccountSelectInput(input) {

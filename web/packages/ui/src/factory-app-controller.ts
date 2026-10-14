@@ -38,7 +38,7 @@ import {
   type OperationalNodeView,
 } from "@dark-factory/client";
 import { agentCurrentTask, type RunPathSample } from "./console-view.js";
-import { FactorySettingsCoordinator, type FactoryGitHubView, type FactoryRemoteInvite } from "./factory-settings-coordinator.js";
+import { FactoryConfigurationCoordinator, type FactoryGitHubView, type FactoryRemoteInvite } from "./factory-settings-coordinator.js";
 import { HumanRequestFlow, type HumanRequestPhase } from "./human-request-flow.js";
 import { MAX_PENDING_INPUT_BYTES, TerminalController, type TerminalControllerSnapshot, type TerminalErrorSource, type TerminalSurface } from "./terminal-controller.js";
 
@@ -275,7 +275,7 @@ export class FactoryAppController {
   #runPathsDue = false;
   #edit: FactoryEditView | undefined;
   #taskEditConfirmation: TaskEditConfirmation | undefined;
-  readonly #settings = new FactorySettingsCoordinator({
+  readonly #settings = new FactoryConfigurationCoordinator({
     session: () => this.#client?.session,
     ready: () => !this.#closed && this.#status === "ready",
     generation: () => this.#generation,

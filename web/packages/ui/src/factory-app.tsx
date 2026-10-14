@@ -128,11 +128,6 @@ export function FactoryApp({ onStatusChange, browserPort }: FactoryAppProps = {}
       onLoadIntake={snapshot.status === "ready" ? (projectId) => { void owner.current?.loadIntake(projectId); } : undefined}
       onIntakeAction={(projectId, request) => { void owner.current?.intakeAction(projectId, request); }}
       onGitHub={(request) => { void owner.current?.githubConnection(request); }}
-      onInviteRemote={() => { void owner.current?.inviteRemote(); }}
-      onLoadDevices={() => { void owner.current?.loadDevices(); }}
-      onRevokeDevice={(device) => { void owner.current?.revokeDevice(device); }}
-      onDismissRemoteInvite={() => owner.current?.dismissRemoteInvite()}
-      onTelemetryIngest={(action) => owner.current?.telemetryIngest(action) ?? Promise.reject(new Error("closed"))}
       terminalContent={terminal}
     />
   );
