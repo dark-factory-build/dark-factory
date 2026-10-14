@@ -97,9 +97,11 @@ test("error banner keeps its centered layout after the paragraph reset", () => {
 test("one screen keeps Factory and the operator panels together", () => {
   const markup = render();
   assert.match(markup, /<main class="dfFactoryConsole" aria-label="Factory operator console">/);
-  for (const label of ["Factory floor", "Selected detail", "Work", "Right panel"]) {
+  for (const label of ["Factory floor", "Selected detail", "Work", "Console views"]) {
     assert.match(markup, new RegExp(`aria-label="${label}"`));
   }
+  assert.doesNotMatch(markup, /aria-label="Right panel"/);
+  assert.equal((markup.match(/aria-label="Console views"/g) ?? []).length, 1);
   assert.doesNotMatch(markup, /ACTIVE RUNS|OPERATOR VIEW/);
   assert.equal(markup.includes("<dt>QUEUED</dt>"), false);
   assert.equal(markup.includes("<dt>NEEDS YOU</dt>"), false);
