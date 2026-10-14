@@ -184,7 +184,7 @@ func (daemon *Daemon) refreshReclaimDeadlineAt(ctx context.Context, at kernel.Un
 	}
 	if found {
 		daemon.reclaimNext.Store(next.Int64())
-	} else {
+	} else if daemon.reclaimNext.Load() <= at.Int64() {
 		daemon.reclaimNext.Store(0)
 	}
 }
