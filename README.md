@@ -16,7 +16,7 @@ shared floor, belts between them and sample workers. No daemon is connected; see
 factory](docs/development/OPERATIONAL_FACTORY.md).*
 
 [Get started](#install) · [Website](https://www.darkfactory.build) ·
-[Console (requires pairing)](https://app.darkfactory.build) ·
+[Remote console (requires pairing)](https://app.darkfactory.build/remote) ·
 [Documentation](docs/install.md) · [Community backlog](https://www.darkfactory.build/backlog)
 
 ## What you can do

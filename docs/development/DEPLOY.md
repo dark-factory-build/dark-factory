@@ -2,11 +2,12 @@
 
 The public site (`https://app.darkfactory.build`) deploys to Vercel
 production from `main` of the dark-factory-site repository via Vercel's Git
-integration. Nothing here deploys it. Its pages are thin shells: the console
-itself is `web/` built into factoryd (`internal/browser/console`), served at
-`/console.js` on loopback and through the relay, and signed by the node key
-the page pinned at pairing. So a daemon release ships its own console, and no
-change here waits on a site deploy.
+integration. Nothing here deploys it. The console itself is `web/` built into
+factoryd (`internal/browser/console`). The desktop console is factoryd's own
+page at `http://127.0.0.1:43123/`, so the browser asks no loopback permission;
+the site's remote page gets the same bundle through the relay, signed by the
+node key. So a daemon release ships its own console, and no change here waits
+on a site deploy.
 
 ```sh
 factoryctl release <commit-sha> [--start] [--wait]
