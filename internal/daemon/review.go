@@ -20,6 +20,7 @@ import (
 	"github.com/dark-factory-build/dark-factory/internal/kernel"
 	"github.com/dark-factory-build/dark-factory/internal/provider"
 	"github.com/dark-factory-build/dark-factory/internal/review"
+	"github.com/dark-factory-build/dark-factory/internal/runner"
 )
 
 // reviewPR answers once the review operation is durable and runs it in the
@@ -840,6 +841,13 @@ func (b *daemonReviewBackend) Review(ctx context.Context, checkout string, reque
 	if len(homes) == 0 {
 		return review.Verdict{}, errors.New("review: no worker login for the provider")
 	}
+	// A reviewer may invoke daemon tests inside its already-granted short root;
+	// nest the review root there instead of creating a denied sibling.
+	reviewTemp, err := os.MkdirTemp(runner.ShortTempDir(), "dfr-")
+	if err != nil {
+		return review.Verdict{}, fmt.Errorf("review temp: %w", err)
+	}
+	defer os.RemoveAll(reviewTemp)
 	// The provider comes from the workers' tool path: launchd's PATH lacks it.
 	body := request.Body
 	if request.Answer != "" {
@@ -850,7 +858,7 @@ func (b *daemonReviewBackend) Review(ctx context.Context, checkout string, reque
 	if alternates, err := os.ReadFile(filepath.Join(checkout, ".git", "objects", "info", "alternates")); err == nil {
 		readable = append(readable, strings.Split(strings.TrimSpace(string(alternates)), "\n")...)
 	}
-	result, err := provider.RunReview(ctx, kind, b.daemon.toolPath, b.daemon.toolchainRoots, b.daemon.operatorHome, homes, checkout, prompt, readable)
+	result, err := provider.RunReview(ctx, kind, b.daemon.toolPath, b.daemon.toolchainRoots, b.daemon.operatorHome, homes, checkout, prompt, readable, reviewTemp)
 	if err != nil {
 		if result.Limited {
 			return review.Verdict{}, errProviderLimited

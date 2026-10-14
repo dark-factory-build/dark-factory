@@ -27,9 +27,12 @@ type ReviewResult struct {
 // ReviewEnvironment is the same filtered, disposable environment used by the
 // worker path. In particular, provider credentials and host Git credentials do
 // not cross the daemon/provider boundary.
-func ReviewEnvironment(root string) []string {
+func ReviewEnvironment(root string, reviewTemp ...string) []string {
 	home := filepath.Join(root, ".review-home")
 	tmp := filepath.Join(root, ".review-tmp")
+	if len(reviewTemp) != 0 && reviewTemp[0] != "" {
+		tmp = reviewTemp[0]
+	}
 	_ = os.MkdirAll(home, 0700)
 	_ = os.MkdirAll(tmp, 0700)
 	allowed := map[string]bool{"PATH": true, "LANG": true, "LC_ALL": true, "LC_CTYPE": true, "TERM": true, "USER": true, "LOGNAME": true, "SHELL": true}
@@ -53,7 +56,7 @@ func ReviewEnvironment(root string) []string {
 // provider launches; callers do not assemble provider command lines. The
 // Reviewers read the toolchain roots and trusted caches, offline, so they can
 // run focused Go, Rust, or web tests; builds write only disposable roots.
-func RunReview(ctx context.Context, kind kernel.Provider, toolPath, toolchainRoots, operatorHome string, accountHomes []string, checkout, prompt string, readable []string) (ReviewResult, error) {
+func RunReview(ctx context.Context, kind kernel.Provider, toolPath, toolchainRoots, operatorHome string, accountHomes []string, checkout, prompt string, readable []string, reviewTemp ...string) (ReviewResult, error) {
 	toolName := "codex"
 	if kind == kernel.ProviderClaudeCode {
 		toolName = "claude"
@@ -64,6 +67,9 @@ func RunReview(ctx context.Context, kind kernel.Provider, toolPath, toolchainRoo
 	}
 	root := filepath.Dir(checkout)
 	home, tmp := filepath.Join(root, ".review-home"), filepath.Join(root, ".review-tmp")
+	if len(reviewTemp) != 0 && reviewTemp[0] != "" {
+		tmp = reviewTemp[0]
+	}
 	golang := []string{"PATH=" + toolPath, "GOENV=off", "GOCACHE=" + filepath.Join(home, "go-build"), "GOPATH=" + filepath.Join(home, "go"), "GOFLAGS=-mod=readonly", "GOPROXY=off", "GOSUMDB=off", "GOTOOLCHAIN=local", "CGO_ENABLED=0", "CARGO_HOME=" + filepath.Join(home, ".cargo"), "COREPACK_HOME=" + filepath.Join(home, ".cache", "corepack"), "COREPACK_ENABLE_NETWORK=0", "npm_config_cache=" + filepath.Join(home, ".cache", "npm"), "XDG_CACHE_HOME=" + filepath.Join(home, ".cache"), "CLAUDE_CODE_TMPDIR=" + tmp}
 	readable = append(readable, filepath.SplitList(toolchainRoots)...)
 	readable = append(readable, "/System/Library/OpenSSL/openssl.cnf")
@@ -88,7 +94,7 @@ func RunReview(ctx context.Context, kind kernel.Provider, toolPath, toolchainRoo
 		}
 	}
 	for _, account := range accountHomes {
-		environment := append(append(ReviewEnvironment(root), AccountEnvironment(kind, filepath.Dir(account), account)...), golang...)
+		environment := append(append(ReviewEnvironment(root, tmp), AccountEnvironment(kind, filepath.Dir(account), account)...), golang...)
 		var argv []string
 		if kind == kernel.ProviderClaudeCode {
 			argv = []string{"-p", prompt, "--permission-mode", "dontAsk", "--safe-mode", "--restricted", "--setting-sources", "", "--strict-mcp-config", "--settings", settings, "--tools", "Read,Grep,Glob,Bash"}
