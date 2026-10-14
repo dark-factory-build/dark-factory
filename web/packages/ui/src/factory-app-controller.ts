@@ -150,9 +150,9 @@ export type FactoryAppStatus =
 type HumanSession = Pick<BrowserSession, "getHumanRequestDetail" | "replyHumanRequest" | "cancelHumanRequest">;
 type TerminalSession = Pick<BrowserSession, "resolveAgentTerminal" | "openTerminal" | "close">;
 type AgentTaskSession = Pick<BrowserSession, "enqueueAgentTaskWithFiles" | "enqueueAgentTask" | "controlAgent" | "getTaskHistory" | "getTaskDetail" | "resolveAgentTerminal">;
-type ConsoleSession = Pick<BrowserSession, "updateAgent" | "setProjectLimits" | "createProject" | "getRepositories" | "mutateRepository" | "intake" | "updateTask" | "getOperationalGraph" | "getOperationalNode" | "getRunPaths" | "discoverAccounts" | "linkAccount" | "updateAccount" | "listBrowserClients" | "revokeBrowserClient" | "githubConnection" | "clientId">;
-type RemoteInviteSession = Pick<BrowserSession, "inviteRemote" | "telemetryIngest" | "capabilities">;
-type ControlledClient = Pick<BrowserClient, "connect" | "close"> & { readonly session?: HumanSession & TerminalSession & AgentTaskSession & ConsoleSession & RemoteInviteSession & Partial<Pick<BrowserSession, "projectContent" | "attachmentRetention" | "setDispatch">> };
+type ConsoleSession = Pick<BrowserSession, "updateAgent" | "setProjectLimits" | "createProject" | "getRepositories" | "mutateRepository" | "intake" | "updateTask" | "getOperationalGraph" | "getOperationalNode" | "getRunPaths" | "discoverAccounts" | "linkAccount" | "listBrowserClients" | "revokeBrowserClient" | "githubConnection" | "clientId">;
+type RemoteInviteSession = Pick<BrowserSession, "inviteRemote" | "capabilities">;
+type ControlledClient = Pick<BrowserClient, "connect" | "close"> & { readonly session?: HumanSession & TerminalSession & AgentTaskSession & ConsoleSession & RemoteInviteSession & Partial<Pick<BrowserSession, "projectContent" | "setDispatch">> };
 type ClientFactory = (options: BrowserSessionOptions) => ControlledClient;
 
 export type FactoryAppControllerOptions = {
@@ -335,12 +335,6 @@ export class FactoryAppController {
     return session.setDispatch({ expectedRevision, enabled });
   }
 
-  async attachmentRetention(enabled?: boolean): Promise<boolean> {
-    const session = this.#client?.session;
-    if (this.#closed || this.#status !== "ready" || session?.attachmentRetention === undefined) throw new SessionError("unsupported");
-    return session.attachmentRetention(enabled);
-  }
-
   async projectContent(operation: ProjectContentOperation, input: ProjectContentInput): Promise<ProjectContentOutput> {
     const session = this.#client?.session;
     if (session?.projectContent === undefined) throw new SessionError("unsupported");
@@ -473,7 +467,7 @@ export class FactoryAppController {
       // only while the floor is still shown; an abandoned round owes nothing.
       const due = this.#runPathsDue;
       this.#runPathsDue = false;
-      if (!this.#current(generation)) return;
+      if (!this.#current(generation) || this.#status !== "ready") return;
       if (due && this.#runPathsTimer !== undefined) this.#pollRunPaths();
       // An agent that stopped running loses its entry; an unchanged round is
       // not a new snapshot, so the floor does not re-render on a heartbeat.
@@ -808,7 +802,15 @@ export class FactoryAppController {
   async loadRepositories(projectId: string): Promise<void> {
     const session = this.#client?.session;
     if (!this.#current(this.#generation) || session === undefined || typeof session.getRepositories !== "function") return;
-    this.#repositories.set(projectId, await session.getRepositories(projectId));
+    const generation = this.#generation;
+    try {
+      const repositories = await session.getRepositories(projectId);
+      if (!this.#current(generation) || this.#status !== "ready") return;
+      this.#repositories.set(projectId, repositories);
+    } catch {
+      if (!this.#current(generation) || this.#status !== "ready") return;
+      this.#repositories.delete(projectId);
+    }
     this.#publish();
   }
   async mutateRepository(request: RepositoryMutation): Promise<void> {
@@ -820,16 +822,39 @@ export class FactoryAppController {
   async loadIntake(projectId: string): Promise<void> {
     const session = this.#client?.session;
     if (!this.#current(this.#generation) || session === undefined) return;
+    const generation = this.#generation;
     this.#intakePending.add(projectId); this.#publish();
-    try { this.#intake.set(projectId, await session.intake({ action: "list", project_id: projectId })); this.#intakeErrors.delete(projectId); }
+    try {
+      const result = await session.intake({ action: "list", project_id: projectId });
+      if (!this.#current(generation) || this.#status !== "ready") return;
+      this.#intake.set(projectId, result); this.#intakeErrors.delete(projectId);
+    }
     catch (error) { this.#intakeErrors.set(projectId, finiteError(error).code); }
     finally { this.#intakePending.delete(projectId); this.#publish(); }
   }
   async intakeAction(projectId: string, request: Parameters<BrowserSession["intake"]>[0]): Promise<void> {
     const session = this.#client?.session;
     if (!this.#current(this.#generation) || session === undefined) return;
-    try { this.#intake.set(projectId, await session.intake(request)); this.#intakeErrors.delete(projectId); }
-    catch (error) { this.#intakeErrors.set(projectId, finiteError(error).code); }
+    const generation = this.#generation;
+    if (request.action === "preview") {
+      const current = this.#intake.get(projectId);
+      if (current !== undefined) this.#intake.set(projectId, { ...current, candidates: undefined, reviewed_revision: undefined, next_page: undefined });
+    }
+    try {
+      let result = await session.intake(request);
+      if (request.action === "accept" && result.state === "accepted" && result.acceptance_id !== undefined) {
+        result = await session.intake({ action: "import", acceptance_id: result.acceptance_id });
+        if (!this.#current(generation) || this.#status !== "ready") return;
+        if (result.state === "imported") result = await session.intake({ action: "list", project_id: projectId });
+      }
+      if (request.action === "update") result = await session.intake({ action: "list", project_id: projectId });
+      if (!this.#current(generation) || this.#status !== "ready") return;
+      const current = this.#intake.get(projectId);
+      this.#intake.set(projectId, result.sources === undefined && current !== undefined ? { ...current, ...result } : result);
+      if (["content_changed", "ineligible", "withdrawn", "withdrawal_pending"].includes(result.state)) this.#intakeErrors.set(projectId, result.state);
+      else this.#intakeErrors.delete(projectId);
+    }
+    catch (error) { if (this.#current(generation) && this.#status === "ready") this.#intakeErrors.set(projectId, finiteError(error).code); }
     this.#publish();
   }
 
@@ -938,6 +963,7 @@ export class FactoryAppController {
       this.#human.clear(true);
       // A reconnect must not show a code minted for the connection that dropped.
       this.#repositories.clear();
+      this.#intake.clear();
     }
     // A wire-level state restart resnapshots on the same authenticated socket;
     // exact terminal discovery and handles remain owned by that session.

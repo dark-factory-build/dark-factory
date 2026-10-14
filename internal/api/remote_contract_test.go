@@ -59,6 +59,51 @@ func TestRemoteRepliesArePairedWithTheirOwnCalls(t *testing.T) {
 	}
 }
 
+func TestOperatorConfigurationRepliesArePairedWithTheirCalls(t *testing.T) {
+	for _, test := range []struct {
+		name  string
+		call  CallKind
+		reply replyKind
+	}{
+		{name: "account update", call: CallAccountUpdate, reply: replyMutation},
+		{name: "attachment retention", call: CallAttachmentRetention, reply: replyContent},
+		{name: "telemetry ingest", call: CallTelemetryIngest, reply: replyContent},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			if !replyMatches(test.call, test.reply) {
+				t.Fatalf("reply %v did not match call %v", test.reply, test.call)
+			}
+		})
+	}
+}
+
+func TestOperatorConfigurationCallsDecodeTheirPublicInputs(t *testing.T) {
+	bearer := testCredential('C')
+	accountID := strings.Repeat("ab", 16)
+	for _, test := range []struct {
+		name  string
+		body  string
+		check func(Call) bool
+	}{
+		{name: "account update", body: `{"method":"account_update","params":{"account_id":"` + accountID + `","expected_revision":3,"label":"renamed"}}`, check: func(call Call) bool {
+			input, ok := call.AccountUpdateInput()
+			return ok && input.AccountID == accountID && input.ExpectedRevision == 3 && input.Label != nil && *input.Label == "renamed"
+		}},
+		{name: "attachment retention", body: `{"method":"attachment_retention","params":{"enabled":false}}`, check: func(call Call) bool {
+			enabled, present, ok := call.AttachmentRetention()
+			return ok && present && !enabled
+		}},
+		{name: "telemetry ingest", body: `{"method":"telemetry_ingest","params":{"action":"status"}}`, check: func(call Call) bool { action, ok := call.TelemetryAction(); return ok && action == "status" }},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			call, code := decodeCall(operatorDomain, bearer, []byte(test.body))
+			if code != "" || !test.check(call) {
+				t.Fatalf("decode code=%q call=%v", code, call.Kind())
+			}
+		})
+	}
+}
+
 func TestRemoteStatusValidationIsStrict(t *testing.T) {
 	connected := RemoteStatus{NodeID: contractNodeID, RelayOrigin: contractRelayWS, Connected: true, Sessions: 3}
 	if !validRemoteStatus(connected) || !validRemoteStatus(RemoteStatus{NodeID: contractNodeID, RelayOrigin: "ws://127.0.0.1:8787"}) {

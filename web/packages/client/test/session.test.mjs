@@ -582,20 +582,6 @@ test("console edits and topology carry exact bodies and correlate their results"
   session.close();
 });
 
-test("telemetry ingest correlates its result and carries a minted secret only in that answer", async () => {
-  const { session, socket } = await openHumanSession();
-  const pending = session.telemetryIngest("mint");
-  const frame = decodeClientControl(socket.sent.at(-1));
-  assert.equal(frame.type, "TELEMETRY_INGEST");
-  assert.deepEqual(frame.body, { action: "mint" });
-  const body = { url: "https://relay.darkfactory.build/ingest/n0/v1/traces", secret: "A".repeat(43), active: true };
-  socket.reply(encodeServerControl({ type: "TELEMETRY_INGEST_RESULT", id: frame.id, body }));
-  assert.deepEqual(await pending, body);
-  // A secret with nothing active is not a shape the factory sends.
-  assert.throws(() => encodeServerControl({ type: "TELEMETRY_INGEST_RESULT", id: "x", body: { ...body, active: false } }));
-  session.close();
-});
-
 test("remote invitation correlates its own result and needs bounded human-actions authority", async () => {
   const invitation = {
     link: "https://app.darkfactory.build/remote#df_remote&node=n0&expires=1767225600",
@@ -2165,40 +2151,6 @@ test("account discovery and linking correlate by request id and gate on capabili
   session.close();
 });
 
-test("account update emits one revisioned rename or unlink request", async () => {
-  const { session, socket } = await openControlledStateSession();
-  const accountId = "5a".repeat(16);
-  const rename = session.updateAccount({ accountId, expectedRevision: 3n, label: "dogfood" });
-  const renameFrame = lastFrame(socket, "ACCOUNT_UPDATE");
-  assert.deepEqual(renameFrame.body, { account_id: accountId, expected_revision: 3n, label: "dogfood" });
-  socket.reply(encodeServerControl({ type: "ACCOUNT_UPDATE_RESULT", id: renameFrame.id, body: { account_id: accountId, revision: 4n } }));
-  assert.deepEqual(await rename, { accountId, revision: 4n });
-
-  const remove = session.updateAccount({ accountId, expectedRevision: 4n, remove: true });
-  const removeFrame = lastFrame(socket, "ACCOUNT_UPDATE");
-  assert.deepEqual(removeFrame.body, { account_id: accountId, expected_revision: 4n, remove: true });
-  socket.reply(encodeServerControl({ type: "ACCOUNT_UPDATE_RESULT", id: removeFrame.id, body: { account_id: accountId, revision: 5n } }));
-  assert.deepEqual(await remove, { accountId, revision: 5n });
-
-  await assert.rejects(session.updateAccount({ accountId, expectedRevision: 5n }), (error) => error.code === "invalid_request");
-  await assert.rejects(session.updateAccount({ accountId, expectedRevision: 5n, label: "x", remove: true }), (error) => error.code === "invalid_request");
-});
-
-test("account update rejects a reply for the wrong account or revision", async () => {
-  for (const body of [
-    { account_id: "6b".repeat(16), revision: 4n },
-    { account_id: "5a".repeat(16), revision: 5n },
-  ]) {
-    const { session, socket } = await openControlledStateSession();
-    const pending = session.updateAccount({ accountId: "5a".repeat(16), expectedRevision: 3n, label: "dogfood" });
-    const frame = lastFrame(socket, "ACCOUNT_UPDATE");
-    const rejection = assert.rejects(pending, (error) => error instanceof ProtocolError && error.code === "malformed");
-    socket.reply(encodeServerControl({ type: "ACCOUNT_UPDATE_RESULT", id: frame.id, body }));
-    await rejection;
-    assert.equal(session.status, "closed");
-  }
-});
-
 test("a push subscription correlates its own result and an old daemon's refusal costs nothing else", async () => {
   const subscription = { endpoint: "https://web.push.apple.com/QGdfl/abc", public_key: "B" + "a".repeat(86), private_key: "MIGH" };
   const { session, socket } = await openHumanSession();
@@ -2434,21 +2386,6 @@ test("closing during attachment file reading rejects without sending or hanging"
   release(new Uint8Array([1]).buffer);
   await rejected;
   assert.equal(socket.sent.length, sent);
-});
-
-test("attachment retention reads and saves through administration traffic", async () => {
-  const { session, socket } = await openHumanSession(undefined, CAPABILITIES.observe | CAPABILITIES.administration);
-  for (const value of [undefined, true, false]) {
-    const pending = session.attachmentRetention(value);
-    const frame = lastFrame(socket, "ATTACHMENT_RETENTION");
-    assert.deepEqual(frame.body, value === undefined ? {} : { enabled: value });
-    socket.reply(encodeServerControl({ type: "ATTACHMENT_RETENTION_RESULT", id: frame.id, body: { enabled: value ?? false } }));
-    assert.equal(await pending, value ?? false);
-  }
-  session.close();
-  const observer = await openHumanSession(undefined, CAPABILITIES.observe);
-  await assert.rejects(observer.session.attachmentRetention(true), (error) => error.code === "unauthorized");
-  observer.session.close();
 });
 
 test("factory dispatch is fenced, revisioned, and exact-correlated", async () => {

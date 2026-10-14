@@ -273,6 +273,7 @@ type attemptCommand struct {
 
 	kind              commandKind
 	removeAttachments bool
+	retentionEnabled  *bool
 	operatorControl   bool
 	attemptRead       bool
 	home              string
@@ -725,7 +726,7 @@ func parse(args []string) (attemptCommand, bool, bool) {
 		}
 		return attemptCommand{kind: commandProfile, seconds: uint32(seconds)}, false, true
 	}
-	if len(args) >= 1 && (args[0] == "debug" || args[0] == "status" || args[0] == "storage" || args[0] == "backup" || args[0] == "content" || args[0] == "outcome" || args[0] == "project" || args[0] == "agent" || args[0] == "account" || args[0] == "task" || args[0] == "worker" || args[0] == "dispatch" || args[0] == "capacity" || args[0] == "intake" || args[0] == "production") {
+	if len(args) >= 1 && (args[0] == "debug" || args[0] == "status" || args[0] == "storage" || args[0] == "backup" || args[0] == "content" || args[0] == "outcome" || args[0] == "project" || args[0] == "agent" || args[0] == "account" || args[0] == "task" || args[0] == "worker" || args[0] == "dispatch" || args[0] == "capacity" || args[0] == "intake" || args[0] == "production" || args[0] == "attachment" || args[0] == "telemetry") {
 		return parseOperator(args)
 	}
 	if len(args) >= 1 && args[0] == "overseer" {
@@ -1677,14 +1678,16 @@ func parseOperator(args []string) (attemptCommand, bool, bool) {
 	}
 	if len(args) >= 2 && args[0] == "attachment" && args[1] == "retention" {
 		values, ok := pairedFlagValues(args[2:], false, "--enabled")
-		enabled := true
+		var enabled *bool
 		if value, present := values["--enabled"]; present {
-			enabled = value == "true"
 			if value != "true" && value != "false" {
 				ok = false
+			} else {
+				parsed := value == "true"
+				enabled = &parsed
 			}
 		}
-		return attemptCommand{kind: commandAttachmentRetention, enabled: enabled}, false, ok
+		return attemptCommand{kind: commandAttachmentRetention, retentionEnabled: enabled}, false, ok
 	}
 	if len(args) >= 2 && args[0] == "telemetry" && args[1] == "ingest" {
 		values, ok := pairedFlagValues(args[2:], false, "--action")
@@ -2358,7 +2361,7 @@ func runOperator(ctx context.Context, command attemptCommand, getenv func(string
 		}
 		return writeJSON(stdout, result)
 	case commandAttachmentRetention:
-		result, callErr := client.AttachmentRetention(callContext, &command.enabled)
+		result, callErr := client.AttachmentRetention(callContext, command.retentionEnabled)
 		if callErr != nil {
 			return writeWebFailure(stderr, "attachment retention", callErr)
 		}

@@ -25,6 +25,7 @@ import (
 	"github.com/dark-factory-build/dark-factory/internal/install"
 	"github.com/dark-factory-build/dark-factory/internal/kernel"
 	"github.com/dark-factory-build/dark-factory/internal/maintainer"
+	"github.com/dark-factory-build/dark-factory/internal/relayhost"
 	"github.com/dark-factory-build/dark-factory/internal/runner"
 )
 
@@ -67,6 +68,88 @@ func TestProfileOperatorAPIWritesProfiles(t *testing.T) {
 		if info.Size() == 0 || info.Mode().Perm() != 0o600 {
 			t.Fatalf("profile %q metadata = size %d mode %o", path, info.Size(), info.Mode().Perm())
 		}
+	}
+}
+
+func TestAttachmentRetentionOperatorAPIUsesDaemonStore(t *testing.T) {
+	fixture := newDispatchFixture(t)
+	operator, err := api.NewOperatorClient(fixture.socket, fixture.operator)
+	if err != nil {
+		t.Fatal(err)
+	}
+	done := fixture.serve(t)
+	enabled := false
+	result, err := operator.AttachmentRetention(context.Background(), &enabled)
+	waitDispatch(t, done)
+	if err != nil {
+		t.Fatalf("attachment retention: %v", err)
+	}
+	if result.Enabled {
+		t.Fatalf("attachment retention remained enabled: %+v", result)
+	}
+}
+
+func TestAccountUpdateOperatorAPIUsesDaemonStore(t *testing.T) {
+	fixture := newDispatchFixture(t)
+	operator, err := api.NewOperatorClient(fixture.socket, fixture.operator)
+	if err != nil {
+		t.Fatal(err)
+	}
+	accountID := testID(61)
+	rawID, err := hex.DecodeString(accountID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	accountKey, err := kernel.AccountIDFromBytes(rawID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := fixture.store.LinkAccount(context.Background(), kernel.NewAccount{ID: accountKey, Provider: kernel.ProviderCodex, Home: filepath.Join(t.TempDir(), "login"), Label: "before"}, mustKernelTime(t, 1000)); err != nil {
+		t.Fatal(err)
+	}
+	label := "after"
+	done := fixture.serve(t)
+	result, err := operator.UpdateAccount(context.Background(), api.AccountUpdateInput{AccountID: accountID, ExpectedRevision: 1, Label: &label})
+	waitDispatch(t, done)
+	if err != nil || result.Revision != 2 {
+		t.Fatalf("account update = %+v, %v", result, err)
+	}
+	accounts, err := fixture.store.ListAccounts(context.Background())
+	if err != nil || len(accounts) != 1 || accounts[0].Label != label {
+		t.Fatalf("stored accounts = %+v, %v", accounts, err)
+	}
+}
+
+func TestTelemetryIngestOperatorAPIUsesRelayHandler(t *testing.T) {
+	fixture := newDispatchFixture(t)
+	identity, err := relayhost.LoadOrCreate(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	fixture.daemon.browserMu.Lock()
+	fixture.daemon.relay = &RelayRuntime{connector: &relayhost.Connector{}, identity: identity, relayOrigin: "ws://relay.example", browserAddress: "127.0.0.1:43123", ingestPath: filepath.Join(t.TempDir(), "ingest.sha256")}
+	fixture.daemon.browserMu.Unlock()
+	operator, err := api.NewOperatorClient(fixture.socket, fixture.operator)
+	if err != nil {
+		t.Fatal(err)
+	}
+	done := fixture.serve(t)
+	minted, err := operator.TelemetryIngest(context.Background(), "mint")
+	waitDispatch(t, done)
+	if err != nil || minted.Secret == "" || !minted.Active {
+		t.Fatalf("telemetry mint = %+v, %v", minted, err)
+	}
+	done = fixture.serve(t)
+	status, err := operator.TelemetryIngest(context.Background(), "status")
+	waitDispatch(t, done)
+	if err != nil || !status.Active || status.Secret != "" {
+		t.Fatalf("telemetry status = %+v, %v", status, err)
+	}
+	done = fixture.serve(t)
+	revoked, err := operator.TelemetryIngest(context.Background(), "revoke")
+	waitDispatch(t, done)
+	if err != nil || revoked.Active || revoked.Secret != "" {
+		t.Fatalf("telemetry revoke = %+v, %v", revoked, err)
 	}
 }
 

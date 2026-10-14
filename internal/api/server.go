@@ -1441,6 +1441,10 @@ func replyMatches(kind CallKind, reply replyKind) bool {
 		return reply == replyAgentPaths
 	case CallAccountsDiscover:
 		return reply == replyAccounts
+	case CallAccountUpdate:
+		return reply == replyMutation
+	case CallAttachmentRetention, CallTelemetryIngest:
+		return reply == replyContent
 	case CallAttemptTask:
 		return reply == replyAttemptTask
 	case CallAttemptSource:

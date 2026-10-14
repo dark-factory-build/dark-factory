@@ -22,8 +22,6 @@ import {
   type PairResultFrame,
   type PushSubscribeBody,
   type RemoteInviteResultBody,
-  type TelemetryIngestBody,
-  type TelemetryIngestResultBody,
   type ServerControlFrame,
   type StateChangedFrame,
   type StateSnapshotFrame,
@@ -169,7 +167,7 @@ export type OperationalNodeView = OperationalNodeBody;
 /** One agent's live run and the repository directories it has changed. */
 export type RunPathsView = Readonly<{ agentId: string; runId: string; paths: readonly string[]; telemetry?: Readonly<RunTelemetry> }>;
 /** `agentId` is the scope id: the agent, or the project for a project-scoped list. */
-type AccountKind = "TELEMETRY_INGEST_RESULT" | "ATTACHMENT_RETENTION_RESULT" | "FACTORY_DISPATCH_RESULT" | "PROJECT_CONTENT_RESULT" | "ACCOUNTS" | "ACCOUNT_LINK_RESULT" | "ACCOUNT_UPDATE_RESULT" | "BROWSER_CLIENTS" | "BROWSER_CLIENT_REVOKE_RESULT" | "PROJECT_CREATE_RESULT" | "REPOSITORIES" | "REPOSITORY_MUTATE_RESULT";
+type AccountKind = "FACTORY_DISPATCH_RESULT" | "PROJECT_CONTENT_RESULT" | "ACCOUNTS" | "ACCOUNT_LINK_RESULT" | "BROWSER_CLIENTS" | "BROWSER_CLIENT_REVOKE_RESULT" | "PROJECT_CREATE_RESULT" | "REPOSITORIES" | "REPOSITORY_MUTATE_RESULT";
 type AccountCorrelation = { operation?: ProjectContentOperation; accountId?: string; entityId?: string; expectedRevision?: bigint; enabled?: boolean; action?: RepositoryMutateBody["action"] };
 type AccountPending = Request & AccountCorrelation;
 
@@ -196,9 +194,6 @@ export type GitHubConnectionResult = Readonly<GitHubConnectionResultBody>;
 
 /** One minted remote pairing invitation and the code that carries it. */
 export type RemoteInvite = Readonly<{ link: string; expiresAtMs: bigint; svg: string }>;
-/** The telemetry ingest endpoint; `secret` is non-empty only in the answer to a mint, and nothing keeps it. */
-export type TelemetryIngest = Readonly<TelemetryIngestResultBody>;
-
 export type HumanRequestCancelRunDescriptor = Readonly<{
   requestId: string;
   runId: string;
@@ -475,12 +470,6 @@ export class BrowserSession {
   }
 
   /** Private, cursor-paged completed work for one agent. */
-  /** Explicit optional library access; it does not subscribe or prefetch. */
-  async attachmentRetention(enabled?: boolean): Promise<boolean> {
-    const result = await this.#accountRequest<{ enabled: boolean }>("ATTACHMENT_RETENTION_RESULT", CAPABILITIES.administration, "attachment-retention", (id) => encodeClientControl({ type: "ATTACHMENT_RETENTION", id, body: enabled === undefined ? {} : { enabled } }));
-    return result.enabled;
-  }
-
   /** Enable or pause factory scheduling at an exact durable factory revision. */
   async setDispatch(request: { expectedRevision: bigint; enabled: boolean }): Promise<FactoryDispatchResult> {
     if (request.expectedRevision < 1n || request.expectedRevision > MAX_SQLITE_INTEGER) return Promise.reject(new SessionError("invalid_request"));
@@ -513,16 +502,6 @@ export class BrowserSession {
     return this.#accountRequest("ACCOUNT_LINK_RESULT", CAPABILITIES.administration, "account-link", (id) => encodeClientControl({ type: "ACCOUNT_LINK", id, body: { provider: request.provider, home: request.home, label: request.label } }));
   }
 
-  /** Renames or removes a linked login; removal is refused while referenced. */
-  updateAccount(request: { accountId: string; expectedRevision: bigint; label?: string; remove?: boolean }): Promise<AccountUpdateResult> {
-    const hasLabel = request.label !== undefined;
-    const hasRemove = request.remove === true;
-    if (hasLabel === hasRemove || request.label !== undefined && bounded(request.label, MAX_AGENT_NAME_BYTES)) return Promise.reject(new SessionError("invalid_request"));
-    if (request.accountId === "" || !validDynamicID(request.accountId) || request.expectedRevision < 1n || request.expectedRevision > MAX_SQLITE_INTEGER) return Promise.reject(new SessionError("invalid_request"));
-    if ((this.#capabilities & CAPABILITIES.administration) === 0) return Promise.reject(new SessionError("unauthorized"));
-    return this.#accountRequest("ACCOUNT_UPDATE_RESULT", CAPABILITIES.administration, "account-update", (id) => encodeClientControl({ type: "ACCOUNT_UPDATE", id, body: { account_id: request.accountId, expected_revision: request.expectedRevision, ...(request.label === undefined ? { remove: true } : { label: request.label }) } }), { accountId: request.accountId, expectedRevision: request.expectedRevision });
-  }
-
   /** The identities this factory has granted, newest first; administration only. */
   listBrowserClients(): Promise<BrowserClientsView> {
     return this.#accountRequest("BROWSER_CLIENTS", CAPABILITIES.administration, "browser-clients", (id) => encodeClientControl({ type: "BROWSER_CLIENTS_GET", id, body: {} }));
@@ -548,11 +527,6 @@ export class BrowserSession {
     let payload: string;
     try { payload = encodeClientControl({ type: "REMOTE_INVITE", id, body: {} }); } catch (error) { return Promise.reject(error); }
     return this.#track(id, { kind: "REMOTE_INVITE_RESULT" }, payload);
-  }
-
-  /** Reads, mints (rotating) or revokes the telemetry ingest secret. */
-  telemetryIngest(action: TelemetryIngestBody["action"]): Promise<TelemetryIngest> {
-    return this.#accountRequest<TelemetryIngest>("TELEMETRY_INGEST_RESULT", CAPABILITIES.administration, "telemetry-ingest", (id) => encodeClientControl({ type: "TELEMETRY_INGEST", id, body: { action } }));
   }
 
   /** Hands the factory this device's alert subscription. Observing is all it
@@ -865,7 +839,7 @@ export class BrowserSession {
       this.#inviteResult(frame.body, frame.id);
       return;
     }
-    if (frame.type === "TELEMETRY_INGEST_RESULT" || frame.type === "ATTACHMENT_RETENTION_RESULT" || frame.type === "FACTORY_DISPATCH_RESULT" || frame.type === "PROJECT_CONTENT_RESULT" || frame.type === "ACCOUNTS" || frame.type === "ACCOUNT_LINK_RESULT" || frame.type === "ACCOUNT_UPDATE_RESULT" || frame.type === "BROWSER_CLIENTS" || frame.type === "BROWSER_CLIENT_REVOKE_RESULT" || frame.type === "PROJECT_CREATE_RESULT" || frame.type === "REPOSITORIES" || frame.type === "REPOSITORY_MUTATE_RESULT") {
+    if (frame.type === "FACTORY_DISPATCH_RESULT" || frame.type === "PROJECT_CONTENT_RESULT" || frame.type === "ACCOUNTS" || frame.type === "ACCOUNT_LINK_RESULT" || frame.type === "BROWSER_CLIENTS" || frame.type === "BROWSER_CLIENT_REVOKE_RESULT" || frame.type === "PROJECT_CREATE_RESULT" || frame.type === "REPOSITORIES" || frame.type === "REPOSITORY_MUTATE_RESULT") {
       this.#accountResult(frame);
       return;
     }
@@ -1207,9 +1181,8 @@ export class BrowserSession {
     return this.#track(id, { kind, ...correlation }, payload);
   }
 
-  #accountResult(frame: Extract<ServerControlFrame, { type: "TELEMETRY_INGEST_RESULT" | "ATTACHMENT_RETENTION_RESULT" | "FACTORY_DISPATCH_RESULT" | "PROJECT_CONTENT_RESULT" | "ACCOUNTS" | "ACCOUNT_LINK_RESULT" | "ACCOUNT_UPDATE_RESULT" | "BROWSER_CLIENTS" | "BROWSER_CLIENT_REVOKE_RESULT" | "PROJECT_CREATE_RESULT" | "REPOSITORIES" | "REPOSITORY_MUTATE_RESULT" }>): void {
+  #accountResult(frame: Extract<ServerControlFrame, { type: "FACTORY_DISPATCH_RESULT" | "PROJECT_CONTENT_RESULT" | "ACCOUNTS" | "ACCOUNT_LINK_RESULT" | "BROWSER_CLIENTS" | "BROWSER_CLIENT_REVOKE_RESULT" | "PROJECT_CREATE_RESULT" | "REPOSITORIES" | "REPOSITORY_MUTATE_RESULT" }>): void {
     const pending = this.#pending<AccountPending>(frame.id, frame.type);
-    if (frame.type === "ATTACHMENT_RETENTION_RESULT" || frame.type === "TELEMETRY_INGEST_RESULT") { this.#requests.delete(frame.id); pending.resolve(Object.freeze(frame.body) as never); return; }
     if (frame.type === "FACTORY_DISPATCH_RESULT") {
       if (pending.expectedRevision === undefined || pending.enabled === undefined || frame.body.revision !== pending.expectedRevision + 1n || frame.body.enabled !== pending.enabled) throw new ProtocolError("malformed");
       this.#requests.delete(frame.id); pending.resolve(Object.freeze(frame.body) as never); return;
@@ -1248,7 +1221,6 @@ export class BrowserSession {
       return;
     }
     if (frame.type === "ACCOUNTS") { this.#requests.delete(frame.id); pending.resolve(Object.freeze({ accounts: frame.body.accounts.map((account) => Object.freeze({ ...account })), ...(frame.body.next_offset === undefined ? {} : { next_offset: frame.body.next_offset }) }) as never); return; }
-    if (frame.type === "ACCOUNT_UPDATE_RESULT" && (pending.accountId !== frame.body.account_id || pending.expectedRevision === undefined || frame.body.revision !== pending.expectedRevision + 1n)) throw new ProtocolError("malformed");
     this.#requests.delete(frame.id);
     pending.resolve(Object.freeze({ accountId: frame.body.account_id, revision: frame.body.revision }) as never);
   }

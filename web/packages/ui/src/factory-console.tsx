@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
-import type { DiscoveredAccount, AccountItem, AgentItem, GitHubConnectionBody, OperationalNodeView, ProjectItem, RepositoryMutation, SpriteAppearance, TaskHistoryView, TaskItem, TelemetryIngest, TelemetryIngestBody } from "@dark-factory/client";
+import type { AgentItem, OperationalNodeView, ProjectItem, RepositoryMutation, SpriteAppearance, TaskHistoryView, TaskItem } from "@dark-factory/client";
 import { type FactoryAgentSelection, type FactoryAppSnapshot, type FactoryHumanRequestView } from "./factory-app-controller.js";
 import { AgentList, FactoryFloor } from "./console-screens.js";
 import { AgentPanel, ConsoleDialog, HumanRequestPanel, WorkPanel, TaskDetail, editErrorCopy, type AgentConfigEdit, type AgentPanelView, type TaskEdit, type TaskBrief, type TaskScope, type TaskContentChip, type AddTask, type WorkFilter } from "./console-sidebar.js";
