@@ -56,6 +56,10 @@ var serviceBinaryNames = [3]string{"factoryd", "factoryctl", "factory-runner"}
 type UpgradeMarker struct {
 	Target string `json:"target"`
 	Reason string `json:"reason,omitempty"`
+	// TrialPassed records the durable boundary between a successful trial and
+	// its promotion. The old build can resume the promotion after its
+	// supervisor is interrupted.
+	TrialPassed bool `json:"trial_passed,omitempty"`
 	// Trial is the process group of a running trial child, and TrialStart
 	// its leader's start time, for the boot after a supervisor that died
 	// mid-trial to stop exactly that child.

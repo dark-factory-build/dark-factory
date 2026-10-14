@@ -132,6 +132,104 @@ func TestStagedBuildThatAnswersAndStopsCleanlyIsPromoted(t *testing.T) {
 	bootUntilSettled(t, home)
 }
 
+func TestPassedTrialRecoveryRestartsAndSettlesWithoutRepeatingPromotion(t *testing.T) {
+	revision := strings.Repeat("d", 40)
+	home := stagedHome(t, "serve", "development")
+	ctx := context.Background()
+	opened, err := install.OpenOperationalHome(ctx, home)
+	if err != nil {
+		t.Fatal(err)
+	}
+	store, err := opened.OpenStore(ctx)
+	if err != nil {
+		_ = opened.Close()
+		t.Fatal(err)
+	}
+	project, projectErr := kernel.ProjectIDFromBytes(bytes.Repeat([]byte{0x32}, kernel.IDBytes))
+	at, atErr := kernel.NewUnixMillis(time.Now().UnixMilli())
+	if err = errors.Join(err, projectErr, atErr); err == nil {
+		_, err = store.CreateProject(ctx, kernel.NewProject{ID: project, Name: "self", Root: filepath.Join(filepath.Dir(home), "repo")}, at)
+	}
+	if err == nil {
+		err = store.RecordDelivery(ctx, project, "dark-factory-build/dark-factory", kernel.ProductionDelivery{ID: "release:development", Kind: "runtime", Destination: "factoryd", Revision: revision, State: "running", Phase: "trial", PullRequests: []uint64{}, UpdatedAt: at.Int64()}, at)
+	}
+	if err = errors.Join(err, store.Close(), opened.Close()); err != nil {
+		t.Fatal(err)
+	}
+	promote, calls := promoteService, 0
+	t.Cleanup(func() { promoteService = promote })
+	promoteService = func(home string) error {
+		calls++
+		if calls == 1 {
+			return errors.New("supervisor interrupted before promotion")
+		}
+		return install.PromoteService(home)
+	}
+	selfSource = func() string { return runningSource }
+	settled := make(chan string, 1)
+	settle := releaseSettledHook
+	t.Cleanup(func() { releaseSettledHook = settle })
+	releaseSettledHook = func(target, state string) { settled <- target + " " + state }
+	if err := superviseTrial(home, childArgs(home), install.UpgradeMarker{Target: "development"}); !errors.Is(err, errRestart) {
+		t.Fatalf("interrupted trial = %v", err)
+	}
+	if calls != 1 {
+		t.Fatalf("promotion calls after trial = %d, want 1", calls)
+	}
+	if marker, present, err := install.ReadUpgradeMarker(home); err != nil || !present || !marker.TrialPassed {
+		t.Fatalf("passed marker after interruption = %+v, %t, %v", marker, present, err)
+	}
+	if current, _ := os.ReadFile(filepath.Join(install.ServiceDirectoryPath(home), "bin", "current", "factoryd")); string(current) != currentProgram {
+		t.Fatal("an interrupted trial changed current")
+	}
+	if err := serve(context.Background(), testConfig(home)); !errors.Is(err, errRestart) {
+		t.Fatalf("recovery = %v", err)
+	}
+	if calls != 2 {
+		t.Fatalf("promotion calls after recovery = %d, want 2", calls)
+	}
+	if marker, present, err := install.ReadUpgradeMarker(home); err != nil || !present || !marker.TrialPassed {
+		t.Fatalf("passed marker after recovery = %+v, %t, %v", marker, present, err)
+	}
+	if current, _ := os.ReadFile(filepath.Join(install.ServiceDirectoryPath(home), "bin", "current", "factoryd")); string(current) == currentProgram {
+		t.Fatal("recovery did not promote the passed trial")
+	}
+	selfSource = func() string { return "development" }
+	bootCtx, cancel := context.WithCancel(ctx)
+	done := make(chan error, 1)
+	go func() { done <- serve(bootCtx, testConfig(home)) }()
+	select {
+	case result := <-settled:
+		if result != "development verified" {
+			t.Fatalf("settlement = %q", result)
+		}
+	case err := <-done:
+		t.Fatalf("settling boot = %v", err)
+	case <-time.After(5 * time.Second):
+		t.Fatal("release never reached verified")
+	}
+	cancel()
+	if err := <-done; err != nil {
+		t.Fatal(err)
+	}
+	if calls != 2 {
+		t.Fatalf("promotion calls after settlement = %d, want 2", calls)
+	}
+	opened, err = install.OpenOperationalHome(ctx, home)
+	if err != nil {
+		t.Fatal(err)
+	}
+	store, err = opened.OpenStore(ctx)
+	if err != nil {
+		_ = opened.Close()
+		t.Fatal(err)
+	}
+	_, delivery, found, err := store.Delivery(ctx, "release:development")
+	if err = errors.Join(err, store.Close(), opened.Close()); err != nil || !found || delivery.State != "verified" || delivery.Phase != "" {
+		t.Fatalf("settled release = %+v, %t, %v", delivery, found, err)
+	}
+}
+
 // A failed trial whose child migrated the store leaves a schema the old
 // build refuses: the old build restores its backup and serves.
 func TestOldBuildRestoresTheBackupOnlyOverAMigratedStore(t *testing.T) {
