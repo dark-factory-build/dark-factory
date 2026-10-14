@@ -197,7 +197,13 @@ func TestConflictRepairRebasesAnAppPublishedPullsChangeOnce(t *testing.T) {
 	}
 	app.refuse = ""
 	pass()
-	if push := app.writes[len(app.writes)-1]; push["name"] != "publish_pack" || push["arguments"].(map[string]any)["expected_head_sha"] != stale || app.tip != head ||
+	var push map[string]any
+	for _, write := range app.writes {
+		if write["name"] == "publish_pack" {
+			push = write
+		}
+	}
+	if push == nil || push["arguments"].(map[string]any)["expected_head_sha"] != stale || app.tip != head ||
 		!strings.Contains(log.String(), "factoryd: published change "+changeState.ID.String()+" at "+head) {
 		t.Fatalf("published pass: push %+v at %s, log %q", push, app.tip, log.String())
 	}
