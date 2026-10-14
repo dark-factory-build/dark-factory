@@ -123,10 +123,6 @@ func encodeDecoded(frame ControlFrame) ([]byte, error) {
 		return EncodeTaskHistoryGet(frame.ID, value)
 	case TaskHistory:
 		return EncodeTaskHistory(frame.ID, value)
-	case TaskListGet:
-		return EncodeTaskListGet(frame.ID, value)
-	case TaskList:
-		return EncodeTaskList(frame.ID, value)
 	case TaskDetailGet:
 		return EncodeTaskDetailGet(frame.ID, value)
 	case TaskDetail:
