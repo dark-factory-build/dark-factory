@@ -381,7 +381,7 @@ func TestOverseerWakeSummarisesTasks(t *testing.T) {
 	if _, err := store.UpdateTask(ctx, cancelled.ID, cancelled.Revision, TaskPatch{Cancel: true}, mustTime(t, 100)); err != nil {
 		t.Fatal(err)
 	}
-			if bodies := wakeBodies(t, store, 1_000_000); len(bodies) != 0 {
+	if bodies := wakeBodies(t, store, 1_000_000); len(bodies) != 0 {
 		t.Fatalf("cancelled task woke the overseer: %q", bodies)
 	}
 

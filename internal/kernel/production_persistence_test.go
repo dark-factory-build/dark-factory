@@ -287,44 +287,9 @@ func TestOverseerWakeRule(t *testing.T) {
 		}
 		return tasks
 	}
-	rewake := OverseerRewakeAfter.Milliseconds()
 	at := int64(200_080)
 	if first := wake(at); len(first) != 0 {
 		t.Fatalf("settled Change woke the overseer = %+v", first)
-	}
-	return
-
-	first := wake(at)
-	if len(first) != 1 || first[0].Priority != 1000 || !strings.Contains(first[0].Body, "\n- "+terminal.TaskID.String()+" ") {
-		t.Fatalf("first wake = %+v", first)
-	}
-	if again := wake(at + 2*rewake); len(again) != 0 {
-		t.Fatalf("second carrier while one is queued = %+v", again)
-	}
-	for round := range 4 {
-		settleCarrier(t, store, at+1, byte(31+21*round), "ran")
-		if early := wake(at + rewake - 1); len(early) != 0 {
-			t.Fatalf("round %d re-woke early = %+v", round, early)
-		}
-		next := wake(at + rewake)
-		if round == 3 {
-			if len(next) != 0 {
-				t.Fatalf("fourth re-wake = %+v", next)
-			}
-			break
-		}
-		if len(next) != 1 {
-			t.Fatalf("re-wake %d = %+v", round+1, next)
-		}
-		at += rewake
-	}
-	// Publication clears it.
-	pr := ProductionPullRequest{Number: 7, Title: "Ship", URL: "https://github.com/example/factory/pull/7", Head: hex.EncodeToString(head.Bytes()), Branch: "factory/" + change.ID.String()[:12], Base: "main", State: "open", Review: ProductionReview{Head: hex.EncodeToString(head.Bytes()), State: "unknown"}}
-	if err := store.RecordPublication(ctx, terminal.ProjectID, terminal.TaskID, "example/factory", pr, mustTime(t, at+3*rewake)); err != nil {
-		t.Fatal(err)
-	}
-	if published := wake(at + 5*rewake); len(published) != 0 {
-		t.Fatalf("published Change still woke the overseer = %+v", published)
 	}
 }
 
