@@ -310,7 +310,7 @@ func (daemon *Daemon) publishPull(ctx context.Context, c kernel.PublishableChang
 			if err == nil && !done {
 				updatedBody := body
 				if issue != 0 && !linearSource && !crossSource {
-					updatedBody = referenceIssue(updatedBody, issue)
+					updatedBody = fmt.Sprintf("%s\n\nRefs #%d", referenceIssue(updatedBody, issue), issue)
 				}
 				_, err = call(ctx, "update_pull_request_body", map[string]any{"repository": repo, "operation_id": operation(step), "pull_number": c.Pull, "body": updatedBody})
 			}
