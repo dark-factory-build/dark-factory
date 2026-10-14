@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"path/filepath"
 	"slices"
+	"strconv"
 	"strings"
 	"testing"
 )
@@ -406,9 +407,8 @@ func TestOverseerFailedReleaseEscalatesOncePerCause(t *testing.T) {
 			t.Fatalf("long cause %s wake = %q", directory, bodies)
 		}
 	}
-	// A full wake that named no item (one overflowing with older items)
-	// handled a failure too: a same-commit retry failing the same way does
-	// not wake again.
+	// A full wake that did not print the failure (one overflowing with older
+	// items) is not its look (#1972): the failure still wakes once.
 	settleCarrier(t, store, at+settle+1, 157, "ran")
 	at += rewake
 	release('e', "failed", "stage", "backup: disk full", at)
@@ -419,8 +419,8 @@ func TestOverseerFailedReleaseEscalatesOncePerCause(t *testing.T) {
 	at += rewake
 	release('e', "running", "build", "", at)
 	release('e', "failed", "stage", "backup: disk still full", at+1)
-	if bodies := wakeBodies(t, store, at+1+settle); len(bodies) != 0 {
-		t.Fatalf("retry after a full wake re-woke = %q", bodies)
+	if bodies := wakeBodies(t, store, at+1+settle); len(bodies) != 1 || !strings.Contains(bodies[0], "backup: disk still full") {
+		t.Fatalf("failure a full wake left out = %q", bodies)
 	}
 }
 
@@ -478,7 +478,8 @@ func TestOverseerWakeSummarisesTasks(t *testing.T) {
 	}
 }
 
-// Lines that overflow the provider bound are dropped first, then escalations.
+// Lines that overflow the provider bound are dropped from the end one at a
+// time, before any escalation, and the wake becomes full.
 func TestOverseerWakeInstructionFallsBackToFull(t *testing.T) {
 	t.Parallel()
 	line := "- " + strings.Repeat("x", 200)
@@ -488,11 +489,50 @@ func TestOverseerWakeInstructionFallsBackToFull(t *testing.T) {
 	}
 	prior := taskID(t, 9)
 	body := overseerWakeInstruction(ProviderCodex, "Supervise.", "counts", lines, []string{"Escalated: stuck"}, &prior, false)
-	if strings.Contains(body, line) || !strings.Contains(body, "mode=full") || !strings.HasSuffix(body, "\nEscalated: stuck") {
-		t.Fatalf("overflow body = %q", body)
+	if kept := strings.Count(body, line); kept == 0 || wakeBodyFits(ProviderCodex, body+"\n"+line) ||
+		!strings.Contains(body, "mode=full") || !strings.HasSuffix(body, "\nEscalated: stuck") {
+		t.Fatalf("overflow body keeps %d lines = %q", kept, body)
 	}
 	if body := overseerWakeInstruction(ProviderCodex, "Supervise.", "counts", lines[:1], nil, &prior, false); !strings.Contains(body, "mode=targeted; prior_task_id="+prior.String()) || !strings.HasSuffix(body, "\n"+line) {
 		t.Fatalf("targeted body = %q", body)
+	}
+}
+
+// #1972: 100 items due at once behind a 4 KiB standing instruction overflow
+// every wake, yet successive wakes name each exactly once: an item counts as
+// seen only once a carrier printed its key, so none is lost.
+func TestOverseerOverflowingWakesDrainEveryItem(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	store, _, overseer := wakeFixture(t)
+	policy, after, instruction := IdleStandingInstruction, uint32(1), strings.Repeat("Supervise. ", 372)
+	if _, err := store.UpdateAgent(ctx, overseer.ID, overseer.Revision, AgentPatch{IdlePolicy: &policy, IdleAfterSeconds: &after, IdleInstruction: &instruction}, mustTime(t, 5)); err != nil {
+		t.Fatal(err)
+	}
+	head := strings.Repeat("a", 40)
+	for number := range 100 {
+		escalate(t, store, overseer.ProjectID, strconv.Itoa(number+1), "open", head, head, 1000)
+	}
+	named := map[int]int{}
+	at := 1000 + overseerWakeSettle.Milliseconds()
+	for wake := 0; ; wake++ {
+		bodies := wakeBodies(t, store, at)
+		if len(bodies) == 0 {
+			break
+		}
+		if len(bodies) != 1 || wake == 100 || !wakeBodyFits(ProviderCodex, bodies[0]) || !strings.Contains(bodies[0], "[reviewer:op") {
+			t.Fatalf("wake %d = %q", wake, bodies)
+		}
+		for number := range 100 {
+			named[number+1] += strings.Count(bodies[0], "[reviewer:op"+strconv.Itoa(number+1)+"]")
+		}
+		settleCarrier(t, store, at+1, byte(10+wake*21), "ran")
+		at += overseerWakeSettle.Milliseconds()
+	}
+	for number := range 100 {
+		if named[number+1] != 1 {
+			t.Fatalf("item %d named %d times: %v", number+1, named[number+1], named)
+		}
 	}
 }
 
@@ -729,8 +769,8 @@ func TestOverseerNeverStartedWakeLeavesItemDue(t *testing.T) {
 		// The carrier failed without starting (or, for contrast,
 		// after its run started).
 		for statement, args := range map[string][]any{
-			`UPDATE tasks SET title = ?, body = 'Escalated: stuck 7', status = 'failed', work_revision = 1, completed_at_ms = updated_at_ms WHERE id = ?`: {overseerWakeTitle, finalizing.TaskID.Bytes()},
-			`UPDATE runs SET terminal_detail = ?1, proposal_detail = ?1 WHERE id = ?2`:                                                                    {detail, finalizing.ID.Bytes()},
+			`UPDATE tasks SET title = ?, body = 'Factory causal wake: mode=targeted; \nEscalated: stuck 7 [reviewer:op7]', status = 'failed', work_revision = 1, completed_at_ms = updated_at_ms WHERE id = ?`: {overseerWakeTitle, finalizing.TaskID.Bytes()},
+			`UPDATE runs SET terminal_detail = ?1, proposal_detail = ?1 WHERE id = ?2`: {detail, finalizing.ID.Bytes()},
 		} {
 			if _, err := store.writer.ExecContext(ctx, statement, args...); err != nil {
 				t.Fatal(err)
