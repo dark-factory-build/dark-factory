@@ -168,17 +168,9 @@ func (daemon *Daemon) advanceReviewOperations(ctx context.Context, startup bool)
 	if err != nil {
 		return 0, err
 	}
-	// Settled work factoryd has yet to publish moves its pull request's head.
-	unpublished := map[kernel.TaskID]bool{}
-	if at, err := daemon.timestamp(); err == nil {
-		changes, _ := daemon.store.PublishableChanges(ctx, at)
-		for _, c := range changes {
-			unpublished[c.Task.ID] = true
-		}
-	}
 	advanced := 0
 	for _, open := range pulls {
-		acted, err := daemon.reconcilePull(ctx, open, unpublished[open.Task], startup)
+		acted, err := daemon.reconcilePull(ctx, open, startup)
 		if err != nil {
 			daemon.noteMaintainerFault(err)
 			LogFactoryd(daemon.log, "factoryd: reconcile %s#%d: %v\n", open.Repository, open.Pull.Number, err)
@@ -193,7 +185,7 @@ func (daemon *Daemon) advanceReviewOperations(ctx context.Context, startup bool)
 // the exact pull request, its task and the operations at its head, decides
 // once (review.Decide) and takes that one action. An action that fails counts
 // toward one escalation.
-func (daemon *Daemon) reconcilePull(ctx context.Context, open kernel.OpenPull, unpublished, startup bool) (bool, error) {
+func (daemon *Daemon) reconcilePull(ctx context.Context, open kernel.OpenPull, startup bool) (bool, error) {
 	ops := make([]review.Operation, len(open.Operations))
 	for i, document := range open.Operations {
 		if json.Unmarshal(document, &ops[i]) != nil || ops[i].ID == "" {
@@ -236,7 +228,7 @@ func (daemon *Daemon) reconcilePull(ctx context.Context, open kernel.OpenPull, u
 			err = store.Update(ctx, resumed)
 		}
 		return true, err
-	case !daemon.customerMaintainer() || daemon.githubQuotaLow(), unpublished:
+	case !daemon.customerMaintainer() || daemon.githubQuotaLow():
 		// The merge stage runs on the factoryd Maintainer path, and settled
 		// work factoryd has yet to publish moves the head.
 		return false, nil
@@ -289,7 +281,7 @@ func (daemon *Daemon) reconcilePull(ctx context.Context, open kernel.OpenPull, u
 		// (escalated) is checked out again each pass; record the compared
 		// tree on the operation if that cost shows.
 		lacks, why := false, ""
-		if !working && task.CompletedAt != nil && task.CompletedAt.Int64() > op.CreatedAt.UnixMilli() {
+		if !working {
 			lacks, why, err = daemon.publishUnanswered(ctx, open, op.Request)
 		}
 		switch {
@@ -329,6 +321,9 @@ func (daemon *Daemon) reconcilePull(ctx context.Context, open kernel.OpenPull, u
 			}
 		case review.SendBack:
 			err = daemon.sendBackPull(ctx, open, task, op, note)
+			if errors.Is(err, kernel.ErrSuperseded) {
+				_, _, err = daemon.publishUnanswered(ctx, open, op.Request)
+			}
 		case review.Enqueue:
 			if err = coordinator.Backend.Enqueue(ctx, op); err == nil {
 				op.Enqueues++

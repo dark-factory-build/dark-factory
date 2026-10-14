@@ -159,9 +159,9 @@ func TestConflictRepairRebasesAnAppPublishedPullsChangeOnce(t *testing.T) {
 	settlementGit(t, git, repository, "clone", "-q", "--bare", "--shared", repository, bare)
 	app := &fakePublishMaintainer{t: t, bare: bare, main: main, tip: stale, journal: map[string]json.RawMessage{}, refuse: "made.txt", externalRefuse: true}
 	backend := &publishingReviewBackend{checkoutReviewBackend{dir: path}, app}
-	backend.pull = &review.Pull{Head: stale, State: "open", Pending: true}
+	backend.pull = &review.Pull{Head: stale, State: "open", Pending: true, MergeStateStatus: "DIRTY"}
 	fixture.daemon.reviewBackend = func(string, uint64) review.Backend { return backend }
-	op := review.Operation{ID: "op-1800", Request: review.Request{Repository: "team/repo", PullNumber: 12, Head: stale, Base: main, BaseRef: "main"}, State: "completed", CreatedAt: time.UnixMilli(100), UpdatedAt: time.UnixMilli(100)}
+	op := review.Operation{ID: "op-1800", Request: review.Request{Repository: "team/repo", PullNumber: 12, Head: stale, Base: main, BaseRef: "main"}, State: "completed", Rebased: true, CreatedAt: time.UnixMilli(10_000), UpdatedAt: time.UnixMilli(10_000)}
 	document, err := json.Marshal(op)
 	if err != nil {
 		t.Fatal(err)
@@ -172,11 +172,22 @@ func TestConflictRepairRebasesAnAppPublishedPullsChangeOnce(t *testing.T) {
 	fixture.daemon.log = &log
 	pass := func() {
 		t.Helper()
-		if _, err := fixture.daemon.reconcilePull(ctx, stalePull, false, false); err != nil {
+		if _, err := fixture.daemon.reconcilePull(ctx, stalePull, false); err != nil {
 			t.Fatal(err)
+		}
+		if after, _, err := fixture.store.Task(ctx, task.ID); err != nil || after.Revision != task.Revision || after.WorkRevision != task.WorkRevision {
+			t.Fatalf("stale head sent back task: %+v %v", after, err)
 		}
 		if document, found, err := fixture.store.ReviewOperation(ctx, changeState.ProjectID, op.ID); err != nil || found && strings.Contains(string(document), "escalation") {
 			t.Fatalf("stale head record = %s %v", document, err)
+		} else if found {
+			var recorded review.Operation
+			if err := json.Unmarshal(document, &recorded); err != nil {
+				t.Fatal(err)
+			}
+			if strings.Contains(recorded.LastAction, "send it back") {
+				t.Fatalf("stale head attempted send-back: %s", recorded.LastAction)
+			}
 		}
 	}
 	attempt := "factoryd: publish change " + changeState.ID.String() + " at " + head + " for task " + task.ID.String() + ": "
