@@ -510,6 +510,73 @@ func (store *Store) ReleaseProviderResources(ctx context.Context, runID RunID, p
 	return store.updateProviderPair(ctx, runID, processID, groupID, expectedRun, expectedProcess, expectedGroup, identity, "", ResourceReleased, at)
 }
 
+// RecordRecoveredProviderAbsence records the exact provider pair as gone
+// after recovery has positively observed its process group absent. It supplies
+// the recovered exit evidence needed before the identified resources can be
+// released and the run can settle.
+func (store *Store) RecordRecoveredProviderAbsence(ctx context.Context, runID RunID, processID, groupID ResourceID, expectedRun, expectedProcess, expectedGroup Revision, identity ResourceIdentity, at UnixMillis) (Run, Resource, Resource, error) {
+	if runID.zero() || processID.zero() || groupID.zero() || processID == groupID || !identity.validFor(ResourceProviderProcess) {
+		return Run{}, Resource{}, Resource{}, fmt.Errorf("%w: invalid recovered provider absence", ErrInvalidValue)
+	}
+	tx, err := store.beginValidatedWrite(ctx)
+	if err != nil {
+		return Run{}, Resource{}, Resource{}, err
+	}
+	defer tx.Close()
+	run, found, err := runByID(ctx, tx.connection, runID)
+	if err != nil || !found {
+		if err == nil {
+			err = ErrNotFound
+		}
+		return Run{}, Resource{}, Resource{}, tx.Rollback(err)
+	}
+	footprint, err := loadLifecycleFootprint(ctx, tx.connection, run)
+	if err != nil {
+		return Run{}, Resource{}, Resource{}, tx.Rollback(err)
+	}
+	if run.Phase != RunFinalizing || run.Revision != expectedRun || run.ProviderExit != nil ||
+		footprint.providerProcess.ID != processID || footprint.providerGroup.ID != groupID ||
+		footprint.providerProcess.Revision != expectedProcess || footprint.providerGroup.Revision != expectedGroup ||
+		footprint.providerProcess.State != ResourceUnresolved || footprint.providerGroup.State != ResourceUnresolved ||
+		!resourceIdentityEqual(footprint.providerProcess.Identity, identity) || !resourceIdentityEqual(footprint.providerGroup.Identity, identity) ||
+		!lifecycleTimesValid(run, footprint, at) {
+		return Run{}, Resource{}, Resource{}, tx.Rollback(ErrConflict)
+	}
+	exit, err := NewProcessExitRecoveredAbsence(1, at)
+	if err != nil {
+		return Run{}, Resource{}, Resource{}, tx.Rollback(err)
+	}
+	exitKind, code, signal := exitSQL(exit)
+	pid, pgid, birth, _ := identity.Process()
+	updated, err := tx.connection.ExecContext(ctx, `UPDATE runs SET provider_exit_kind = ?, provider_exit_sequence = ?, provider_exit_code = ?, provider_exit_signal = ?, provider_exit_at_ms = ?, revision = revision + 1, updated_at_ms = ? WHERE id = ? AND phase = 'finalizing' AND provider_exit_kind IS NULL AND revision = ?`, exitKind, exit.sequence, code, signal, exit.at.Int64(), at.Int64(), runID.Bytes(), expectedRun.Int64())
+	if err := requireOneRow(updated, err); err != nil {
+		return Run{}, Resource{}, Resource{}, tx.Rollback(err)
+	}
+	updated, err = tx.connection.ExecContext(ctx, `UPDATE resources SET state = 'released', unresolved_reason = NULL, released_at_ms = ?, revision = revision + 1, updated_at_ms = ? WHERE run_id = ? AND kind IN ('provider_process', 'provider_group') AND state = 'unresolved' AND revision IN (?, ?) AND pid = ? AND pgid = ? AND birth_digest = ?`, at.Int64(), at.Int64(), runID.Bytes(), expectedProcess.Int64(), expectedGroup.Int64(), pid, pgid, birth.Bytes())
+	if err := requireRows(updated, err, 2); err != nil {
+		return Run{}, Resource{}, Resource{}, tx.Rollback(err)
+	}
+	if err := appendInvalidations(ctx, tx.connection, at, []pendingInvalidation{{kind: EntityRun, id: runID.Bytes(), revision: expectedRun.Int64() + 1}}); err != nil {
+		return Run{}, Resource{}, Resource{}, tx.Rollback(err)
+	}
+	run, _, err = runByID(ctx, tx.connection, runID)
+	if err != nil {
+		return Run{}, Resource{}, Resource{}, tx.Rollback(err)
+	}
+	process, _, err := resourceByID(ctx, tx.connection, processID)
+	if err != nil {
+		return Run{}, Resource{}, Resource{}, tx.Rollback(err)
+	}
+	group, _, err := resourceByID(ctx, tx.connection, groupID)
+	if err != nil {
+		return Run{}, Resource{}, Resource{}, tx.Rollback(err)
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return Run{}, Resource{}, Resource{}, err
+	}
+	return run, process, group, nil
+}
+
 func (store *Store) updateProviderPair(ctx context.Context, runID RunID, processID, groupID ResourceID, expectedRun, expectedProcess, expectedGroup Revision, identity ResourceIdentity, reason string, target ResourceState, at UnixMillis) (Run, Resource, Resource, error) {
 	if runID.zero() || processID.zero() || groupID.zero() || processID == groupID || (target != ResourceUnresolved && target != ResourceReleased) {
 		return Run{}, Resource{}, Resource{}, fmt.Errorf("%w: invalid provider pair transition", ErrInvalidValue)
@@ -845,6 +912,59 @@ func (store *Store) CloseTerminalAfterRunner(ctx context.Context, result Attempt
 		return Run{}, TerminalSession{}, tx.Rollback(ErrConflict)
 	}
 	updated, err := tx.connection.ExecContext(ctx, `UPDATE terminal_sessions SET state = 'closed', unresolved_reason = NULL, closed_at_ms = ?, revision = revision + 1, updated_at_ms = ? WHERE id = ? AND run_id = ? AND state = ? AND revision = ?`, at.Int64(), at.Int64(), footprint.session.ID.Bytes(), run.ID.Bytes(), footprint.session.State.String(), expectedSession.Int64())
+	if err := requireOneRow(updated, err); err != nil {
+		return Run{}, TerminalSession{}, tx.Rollback(err)
+	}
+	updated, err = tx.connection.ExecContext(ctx, `UPDATE runs SET revision = revision + 1, updated_at_ms = ? WHERE id = ? AND phase = 'finalizing' AND revision = ?`, at.Int64(), run.ID.Bytes(), expectedRun.Int64())
+	if err := requireOneRow(updated, err); err != nil {
+		return Run{}, TerminalSession{}, tx.Rollback(err)
+	}
+	if err := appendInvalidations(ctx, tx.connection, at, []pendingInvalidation{{kind: EntityRun, id: run.ID.Bytes(), revision: expectedRun.Int64() + 1}}); err != nil {
+		return Run{}, TerminalSession{}, tx.Rollback(err)
+	}
+	run, _, err = runByID(ctx, tx.connection, run.ID)
+	if err != nil {
+		return Run{}, TerminalSession{}, tx.Rollback(err)
+	}
+	session, _, err := terminalSessionByID(ctx, tx.connection, footprint.session.ID)
+	if err != nil {
+		return Run{}, TerminalSession{}, tx.Rollback(err)
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return Run{}, TerminalSession{}, err
+	}
+	return run, session, nil
+}
+
+// CloseTerminalAfterRecoveredAbsence closes a no-result attempt after recovery
+// has recorded positive absence for both process owners. No attempt artifact
+// is required because the failure proposal is the durable outcome.
+func (store *Store) CloseTerminalAfterRecoveredAbsence(ctx context.Context, runID RunID, expectedRun, expectedSession Revision, at UnixMillis) (Run, TerminalSession, error) {
+	tx, err := store.beginValidatedWrite(ctx)
+	if err != nil {
+		return Run{}, TerminalSession{}, err
+	}
+	defer tx.Close()
+	run, found, err := runByID(ctx, tx.connection, runID)
+	if err != nil || !found {
+		if err == nil {
+			err = ErrNotFound
+		}
+		return Run{}, TerminalSession{}, tx.Rollback(err)
+	}
+	footprint, err := loadLifecycleFootprint(ctx, tx.connection, run)
+	if err != nil {
+		return Run{}, TerminalSession{}, tx.Rollback(err)
+	}
+	if run.Phase != RunFinalizing || run.Proposal == nil || run.ProviderExit == nil || run.RunnerExit == nil ||
+		!run.ProviderExit.RecoveredAbsence() || !run.RunnerExit.RecoveredAbsence() || run.Revision != expectedRun ||
+		footprint.runtime.State != ResourceReleasing && footprint.runtime.State != ResourceUnresolved ||
+		footprint.runner.State != ResourceReleased || footprint.providerProcess.State != ResourceReleased || footprint.providerGroup.State != ResourceReleased ||
+		(footprint.session.State != TerminalSessionReleasing && footprint.session.State != TerminalSessionUnresolved) ||
+		footprint.session.Revision != expectedSession || !lifecycleTimesValid(run, footprint, at) {
+		return Run{}, TerminalSession{}, tx.Rollback(ErrConflict)
+	}
+	updated, err := tx.connection.ExecContext(ctx, `UPDATE terminal_sessions SET state = 'closed', unresolved_reason = NULL, closed_at_ms = ?, updated_at_ms = ?, revision = revision + 1 WHERE id = ? AND run_id = ? AND state = ? AND revision = ?`, at.Int64(), at.Int64(), footprint.session.ID.Bytes(), run.ID.Bytes(), footprint.session.State.String(), expectedSession.Int64())
 	if err := requireOneRow(updated, err); err != nil {
 		return Run{}, TerminalSession{}, tx.Rollback(err)
 	}

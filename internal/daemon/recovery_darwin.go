@@ -96,7 +96,7 @@ func (daemon *Daemon) recoverRuns(ctx context.Context, parent *RuntimeParent, ch
 		daemon.attemptMu.Lock()
 		_, live := daemon.attempts[recoverable.Run.ID]
 		daemon.attemptMu.Unlock()
-		if live || recoverable.Run.UpdatedAt.Int64() > updatedBefore {
+		if live || (!finalizingRunNeedsRecovery(recoverable) && recoverable.Run.UpdatedAt.Int64() > updatedBefore) {
 			// A registered live owner is not abandoned; recovery never races it.
 			continue
 		}
@@ -104,6 +104,18 @@ func (daemon *Daemon) recoverRuns(ctx context.Context, parent *RuntimeParent, ch
 		dispositions = append(dispositions, RecoveredRunDisposition{RunID: recoverable.Run.ID, Action: action, Err: runErr})
 	}
 	return dispositions, nil
+}
+
+func finalizingRunNeedsRecovery(recoverable kernel.RecoverableRun) bool {
+	if recoverable.Run.Phase != kernel.RunFinalizing {
+		return false
+	}
+	for _, resource := range recoverable.Resources {
+		if resource.State == kernel.ResourceUnresolved {
+			return true
+		}
+	}
+	return false
 }
 
 // RecoverHumanDeliveries marks replies a previous daemon process left
@@ -312,6 +324,15 @@ func (daemon *Daemon) recoverRunOnce(ctx context.Context, parent *RuntimeParent,
 		_, settleErr := daemon.settleRun(ctx, changeParent, run.ID)
 		return RecoveredConverged, settleErr
 	}
+	if run.Phase == kernel.RunFinalizing && runtimeRoot.State == kernel.ResourceActive &&
+		runnerProcess.State == kernel.ResourceReleased && providerProcess.State == kernel.ResourceReleased && providerGroup.State == kernel.ResourceReleased &&
+		recoverable.TerminalSession.State == kernel.TerminalSessionClosed {
+		if removeErr := daemon.removeRecoveredRuntime(ctx, parent, run.ID, recovered, fileIdentity); removeErr != nil {
+			return RecoveredConverged, removeErr
+		}
+		_, settleErr := daemon.settleRun(ctx, changeParent, run.ID)
+		return RecoveredConverged, settleErr
+	}
 	switch {
 	case runnerProcess.State == kernel.ResourceStarting:
 		if recovered.OuterActivated() {
@@ -493,10 +514,7 @@ func (daemon *Daemon) recoverWithoutResult(ctx context.Context, run kernel.Run, 
 	if err != nil {
 		return RecoveredUncertain, err
 	}
-	if process.State == kernel.ResourceReleasing && !process.Identity.Empty() && run.ProviderExit == nil {
-		if !daemon.recoveredProviderAbsent(process) {
-			return RecoveredUncertain, errInvalidContract
-		}
+	if (process.State == kernel.ResourceReleasing || process.State == kernel.ResourceUnresolved) && process.State == group.State && !process.Identity.Empty() && daemon.recoveredProviderAbsent(process) {
 		freshRun, found, err := daemon.store.Run(ctx, run.ID)
 		if err != nil || !found {
 			return RecoveredUncertain, errors.Join(err, errInvalidContract)
@@ -505,10 +523,28 @@ func (daemon *Daemon) recoverWithoutResult(ctx context.Context, run kernel.Run, 
 		if err != nil {
 			return RecoveredUncertain, err
 		}
-		_, _, _, markErr := daemon.store.MarkProviderResourcesUnresolved(ctx, run.ID, process.ID, group.ID, freshRun.Revision, process.Revision, group.Revision, process.Identity, "provider absent without an attempt result at recovery", at)
-		if markErr != nil {
-			return RecoveredUncertain, markErr
+		if process.State == kernel.ResourceReleasing {
+			if _, _, _, err := daemon.store.MarkProviderResourcesUnresolved(ctx, run.ID, process.ID, group.ID, freshRun.Revision, process.Revision, group.Revision, process.Identity, "provider absent without an attempt result at recovery", at); err != nil {
+				return RecoveredUncertain, err
+			}
+			process, err = current(process.ID)
+			if err != nil {
+				return RecoveredUncertain, err
+			}
+			group, err = current(group.ID)
+			if err != nil {
+				return RecoveredUncertain, err
+			}
+			freshRun, found, err = daemon.store.Run(ctx, run.ID)
+			if err != nil || !found {
+				return RecoveredUncertain, errors.Join(err, errInvalidContract)
+			}
 		}
+		releasedRun, _, _, err := daemon.store.RecordRecoveredProviderAbsence(ctx, run.ID, process.ID, group.ID, freshRun.Revision, process.Revision, group.Revision, process.Identity, at)
+		if err != nil {
+			return RecoveredUncertain, err
+		}
+		run = releasedRun
 		acted = true
 	}
 	runnerCurrent, err := current(runnerProcess.ID)
@@ -519,10 +555,28 @@ func (daemon *Daemon) recoverWithoutResult(ctx context.Context, run kernel.Run, 
 		if !daemon.recoveredRunnerAbsent(runnerCurrent) {
 			return RecoveredUncertain, errInvalidContract
 		}
-		if _, absenceErr := daemon.recordRecoveredRunnerAbsence(ctx, run.ID, runnerCurrent.ID, runnerCurrent.Identity); absenceErr != nil {
+		recoveredRun, absenceErr := daemon.recordRecoveredRunnerAbsence(ctx, run.ID, runnerCurrent.ID, runnerCurrent.Identity)
+		if absenceErr != nil {
 			return RecoveredUncertain, absenceErr
 		}
+		run = recoveredRun
 		acted = true
+	}
+	if run.ProviderExit != nil && run.RunnerExit != nil {
+		session, found, err := daemon.store.TerminalSessionForRun(ctx, run.ID)
+		if err != nil || !found {
+			return RecoveredUncertain, errors.Join(err, errInvalidContract)
+		}
+		if session.State != kernel.TerminalSessionClosed {
+			at, err := daemon.timestamp()
+			if err != nil {
+				return RecoveredUncertain, err
+			}
+			if _, _, err := daemon.store.CloseTerminalAfterRecoveredAbsence(ctx, run.ID, run.Revision, session.Revision, at); err != nil {
+				return RecoveredUncertain, err
+			}
+			acted = true
+		}
 	}
 	if !acted {
 		return RecoveredConverged, nil

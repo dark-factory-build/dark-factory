@@ -12,8 +12,10 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"sync"
+	"syscall"
 	"testing"
 	"time"
 
@@ -882,25 +884,24 @@ func TestRecoverySweepFailsClosedForActiveAttemptWithoutResult(t *testing.T) {
 		t.Fatalf("disposition = %+v", disposition)
 	}
 	recovered := fixture.currentRun(t)
-	if recovered.Phase != kernel.RunFinalizing || recovered.Proposal == nil || recovered.Proposal.Code() != kernel.FailureInternal || recovered.RunnerExit == nil || !recovered.RunnerExit.RecoveredAbsence() {
+	if recovered.Phase != kernel.RunTerminal || recovered.Proposal == nil || recovered.Proposal.Code() != kernel.FailureInternal || recovered.RunnerExit == nil || !recovered.RunnerExit.RecoveredAbsence() {
 		t.Fatalf("recovered run = %+v", recovered)
 	}
+	if recovered.ProviderExit == nil || !recovered.ProviderExit.RecoveredAbsence() || recovered.Proposal.Detail() != "recovered active attempt without an attempt result" {
+		t.Fatalf("recovered provider failure = %+v", recovered)
+	}
 	states = fixture.resourceStates(t)
-	if states[kernel.ResourceProviderProcess].State != kernel.ResourceUnresolved || states[kernel.ResourceProviderGroup].State != kernel.ResourceUnresolved {
+	if states[kernel.ResourceProviderProcess].State != kernel.ResourceReleased || states[kernel.ResourceProviderGroup].State != kernel.ResourceReleased {
 		t.Fatalf("provider pair = %+v", states)
 	}
 	if states[kernel.ResourceRunnerProcess].State != kernel.ResourceReleased {
 		t.Fatalf("runner = %+v", states[kernel.ResourceRunnerProcess])
 	}
-	// Deliberately not terminal: the run keeps its unresolved residue.
-	if states[kernel.ResourceRuntimeRoot].State == kernel.ResourceReleased {
-		t.Fatalf("runtime released without teardown proof: %+v", states[kernel.ResourceRuntimeRoot])
+	if recovered.Terminal == nil || recovered.Terminal.Code() != kernel.FailureInternal {
+		t.Fatalf("settled recovery = %+v", recovered)
 	}
-	// A re-sweep fires no edge and must say so rather than re-reporting the
-	// converging disposition.
-	resweep := fixture.sweep(t)
-	if resweep.Action != RecoveredConverged || resweep.Err != nil {
-		t.Fatalf("re-sweep disposition = %+v", resweep)
+	if states = fixture.resourceStates(t); states[kernel.ResourceRuntimeRoot].State != kernel.ResourceReleased {
+		t.Fatalf("runtime after settlement = %+v", states[kernel.ResourceRuntimeRoot])
 	}
 }
 
@@ -1276,6 +1277,133 @@ func TestLivenessTickRecoversOnlyOldOwnerlessRuns(t *testing.T) {
 	if run := tick(updated + ownerlessRunAge.Milliseconds()); run.Phase != kernel.RunTerminal {
 		t.Fatalf("ownerless finalizing run with a result did not settle: %+v", run)
 	}
+}
+
+func TestLivenessTickRecoversTerminatedNoResultWorkerAndRetainsWork(t *testing.T) {
+	fixture := newRecoveryFixtureWithRole(t, 0x71, kernel.RoleWorker)
+	ctx := context.Background()
+	fixture.stageRuntime(t)
+	fixture.beginRunnerStart(t)
+	runnerCommand := exec.Command("/bin/sleep", "30")
+	runnerCommand.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	if err := runnerCommand.Start(); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		if runnerCommand.ProcessState == nil {
+			_ = unix.Kill(-runnerCommand.Process.Pid, unix.SIGKILL)
+			_, _ = runnerCommand.Process.Wait()
+		}
+	})
+	runnerIdentity := recoveryRealProcessIdentity(t, runnerCommand.Process.Pid)
+	runnerResourceIdentity, err := processResourceIdentity(runnerIdentity)
+	if err != nil {
+		t.Fatal(err)
+	}
+	states := fixture.resourceStates(t)
+	runnerResource := states[kernel.ResourceRunnerProcess]
+	if _, _, err := fixture.store.ActivateRunner(ctx, fixture.run.ID, runnerResource.ID, fixture.currentRun(t).Revision, runnerResource.Revision, runnerResourceIdentity, mustKernelTime(t, 230)); err != nil {
+		t.Fatal(err)
+	}
+	fixture.writeMarker(t, runner.OuterActivationMarkerName)
+	changeState, worktree := fixture.settlementWorktree(t)
+	if err := os.WriteFile(filepath.Join(worktree, "uncommitted-cache"), []byte("keep\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	providerCommand := exec.Command("/bin/sleep", "30")
+	providerCommand.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	if err := providerCommand.Start(); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		if providerCommand.ProcessState == nil {
+			_ = unix.Kill(-providerCommand.Process.Pid, unix.SIGKILL)
+			_, _ = providerCommand.Process.Wait()
+		}
+	})
+	providerIdentity := recoveryRealProcessIdentity(t, providerCommand.Process.Pid)
+	providerResourceIdentity, err := processResourceIdentity(providerIdentity)
+	if err != nil {
+		t.Fatal(err)
+	}
+	states = fixture.resourceStates(t)
+	process, group := states[kernel.ResourceProviderProcess], states[kernel.ResourceProviderGroup]
+	if _, _, err := fixture.store.ActivateProviderResources(ctx, fixture.run.ID, process.ID, process.Revision, group.ID, group.Revision, providerResourceIdentity, mustKernelTime(t, 450)); err != nil {
+		t.Fatal(err)
+	}
+	session, found, err := fixture.store.TerminalSessionForRun(ctx, fixture.run.ID)
+	if err != nil || !found {
+		t.Fatalf("session: found=%v err=%v", found, err)
+	}
+	if fixture.run, err = fixture.store.ActivateRun(ctx, fixture.run.ID, session.ID, fixture.currentRun(t).Revision, session.Revision, mustKernelTime(t, 460)); err != nil {
+		t.Fatal(err)
+	}
+	if err := unix.Kill(-runnerCommand.Process.Pid, unix.SIGKILL); err != nil {
+		t.Fatal(err)
+	}
+	if err := unix.Kill(-providerCommand.Process.Pid, unix.SIGKILL); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := runnerCommand.Process.Wait(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := providerCommand.Process.Wait(); err != nil {
+		t.Fatal(err)
+	}
+	failure, err := kernel.NewFailureProposal(kernel.FailureInternal, "recovered active attempt without an attempt result")
+	if err != nil {
+		t.Fatal(err)
+	}
+	failed, err := fixture.store.FailRun(ctx, fixture.run.ID, fixture.currentRun(t).Revision, failure, mustKernelTime(t, 500))
+	if err != nil {
+		t.Fatal(err)
+	}
+	states = fixture.resourceStates(t)
+	process, group = states[kernel.ResourceProviderProcess], states[kernel.ResourceProviderGroup]
+	if _, _, _, err := fixture.store.MarkProviderResourcesUnresolved(ctx, fixture.run.ID, process.ID, group.ID, failed.Revision, process.Revision, group.Revision, providerResourceIdentity, "provider absent without an attempt result at recovery", mustKernelTime(t, 501)); err != nil {
+		t.Fatal(err)
+	}
+	updated := fixture.currentRun(t).UpdatedAt.Int64()
+	fixture.daemon.now = func() time.Time { return time.UnixMilli(updated + ownerlessRunAge.Milliseconds() - 1) }
+	if err := fixture.daemon.enforceRunLiveness(ctx, SupervisorSpec{RuntimeParent: fixture.parent, ChangeParent: fixture.changeParent}); err != nil {
+		t.Fatal(err)
+	}
+	recovered := fixture.currentRun(t)
+	if recovered.Phase != kernel.RunTerminal || recovered.Terminal == nil || recovered.Terminal.Code() != kernel.FailureInternal {
+		t.Fatalf("periodic recovery = %+v", recovered)
+	}
+	if states = fixture.resourceStates(t); states[kernel.ResourceRuntimeRoot].State != kernel.ResourceReleased {
+		t.Fatalf("runtime after periodic recovery = %+v", states[kernel.ResourceRuntimeRoot])
+	}
+	retained, found, err := fixture.store.Change(ctx, changeState.ID)
+	if err != nil || !found || retained.ID != changeState.ID {
+		t.Fatalf("retained Change = found=%v err=%v state=%+v", found, err, retained)
+	}
+	if _, err := os.Stat(filepath.Join(worktree, "uncommitted-cache")); err != nil {
+		t.Fatalf("retained uncommitted work = %v", err)
+	}
+}
+
+func recoveryRealProcessIdentity(t *testing.T, pid int) runner.Identity {
+	t.Helper()
+	processes, err := unix.SysctlKinfoProcSlice("kern.proc.all", 0)
+	if err != nil {
+		if errors.Is(err, syscall.EPERM) {
+			t.Skipf("real process identity observation unavailable: %v", err)
+		}
+		t.Fatal(err)
+	}
+	for _, process := range processes {
+		if int(process.Proc.P_pid) == pid && process.Proc.P_stat != 5 {
+			identity := runner.Identity{PID: pid, PGID: int(process.Eproc.Pgid), Birth: runner.Birth{Seconds: process.Proc.P_starttime.Sec, Microseconds: process.Proc.P_starttime.Usec}}
+			if !identity.Valid() {
+				t.Fatalf("invalid process identity %+v", identity)
+			}
+			return identity
+		}
+	}
+	t.Fatalf("process %d disappeared before identity capture", pid)
+	return runner.Identity{}
 }
 
 func shrinkStoreTimeout(t *testing.T) {
