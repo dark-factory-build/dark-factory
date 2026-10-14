@@ -313,3 +313,52 @@ func TestArchiveHistoryKeepsATreeHotUntilItsAttachmentIsRemoved(t *testing.T) {
 		t.Fatalf("expired tree still hot: %v, %v", found, err)
 	}
 }
+
+// Archiving keeps the three newest finished carriers specialistSchedule reads
+// for its quiet streak, even while a newer carrier is queued: four quiet
+// reviews then a queued fifth archive only the oldest, and the backoff holds.
+func TestArchiveHistoryKeepsTheCarriersASpecialistBacksOffFrom(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	store, _, _, agent := newAdmissionStore(t, RoleWorker, 2)
+	defer store.Close()
+	agent = makeSpecialist(t, store, agent, "failures", 10)
+	if bodies := wakeBodies(t, store, 20); len(bodies) != 1 {
+		t.Fatalf("initial wake = %q", bodies)
+	}
+	at := int64(100)
+	for round := range 4 {
+		runCarrier(t, store, byte(30+25*round), at)
+		state := specialistStateOf(t, store, agent.ID)
+		if next := wakeBodies(t, store, state.NextReviewAt); len(next) != 1 {
+			t.Fatalf("round %d wake = %q", round, next)
+		}
+		at = state.NextReviewAt + 1
+	}
+	before := specialistStateOf(t, store, agent.ID)
+	if before.QuietReviews != 3 || before.Waiting != "queued" {
+		t.Fatalf("state before archive = %+v", before)
+	}
+	later := at + HistoryRetention + 1
+	reclaimable, err := store.ReclaimableChanges(ctx, mustTime(t, later))
+	if err != nil || len(reclaimable) != 4 {
+		t.Fatalf("reclaimable = %d, %v", len(reclaimable), err)
+	}
+	for _, change := range reclaimable {
+		if _, err := store.ReclaimChange(ctx, change.ID, change.Revision, change.GivenUp, mustTime(t, later)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for moved := 1; moved > 0; {
+		if moved, err = store.ArchiveHistory(ctx, mustTime(t, later)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	var archived int
+	if err := store.writer.QueryRowContext(ctx, `SELECT count(*) FROM archived_tasks`).Scan(&archived); err != nil || archived != 1 {
+		t.Fatalf("archived carriers = %d, %v", archived, err)
+	}
+	if after := specialistStateOf(t, store, agent.ID); after.QuietReviews != before.QuietReviews || after.LastReviewTaskID != before.LastReviewTaskID {
+		t.Fatalf("state after archive = %+v, want %+v", after, before)
+	}
+}
