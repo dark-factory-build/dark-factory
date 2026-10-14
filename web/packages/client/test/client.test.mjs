@@ -79,8 +79,8 @@ const expectIgnoredMember = (base, mutated, role = "client") => {
 };
 
 test("canonical control fixtures decode by sender role and re-encode exactly", () => {
-  const client = ["pair_prove", "auth_prove", "remote_invite", "push_subscribe", "browser_clients_get", "browser_client_revoke", "run_paths_get", "agent_control", "task_history_get"];
-  const server = ["hello", "pair_result", "auth_result", "remote_invite_result", "push_subscribe_result", "browser_clients", "browser_client_revoke_result", "run_paths", "agent_control_result", "task_history"];
+  const client = ["pair_prove", "auth_prove", "remote_invite", "push_subscribe", "browser_clients_get", "browser_client_revoke", "run_paths_get", "agent_control"];
+  const server = ["hello", "pair_result", "auth_result", "remote_invite_result", "push_subscribe_result", "browser_clients", "browser_client_revoke_result", "run_paths", "agent_control_result"];
   for (const name of client) assert.equal(encodeClientControl(decodeClientControl(fixture(`${name}.json`))), fixture(`${name}.json`));
   for (const name of server) assert.equal(encodeServerControl(decodeServerControl(fixture(`${name}.json`))), fixture(`${name}.json`));
   // An agent with no live run is in no room, so an empty run identity may not

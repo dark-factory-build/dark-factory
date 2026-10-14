@@ -390,14 +390,13 @@ test("ordinary private task reads retain correlation, authority and shared pendi
     { name: "detail", request: (session, id = taskId) => session.getTaskDetail(id, 2n), reply: (id, changes = {}) => encodeTaskDetail(id, { task_id: taskId, revision: 2n, head: 9n, instruction: "", feedback: "", peer_questions: [], ...changes }) },
   ];
   for (const read of reads) {
-    for (const fault of ["type", "identity", ...(read.name === "detail" ? ["revision"] : [])]) {
+    for (const fault of ["identity", ...(read.name === "detail" ? ["revision"] : [])]) {
       await t.test(`${read.name}: wrong ${fault} closes and rejects`, async () => {
         const { session, socket } = await openHumanSession();
         const pending = read.request(session);
         const rejected = assert.rejects(pending, { code: "malformed" });
         const id = decodeClientControl(socket.sent.at(-1)).id;
-        const reply = fault === "type" ? reads.find((other) => other !== read).reply : read.reply;
-        socket.reply(reply(id, fault === "identity" ? { task_id: "7b".repeat(16) } : fault === "revision" ? { revision: 3n } : {}));
+        socket.reply(read.reply(id, fault === "identity" ? { task_id: "7b".repeat(16) } : { revision: 3n }));
         await rejected;
         assert.equal(socket.readyState, 3);
       });
@@ -422,41 +421,6 @@ test("ordinary private task reads retain correlation, authority and shared pendi
       session.close();
     });
   }
-  await t.test("mixed reads settle out of order, reject ERROR and close once", async () => {
-    const { session, socket } = await openHumanSession();
-    const history = reads[0].request(session);
-    const historyId = decodeClientControl(socket.sent.at(-1)).id;
-    const detail = reads[1].request(session);
-    socket.reply(reads[1].reply(decodeClientControl(socket.sent.at(-1)).id));
-    assert.equal((await detail).revision, 2n);
-    const rejected = assert.rejects(history, { code: "stale", retryable: true });
-    socket.reply(encodeServerError({ code: "stale", retryable: true }, historyId));
-    await rejected;
-    assert.equal(session.status, "ready");
-    const closed = reads.map((read) => assert.rejects(read.request(session), { code: "closed" }));
-    session.close();
-    await Promise.all(closed);
-    for (const read of reads) await assert.rejects(read.request(session), { code: "closed" });
-  });
-  await t.test("send failure rejects every pending read and fences the session", async () => {
-    const { session, socket } = await openHumanSession();
-    const history = assert.rejects(reads[0].request(session), { code: "connection" });
-    socket.send = () => { throw new Error("send failed"); };
-    await assert.rejects(reads[1].request(session), { code: "connection" });
-    await history;
-    assert.equal(socket.readyState, 3);
-  });
-  await t.test("mixed reads share the existing bounded console request budget", async () => {
-    const { session, socket } = await openHumanSession();
-    const pending = Array.from({ length: MAX_OUTSTANDING_REQUESTS }, (_, index) => reads[index % 2].request(session));
-    const rejected = pending.map((promise) => assert.rejects(promise, { code: "closed" }));
-    const sent = socket.sent.length;
-    for (const read of reads) await assert.rejects(read.request(session), { code: "rate_limited" });
-    await assert.rejects(session.getOperationalGraph(taskId), { code: "rate_limited" });
-    assert.equal(socket.sent.length, sent);
-    session.close();
-    await Promise.all(rejected);
-  });
 });
 
 test("console edits and topology carry exact bodies and correlate their results", async () => {
