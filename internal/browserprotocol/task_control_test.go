@@ -67,6 +67,7 @@ func TestTaskEnqueueControlBoundsAndDirection(t *testing.T) {
 		t.Fatal("unknown mode accepted")
 	}
 }
+
 // Unclaimed shared work travels in the additive shared_tasks member, so a
 // console from before the shared queue (every task item names an agent)
 // ignores it. A task item without an agent is still malformed.
