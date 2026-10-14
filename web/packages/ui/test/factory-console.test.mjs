@@ -4,7 +4,7 @@ import test from "node:test";
 import { createElement, isValidElement, useEffect, useState } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { act, create } from "react-test-renderer";
-import { MAX_SNAPSHOT_ENTITIES, MAX_TASK_PRIORITY, ProtocolError, SessionError } from "@dark-factory/client";
+import { MAX_SNAPSHOT_ENTITIES, ProtocolError, SessionError } from "@dark-factory/client";
 import { FactoryApp, FactoryConsole } from "../dist/src/index.js";
 import { layoutScene } from "../dist/src/factory-scene/scene.js";
 import { projectGraph, projectFloor, workRows } from "../dist/src/console-view.js";
@@ -729,102 +729,39 @@ test("unclaimed shared work waits under its project until an eligible worker cla
     onEditTask: () => {},
   });
   assert.match(markup, /Anyone free/);
-  assert.match(markup, /Any eligible worker · Priority/);
-  assert.match(markup, /<option value="" disabled=""[^>]*>Any eligible worker<\/option>/);
+  assert.match(markup, /Any eligible worker/);
+  assert.doesNotMatch(markup, /Priority/);
+  assert.doesNotMatch(markup, /df-assign-/);
 });
 
-test("the queued task row keeps served order and changes its exact priority", async () => {
+test("a queued row uses the shared Work row and opens TaskDetail", async () => {
   const previousAct = globalThis.IS_REACT_ACT_ENVIRONMENT;
   globalThis.IS_REACT_ACT_ENVIRONMENT = true;
   try {
-    const edits = [];
     const detailReads = [];
-    const queued = { ...fixtureState.tasks.get([...fixtureState.tasks.keys()][1]), title: "Served first", priority: 2 };
-    const other = { ...queued, id: "39".repeat(16), title: "Higher but served second", priority: 9, revision: 20n };
-    const archivedPeer = { ...fixtureState.agents.get("23".repeat(16)), id: "24".repeat(16), name: "Retired Builder", archived: true, paused: true };
-    const state = baseState({
-      agents: new Map([...fixtureState.agents, [archivedPeer.id, archivedPeer]]),
-      tasks: new Map([[queued.id, { ...queued, assigned_agent_id: ids.agent }], [other.id, { ...other, assigned_agent_id: ids.agent }]]),
-    });
+    const selections = [];
+    const queued = { ...fixtureState.tasks.get([...fixtureState.tasks.keys()][1]), title: "Queued task", assigned_agent_id: ids.agent };
     const props = {
       status: "ready",
-      state,
+      state: baseState({ tasks: new Map([[queued.id, queued]]) }),
       detail: "work",
       selectedAgent: agentSelection(),
-      onSaveAgentConfig: (config) => edits.push(["config", config]),
-      onEditTask: async (task, change) => { edits.push([task.id, change]); return true; },
+      onSelectTask: (taskId) => selections.push(taskId),
       onLoadTaskDetail: async (task, peerOffset, expectedHead) => {
         detailReads.push(task.id);
-        if (peerOffset !== undefined) throw new SessionError("stale");
-        return { taskId: task.id, revision: task.revision, head: expectedHead ?? 7n, instruction: "Original brief", feedback: "Review this carefully", peerQuestions: [{ id: `${peerOffset ?? 0n}`.padStart(32, "0"), source_task_id: queued.id, target_task_id: other.id, question: "What changed?", recipient_delivery_state: "delivered", answer_delivery_state: "pending", revision: 1n, created_at_ms: 1n, updated_at_ms: 1n }], nextPeerOffset: 1n };
+        return { taskId: task.id, revision: task.revision, head: expectedHead ?? 7n, instruction: "Original brief", feedback: "", peerQuestions: [] };
       },
     };
     let renderer;
     await act(async () => { renderer = create(createElement(FactoryConsole, props)); });
-    const buttons = renderer.root.findAllByType("button");
-    const byLabel = (label) => buttons.find((button) => button.props["aria-label"] === label);
-    const queueRows = renderer.root.findByProps({ "aria-label": "Work" }).findAllByProps({ className: "dfConsoleItem dfWorkRow" }).filter((row) => [queued.title, other.title].includes(rowTitle(row)));
-    assert.deepEqual(queueRows.map(rowTitle), [queued.title, other.title], "the queue keeps the server's per-agent order, rather than re-sorting priority");
-    assert.ok(!renderer.root.findAllByType("p").some((paragraph) => paragraph.props.children === "Grouped by agent · no global start order"));
-    assert.ok(renderer.root.findAllByType("span").some((span) => (Array.isArray(span.props.children) ? span.props.children.join("") : String(span.props.children)).includes("Priority 2")));
-    await act(async () => { byLabel(`Increase priority for ${queued.title}`).props.onClick(); });
-    assert.deepEqual(edits.at(-1), [queued.id, { priority: queued.priority + 1 }]);
-    await act(async () => { byLabel(`Decrease priority for ${other.title}`).props.onClick(); });
-    assert.deepEqual(edits.at(-1), [other.id, { priority: other.priority - 1 }]);
-
-    const highest = { ...queued, title: "Highest", priority: MAX_TASK_PRIORITY };
-    const lowest = { ...other, title: "Lowest", priority: -MAX_TASK_PRIORITY };
-    await act(async () => { renderer.update(createElement(FactoryConsole, { ...props, state: baseState({ tasks: new Map([[highest.id, highest], [lowest.id, lowest]]) }) })); });
-    const bounded = renderer.root.findAllByType("button");
-    assert.equal(bounded.find((button) => button.props["aria-label"] === `Increase priority for ${highest.title}`).props.disabled, true);
-    assert.equal(bounded.find((button) => button.props["aria-label"] === `Decrease priority for ${lowest.title}`).props.disabled, true);
-
-    await act(async () => { renderer.update(createElement(FactoryConsole, props)); });
-
-    const editBrief = () => renderer.root.findAllByType("button").find((button) => button.props.children === "Edit brief");
-    const firstRow = renderer.root.findByProps({ "aria-label": "Work" }).findAllByProps({ className: "dfConsoleItem dfWorkRow" }).find((row) => rowTitle(row) === queued.title);
-    assert.equal(firstRow.findByProps({ className: "dfConsoleItem__detail" }).props.hidden, true, "queue rows start collapsed");
-    assert.deepEqual(detailReads, [], "collapsed queued rows do not read private briefs");
-    await act(async () => { rowButton(firstRow).props.onClick(); });
-    assert.deepEqual(detailReads, [queued.id]);
-    const title = renderer.root.findAllByType("input").find((input) => input.props.value === queued.title);
-    await act(async () => { title.props.onChange({ currentTarget: { value: "Renamed" } }); });
-    const instruction = renderer.root.findAllByType("textarea").find((input) => input.props.id === `df-instruction-${queued.id}`);
-    await act(async () => { instruction.props.onChange({ currentTarget: { value: "Replacement brief" } }); });
-		assert.ok(renderer.root.findAllByType("pre").some((item) => item.props.children === "Review this carefully"));
-    await act(async () => { await renderer.root.findAllByType("button").find((button) => button.props.children === "Save brief").props.onClick(); });
-    assert.deepEqual(edits.at(-1), [queued.id, { title: "Renamed", body: "Replacement brief" }]);
-    await act(async () => { rowButton(firstRow).props.onClick(); rowButton(firstRow).props.onClick(); });
-    assert.deepEqual(detailReads, [queued.id], "reopening a cached row does not overwrite the brief");
-
-    const assign = renderer.root.findAllByType("select").find((select) => select.props.id === `df-assign-${queued.id}`);
-    // Reassignment offers only active agents in the same project. Retired
-    // names remain on historical rows, but cannot receive new queued work.
-    assert.deepEqual(assign.props.children.map((option) => option.props.children), ["Builder One", "Builder Two"]);
-    await act(async () => { assign.props.onChange({ currentTarget: { value: "23".repeat(16) } }); });
-    assert.deepEqual(edits.at(-1), [queued.id, { assignedAgentId: "23".repeat(16) }]);
-
-    await act(async () => { renderer.root.findAllByType("button").find((button) => button.props.children === "Cancel").props.onClick(); });
-    assert.deepEqual(edits.at(-1), [queued.id, { cancel: true }]);
-
-    // A refused brief edit preserves the operator's drafts at the unchanged
-    // revision, rather than silently replacing the intended instruction.
-    await act(async () => { await editBrief().props.onClick(); });
-    const titleValue = () => renderer.root.findAllByType("input").find((input) => input.props.id === `df-title-${queued.id}`).props.value;
-    const instructionValue = () => renderer.root.findAllByType("textarea").find((input) => input.props.id === `df-instruction-${queued.id}`).props.value;
-    await act(async () => { renderer.root.findAllByType("input").find((input) => input.props.id === `df-title-${queued.id}`).props.onChange({ currentTarget: { value: "Keep this draft" } }); });
-    await act(async () => { renderer.root.findAllByType("textarea").find((input) => input.props.id === `df-instruction-${queued.id}`).props.onChange({ currentTarget: { value: "Keep this instruction" } }); });
-    assert.equal(titleValue(), "Keep this draft");
-    await act(async () => { await renderer.root.findAllByType("button").find((button) => button.props.children === "Older conversation").props.onClick(); });
-    assert.equal(titleValue(), "Keep this draft");
-    assert.equal(instructionValue(), "Keep this instruction");
-    assert.ok(renderer.root.findAllByProps({ role: "alert" }).some((item) => String(item.props.children).includes("Save or discard your draft")));
-    const revised = baseState({ tasks: new Map([[queued.id, { ...queued, assigned_agent_id: ids.agent, revision: queued.revision + 1n }], [other.id, { ...other, assigned_agent_id: ids.agent }]]) });
-    await act(async () => { renderer.update(createElement(FactoryConsole, { ...props, state: revised })); });
-    assert.equal(titleValue(), "Keep this draft");
-    assert.equal(instructionValue(), "Keep this instruction");
-    assert.equal(renderer.root.findAllByProps({ role: "alert" }).some((item) => String(item.props.children).includes("Task changed")), true);
-    assert.equal(renderer.root.findAllByType("button").find((button) => button.props.children === "Save brief").props.disabled, true);
+    const work = renderer.root.findByProps({ "aria-label": "Work" });
+    const row = work.findAllByProps({ className: "dfConsoleItem dfWorkRow" }).find((item) => rowTitle(item) === queued.title);
+    assert.equal(row.findAllByType("button").some((button) => button.props.children === "Edit brief"), false);
+    assert.equal(row.findAllByType("button").some((button) => button.props["aria-label"] === `Increase priority for ${queued.title}`), false);
+    assert.equal(row.findAllByType("select").some((select) => select.props.id === `df-assign-${queued.id}`), false);
+    await act(async () => { rowButton(row).props.onClick(); });
+    assert.deepEqual(selections, [queued.id]);
+    assert.deepEqual(detailReads, []);
     await act(async () => { renderer.unmount(); });
   } finally {
     globalThis.IS_REACT_ACT_ENVIRONMENT = previousAct;
@@ -1319,18 +1256,18 @@ test("task selection and floor questions open the exact existing task detail and
   const queuedTask = fixtureState.tasks.get("32".repeat(16));
   await act(async () => { tree.update(createElement(Harness, { editable: true })); });
   await openRunning();
-  // The selected running task is retried: a queued, editable task has its inline editor, not a dialog.
+  // The selected running task is retried: queued work uses the same detail route.
   const requeued = new Map(fixtureState.tasks).set(task.id, { ...task, status: "queued" });
   await act(async () => { tree.update(createElement(Harness, { editable: true, state: { ...fixtureState, tasks: requeued } })); });
-  assert.equal(tree.root.findAllByProps({ "aria-label": "Task details" }).length, 0, "editable queued work stays in its inline editor");
+  assert.equal(tree.root.findAllByProps({ "aria-label": "Task details" }).length, 1, "queued work opens the shared task detail");
   await act(async () => { tree.update(createElement(Harness, { editable: true })); });
   await act(async () => { tree.root.findByProps({ "aria-label": "Task details" }).props.onClose(); });
-  // Expanding a queued row selects nothing, so its start cannot open a dialog unasked.
+  // A queued row uses the same task-selection route as every other Work row.
   const queuedRow = tree.root.findAllByProps({ className: "dfConsoleItem dfWorkRow" }).find((row) => rowTitle(row) === queuedTask.title);
   await act(async () => { rowButton(queuedRow).props.onClick(); });
   const started = new Map(fixtureState.tasks).set(queuedTask.id, { ...queuedTask, status: "running" });
   await act(async () => { tree.update(createElement(Harness, { editable: true, state: { ...fixtureState, tasks: started } })); });
-  assert.equal(tree.root.findAllByProps({ "aria-label": "Task details" }).length, 0, "a queued task that starts running opens no dialog");
+  assert.equal(tree.root.findAllByProps({ "aria-label": "Task details" }).length, 1, "a queued task remains on the shared detail route");
   await act(async () => { tree.update(createElement(Harness, { editable: true })); });
   await act(async () => { tree.root.findByProps({ "data-human-request-id": ids.request }).props.onClick(); });
   assert.equal(questions[0], fixtureState.humanRequests.get(ids.request));

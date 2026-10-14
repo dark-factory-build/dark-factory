@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState, type FormEvent, type ReactNode } from "react";
-import { MAX_TASK_ATTACHMENTS, MAX_TASK_ATTACHMENT_BYTES, MAX_TASK_PRIORITY, type IntakeView, type IntakeBody, type DiscoveredAccount, type AccountItem, type AgentItem, type IdleWakeOn, type GitHubConnectionBody, type GitHubDelegationBody, type HumanRequestItem, type ProjectItem, type RepositoryMutation, type RunTelemetry, type RepositoryView, type StateView, type TaskHistoryView, type TaskItem, type TaskPeerQuestion, type TaskContentPin } from "@dark-factory/client";
+import { MAX_TASK_ATTACHMENTS, MAX_TASK_ATTACHMENT_BYTES, type IntakeView, type IntakeBody, type DiscoveredAccount, type AccountItem, type AgentItem, type IdleWakeOn, type GitHubConnectionBody, type GitHubDelegationBody, type HumanRequestItem, type ProjectItem, type RepositoryMutation, type RunTelemetry, type RepositoryView, type StateView, type TaskHistoryView, type TaskItem, type TaskPeerQuestion, type TaskContentPin } from "@dark-factory/client";
 import type { FactoryEditView, FactoryHumanRequestView } from "./factory-app-controller.js";
 import { rankLabel } from "./console-screens.js";
 import { activityLabel, type KnowledgeActivity } from "./project-board.js";
@@ -15,7 +15,7 @@ import type { PublishedRelease, RuntimeBuild } from "./production-data.js";
 /** Only the controls the operator actually changed; the rest are left alone. */
 export type AgentConfigEdit = Readonly<{ model?: string; reasoningEffort?: string; accountId?: string; paused?: boolean; archived?: boolean; idlePolicy?: "wait" | "standing_instruction"; idleAfterSeconds?: number; idleInstruction?: string; idleWakeOn?: IdleWakeOn }>;
 
-export type TaskEdit = Readonly<{ title?: string; body?: string; priority?: number; assignedAgentId?: string; cancel?: boolean; retry?: boolean }>;
+export type TaskEdit = Readonly<{ cancel?: boolean; retry?: boolean }>;
 export type TaskBrief = Readonly<{ taskId: string; revision: bigint; head: bigint; instruction: string; feedback: string; outcome?: string; peerQuestions: readonly TaskPeerQuestion[]; nextPeerOffset?: bigint }>;
 export type AgentPanelView = "terminal" | "config";
 export type TaskScope = { agent_id: string } | { project_id: string };
@@ -310,7 +310,6 @@ export function WorkPanel({
         {selected ? <div className="dfConsoleItem__detail">{requestContent}</div> : null}
       </WorkRowShell>;
     }
-    if (task?.status === "queued" && onEditTask !== undefined) return <QueuedTask key={row.key} chips={chips(row)} meta={`${named ? `${named} · ` : ""}${owner(task)} · Priority ${task.priority}`} task={task} peers={agents.filter((peer) => peer.project_id === (state.agents.get(task.assigned_agent_id)?.project_id ?? task.project_id))} pending={edit?.pending === true} ready={ready} onEditTask={onEditTask} onLoadTaskDetail={onLoadTaskDetail} />;
     return <WorkRowShell key={row.key} title={row.title} chips={chips(row)} meta={meta} disabled={!ready} pressed={task && selectedTaskId === task.id} onOpen={task ? (onSelectTask && (() => onSelectTask(task.id))) : () => onSelectProduction(productionKey(row.pr!))}>
       {blocked && task.blocked_reason ? <p className="dfConsoleItem__meta">{task.blocked_reason}</p> : null}
       {!blocked || onEditTask === undefined ? null : <div className="dfConsoleSidebar__taskActions"><button type="button" aria-label={`Retry ${task.title}`} disabled={!ready || edit?.pending === true} onClick={() => { void onEditTask(task, { retry: true }); }}>Retry</button><button type="button" aria-label={`Cancel ${task.title}`} disabled={!ready || edit?.pending === true} onClick={() => { void onEditTask(task, { cancel: true }); }}>Cancel</button></div>}
@@ -536,98 +535,6 @@ function AgentConfig({
       ) : null}
       <button type="submit" disabled={pending || !ready || ruleIncomplete}>{pending ? "Saving" : "Save"}</button>
     </form>
-  );
-}
-
-/**
- * A priority is durable global scheduling input. Increasing or decreasing it
- * by one is honest about the effect even when several queued tasks tie.
- */
-function QueuedTask({
-  chips,
-  meta,
-  task,
-  peers,
-  pending,
-  ready,
-  onEditTask,
-  onLoadTaskDetail,
-}: {
-  chips: ReactNode;
-  meta: ReactNode;
-  task: TaskItem;
-  peers: readonly AgentItem[];
-  pending: boolean;
-  ready: boolean;
-  onEditTask: (task: TaskItem, change: TaskEdit) => Promise<boolean>;
-  onLoadTaskDetail?: (task: TaskItem, peerOffset?: bigint, expectedHead?: bigint) => Promise<TaskBrief>;
-}) {
-  const [brief, setBrief] = useState<TaskBrief>();
-  const [title, setTitle] = useState(task.title);
-  const [instruction, setInstruction] = useState("");
-  const [loading, setLoading] = useState(false);
-  const [detailError, setDetailError] = useState(false);
-  const [expanded, setExpanded] = useState(false);
-  const [open, setOpen] = useState(false);
-  const [openedRevision, setOpenedRevision] = useState<bigint>();
-  const disabled = pending || !ready;
-  const stale = open && openedRevision !== task.revision;
-  const load = async (peerOffset?: bigint, expectedHead?: bigint) => {
-    if (onLoadTaskDetail === undefined) return;
-    setLoading(true);
-    setDetailError(false);
-    try {
-      const loaded = await onLoadTaskDetail(task, peerOffset, expectedHead);
-      setBrief(loaded);
-      if (peerOffset === undefined) {
-        setTitle(task.title);
-        setInstruction(loaded.instruction);
-        setOpenedRevision(task.revision);
-        setOpen(true);
-      }
-    } catch {
-      setDetailError(true);
-    } finally {
-      setLoading(false);
-    }
-  };
-  return (
-    <WorkRowShell title={task.title} chips={chips} meta={meta} expanded={expanded} onOpen={() => { setExpanded(!expanded); if (!expanded && brief === undefined && !loading) void load(); }}>
-      <div className="dfConsoleItem__detail" hidden={!expanded}>
-        {open ? <>
-          <label htmlFor={`df-title-${task.id}`}>Title</label>
-          <input id={`df-title-${task.id}`} value={title} disabled={disabled || loading || stale} onChange={(event) => setTitle(event.currentTarget.value)} />
-          <label htmlFor={`df-instruction-${task.id}`}>Instruction</label>
-          <textarea id={`df-instruction-${task.id}`} rows={4} value={instruction} disabled={disabled || loading || stale} onChange={(event) => setInstruction(event.currentTarget.value)} />
-          {brief?.feedback === "" || brief === undefined ? null : <><label>Retained review feedback</label><pre className="dfConsoleSidebar__feedback">{brief.feedback}</pre></>}
-        {brief === undefined ? null : <TaskConversation brief={brief} pending={loading} onOlder={brief.nextPeerOffset === undefined ? undefined : () => { void load(brief.nextPeerOffset, brief.head); }} />}
-        {stale ? <p role="alert">Task changed — reopen brief to save</p> : null}
-          <div className="dfConsoleSidebar__taskActions">
-            <button type="button" disabled={disabled || loading || stale || title.trim() === ""} onClick={async () => { if (await onEditTask(task, { title, body: instruction })) setOpen(false); }}>{pending ? "Saving" : "Save brief"}</button>
-            {stale ? <button type="button" disabled={loading} onClick={() => { void load(); }}>Reopen brief</button> : null}
-            <button type="button" disabled={loading} onClick={() => setOpen(false)}>Discard</button>
-          </div>
-        </> : <button type="button" disabled={disabled || loading || onLoadTaskDetail === undefined} onClick={() => { void load(); }}>{loading ? "Loading brief" : "Edit brief"}</button>}
-        {detailError ? <p role="alert">{open ? "Could not load details. Save or discard your draft, then reopen to retry." : "Could not load details. Reopen the brief to retry."}</p> : null}
-        <div className="dfConsoleSidebar__taskActions">
-          <button type="button" aria-label={`Increase priority for ${task.title}`} disabled={disabled || task.priority === MAX_TASK_PRIORITY} onClick={() => { void onEditTask(task, { priority: task.priority + 1 }); }}>Increase priority</button>
-          <button type="button" aria-label={`Decrease priority for ${task.title}`} disabled={disabled || task.priority === -MAX_TASK_PRIORITY} onClick={() => { void onEditTask(task, { priority: task.priority - 1 }); }}>Decrease priority</button>
-          <label className="dfFactoryConsole__visuallyHidden" htmlFor={`df-assign-${task.id}`}>Agent for {task.title}</label>
-          <select
-            id={`df-assign-${task.id}`}
-            value={task.assigned_agent_id}
-            disabled={disabled}
-            onChange={(event) => { void onEditTask(task, { assignedAgentId: event.currentTarget.value }); }}
-          >
-            {[
-              ...(task.assigned_agent_id === "" ? [<option key="" value="" disabled>Any eligible worker</option>] : []),
-              ...peers.filter((peer) => !peer.archived && (task.assigned_agent_id !== "" || peer.role === "worker")).map((peer) => <option key={peer.id} value={peer.id}>{peer.name}</option>),
-            ]}
-          </select>
-          <button type="button" disabled={disabled} onClick={() => { void onEditTask(task, { cancel: true }); }}>Cancel</button>
-        </div>
-        </div>
-    </WorkRowShell>
   );
 }
 
