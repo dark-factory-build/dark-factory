@@ -99,7 +99,6 @@ export function FactoryApp({ onStatusChange, browserPort }: FactoryAppProps = {}
       onSetDispatch={snapshot.dispatchAllowed ? (revision, enabled) => owner.current?.setDispatch(revision, enabled) ?? Promise.reject(new Error("closed")) : undefined}
       onProjectContent={(operation, input) => owner.current?.projectContent(operation, input) ?? Promise.reject(new Error("closed"))}
       onSaveAgentConfig={(config) => { void owner.current?.updateAgentConfig(config); }}
-      onSaveProjectLimits={(project, limits) => { void owner.current?.updateProjectLimits(project, limits); }}
       onSaveAgentAppearance={(agentId, appearance) => owner.current?.updateAgentAppearance(agentId, appearance) ?? Promise.resolve(false)}
       appearanceAgentId={appearanceAgentId}
       onEditAppearance={(agent) => setAppearanceAgentId(agent.id)}
@@ -115,8 +114,6 @@ export function FactoryApp({ onStatusChange, browserPort }: FactoryAppProps = {}
       onReplyHumanRequest={() => { void owner.current?.replyHumanRequest(); }}
       onCancelHumanRequest={() => { void owner.current?.cancelHumanRequest(); }}
       onCloseHumanRequest={() => owner.current?.clearHumanRequest()}
-      onLoadRepositories={snapshot.status === "ready" ? (projectId) => { void owner.current?.loadRepositories(projectId); } : undefined}
-      onMutateRepository={(request) => { void owner.current?.mutateRepository(request); }}
       onLoadIntake={snapshot.status === "ready" ? (projectId) => { void owner.current?.loadIntake(projectId); } : undefined}
       onIntakeAction={(projectId, request) => { void owner.current?.intakeAction(projectId, request); }}
       terminalContent={terminal}

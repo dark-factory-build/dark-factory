@@ -64,7 +64,6 @@ function harness(overrides = {}) {
     listBrowserClients: overrides.listBrowserClients ?? (async () => ({ clients: [], more: false })),
     revokeBrowserClient: overrides.revokeBrowserClient ?? (async () => { throw new SessionError("not_found"); }),
     getRepositories: overrides.getRepositories ?? (async () => []),
-    mutateRepository: overrides.mutateRepository ?? (async () => undefined),
     createProject: overrides.createProject ?? (async () => undefined),
     githubConnection: overrides.githubConnection ?? (async () => ({ state: "denied" })),
     intake: overrides.intake ?? (async () => ({ state: "ok", sources: [] })),

@@ -18,7 +18,7 @@ import {
   encodeServerControl,
 } from "../dist/src/index.js";
 import { settle } from "./remote-fake.mjs";
-import { encodeAgentControlResult, encodeAuthResult, encodeHello, encodeHumanRequestCancelRunResult, encodeHumanRequestDetail, encodeHumanRequestReplyResult, encodePairResult, encodeProjectCreateResult, encodeRemoteInviteResult, encodeRepositories, encodeRepositoryMutateResult, encodeServerError, encodeStateChanged, encodeStateSnapshot, encodeTaskDetail, encodeTaskEnqueueResult, encodeTaskHistory, encodeTerminalAttached, encodeTerminalExit, encodeTerminalReset, encodeTerminalTarget } from "./server-frames.mjs";
+import { encodeAgentControlResult, encodeAuthResult, encodeHello, encodeHumanRequestCancelRunResult, encodeHumanRequestDetail, encodeHumanRequestReplyResult, encodePairResult, encodeProjectCreateResult, encodeRemoteInviteResult, encodeRepositories, encodeServerError, encodeStateChanged, encodeStateSnapshot, encodeTaskDetail, encodeTaskEnqueueResult, encodeTaskHistory, encodeTerminalAttached, encodeTerminalExit, encodeTerminalReset, encodeTerminalTarget } from "./server-frames.mjs";
 
 const challenge = "11".repeat(32);
 const daemonID = "22".repeat(16);
@@ -324,7 +324,7 @@ test("authenticated task enqueue mints exact IDs and correlates the durable resu
   session.close();
 });
 
-test("private repository administration and enqueue selection are exact-correlated", async () => {
+test("private repository listing and enqueue selection are exact-correlated", async () => {
   const { session, socket } = await openHumanSession();
   const projectId = "7a".repeat(16);
   const repositoryId = "7b".repeat(16);
@@ -336,24 +336,6 @@ test("private repository administration and enqueue selection are exact-correlat
   assert.deepEqual(listFrame, { type: "REPOSITORIES_GET", id: listFrame.id, body: { project_id: projectId } });
   socket.reply(encodeRepositories(listFrame.id, { project_id: projectId, items: [item] }));
   assert.deepEqual(await listed, [item]);
-
-  const updated = session.mutateRepository({ projectId, repositoryId, expectedRevision: 3n, action: "base", baseRef: "release" });
-  const updateFrame = decodeClientControl(socket.sent.at(-1));
-  assert.deepEqual(updateFrame.body, { action: "base", id: repositoryId, expected_revision: 3n, base_ref: "release" });
-  socket.reply(encodeRepositoryMutateResult(updateFrame.id, { repository: { ...item, base_ref: "release", revision: 4n } }));
-  assert.equal((await updated).base_ref, "release");
-
-  const fetch = session.mutateRepository({ projectId, repositoryId, action: "fetch" });
-  const fetchFrame = decodeClientControl(socket.sent.at(-1));
-  assert.deepEqual(fetchFrame.body, { action: "fetch", id: repositoryId });
-  socket.reply(encodeRepositoryMutateResult(fetchFrame.id, { repository: { ...item, base_ref: "release", revision: 5n, fetch_state: "ready", readiness_message: "Checkout is ready." } }));
-  assert.equal((await fetch).fetch_state, "ready");
-
-  const github = session.mutateRepository({ projectId, repositoryId, action: "github" });
-  const githubFrame = decodeClientControl(socket.sent.at(-1));
-  assert.deepEqual(githubFrame.body, { action: "github", id: repositoryId });
-  socket.reply(encodeRepositoryMutateResult(githubFrame.id, { repository: { ...item, base_ref: "release", revision: 6n, publication_state: "ready", github_repository_id: 123456n } }));
-  assert.equal((await github).github_repository_id, 123456n);
 
   const enqueue = session.enqueueAgentTask({ agentId, expectedAgentRevision: 2n, repositoryId, instruction: "Use the selected checkout" });
   const enqueueFrame = decodeClientControl(socket.sent.at(-1));
@@ -488,7 +470,6 @@ test("console edits and topology carry exact bodies and correlate their results"
   const { session, socket } = await openHumanSession();
   const agentId = "78".repeat(16);
   const taskId = "79".repeat(16);
-  const projectId = "7d".repeat(16);
 
   const agentPending = session.updateAgent({ agentId, expectedRevision: 7n, model: "claude-opus-5", paused: true });
   const agentFrame = decodeClientControl(socket.sent.at(-1));
@@ -497,13 +478,6 @@ test("console edits and topology carry exact bodies and correlate their results"
   assert.deepEqual(agentFrame.body, { agent_id: agentId, expected_revision: 7n, model: "claude-opus-5", paused: true });
   socket.reply(encodeServerControl({ type: "AGENT_UPDATE_RESULT", id: agentFrame.id, body: { agent_id: agentId, revision: 8n } }));
   assert.deepEqual(await agentPending, { agentId, revision: 8n });
-
-  const limitsPending = session.setProjectLimits({ projectId, expectedRevision: 4n, maxRunSeconds: 900 });
-  const limitsFrame = decodeClientControl(socket.sent.at(-1));
-  assert.equal(limitsFrame.type, "PROJECT_LIMITS");
-  assert.deepEqual(limitsFrame.body, { project_id: projectId, expected_revision: 4n, max_run_seconds: 900 });
-  socket.reply(encodeServerControl({ type: "PROJECT_LIMITS_RESULT", id: limitsFrame.id, body: { project_id: projectId, revision: 5n } }));
-  assert.deepEqual(await limitsPending, { projectId, revision: 5n });
 
   const taskPending = session.updateTask({ taskId, expectedRevision: 3n, priority: 5, cancel: true });
   const taskFrame = decodeClientControl(socket.sent.at(-1));
@@ -2078,7 +2052,7 @@ test("without administration the account verbs are refused before anything is se
   assert.equal(session.status, "ready");
   const sent = socket.sent.length;
   const agentId = "7c".repeat(16);
-  for (const refused of [session.discoverAccounts(), session.linkAccount({ provider: "codex", home: "/x", label: "x" }), session.updateAgent({ agentId, expectedRevision: 3n, accountId: "" }), session.setProjectLimits({ projectId: "7d".repeat(16), expectedRevision: 3n, runBudget: 1n, maxRunSeconds: 0 })]) {
+  for (const refused of [session.discoverAccounts(), session.linkAccount({ provider: "codex", home: "/x", label: "x" }), session.updateAgent({ agentId, expectedRevision: 3n, accountId: "" })]) {
     await assert.rejects(refused, (error) => error instanceof SessionError && error.code === "unauthorized");
   }
   assert.equal(socket.sent.length, sent);

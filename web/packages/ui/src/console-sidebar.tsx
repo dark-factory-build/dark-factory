@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState, type FormEvent, type ReactNode } from "react";
-import { MAX_TASK_ATTACHMENTS, MAX_TASK_ATTACHMENT_BYTES, type IntakeView, type IntakeBody, type DiscoveredAccount, type AccountItem, type AgentItem, type IdleWakeOn, type GitHubConnectionBody, type GitHubDelegationBody, type HumanRequestItem, type ProjectItem, type RepositoryMutation, type RunTelemetry, type RepositoryView, type StateView, type TaskHistoryView, type TaskItem, type TaskPeerQuestion, type TaskContentPin } from "@dark-factory/client";
+import { MAX_TASK_ATTACHMENTS, MAX_TASK_ATTACHMENT_BYTES, type IntakeView, type IntakeBody, type DiscoveredAccount, type AccountItem, type AgentItem, type IdleWakeOn, type GitHubConnectionBody, type GitHubDelegationBody, type HumanRequestItem, type ProjectItem, type RunTelemetry, type RepositoryView, type StateView, type TaskHistoryView, type TaskItem, type TaskPeerQuestion, type TaskContentPin } from "@dark-factory/client";
 import type { FactoryEditView, FactoryHumanRequestView } from "./factory-app-controller.js";
 import { rankLabel } from "./console-screens.js";
 import { activityLabel, type KnowledgeActivity } from "./project-board.js";
@@ -246,13 +246,10 @@ export type AddTask = (agent: AgentItem, instruction: string, mode: "queue" | "a
 /** One list for everything open: what needs you, what is in review, running and queued. */
 export function WorkPanel({
   state, rows, projectId, filter, onFilter, byMission, onByMission, missions, edit, ready, onEditTask, onAddTask, taskContent = [], onTaskContent = () => undefined, onLoadTaskDetail, onLoadTaskHistory,
-  selectedTaskId, onSelectTask, selectedHumanRequest, onSelectHumanRequest, onCloseHumanRequest, requestContent, onSelectProduction, onMission, sources, onManageSources, onIntakeAction, intake,
+  selectedTaskId, onSelectTask, selectedHumanRequest, onSelectHumanRequest, onCloseHumanRequest, requestContent, onSelectProduction, onMission, onIntakeAction, intake,
 }: {
-  /** The local source list for the shown project; undefined until loaded. */
-  sources?: readonly { id: string; repository: string; label: string; enabled: boolean }[];
-  onManageSources?: () => void;
   onIntakeAction?: (projectId: string, request: IntakeBody) => void;
-  /** The shown project's last intake outcome; a failed Accept routes to Sources for fresh content. */
+  /** The shown project's last intake outcome. */
   intake?: Readonly<{ state?: string; failed: boolean; busy: boolean }>;
   selectedTaskId?: string;
   onSelectTask?: (taskId: string) => void;
@@ -316,7 +313,6 @@ export function WorkPanel({
     </WorkRowShell>;
   };
   return <section className="dfConsoleSidebar__panel" aria-label="Work">
-    {onManageSources === undefined ? null : <p className="dfConsoleItem__meta" role="status" aria-label="Task sources">{sources === undefined ? "Sources: not loaded yet" : sources.length === 0 ? "No sources — tasks come only from New task" : `Sources: ${sources.map((item) => `${item.repository} · ${item.label === "" ? "every issue" : `label ${item.label}`}${item.enabled ? "" : " (paused)"}`).join("; ")}`} <button type="button" onClick={onManageSources}>Manage</button></p>}
     {state.factory.dispatch_enabled ? null : <p role="status">New work is paused. Queued tasks wait; active processes continue. An administrator can resume new work above.</p>}
     {onAddTask === undefined ? null : <NewTask agents={agents} state={state} disabled={!ready || edit?.pending === true} onAddTask={onAddTask} content={taskContent} onContent={onTaskContent} />}
     <div className="dfWorkBar">
@@ -327,7 +323,7 @@ export function WorkPanel({
       {byMission ? null : <IconButton icon="terminal" aria-label="Show overseer and specialist passes" aria-pressed={overseer} disabled={!ready} onClick={() => setOverseer(!overseer)} />}
     </div>
     <div hidden={byMission}>
-      {rows.some((row) => row.intake !== undefined) && (intake?.failed || !["ok", "accepted", "imported", "withdrawn", "withdrawal_pending", undefined].includes(intake?.state)) ? <p role="alert">Could not accept: {intake?.failed ? "try again" : intake?.state?.replaceAll("_", " ")}. {onManageSources === undefined ? null : <button type="button" onClick={onManageSources}>Review in Sources</button>}</p> : null}
+      {rows.some((row) => row.intake !== undefined) && (intake?.failed || !["ok", "accepted", "imported", "withdrawn", "withdrawal_pending", undefined].includes(intake?.state)) ? <p role="alert">Could not accept: {intake?.failed ? "try again" : intake?.state?.replaceAll("_", " ")}.</p> : null}
       {shown.length === 0 ? <p className="dfFactoryConsole__empty">{filter === "all" ? "No open work" : "Nothing here"}</p> : <ul className="dfConsoleItems">{shown.map(item)}</ul>}
     </div>
     <div hidden={!byMission}>{missions}</div>
