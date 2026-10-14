@@ -11,21 +11,21 @@ const browser = process.env.DF_LAYOUT_BROWSER;
 
 test("the documented floor fixtures fit controls at phone width and stay one row on desktop", { skip: browser === undefined ? "set DF_LAYOUT_BROWSER to opt into live layout measurement" : false }, () => {
   const dir = mkdtempSync(join(tmpdir(), "df-floor-layout-"));
-  const floor = join(dir, "floor.html"), fixture = join(dir, "fixture.html");
-  execFileSync(process.execPath, [preview, floor]);
+  const fixture = join(dir, "fixture.html");
   execFileSync(process.execPath, [preview, "fixture", fixture]);
-  for (const [file, selector, controls] of [[floor, ".dfFactoryEntityTools", "summary"], [fixture, ".dfWorkBar", "summary, .dfConsoleViewToggle button, .dfWorkBar > button"]]) {
+  for (const [selector, controls] of [[".dfFactoryEntityTools", "summary, button"], [".dfWorkBar", "summary, .dfConsoleViewToggle button, .dfWorkBar > button"]]) {
     for (const width of [390, 1440]) {
-      const measurement = measure(file, width, selector, controls);
+      const measurement = measure(fixture, width, selector, controls);
       assert.equal(measurement.root.scrollWidth, measurement.root.clientWidth, `${selector} horizontally overflows at ${width}px`);
       for (const control of measurement.controls) assert.equal(control.within, true, `${control.text} leaves ${selector} at ${width}px`);
+      for (const control of measurement.controls) assert.equal(control.operable, true, `${control.text} is disabled at ${width}px`);
       if (width === 1440) assert.equal(measurement.root.rows, 1, `${selector} wraps on desktop`);
     }
   }
 });
 
 function measure(file, width, selector, controls) {
-  const script = `<script>requestAnimationFrame(() => { const root = document.querySelector(${JSON.stringify(selector)}); const bounds = root.getBoundingClientRect(); const elements = [...root.querySelectorAll(${JSON.stringify(controls)})]; const items = elements.map((element) => { const rect = element.getBoundingClientRect(); return { text: element.textContent.trim(), within: rect.left >= bounds.left - .1 && rect.right <= bounds.right + .1 && rect.top >= bounds.top - .1 && rect.bottom <= bounds.bottom + .1, top: rect.top }; }); const rows = new Set(items.map((item) => item.top.toFixed(2))).size; document.body.insertAdjacentHTML("beforeend", "<pre id=\"df-layout\">" + JSON.stringify({ root: { scrollWidth: root.scrollWidth, clientWidth: root.clientWidth, rows }, controls: items }) + "</pre>"); });</script>`;
+  const script = `<script>requestAnimationFrame(() => { const root = document.querySelector(${JSON.stringify(selector)}); const bounds = root.getBoundingClientRect(); const elements = [...root.querySelectorAll(${JSON.stringify(controls)})]; const items = elements.map((element) => { const rect = element.getBoundingClientRect(); return { text: element.textContent.trim(), within: rect.left >= bounds.left - .1 && rect.right <= bounds.right + .1 && rect.top >= bounds.top - .1 && rect.bottom <= bounds.bottom + .1, operable: element.disabled !== true, top: rect.top }; }); const rows = new Set(items.map((item) => item.top.toFixed(2))).size; document.body.insertAdjacentHTML("beforeend", "<pre id=\"df-layout\">" + JSON.stringify({ root: { scrollWidth: root.scrollWidth, clientWidth: root.clientWidth, rows }, controls: items }) + "</pre>"); });</script>`;
   const wrapper = `${file}.wrapper.html`;
   writeFileSync(wrapper, `${readFileSync(file, "utf8")}${script}`);
   const dom = execFileSync(browser, ["--headless=new", "--no-sandbox", "--disable-gpu", "--no-first-run", "--disable-dev-shm-usage", `--user-data-dir=${mkdtempSync(join(tmpdir(), "df-chrome-"))}`, "--dump-dom", `--window-size=${width},844`, `file://${wrapper}`], { encoding: "utf8" });
