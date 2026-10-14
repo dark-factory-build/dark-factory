@@ -97,6 +97,42 @@ func BenchmarkOverseerItemsLiveShape(b *testing.B) {
 	}
 }
 
+func TestProductionEscalationReachesStalledCard(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	store, _, overseer := wakeFixture(t)
+	head := strings.Repeat("a", 40)
+	if err := store.RecordProductionObservation(ctx, overseer.ProjectID, ProductionObservation{
+		Repository: "example/factory", ObservedAt: 1000,
+		PullRequests: []ProductionPullRequest{{Number: 7, Title: "Ship", Head: head, State: "open", Review: ProductionReview{Head: head, State: "unknown"}}},
+	}, mustTime(t, 1000)); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.RecordReviewOperation(ctx, overseer.ProjectID, "example/factory", "api-op7", map[string]any{
+		"request": map[string]any{"PullNumber": 7, "Head": strings.ToUpper(head)}, "escalation": "stuck 7",
+	}, mustTime(t, 1000)); err != nil {
+		t.Fatal(err)
+	}
+	at := int64(1000) + overseerWakeMaxDelay.Milliseconds()
+	bodies := wakeBodies(t, store, at)
+	if len(bodies) != 1 || !strings.Contains(bodies[0], "[reviewer:api-op7]") {
+		t.Fatalf("API escalation wake = %q", bodies)
+	}
+	settleCarrier(t, store, at+1, 31, NeverStartedRunDetail)
+	settleCarrier(t, store, at+20, 52, NeverStartedRunDetail)
+	at += 40 + OverseerRewakeAfter.Milliseconds()
+	tasks, err := store.EnqueueOverseerWakeups(ctx, mustTime(t, at))
+	if err != nil || len(tasks) != 1 {
+		t.Fatalf("API escalation re-wake = %+v, %v", tasks, err)
+	}
+	settleCarrier(t, store, at+1, 73, "ran")
+	wakeBodies(t, store, at+10+OverseerRewakeAfter.Milliseconds())
+	requests, err := store.OperatorHumanRequests(ctx)
+	if err != nil || len(requests) != 1 || !strings.Contains(requests[0].QuestionText, "[reviewer:api-op7]") {
+		t.Fatalf("API escalation stalled card = %+v, %v", requests, err)
+	}
+}
+
 // An escalation wakes the overseer only while its pull request is open at the
 // escalated head, and only once settled: its newest item a minute old, or its
 // oldest five minutes old.
