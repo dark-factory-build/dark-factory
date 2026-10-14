@@ -348,9 +348,9 @@ func (daemon *Daemon) release(project kernel.ProjectID, root string, source chan
 		fail(err.Error())
 		return
 	}
-	// The merged intake pull requests no verified release names yet, kept
-	// where this commit's history ships them.
-	outstanding, _ := daemon.store.UnreleasedMergedPulls(ctx, project, selfRepository)
+	// The intake pull requests no verified release names yet, kept where
+	// this commit's history ships them, observed merged or not.
+	outstanding, _ := daemon.store.UnreleasedIntakePulls(ctx, project, selfRepository)
 	delivery.PullRequests = releasedPulls(ctx, filepath.Join(directory, "tree", ".git"), delivery.Revision, outstanding)
 	delivery.Phase = "drain"
 	_ = daemon.writeRelease(ctx, project, &delivery)

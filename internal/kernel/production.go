@@ -377,10 +377,12 @@ func (store *Store) RecordDelivery(ctx context.Context, project ProjectID, repos
 	return tx.Commit(ctx)
 }
 
-// UnreleasedMergedPulls lists, newest first and at most a release's worth,
-// repository's merged intake pull requests that no verified release names: the
-// ones a release may still make live (#1906).
-func (store *Store) UnreleasedMergedPulls(ctx context.Context, project ProjectID, repository string) ([]uint64, error) {
+// UnreleasedIntakePulls lists, newest first and at most a release's worth,
+// repository's published intake pull requests, merged or not yet seen to be,
+// that no verified release names: the ones a release may still make live
+// (#1906). Its history decides which it ships, so a merge refresh has yet to
+// observe still counts; one closed unmerged never ships.
+func (store *Store) UnreleasedIntakePulls(ctx context.Context, project ProjectID, repository string) ([]uint64, error) {
 	tx, err := store.beginRead(ctx)
 	if err != nil {
 		return nil, err
@@ -389,7 +391,7 @@ func (store *Store) UnreleasedMergedPulls(ctx context.Context, project ProjectID
 	rows, err := tx.connection.QueryContext(ctx, `SELECT DISTINCT p.pull_number FROM publication_tasks AS p
 		JOIN intake_task_bindings AS b ON b.task_id = p.task_id
 		JOIN production_records AS r ON r.project_id = p.project_id AND r.repository = p.repository AND r.kind = 'pull_request' AND r.identity = CAST(p.pull_number AS TEXT)
-		WHERE p.project_id = ?1 AND p.repository = ?2 AND json_extract(r.document, '$.state') = 'merged'
+		WHERE p.project_id = ?1 AND p.repository = ?2 AND json_extract(r.document, '$.state') <> 'closed'
 		  AND NOT EXISTS (SELECT 1 FROM production_records AS d, json_each(d.document, '$.pull_requests') AS n
 		      WHERE d.project_id = ?1 AND d.repository = ?2 AND d.kind = 'delivery' AND d.identity LIKE 'release:%'
 		        AND json_extract(d.document, '$.state') = 'verified' AND CAST(n.value AS INTEGER) = p.pull_number)

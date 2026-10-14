@@ -888,19 +888,21 @@ func TestMergedIntakeSentBackPublishesItsCorrectionAnew(t *testing.T) {
 	if err := store.RecordPublication(ctx, worker.ProjectID, worker.TaskID, "example/factory", pr, mustTime(t, 70)); err != nil {
 		t.Fatal(err)
 	}
+	// A release may make it live until a verified release names it, whether
+	// or not its merge has been observed yet: the release's history decides.
+	unreleased := func(want ...uint64) {
+		t.Helper()
+		if pulls, err := store.UnreleasedIntakePulls(ctx, worker.ProjectID, "Example/Factory"); err != nil || !slices.Equal(pulls, want) {
+			t.Fatalf("unreleased intake pulls = %v %v, want %v", pulls, err, want)
+		}
+	}
+	unreleased(5)
 	pr.State = "merged"
 	if err := store.RecordProductionObservation(ctx, worker.ProjectID, ProductionObservation{Repository: "example/factory", ObservedAt: 75, PullRequests: []ProductionPullRequest{pr}, Checks: []ProductionCheck{}}, mustTime(t, 75)); err != nil {
 		t.Fatal(err)
 	}
 	if found := candidates(76); len(found) != 0 {
 		t.Fatalf("merged work published again: %+v", found)
-	}
-	// A release may still make it live until a verified release names it.
-	unreleased := func(want ...uint64) {
-		t.Helper()
-		if pulls, err := store.UnreleasedMergedPulls(ctx, worker.ProjectID, "Example/Factory"); err != nil || !slices.Equal(pulls, want) {
-			t.Fatalf("unreleased merged pulls = %v %v, want %v", pulls, err, want)
-		}
 	}
 	unreleased(5)
 	for _, state := range []string{"running", "verified"} {
@@ -957,6 +959,13 @@ func TestMergedIntakeSentBackPublishesItsCorrectionAnew(t *testing.T) {
 	if len(found) != 1 || found[0].Task.ID != task.ID || found[0].Pull != 0 || found[0].Head != hex.EncodeToString(corrected.Bytes()) || found[0].Accepted.ID != accepted.ID {
 		t.Fatalf("correction candidates = %+v", found)
 	}
+	// A pull request closed unmerged never ships.
+	closedPull := pr
+	closedPull.Number, closedPull.URL, closedPull.State = 4, "https://github.com/example/factory/pull/4", "closed"
+	if err := store.RecordPublication(ctx, worker.ProjectID, worker.TaskID, "example/factory", closedPull, mustTime(t, 101)); err != nil {
+		t.Fatal(err)
+	}
+	unreleased()
 }
 
 // A pull request a person opened has no factory Change. Its repair task's

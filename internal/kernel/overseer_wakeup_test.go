@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 )
@@ -482,11 +483,26 @@ func TestOverseerVerifiesMergedIntakeOnceLive(t *testing.T) {
 			}
 			settleCarrier(t, store, at+1, seed, "ran")
 		}
+		head := hex.EncodeToString(moved.Bytes())
+		pr := ProductionPullRequest{Number: 7, Title: "Ship", URL: "https://github.com/dark-factory-build/dark-factory/pull/7", Head: head, Branch: "factory/" + change.ID.String()[:12], Base: "main", State: "open", Review: ProductionReview{Head: head, State: "allow"}}
+		if err := store.RecordPublication(ctx, finalizing.ProjectID, finalizing.TaskID, "dark-factory-build/dark-factory", pr, mustTime(t, 90)); err != nil {
+			t.Fatal(err)
+		}
+		// What a release names comes from the store's outstanding intake
+		// pulls, its merge observed or not (release.go keeps those its
+		// history ships).
+		outstanding := func() []uint64 {
+			t.Helper()
+			pulls, err := store.UnreleasedIntakePulls(ctx, finalizing.ProjectID, "dark-factory-build/dark-factory")
+			if err != nil || !slices.Equal(pulls, []uint64{7}) {
+				t.Fatalf("outstanding intake pulls = %v %v", pulls, err)
+			}
+			return pulls
+		}
 		merge := func(at int64) {
 			t.Helper()
-			head := hex.EncodeToString(moved.Bytes())
-			pr := ProductionPullRequest{Number: 7, Title: "Ship", URL: "https://github.com/dark-factory-build/dark-factory/pull/7", Head: head, Branch: "factory/" + change.ID.String()[:12], Base: "main", State: "merged", Review: ProductionReview{Head: head, State: "allow"}}
-			if err := store.RecordPublication(ctx, finalizing.ProjectID, finalizing.TaskID, "dark-factory-build/dark-factory", pr, mustTime(t, at)); err != nil {
+			pr.State = "merged"
+			if err := store.RecordProductionObservation(ctx, finalizing.ProjectID, ProductionObservation{Repository: "dark-factory-build/dark-factory", ObservedAt: at, PullRequests: []ProductionPullRequest{pr}, Checks: []ProductionCheck{}}, mustTime(t, at)); err != nil {
 				t.Fatal(err)
 			}
 		}
@@ -495,7 +511,8 @@ func TestOverseerVerifiesMergedIntakeOnceLive(t *testing.T) {
 		live := int64(5000)
 		switch order {
 		case "release first":
-			release('b', 2000, 7)
+			// The release shipped it before refresh observed the merge.
+			release('b', 2000, outstanding()...)
 			fullPass(3000, 31)
 			merge(live)
 		case "merge first":
@@ -504,14 +521,14 @@ func TestOverseerVerifiesMergedIntakeOnceLive(t *testing.T) {
 			if bodies := wakeBodies(t, store, 3000+settle); len(bodies) != 0 {
 				t.Fatalf("merged but not yet live woke = %q", bodies)
 			}
-			release('b', live, 7)
+			release('b', live, outstanding()...)
 		case "unshipped":
 			release('b', 2000, 9)
 			merge(3000)
 			if bodies := wakeBodies(t, store, 3000+settle); len(bodies) != 0 {
 				t.Fatalf("a merge after the listing release woke before one shipped it = %q", bodies)
 			}
-			release('d', live, 7)
+			release('d', live, outstanding()...)
 		}
 		bodies := wakeBodies(t, store, live+settle)
 		if len(bodies) != 1 || !strings.Contains(bodies[0], finalizing.TaskID.String()+` "verify" succeeded`) || !strings.Contains(bodies[0], "PR #7 merged/allow") {
