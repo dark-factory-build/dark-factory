@@ -94,7 +94,15 @@ func (daemon *Daemon) publishSettledChange(ctx context.Context, c kernel.Publish
 		path, cleanup, err := backend.clone(ctx, repo, "", main, c.Base, "main")
 		return filepath.Join(path, ".git"), cleanup, err
 	}
+	if daemon.settledPublishCheckout != nil {
+		checkout = func(ctx context.Context, main string) (string, func(), error) {
+			return daemon.settledPublishCheckout(ctx, repo, main, c.Base, "main")
+		}
+	}
 	source, err := daemon.settledChangeGitDirectory(ctx, c)
+	if daemon.settledPublishSource != nil {
+		source, err = daemon.settledPublishSource(ctx, c)
+	}
 	if err != nil {
 		return daemon.publishFailed(ctx, c, repo, err)
 	}

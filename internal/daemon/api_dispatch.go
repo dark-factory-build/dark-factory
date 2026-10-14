@@ -65,6 +65,10 @@ type Daemon struct {
 	// githubMCP is a package-test-only transport seam for GitHub Maintainer
 	// calls; production uses github.MCP directly.
 	githubMCP func(context.Context, json.RawMessage, map[string]uint64) (json.RawMessage, error)
+	// settledPublishSource and settledPublishCheckout are package-test-only
+	// seams for exercising publishSettledChange without supervisor setup.
+	settledPublishSource   func(context.Context, kernel.PublishableChange) (string, error)
+	settledPublishCheckout func(context.Context, string, string, string, string) (string, func(), error)
 	// browserRemote is a package-test-only seam for operator calls that wait
 	// outside a paired client's gate.
 	browserRemote       func(context.Context, string)

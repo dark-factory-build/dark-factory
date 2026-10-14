@@ -647,6 +647,58 @@ func TestLinearPublicationUsesExternalSourceWithoutIssueObservation(t *testing.T
 	}
 }
 
+func TestSettledLinearPublicationUsesPrivateMaintainerMethod(t *testing.T) {
+	fixture, c, source, app, checkout := publishFixture(t, 1, false)
+	repositoryID, err := kernel.RepositoryIDFromBytes(mustIDBytes(t, testID(251)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	c.Accepted.RepositoryID = repositoryID
+	c.Accepted.Snapshot.LinearTeamID = "ENG"
+	c.Accepted.Snapshot.URL = "https://linear.app/acme/issue/ENG-7/intake"
+	fixture.daemon.settledPublishSource = func(context.Context, kernel.PublishableChange) (string, error) { return source, nil }
+	fixture.daemon.settledPublishCheckout = func(ctx context.Context, _ string, _ string, _ string, _ string) (string, func(), error) {
+		return checkout(ctx, "main")
+	}
+	var method string
+	fixture.daemon.githubMCP = func(ctx context.Context, request json.RawMessage, _ map[string]uint64) (json.RawMessage, error) {
+		var call struct {
+			Params struct {
+				Name      string         `json:"name"`
+				Arguments map[string]any `json:"arguments"`
+			} `json:"params"`
+		}
+		if err := json.Unmarshal(request, &call); err != nil {
+			t.Fatal(err)
+		}
+		var envelope struct {
+			Method string `json:"method"`
+		}
+		if err := json.Unmarshal(request, &envelope); err != nil {
+			t.Fatal(err)
+		}
+		if call.Params.Name == "publish_pack" {
+			method = envelope.Method
+		}
+		for key, value := range call.Params.Arguments {
+			if number, ok := value.(float64); ok {
+				call.Params.Arguments[key] = int(number)
+			}
+		}
+		result, err := app.call(ctx, call.Params.Name, call.Params.Arguments)
+		if err != nil {
+			return nil, err
+		}
+		return json.Marshal(map[string]any{"jsonrpc": "2.0", "id": 1, "result": map[string]any{"structuredContent": json.RawMessage(result), "content": []any{}, "isError": false}})
+	}
+	if err := fixture.daemon.publishSettledChange(context.Background(), c); err != nil {
+		t.Fatal(err)
+	}
+	if method != "factory/tools/call_private" {
+		t.Fatalf("publish_pack method = %q", method)
+	}
+}
+
 func TestCrossSourceCorrectionKeepsQualifiedReferenceFooter(t *testing.T) {
 	fixture, c, source, app, checkout := publishFixture(t, 1, false)
 	c.Accepted.SourceRepository = "feed/issues"
