@@ -2,8 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
-import { act, create } from "react-test-renderer";
-import { AgentInstruction, TerminalContent, TerminalPanel } from "../dist/src/factory-app.js";
+import { TerminalContent, TerminalPanel } from "../dist/src/factory-app.js";
 import { TaskConversation } from "../dist/src/console-sidebar.js";
 const textOf = (node) => [].concat(node.props.children).flat(Infinity).filter((child) => typeof child === "string").join("").trim();
 
@@ -15,7 +14,6 @@ function terminalView(overrides = {}) {
     phase: "ready",
     writable: true,
     paused: false,
-    instructionPending: false,
     queued: false,
     hasOutputSurface: false,
     resets: 0,
@@ -61,6 +59,7 @@ test("answered task conversation keeps the question and answer text without deli
   assert.equal(markup.includes("Answer delivery"), false);
 });
 
+// Agent pane render coverage above deliberately excludes task-entry controls.
 test("the terminal is a quiet sidebar", () => {
   const markup = renderToStaticMarkup(panel(terminalView({ taskTitle: "Repair finalization" })));
   assert.match(markup, /dfFactoryConsole__terminalPanel/);
@@ -72,7 +71,6 @@ test("the terminal is a quiet sidebar", () => {
   }
   assert.equal((markup.match(/<button/g) ?? []).length, 0, "the terminal has no duplicate controls");
 });
-
 test("finalizing work shows no blank terminal or idle input", () => {
   const markup = renderToStaticMarkup(createElement(TerminalContent, {
     terminal: terminalView({ taskTitle: "Repair finalization", finishing: true }),
@@ -82,93 +80,16 @@ test("finalizing work shows no blank terminal or idle input", () => {
   assert.equal(markup.includes("textarea"), false);
   assert.equal(markup.includes('role="application"'), false);
 });
-
-test("an idle configured agent accepts one compact instruction", async () => {
-  const previousAct = globalThis.IS_REACT_ACT_ENVIRONMENT;
-  globalThis.IS_REACT_ACT_ENVIRONMENT = true;
-  try {
-    const submitted = [];
-    let renderer;
-    await act(async () => {
-      renderer = create(createElement(AgentInstruction, {
-        terminal: terminalView({ phase: "idle", writable: false }),
-        onSubmit: async (instruction) => { submitted.push(instruction); return true; },
-      }));
-    });
-    const textarea = renderer.root.findByType("textarea");
-    await act(async () => { textarea.props.onChange({ target: { value: "Repair the queue" } }); });
-    const form = renderer.root.findByType("form");
-    await act(async () => { form.props.onSubmit({ preventDefault() {} }); });
-    assert.deepEqual(submitted, ["Repair the queue"]);
-    assert.equal(renderer.root.findByType("textarea").props.value, "");
-    await act(async () => { renderer.unmount(); });
-  } finally {
-    globalThis.IS_REACT_ACT_ENVIRONMENT = previousAct;
-  }
-});
-
-test("an instruction can be queued for any eligible worker in the project", async () => {
-  const previousAct = globalThis.IS_REACT_ACT_ENVIRONMENT;
-  globalThis.IS_REACT_ACT_ENVIRONMENT = true;
-  try {
-    const submitted = [];
-    let renderer;
-    await act(async () => {
-      renderer = create(createElement(AgentInstruction, {
-        terminal: terminalView({ phase: "idle", writable: false }),
-        onSubmit: async (instruction, mode) => { submitted.push([instruction, mode]); return true; },
-      }));
-    });
-    await act(async () => { renderer.root.findByType("textarea").props.onChange({ target: { value: "Whoever is free: fix the flaky test" } }); });
-    const anyWorker = renderer.root.findAllByType("button").find((button) => button.props.children === "Any worker");
-    assert.equal(anyWorker.props["aria-label"], "Queue for any eligible worker in Builder One's project");
-    await act(async () => { anyWorker.props.onClick(); });
-    assert.deepEqual(submitted, [["Whoever is free: fix the flaky test", "any"]]);
-    assert.equal(renderer.root.findByType("textarea").props.value, "");
-    await act(async () => { renderer.unmount(); });
-  } finally {
-    globalThis.IS_REACT_ACT_ENVIRONMENT = previousAct;
-  }
-});
-
-test("paused agents remain identifiable without a false input", () => {
-  const markup = renderToStaticMarkup(createElement(AgentInstruction, {
-    terminal: terminalView({ phase: "idle", writable: false, paused: true }),
-    onSubmit: async () => true,
-  }));
-  assert.match(markup, />Paused<\/p>/);
-  assert.equal(markup.includes("textarea"), false);
-});
-
-test("paused or capacity-queued idle agents can add follow-up work", () => {
+test("paused or capacity-queued idle agents show truthful state without task entry", () => {
   for (const overrides of [{ paused: true }, { queued: true }]) {
     const markup = renderToStaticMarkup(createElement(TerminalContent, {
       terminal: terminalView({ phase: "idle", writable: false, ...overrides }),
       controller: {},
     }));
-    const id = `df-instruction-${"21".repeat(16)}-queue`;
-    assert.match(markup, new RegExp(`for="${id}"`));
-    assert.match(markup, new RegExp(`id="${id}"`));
-    assert.match(markup, />Add to queue</);
+    assert.match(markup, overrides.paused ? />Paused<\/p>/ : /Queued · waiting for capacity/);
+    assert.equal(markup.includes("textarea"), false);
+    assert.equal(markup.includes("Add to queue"), false);
   }
-});
-
-test("queued instructions state their capacity wait", () => {
-  const markup = renderToStaticMarkup(createElement(AgentInstruction, {
-    terminal: terminalView({ phase: "idle", writable: false, queued: true }),
-    onSubmit: async () => true,
-  }));
-  assert.match(markup, /Queued · waiting for capacity/);
-  assert.equal(markup.includes("textarea"), false);
-});
-
-test("an uncertain instruction send never claims the task was absent", () => {
-  const markup = renderToStaticMarkup(createElement(AgentInstruction, {
-    terminal: terminalView({ phase: "idle", writable: false, instructionError: { code: "connection" } }),
-    onSubmit: async () => false,
-  }));
-  assert.match(markup, /Send not confirmed — check tasks before retrying/);
-  assert.equal(markup.includes(">Not sent<"), false);
 });
 
 test("a definite steering refusal is visible", () => {
@@ -185,30 +106,11 @@ test("the terminal has controls but no duplicated task history", () => {
     controller: {},
   }));
   assert.equal(markup.includes("History"), false);
+  for (const removed of ["textarea", "Any worker", "Start", "Add follow-up work", "Add to queue"]) assert.equal(markup.includes(removed), false, removed);
   assert.match(markup, />Interrupt<\/button>/);
   assert.match(markup, />Stop current<\/button>/);
 });
 
-test("a controller-owned draft and refusal survive the composer changing to a follow-up", () => {
-  const markup = renderToStaticMarkup(createElement(AgentInstruction, {
-    terminal: terminalView({ instructionDraft: "Keep this task", instructionError: { code: "stale" }, taskTitle: "Standing inspection" }),
-    mode: "queue",
-    onDraftChange: () => {},
-    onSubmit: async () => false,
-  }));
-  assert.match(markup, /Add follow-up work/);
-  assert.match(markup, />Keep this task<\/textarea>/);
-  assert.match(markup, />Not sent</);
-});
-
-test("crypto-unavailable preflight is definitively not sent", () => {
-  const markup = renderToStaticMarkup(createElement(AgentInstruction, {
-    terminal: terminalView({ phase: "idle", writable: false, instructionError: { code: "crypto_unavailable" } }),
-    onSubmit: async () => false,
-  }));
-  assert.match(markup, />Not sent</);
-  assert.equal(markup.includes("SEND NOT CONFIRMED"), false);
-});
 
 test("exceptional input ownership and replay loss are concise", () => {
   const occupied = renderToStaticMarkup(panel(terminalView({ writable: false, error: { code: "stale" } })));
@@ -235,25 +137,4 @@ test("exceptional input ownership and replay loss are concise", () => {
   assert.equal(quiet.includes("Earlier output"), false);
 });
 
-
-test("disabled or removed instruction checkout falls back to current routing", async () => {
-  const previousAct = globalThis.IS_REACT_ACT_ENVIRONMENT;
-  globalThis.IS_REACT_ACT_ENVIRONMENT = true;
-  try {
-    for (const removed of [false, true]) {
-      const submitted = [];
-      const first = { id: "first", name: "First", enabled: true, default: false };
-      const second = { id: "second", name: "Second", enabled: true, default: true };
-      const props = { terminal: terminalView(), onSubmit: async (...args) => { submitted.push(args); return true; } };
-      let renderer;
-      await act(async () => { renderer = create(createElement(AgentInstruction, { ...props, repositories: [first, second] })); });
-      await act(async () => { renderer.root.findByType("select").props.onChange({ currentTarget: { value: "first" } }); });
-      await act(async () => { renderer.update(createElement(AgentInstruction, { ...props, repositories: removed ? [second] : [{ ...first, enabled: false }, second] })); });
-      assert.equal(renderer.root.findAllByType("select").length, 0);
-      await act(async () => { renderer.root.findByType("textarea").props.onChange({ target: { value: "Use available checkout" } }); });
-      await act(async () => { renderer.root.findByType("form").props.onSubmit({ preventDefault() {} }); });
-      assert.deepEqual(submitted, [["Use available checkout", "now", undefined]]);
-      await act(async () => { renderer.unmount(); });
-    }
-  } finally { globalThis.IS_REACT_ACT_ENVIRONMENT = previousAct; }
-});
+// Agent pane render coverage deliberately excludes task-entry controls.
