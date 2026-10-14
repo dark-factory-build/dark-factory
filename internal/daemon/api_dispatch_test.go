@@ -1955,9 +1955,10 @@ func TestOverseerEnqueuePinsContentWhileSchedulerRunsAndRejectsPostHocAttach(t *
 	}
 drained:
 	started := make(chan struct{})
+	var startedOnce sync.Once
 	schedulerDone := make(chan error, 1)
 	schedulerSpec := SupervisorSpec{scheduledAttempt: func(ctx context.Context, spec SupervisorSpec) (kernel.Run, error) {
-		close(started)
+		startedOnce.Do(func() { close(started) })
 		spec.admissionObserved(false)
 		<-ctx.Done()
 		return kernel.Run{}, ctx.Err()
