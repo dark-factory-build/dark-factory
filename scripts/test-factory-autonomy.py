@@ -120,6 +120,35 @@ class AutonomyTest(unittest.TestCase):
                     refresh.assert_not_called()
                     self.assertTrue(result[-1]['ok'])
 
+    def test_post_verify_failure_is_logged_once_per_receipt(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            release = root / 'release.json'
+            release.write_text(json.dumps({'repository': 'fixture/controller', 'base': 'main'}))
+            config = {'release_configs': [str(release)], 'factory_home': str(root / 'home'),
+                      'journal': str(root / 'journal')}
+            receipt = {'state': 'verified', 'sha': 'a' * 40, 'pr': 990,
+                       'delivery_mode': 'unchanged', 'delivery_sources': None,
+                       'verification': {'healthy': True, 'sha': 'a' * 40}}
+            delivery = Mock()
+            delivery.deliver.side_effect = ValueError('/private/secret/path')
+            completed = subprocess.CompletedProcess([], 0, json.dumps(receipt), '')
+            with patch.object(autonomy.subprocess, 'run', return_value=completed), \
+                 patch.object(autonomy.importlib.util, 'spec_from_file_location'), \
+                 patch.object(autonomy.importlib.util, 'module_from_spec', return_value=delivery), \
+                 patch.object(autonomy, 'controller_checkout', return_value=None):
+                first = autonomy.tick(root / 'config', config, release_only=True)
+                second = autonomy.tick(root / 'config', config, release_only=True)
+            self.assertFalse(first[-1]['ok'])
+            self.assertIn('ValueError', first[-1]['error'])
+            self.assertEqual(first, second)
+            delivery.deliver.assert_called_once()
+            log = Path(config['journal']).with_suffix('.release.service.log')
+            self.assertTrue(log.exists())
+            self.assertNotIn('/private/secret/path', log.read_text())
+            state = json.loads(Path(config['journal'] + '.release-post-verify.json').read_text())
+            self.assertEqual(1, len(state['failures']))
+
     def test_controller_excludes_another_job_for_the_same_factory(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

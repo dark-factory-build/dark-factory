@@ -11,10 +11,12 @@ import json
 import os
 from pathlib import Path
 import plistlib
+import re
 import subprocess
 import sys
 import tempfile
 import time
+import traceback
 
 
 def validate_controller_config(config):
@@ -38,6 +40,88 @@ def validate_controller_config(config):
 
 class ControllerSourceError(ValueError):
     pass
+
+
+def post_verify_key(receipt):
+    return str(receipt.get('pr')) + ':' + str(receipt.get('sha'))
+
+
+def post_verify_state_path(config):
+    journal = config.get('journal')
+    return None if not isinstance(journal, str) or not journal else Path(journal + '.release-post-verify.json')
+
+
+def post_verify_failure(config, receipt):
+    path = post_verify_state_path(config)
+    if path is None:
+        return None
+    state = managed_read(path, {'version': 1, 'failures': {}})
+    if not isinstance(state, dict) or state.get('version') != 1 or not isinstance(state.get('failures'), dict):
+        raise ValueError('post-verify failure journal is invalid')
+    return state['failures'].get(post_verify_key(receipt))
+
+
+def record_post_verify_failure(config, receipt, error):
+    path = post_verify_state_path(config)
+    if path is None:
+        return {'error': error[:240]}
+    state = managed_read(path, {'version': 1, 'failures': {}})
+    if not isinstance(state, dict) or state.get('version') != 1 or not isinstance(state.get('failures'), dict):
+        state = {'version': 1, 'failures': {}}
+    key = post_verify_key(receipt)
+    state['failures'].setdefault(key, {'error': error[:240], 'at': int(time.time())})
+    # Keep this diagnostic sidecar bounded while retaining one decision per
+    # receipt. The oldest entries are safe to discard after newer receipts
+    # have settled; a repeated receipt remains retained during normal use.
+    if len(state['failures']) > 100:
+        for old_key in list(state['failures'])[:-100]:
+            del state['failures'][old_key]
+    atomic_json(path, state)
+    return state['failures'][key]
+
+
+def sanitize_paths(value):
+    root = str(Path(__file__).resolve().parent.parent)
+    lines = []
+    for line in value.splitlines():
+        # Keep diagnostics useful without disclosing host paths outside this
+        # checkout through a launchd service log.
+        while '/' in line:
+            start = next((i for i, char in enumerate(line) if char == '/'), None)
+            if start is None:
+                break
+            end = start
+            while end < len(line) and not line[end].isspace() and line[end] not in "'\"(),;:":
+                end += 1
+            candidate = line[start:end]
+            if end == start:
+                line = line[:start] + '<slash>' + line[start + 1:]
+                continue
+            if candidate.startswith(root + '/') or candidate == root:
+                line = line[:start] + '<repo-path>' + line[end:]
+            else:
+                line = line[:start] + '<external-path>' + line[end:]
+        lines.append(line[:1000])
+    value = '\n'.join(lines)[:8000]
+    value = re.sub(r'(?i)\b(token|secret|password|authorization|bearer)\b\s*[:=]\s*[^\s,;]+', r'\1=<redacted>', value)
+    value = re.sub(r'(?i)\b(?:ghp|github_pat)_[A-Za-z0-9_\-]+', '<credential>', value)
+    return value
+
+
+def safe_traceback(error):
+    return sanitize_paths(traceback.format_exc())
+
+
+def log_post_verify_failure(config, receipt, error):
+    journal = config.get('journal')
+    if not isinstance(journal, str) or not journal:
+        return
+    log = Path(journal).with_suffix('.release.service.log')
+    log.parent.mkdir(parents=True, exist_ok=True)
+    with log.open('a', encoding='utf-8') as stream:
+        stream.write('post-verify failure for receipt ' + post_verify_key(receipt) + ': ' + sanitize_paths(str(error))[:240] + '\n')
+        stream.write(safe_traceback(error) + '\n')
+    os.chmod(log, 0o600)
 
 
 def controller_checkout(scripts):
@@ -98,29 +182,47 @@ def tick(config_path, config, release_only=False, skip_intake=False, environment
             result = {'component': Path(argv[1]).stem, 'ok': completed.returncode == 0}
             if completed.returncode:
                 result['error'] = 'legacy_review_customer_unsupported: use the installed customer publication workflow' if Path(argv[1]).name == 'factory-review-intake.py' and 'Legacy review is owner-only' in completed.stderr else 'exit_' + str(completed.returncode)
-            results.append(result)
             if completed.returncode == 0 and Path(argv[1]).name == 'factory-release.py':
                 receipt = json.loads(completed.stdout)
                 if receipt.get('state') == 'verified':
-                    spec = importlib.util.spec_from_file_location('factory_delivery', scripts / 'factory-delivery.py')
-                    delivery = importlib.util.module_from_spec(spec)
-                    spec.loader.exec_module(delivery)
-                    release_config = json.loads(Path(argv[2]).read_text())
-                    delivery.deliver(config, release_config, receipt)
-                    # Checkout replacement must not overlap readers in the normal pass.
-                    refresh_lock = Path(str(Path(config['factory_home']).resolve()) + '.autonomy.lock')
-                    with refresh_lock.open('a+') as lock:
-                        fcntl.flock(lock, fcntl.LOCK_EX)
-                        checkout = controller_checkout(scripts)
-                        if checkout is not None:
-                            refresh_controller(checkout, release_config, receipt)
+                    prior_failure = post_verify_failure(config, receipt)
+                    if prior_failure is not None:
+                        result.update({'ok': False, 'error': prior_failure['error']})
+                    else:
+                        try:
+                            spec = importlib.util.spec_from_file_location('factory_delivery', scripts / 'factory-delivery.py')
+                            delivery = importlib.util.module_from_spec(spec)
+                            spec.loader.exec_module(delivery)
+                            release_config = json.loads(Path(argv[2]).read_text())
+                            delivery.deliver(config, release_config, receipt)
+                            # Checkout replacement must not overlap readers in the normal pass.
+                            refresh_lock = Path(str(Path(config['factory_home']).resolve()) + '.autonomy.lock')
+                            with refresh_lock.open('a+') as lock:
+                                fcntl.flock(lock, fcntl.LOCK_EX)
+                                checkout = controller_checkout(scripts)
+                                if checkout is not None:
+                                    refresh_controller(checkout, release_config, receipt)
+                        except Exception as error:
+                            detail = sanitize_paths(type(error).__name__ + ': ' + str(error))
+                            log_post_verify_failure(config, receipt, error)
+                            if isinstance(error, ControllerSourceError):
+                                # Operator checkout conditions can be repaired;
+                                # leave those eligible for a later refresh.
+                                result.update({'ok': False, 'error': detail[:240]})
+                            else:
+                                record = record_post_verify_failure(config, receipt, detail)
+                                result.update({'ok': False, 'error': record['error']})
+            results.append(result)
 
         except ControllerSourceError as error:
             result.update({'ok': False, 'error': str(error)})
+            results.append(result)
         except subprocess.TimeoutExpired:
             results.append({'component': Path(argv[1]).stem, 'ok': False, 'error': 'timeout'})
-        except Exception:
-            results.append({'component': Path(argv[1]).stem, 'ok': False, 'error': 'exception'})
+        except Exception as error:
+            detail = sanitize_paths(type(error).__name__ + ': ' + str(error))
+            result.update({'ok': False, 'error': detail[:240]})
+            results.append(result)
     return results
 
 

@@ -55,6 +55,17 @@ class DeliveryFixtures(unittest.TestCase):
             self.assertEqual(delivery.deliver(self.config, {"repository": "example/factory"}, self.receipt), [])
         self.assertEqual(self.enqueued, [])
 
+    def test_unchanged_receipt_allows_legacy_missing_or_null_empty_mapping(self):
+        for value in ("missing", None):
+            with self.subTest(value=value):
+                self.receipt["delivery_mode"] = "unchanged"
+                if value == "missing":
+                    self.receipt.pop("delivery_sources", None)
+                else:
+                    self.receipt["delivery_sources"] = None
+                with mock.patch.object(delivery, "load_intake", return_value=self.intake):
+                    self.assertEqual(delivery.deliver(self.config, {"repository": "example/factory"}, self.receipt), [])
+
 
 if __name__ == "__main__":
     unittest.main()

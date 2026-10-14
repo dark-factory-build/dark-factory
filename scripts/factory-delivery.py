@@ -26,6 +26,11 @@ def deliver(intake_config, release_config, receipt):
         raise ValueError('deployment receipt has no exact live proof')
     mode = receipt.get('delivery_mode')
     sources = receipt.get('delivery_sources')
+    if mode in {'baseline_current', 'unchanged', 'nonancestor_baseline'} and sources is None:
+        # Older verified receipts omitted the empty mapping. These modes prove
+        # that there are no source PRs to sweep, so preserve that receipt
+        # contract instead of turning a successful deployment into a retry.
+        sources = []
     if mode not in {'range', 'baseline_current', 'unchanged', 'nonancestor_baseline'} or not isinstance(sources, list):
         raise ValueError('deployment receipt has no bounded source mapping')
     if mode != 'range' and sources:
