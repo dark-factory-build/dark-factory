@@ -362,3 +362,63 @@ func TestArchiveHistoryKeepsTheCarriersASpecialistBacksOffFrom(t *testing.T) {
 		t.Fatalf("state after archive = %+v, want %+v", after, before)
 	}
 }
+
+// A settled task that pinned a proposal stays hot: the pin is the proposal's
+// acceptance, so archiving it would reopen the proposal for specialists.
+func TestArchiveHistoryKeepsAProposalsAcceptance(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	store, run, _ := runningWorkerRun(t)
+	defer store.Close()
+	task, err := store.EnqueueTask(ctx, NewTask{ID: taskID(t, 100), ProjectID: run.ProjectID, IncarnationID: incarnationID(t, 101), Title: "implement"}, mustTime(t, 40))
+	if err != nil {
+		t.Fatal(err)
+	}
+	spec := knowledgeSpec(t, run.ProjectID, 90, ContentObservation, KnowledgeMetadata{Status: "tentative"})
+	spec.Author = "run:00 agent:" + run.AgentID.String() + " role:worker"
+	spec.SourceReferences = `{"status":"tentative","record_type":"proposal"}`
+	proposal, err := store.CreateContent(ctx, spec, mustTime(t, 41))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.AttachContentToTask(ctx, task.ID, run.ProjectID, proposal.ID, proposal.Revision, mustTime(t, 42)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.UpdateTaskForOperator(ctx, task.ID, task.Revision, TaskPatch{Cancel: true}, mustTime(t, 43)); err != nil {
+		t.Fatal(err)
+	}
+	follow := func() (int, string) {
+		t.Helper()
+		conn, err := store.writer.Conn(ctx)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer conn.Close()
+		agent, _, err := agentByID(ctx, conn, run.AgentID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var open int
+		if err := conn.QueryRowContext(ctx, `SELECT count(*) FROM project_content_revisions AS c WHERE c.id = ? AND `+openProposalSQL, proposal.ID.Bytes()).Scan(&open); err != nil {
+			t.Fatal(err)
+		}
+		body, err := specialistWake(ctx, conn, agent, SpecialistState{}, specialistPrior{}, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return open, body
+	}
+	accepted := "- proposal " + proposal.ID.String() + ` "` + spec.Title + `": accepted task ` + task.ID.String() + " cancelled"
+	if open, body := follow(); open != 0 || !strings.Contains(body, accepted) {
+		t.Fatalf("before archive: open=%d body=%q", open, body)
+	}
+	if _, err := store.ArchiveHistory(ctx, mustTime(t, 44+HistoryRetention)); err != nil {
+		t.Fatal(err)
+	}
+	if _, found, err := store.Task(ctx, task.ID); err != nil || !found {
+		t.Fatalf("accepting task archived: %v, %v", found, err)
+	}
+	if open, body := follow(); open != 0 || !strings.Contains(body, accepted) {
+		t.Fatalf("after archive: open=%d body=%q", open, body)
+	}
+}

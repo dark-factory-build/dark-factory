@@ -91,7 +91,11 @@ existing constant):
 6. No attachment of T still holds data. Attachment retention removes it 30
    days after T settles, or an operator removes it, and the append-only
    archive could never drop it.
-7. T is not one of its agent's three newest finished carrier tasks, which
+7. T pins no proposal revision (`task_content_references`): that pin is the
+   proposal's acceptance, which `attachedProposalSQL` reads from the hot store
+   inside scheduler writes. Phase 3 can move these once the acceptance is
+   recorded without the pin.
+8. T is not one of its agent's three newest finished carrier tasks, which
    `specialistSchedule` reads for the last review and its quiet streak; a
    queued, running or blocked newer carrier does not displace them.
 

@@ -89,7 +89,9 @@ const (
 	// first); its Change, if any, is abandoned, since reclaim and send-back act
 	// on a kept one; no pull request it published is open; no attachment of
 	// it still holds data, which retention or an operator may yet remove and
-	// the append-only archive could never drop; and it is not one of its
+	// the append-only archive could never drop; it pins no proposal revision,
+	// since that pin is the proposal's acceptance (attachedProposalSQL), which
+	// specialist reads take from the hot store; and it is not one of its
 	// agent's three newest finished carriers (?2 is their title), from which
 	// specialistSchedule reads the last review and the quiet streak.
 	settledTasks = `SELECT t.id FROM main.tasks AS t WHERE t.status IN ('succeeded', 'failed', 'cancelled') AND t.completed_at_ms < ?1
@@ -98,6 +100,8 @@ const (
 		AND NOT EXISTS (SELECT 1 FROM main.publication_tasks AS p JOIN main.production_records AS x ON x.project_id = p.project_id AND x.repository = p.repository AND x.kind = 'pull_request' AND x.identity = CAST(p.pull_number AS TEXT)
 			WHERE p.task_id = t.id AND json_extract(x.document, '$.state') = 'open')
 		AND NOT EXISTS (SELECT 1 FROM main.task_attachments AS f WHERE f.task_id = t.id AND f.data IS NOT NULL)
+		AND NOT EXISTS (SELECT 1 FROM main.task_content_references AS r JOIN main.project_content_revisions AS p ON p.id = r.content_id AND p.revision = r.content_revision
+			WHERE r.task_id = t.id AND ` + proposalRevisionSQL + `)
 		AND NOT (t.title = ?2 AND t.id IN (SELECT c.id FROM main.tasks AS c WHERE c.assigned_agent_id = t.assigned_agent_id AND c.title = ?2 AND c.status NOT IN ('queued', 'running', 'blocked') ORDER BY c.created_at_ms DESC, c.id DESC LIMIT 3))
 		ORDER BY t.id`
 	// Every pair of tasks a hot row joins, which must move together.
