@@ -197,10 +197,10 @@ func liveShapedStore(t *testing.T) (*Store, int64) {
 	return store, newest
 }
 
-// Phase 1 of docs/development/STORE_SPLIT.md on a store of the live shape:
-// archiving the settled trees leaves a week of work hot, so whole-store
-// validation walks only that, and the report reads the same across the
-// boundary. It logs the before and after numbers the issue asks for; time is
+// Phases 1 and 2 of docs/development/STORE_SPLIT.md on a store of the live
+// shape: archiving the settled trees and production records leaves a week of
+// work hot, so whole-store validation walks only that, and the report reads
+// the same across the boundary. It logs the before and after numbers the issue asks for; time is
 // logged, not asserted, as parallel tests skew it.
 func TestArchiveHistoryBoundsALiveShapedStore(t *testing.T) {
 	if testing.Short() {
@@ -264,13 +264,14 @@ func TestArchiveHistoryBoundsALiveShapedStore(t *testing.T) {
 		t.Fatal(err)
 	}
 	after := measure("after")
-	var hot, archived int
-	if err := store.writer.QueryRowContext(ctx, `SELECT (SELECT count(*) FROM tasks), (SELECT count(*) FROM archived_tasks)`).Scan(&hot, &archived); err != nil {
+	var hot, archived, records int
+	if err := store.writer.QueryRowContext(ctx, `SELECT (SELECT count(*) FROM tasks), (SELECT count(*) FROM archived_tasks), (SELECT count(*) FROM production_records)`).Scan(&hot, &archived, &records); err != nil {
 		t.Fatal(err)
 	}
-	// Copies 35 to 39 ended within the week before at.
-	if hot != 500 || archived != 3500 || after*6 > before {
-		t.Fatalf("hot tasks = %d, archived = %d, validation statements %d then %d", hot, archived, before, after)
+	// Copies 35 to 39 ended within the week before at; every production
+	// record is settled.
+	if hot != 500 || archived != 3500 || records != 0 || after*6 > before {
+		t.Fatalf("hot tasks = %d, archived = %d, hot records = %d, validation statements %d then %d", hot, archived, records, before, after)
 	}
 	if again := report(); !reflect.DeepEqual(again, reported) {
 		t.Fatalf("report across the archive =\n%s\nwant\n%s", strings.Join(again, "\n"), strings.Join(reported, "\n"))
@@ -420,5 +421,90 @@ func TestArchiveHistoryKeepsAProposalsAcceptance(t *testing.T) {
 	}
 	if open, body := follow(); open != 0 || !strings.Contains(body, accepted) {
 		t.Fatalf("after archive: open=%d body=%q", open, body)
+	}
+}
+
+// Phase 2: a settled production record moves once nothing hot reads it, and
+// why and the report read the same across the boundary, also after a poll
+// observes a moved record again.
+func TestArchiveHistoryMovesSettledProductionRecords(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	store, _, project, _, _ := newSharedQueueStore(t, 4)
+	defer store.Close()
+	task, err := store.EnqueueTask(ctx, NewTask{ID: taskID(t, 90), ProjectID: project.ID, IncarnationID: incarnationID(t, 91), Title: "t"}, mustTime(t, 10))
+	if err != nil {
+		t.Fatal(err)
+	}
+	record := func(kind, identity, document string, at int64) {
+		t.Helper()
+		if _, err := store.writer.ExecContext(ctx, `INSERT INTO production_records VALUES (?, 'owner/repository', ?, ?, '', ?, ?)`, project.ID.Bytes(), kind, identity, document, at); err != nil {
+			t.Fatal(err)
+		}
+	}
+	pull := func(number int, state string) string {
+		return fmt.Sprintf(`{"number":%d,"state":%q,"title":"p","head":"%040d"}`, number, state, number)
+	}
+	record("pull_request", "1", pull(1, "merged"), 10) // a hot publication names it
+	record("pull_request", "2", pull(2, "closed"), 10)
+	record("pull_request", "3", pull(3, "open"), 10)
+	record("check", "c2", `{"pull_requests":[2],"conclusion":"failure","name":"build","revision":"ab"}`, 10)
+	record("check", "c3", `{"pull_requests":[3]}`, 10)
+	record("check", "main", `{"pull_requests":[],"conclusion":"failure","name":"main build","revision":"cd"}`, 10)
+	record("reviewer", "r2", `{"state":"approved","request":{"PullNumber":2,"Head":"x"}}`, 10)
+	record("reviewer", "r2-running", `{"state":"running","request":{"PullNumber":2,"Head":"x"}}`, 10)
+	record("reviewer", "publish-x-1", `{"state":"failed"}`, 10)
+	record("delivery", "release:a", `{"state":"verified","pull_requests":[2]}`, 5)
+	record("delivery", "release:b", `{"state":"verified","pull_requests":[1]}`, 6)
+	record("delivery", "release:c", `{"state":"verified","pull_requests":[]}`, 7) // the newest release
+	record("delivery", "worker", `{"state":"verified","pull_requests":[]}`, 7)
+	record("repository", "owner/repository", `{}`, 10)
+	if _, err := store.writer.ExecContext(ctx, `INSERT INTO publication_tasks VALUES (?, 'owner/repository', 1, ?, NULL, 10)`, project.ID.Bytes(), task.ID.Bytes()); err != nil {
+		t.Fatal(err)
+	}
+	view := func() string {
+		t.Helper()
+		why, err := store.Why(ctx, &project.ID, 2, TaskID{})
+		if err != nil {
+			t.Fatal(err)
+		}
+		report, err := store.Report(ctx, nil, 0, 24*60*60*1000)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return fmt.Sprintf("%q\n%q", why, report[:len(report)-1]) // The last is the live WAL size.
+	}
+	before := view()
+	// The elder releases are due first, but name pull requests still hot.
+	if moved, err := store.ArchiveHistory(ctx, mustTime(t, 10+HistoryRetention)); err != nil || moved != 0 {
+		t.Fatalf("archive within retention = %d, %v", moved, err)
+	}
+	if moved, err := store.ArchiveHistory(ctx, mustTime(t, 11+HistoryRetention)); err != nil || moved != 5 {
+		t.Fatalf("archive past retention = %d, %v", moved, err)
+	}
+	rows, err := store.writer.QueryContext(ctx, `SELECT identity FROM production_records ORDER BY kind, identity`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var hot []string
+	for rows.Next() {
+		var identity string
+		if err := rows.Scan(&identity); err != nil {
+			t.Fatal(err)
+		}
+		hot = append(hot, identity)
+	}
+	if err := errors.Join(rows.Err(), rows.Close()); err != nil {
+		t.Fatal(err)
+	}
+	if want := []string{"c3", "release:b", "release:c", "worker", "1", "3", "owner/repository", "publish-x-1", "r2-running"}; !reflect.DeepEqual(hot, want) {
+		t.Fatalf("hot records = %q, want %q", hot, want)
+	}
+	if after := view(); after != before {
+		t.Fatalf("view across the archive =\n%s\nwant\n%s", after, before)
+	}
+	record("check", "c2", `{"pull_requests":[2],"conclusion":"failure","name":"build","revision":"ab"}`, 10)
+	if after := view(); after != before {
+		t.Fatalf("view after a poll observed a moved record again =\n%s\nwant\n%s", after, before)
 	}
 }

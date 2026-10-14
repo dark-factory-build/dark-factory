@@ -46,7 +46,7 @@ func (store *Store) Report(ctx context.Context, project *ProjectID, since, bucke
 		WHERE (?1 IS NULL OR r.project_id = ?1) AND r.admitted_at_ms >= ?2),
 	merged AS (
 		SELECT COALESCE(unixepoch(json_extract(document, '$.merged_at')) * 1000, observed_at_ms) / ?3 * ?3 AS bucket, count(*) AS merges
-		FROM production_records WHERE (?1 IS NULL OR project_id = ?1) AND kind = 'pull_request' AND json_extract(document, '$.state') = 'merged'
+		FROM `+archived.table("production_records")+` WHERE (?1 IS NULL OR project_id = ?1) AND kind = 'pull_request' AND json_extract(document, '$.state') = 'merged'
 		  AND COALESCE(unixepoch(json_extract(document, '$.merged_at')) * 1000, observed_at_ms) >= ?2 GROUP BY 1),
 	buckets AS (SELECT bucket FROM spend UNION SELECT bucket FROM merged)
 	SELECT b.bucket, COALESCE(SUM(s.runs), 0), COALESCE(SUM(s.failed), 0),
@@ -216,9 +216,10 @@ func why(ctx context.Context, c *sql.Conn, archived history, project *ProjectID,
 	// The pull request: the one asked for, or the newest the task published.
 	var projectBytes []byte
 	var document string
-	query, args := `SELECT r.project_id, r.repository, r.document FROM production_records AS r WHERE (?1 IS NULL OR r.project_id = ?1) AND r.kind = 'pull_request' AND r.identity = ?2 AND (?3 = '' OR r.repository = ?3) ORDER BY r.observed_at_ms DESC LIMIT 1`, []any{scope, strconv.FormatUint(pull, 10), repository}
+	records := archived.table("production_records")
+	query, args := `SELECT r.project_id, r.repository, r.document FROM `+records+` AS r WHERE (?1 IS NULL OR r.project_id = ?1) AND r.kind = 'pull_request' AND r.identity = ?2 AND (?3 = '' OR r.repository = ?3) ORDER BY r.observed_at_ms DESC LIMIT 1`, []any{scope, strconv.FormatUint(pull, 10), repository}
 	if pull == 0 {
-		query, args = `SELECT r.project_id, r.repository, r.document FROM `+archived.table("publication_tasks")+` AS p JOIN production_records AS r ON r.project_id = p.project_id AND r.repository = p.repository AND r.kind = 'pull_request' AND r.identity = CAST(p.pull_number AS TEXT)
+		query, args = `SELECT r.project_id, r.repository, r.document FROM `+archived.table("publication_tasks")+` AS p JOIN `+records+` AS r ON r.project_id = p.project_id AND r.repository = p.repository AND r.kind = 'pull_request' AND r.identity = CAST(p.pull_number AS TEXT)
 			WHERE p.task_id = ? ORDER BY p.created_at_ms DESC LIMIT 1`, []any{taskID.Bytes()}
 	}
 	err = c.QueryRowContext(ctx, query, args...).Scan(&projectBytes, &repository, &document)
@@ -258,7 +259,7 @@ func why(ctx context.Context, c *sql.Conn, archived history, project *ProjectID,
 	var passed, pending, failed int
 	var failing []string
 	rows, err := c.QueryContext(ctx, `SELECT json_extract(c.document, '$.name'), json_extract(c.document, '$.state'), COALESCE(json_extract(c.document, '$.conclusion'), '')
-		FROM production_records AS c, json_each(c.document, '$.pull_requests') AS n
+		FROM `+records+` AS c, json_each(c.document, '$.pull_requests') AS n
 		WHERE c.project_id = ? AND c.repository = ? AND c.kind = 'check' AND json_extract(c.document, '$.scope') = 'head'
 		  AND lower(json_extract(c.document, '$.revision')) = ? AND CAST(n.value AS INTEGER) = ? AND json_extract(c.document, '$.required')`, projectBytes, repository, head, int64(pr.Number))
 	if err != nil {
@@ -303,7 +304,7 @@ func why(ctx context.Context, c *sql.Conn, archived history, project *ProjectID,
 	// The reconciler's newest operation at this head.
 	var op *review.Operation
 	var operation string
-	err = c.QueryRowContext(ctx, `SELECT document FROM production_records WHERE project_id = ? AND repository = ? AND kind = 'reviewer' AND json_type(document, '$.request') = 'object'
+	err = c.QueryRowContext(ctx, `SELECT document FROM `+records+` WHERE project_id = ? AND repository = ? AND kind = 'reviewer' AND json_type(document, '$.request') = 'object'
 		AND json_extract(document, '$.request.PullNumber') = ? AND lower(json_extract(document, '$.request.Head')) = ? ORDER BY json_extract(document, '$.created_at') DESC LIMIT 1`,
 		projectBytes, repository, int64(pr.Number), head).Scan(&operation)
 	switch {

@@ -15,8 +15,8 @@ import (
 )
 
 // HistoryRetention is how long, in ms, a terminal run's content-access
-// receipts, and a settled task tree, stay in the hot database before
-// ArchiveHistory moves them.
+// receipts, a settled task tree and a settled production record stay in the
+// hot database before ArchiveHistory moves them.
 const HistoryRetention = 7 * 24 * 60 * 60 * 1000
 
 // archiveCopiedHook is package-local deterministic fault instrumentation
@@ -34,13 +34,15 @@ var archiveSchema = []string{
 	`CREATE INDEX IF NOT EXISTS archive.content_accesses_content ON content_accesses(content_id, content_revision, created_at_ms DESC)`,
 }
 
-// archivedTree lists, child first, the hot tables a settled task tree moves
-// out of: the rows of each that the batch's tasks (?1, a JSON array of their
-// hex ids) own, and the order a digest reads them in. Each archive table
-// mirrors its hot table's columns, then the generation, so readers union the
-// two with one column list (history.table). A user_version bump that changes
+// archivedTree lists, child first, the hot tables a batch (?1, a JSON object
+// of its cutoff and its tasks' hex ids) moves out of: the settled production
+// records, deleted before the publications they read, then the rows of each
+// table that the batch's tasks own, and the order a digest reads them in.
+// Each archive table mirrors its hot table's columns, then the generation, so
+// readers union the two with one column list (history.table). A user_version bump that changes
 // one of these tables changes its archive table too.
 var archivedTree = []struct{ table, rows, order string }{
+	{"production_records", settledRecords, "project_id, repository, kind, identity"},
 	{"terminal_diagnostics", batchRuns, "run_id"},
 	{"run_tokens", batchRuns, "run_id"},
 	{"human_requests", batchRuns, "id"},
@@ -82,7 +84,7 @@ const (
 	archiveGeneration = `SELECT ` + archivedAccessColumns + ` FROM archive.content_accesses WHERE generation = ?1` + archivedAccessOrder
 	nextGeneration    = `SELECT max(COALESCE((SELECT max(generation) FROM main.archive_batches), 0), COALESCE((SELECT max(generation) FROM archive.content_accesses), 0), COALESCE((SELECT max(generation) FROM archive.batches), 0)) + 1`
 
-	inBatch   = `IN (SELECT unhex(value) FROM json_each(?1))`
+	inBatch   = `IN (SELECT unhex(value) FROM json_each(?1, '$.tasks'))`
 	batchRuns = `run_id IN (SELECT id FROM main.runs WHERE task_id ` + inBatch + `)`
 	// A tree is settled when its task ended, and each of its runs, before the
 	// cutoff (?1); no run still holds receipts (the receipt pass moves them
@@ -104,6 +106,24 @@ const (
 			WHERE r.task_id = t.id AND ` + proposalRevisionSQL + `)
 		AND NOT (t.title = ?2 AND t.id IN (SELECT c.id FROM main.tasks AS c WHERE c.assigned_agent_id = t.assigned_agent_id AND c.title = ?2 AND c.status NOT IN ('queued', 'running', 'blocked') ORDER BY c.created_at_ms DESC, c.id DESC LIMIT 3))
 		ORDER BY t.id`
+	// A production record is settled once observed before the cutoff when
+	// nothing hot still reads it: a pull request, a check, a review operation
+	// that names a pull request and neither runs nor gates (recovery reads
+	// those), or a release delivery but its project's newest (releases and
+	// overseer wakes read that); and no pull request it names is open,
+	// observed since the cutoff or named by a hot publication. Other review
+	// operations stay with their Change, and repository records stay. At
+	// most 1024 move per batch.
+	settledRecords = `(project_id, repository, kind, identity) IN (SELECT x.project_id, x.repository, x.kind, x.identity FROM main.production_records AS x
+		WHERE x.observed_at_ms < json_extract(?1, '$.cutoff') AND CASE x.kind
+			WHEN 'reviewer' THEN json_extract(x.document, '$.request.PullNumber') > 0 AND json_extract(x.document, '$.state') NOT IN ('running', 'gating')
+			WHEN 'delivery' THEN x.identity LIKE 'release:%' AND x.identity <> (SELECT identity FROM main.production_records WHERE project_id = x.project_id AND kind = 'delivery' AND identity LIKE 'release:%' ORDER BY observed_at_ms DESC LIMIT 1)
+			ELSE x.kind IN ('pull_request', 'check') END
+		AND NOT EXISTS (SELECT 1 FROM json_each(CASE x.kind WHEN 'pull_request' THEN json_array(x.identity) WHEN 'reviewer' THEN json_array(json_extract(x.document, '$.request.PullNumber')) ELSE json_extract(x.document, '$.pull_requests') END) AS n
+			WHERE EXISTS (SELECT 1 FROM main.publication_tasks AS p WHERE p.project_id = x.project_id AND p.repository = x.repository AND p.pull_number = CAST(n.value AS INTEGER))
+			OR EXISTS (SELECT 1 FROM main.production_records AS h WHERE h.project_id = x.project_id AND h.repository = x.repository AND h.kind = 'pull_request' AND h.identity = CAST(n.value AS TEXT)
+				AND (json_extract(h.document, '$.state') = 'open' OR h.observed_at_ms >= json_extract(?1, '$.cutoff'))))
+		ORDER BY 1, 2, 3, 4 LIMIT 1024)`
 	// Every pair of tasks a hot row joins, which must move together.
 	taskLinks = `SELECT task_id, upstream_task_id FROM main.task_prerequisites
 		UNION ALL SELECT p.task_id, r.task_id FROM main.task_prerequisites AS p JOIN main.runs AS r ON r.id = p.consumed_run_id
@@ -125,7 +145,13 @@ func (h history) table(name string) string {
 	if !h[name] {
 		return name
 	}
-	return `(SELECT *, NULL AS generation FROM main.` + name + ` UNION ALL SELECT * FROM archive.` + name + ` WHERE generation IN (SELECT generation FROM main.archive_batches))`
+	rows := `(SELECT *, NULL AS generation FROM main.` + name + ` UNION ALL SELECT * FROM archive.` + name + ` WHERE generation IN (SELECT generation FROM main.archive_batches))`
+	if name != "production_records" {
+		return rows
+	}
+	// A poll can observe an archived record again, so a read keeps one copy
+	// of each: the hot one, else the newest generation's.
+	return `(SELECT project_id, repository, kind, identity, visual_id, document, observed_at_ms, generation FROM (SELECT *, row_number() OVER (PARTITION BY project_id, repository, kind, identity ORDER BY generation IS NULL DESC, generation DESC) AS copy FROM ` + rows + `) WHERE copy = 1)`
 }
 
 // contentAccessesSQL is every content-access receipt with its run's identity:
@@ -289,12 +315,12 @@ func verifyGenerations(ctx context.Context, connection *sql.Conn) error {
 
 // ArchiveHistory moves one batch of the content-access receipts of runs
 // terminal before at - HistoryRetention into the archive, then one batch of
-// settled task trees (archiveTrees), each under a generation of its own, and
-// reports how many rows it moved. The copy commits in the archive first and is proven against
-// the hot rows by digest; only then does one hot transaction delete them and
-// record the generation. The archive only grows: a generation the hot
-// database does not record, from a crash between the two commits or one a
-// restored backup predates, is ignored by readers and never reused, and its
+// settled task trees and production records (archiveTrees), each under a
+// generation of its own, and reports how many rows it moved. The copy commits
+// in the archive first and is proven against the hot rows by digest; only
+// then does one hot transaction delete them and record the generation. The
+// archive only grows: a generation the hot database does not record, from a
+// crash between the two commits or one a restored backup predates, is ignored by readers and never reused, and its
 // rows, still hot, are copied again under a new one. A recorded generation
 // the archive lacks fails every pass and every crossing read closed. Only
 // beginHistoryRead reads the archive.
@@ -404,11 +430,12 @@ func archiveBatch(ctx context.Context, tx *writeTx, cutoff, at int64) (int, erro
 	return rows, nil
 }
 
-// archiveTrees moves one batch of settled task trees (settledTrees) under a
-// generation of its own, by archiveBatch's two commits: the copy commits in
-// the archive and is proven by digest first, then one hot transaction proves
-// the rows unchanged, deletes them child first, records each task in
-// archived_tasks and commits the generation. Foreign keys are checked at that
+// archiveTrees moves one batch of settled task trees (settledTrees) and
+// production records (settledRecords) under a generation of its own, by
+// archiveBatch's two commits: the copy commits in the archive and is proven
+// by digest first, then one hot transaction proves the rows unchanged,
+// deletes them child first, records each task in archived_tasks and commits
+// the generation. Foreign keys are checked at that
 // commit, so a reference made to the batch in between refuses the pass and
 // the next one picks again. It reports how many rows it moved.
 func archiveTrees(ctx context.Context, tx *writeTx, cutoff, at int64) (int, error) {
@@ -424,13 +451,13 @@ func archiveTrees(ctx context.Context, tx *writeTx, cutoff, at int64) (int, erro
 	rows := 0
 	err := tx.within(ctx, func() error {
 		var err error
-		if batch, err = settledTrees(ctx, connection, cutoff); err != nil || batch == "" {
+		if batch, err = settledTrees(ctx, connection, cutoff); err != nil {
 			return err
 		}
 		if err := connection.QueryRowContext(ctx, nextGeneration).Scan(&generation); err != nil {
 			return err
 		}
-		if digest, rows, err = digestRows(ctx, connection, hot, batch, generation); err != nil {
+		if digest, rows, err = digestRows(ctx, connection, hot, batch, generation); err != nil || rows == 0 {
 			return err
 		}
 		for _, tree := range archivedTree {
@@ -490,7 +517,7 @@ func archiveTrees(ctx context.Context, tx *writeTx, cutoff, at int64) (int, erro
 		if _, err := connection.ExecContext(ctx, `INSERT INTO main.archive_batches(generation, rows, digest, archived_at_ms) VALUES (?, ?, ?, ?)`, generation, rows, digest, at); err != nil {
 			return err
 		}
-		_, err = connection.ExecContext(ctx, `INSERT INTO main.archived_tasks(task_id, generation) SELECT unhex(value), ?2 FROM json_each(?1)`, batch, generation)
+		_, err = connection.ExecContext(ctx, `INSERT INTO main.archived_tasks(task_id, generation) SELECT unhex(value), ?2 FROM json_each(?1, '$.tasks')`, batch, generation)
 		return err
 	})
 	if err != nil {
@@ -499,11 +526,16 @@ func archiveTrees(ctx context.Context, tx *writeTx, cutoff, at int64) (int, erro
 	return rows, nil
 }
 
-// settledTrees picks the next batch, as a JSON array of hex task ids: whole
-// groups of settled trees (settledTasks) that hot rows join (taskLinks), in id
-// order, up to 256 tasks unless the first group is larger. A group joined to
-// any task that is not settled stays hot. It returns "" when none is due.
+// settledTrees picks the next batch, as a JSON object of the cutoff and the
+// hex ids of its tasks: whole groups of settled trees (settledTasks) that hot
+// rows join (taskLinks), in id order, up to 256 tasks unless the first group
+// is larger. A group joined to any task that is not settled stays hot.
 func settledTrees(ctx context.Context, connection *sql.Conn, cutoff int64) (string, error) {
+	batch := []string{}
+	encode := func() (string, error) {
+		encoded, err := json.Marshal(map[string]any{"cutoff": cutoff, "tasks": batch})
+		return string(encoded), err
+	}
 	var settled []string
 	group := map[string]string{} // Each settled task's parent in its group.
 	rows, err := connection.QueryContext(ctx, settledTasks, cutoff, overseerWakeTitle)
@@ -518,8 +550,11 @@ func settledTrees(ctx context.Context, connection *sql.Conn, cutoff int64) (stri
 		settled = append(settled, string(id))
 		group[string(id)] = string(id)
 	}
-	if err := errors.Join(rows.Err(), rows.Close()); err != nil || len(settled) == 0 {
+	if err := errors.Join(rows.Err(), rows.Close()); err != nil {
 		return "", err
+	}
+	if len(settled) == 0 {
+		return encode()
 	}
 	root := func(id string) string {
 		for group[id] != id {
@@ -558,7 +593,6 @@ func settledTrees(ctx context.Context, connection *sql.Conn, cutoff int64) (stri
 	for _, id := range held {
 		delete(members, root(id))
 	}
-	var batch []string
 	for _, id := range settled {
 		tasks, ok := members[root(id)]
 		if !ok {
@@ -572,11 +606,7 @@ func settledTrees(ctx context.Context, connection *sql.Conn, cutoff int64) (stri
 			batch = append(batch, hex.EncodeToString([]byte(task)))
 		}
 	}
-	if len(batch) == 0 {
-		return "", nil
-	}
-	encoded, err := json.Marshal(batch)
-	return string(encoded), err
+	return encode()
 }
 
 // digestRows hashes the rows each query returns, in order, and counts them.
