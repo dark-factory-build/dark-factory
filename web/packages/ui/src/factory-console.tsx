@@ -6,8 +6,7 @@ import { AgentPanel, ConsoleDialog, HumanRequestPanel, WorkPanel, TaskDetail, ed
 import { ProjectLibrary, type ProjectContentCall } from "./project-library.js";
 import { activityTarget, onBoard, useKnowledgeActivity, type KnowledgeActivity } from "./project-board.js";
 import { useProduction } from "./production-data.js";
-import { deriveProductionView, inProgressProduction, productionKey } from "./production-view.js";
-import { ProductionPanel, asTask } from "./production-panel.js";
+import { deriveProductionView, inProgressProduction } from "./production-view.js";
 import { MissionsPanel } from "./missions-panel.js";
 import { agentTelemetry, needsYou, workRows } from "./console-view.js";
 import { IconButton } from "./icons.js";
@@ -80,6 +79,10 @@ const ERROR_LABELS = new Map<string, string>([
   ["internal", "The server could not complete the request."],
   ["unsupported", "The factory does not support this request yet."],
 ]);
+
+const text = (value: unknown) => typeof value === "string" ? value : "";
+const asTask = (v: Record<string, unknown>, project: string): TaskItem => ({ id: text(v.task_id) || text(v.id), project_id: text(v.project_id) || project, assigned_agent_id: text(v.assigned_agent_id), title: text(v.title) || "Untitled task", status: text(v.status) as TaskItem["status"] || "blocked", blocked_reason: text(v.blocked_reason) || undefined, priority: Number(v.priority) || 0, revision: BigInt(text(v.revision) || "0"), updated_at_ms: text(v.updated_at_ms) ? BigInt(text(v.updated_at_ms)) : undefined });
+const pullRequestHref = (item: { repository: string; pullRequest?: { number: number; url?: string } }) => item.pullRequest?.url || (item.pullRequest ? `https://github.com/${item.repository}/pull/${item.pullRequest.number}` : undefined);
 
 /** One screen: a factory or agent list beside one operator detail panel. */
 export function FactoryConsole({
@@ -158,8 +161,6 @@ export function FactoryConsole({
   const productionView = useMemo(() => deriveProductionView(productionData.records, Date.now()), [productionData.records]);
   const productionItems = useMemo(() => Object.values(productionView.contraptions).sort((a, b) => Number(a.completed) - Number(b.completed) || (a.completed ? a.completedAt - b.completedAt : 0) || a.visualId.localeCompare(b.visualId)), [productionView]);
   const inProgressItems = useMemo(() => productionItems.filter(inProgressProduction), [productionItems]);
-  const [selectedProduction, setSelectedProduction] = useState<string>();
-  const shownProduction = productionItems.some((item) => productionKey(item) === selectedProduction);
   const [libraryOpen, setLibraryOpen] = useState(false);
   const [taskContent, setTaskContent] = useState<readonly TaskContentChip[]>([]);
   const [knowledgeView, setKnowledgeView] = useState<{ board?: boolean; project?: string; entity?: string; id?: string; revision?: number; repository?: string }>({});
@@ -170,8 +171,7 @@ export function FactoryConsole({
   const [requestedMission, setRequestedMission] = useState<{ projectId: string; id: string }>();
   const [byMission, setByMission] = useState(false);
   const [workFilter, setWorkFilter] = useState<WorkFilter>("all");
-  const selectProduction = (key: string) => { setSelectedProduction(key); if (key) onDetail?.("work"); };
-  const showWork = () => { setSelectedProduction(undefined); onDetail?.("work"); };
+  const showWork = () => { onDetail?.("work"); };
   const openWork = (id: string | undefined, missions: boolean) => { selectProject(id); setByMission(missions); if (!missions) setWorkFilter("all"); showWork(); };
   const openMission = (projectId: string, id: string) => { setRequestedMission({ projectId, id }); openWork(projectId, true); };
   // Routes into Work from outside it (floor, Library, Settings) reset the view first so the answer form or task is never hidden.
@@ -205,7 +205,9 @@ export function FactoryConsole({
       const record = productionData.records.find((item) => item.project_id === project && item.id === id);
       const item = productionItems.find((item) => item.projectId === project && item.visualId === (record?.visual_id ?? id));
       if (!item) throw new Error("Record is outside the loaded Changes. Its retained identity remains linked here.");
-      selectProduction(productionKey(item));
+      const href = pullRequestHref(item);
+      if (!href) throw new Error("Pull request link unavailable.");
+      globalThis.open?.(href, "_blank", "noopener,noreferrer");
     }
     setLibraryOpen(false);
   };
@@ -259,7 +261,7 @@ export function FactoryConsole({
         </nav>}
         <div className="dfConsoleLayout">
           <section className="dfConsoleLayout__left dfFactoryConsole__section" aria-label="Factory floor">
-            <FactoryFloor activity={knowledgeActivity.recent} activityCues={knowledgeActivity.cues} onOpenActivity={ready ? openActivity : undefined} requestedEntity={requestedEntity} onOpenBoard={(project, entity, id, repository) => openKnowledge(true, project, entity, id, repository)} changes={productionItems} changesRead={productionData.read} selectedChange={selectedProduction} onSelectChange={selectProduction} onProjectContent={onProjectContent} onOpenLibrary={(id) => openKnowledge(false, id)} onOpenTasks={ready ? (id) => openWork(id, false) : undefined} onOpenMissions={ready ? (id) => openWork(id, true) : undefined} projectId={projectId} selectedTaskId={selectedTask?.id} onSelectTask={ready ? goTask : undefined} selectedAgentId={selectedDetail === "agent" ? selectedAgent?.id : undefined} state={scopedState} graphs={graphs} graphErrors={graphErrors} onLoadNode={onLoadNode} onAddTask={ready ? onAddTask : undefined} runPaths={runPaths} lastRunPaths={lastRunPaths} onSelectAgent={ready ? chooseAgent : undefined} onSelectHumanRequest={ready ? selectRequest : undefined} connected={ready} />
+            <FactoryFloor activity={knowledgeActivity.recent} activityCues={knowledgeActivity.cues} onOpenActivity={ready ? openActivity : undefined} requestedEntity={requestedEntity} onOpenBoard={(project, entity, id, repository) => openKnowledge(true, project, entity, id, repository)} changes={productionItems} changesRead={productionData.read} onProjectContent={onProjectContent} onOpenLibrary={(id) => openKnowledge(false, id)} onOpenTasks={ready ? (id) => openWork(id, false) : undefined} onOpenMissions={ready ? (id) => openWork(id, true) : undefined} projectId={projectId} selectedTaskId={selectedTask?.id} onSelectTask={ready ? goTask : undefined} selectedAgentId={selectedDetail === "agent" ? selectedAgent?.id : undefined} state={scopedState} graphs={graphs} graphErrors={graphErrors} onLoadNode={onLoadNode} onAddTask={ready ? onAddTask : undefined} runPaths={runPaths} lastRunPaths={lastRunPaths} onSelectAgent={ready ? chooseAgent : undefined} onSelectHumanRequest={ready ? selectRequest : undefined} connected={ready} />
           </section>
 
           <aside className="dfConsoleSidebar" aria-label="Selected detail">
@@ -271,8 +273,7 @@ export function FactoryConsole({
             </div>
             {editError === undefined ? null : <p className="dfFactoryConsole__terminalError" role="alert">{editError}</p>}
             <div hidden={selectedDetail !== "work"}>
-              <div hidden={!shownProduction}><ProductionPanel items={productionItems} selected={selectedProduction} onSelect={selectProduction} state={state} call={ready ? onProjectContent : undefined} connected={ready} error={[productionData.error, ...productionData.notices].filter(Boolean).join(" ")} active={selectedDetail === "work" && shownProduction} onMission={openMission} onAgent={ready ? chooseAgent : undefined} onOpenTask={setRelatedTask} /></div>
-              <div hidden={shownProduction}><WorkPanel
+              <WorkPanel
                 state={scopedState}
                 rows={rows}
                 projectId={projectId}
@@ -280,7 +281,7 @@ export function FactoryConsole({
                 onFilter={(value) => { setWorkFilter(value); setByMission(false); }}
                 byMission={byMission}
                 onByMission={() => setByMission(!byMission)}
-                missions={<MissionsPanel production={productionItems} onProduction={selectProduction} requestedMission={requestedMission} state={scopedState} projectId={projectId} active={selectedDetail === "work" && byMission && !shownProduction} call={ready ? onProjectContent : undefined} onSelectAgent={ready ? chooseAgent : undefined} onOpenTask={ready ? setRelatedTask : undefined} />}
+                missions={<MissionsPanel production={productionItems} requestedMission={requestedMission} state={scopedState} projectId={projectId} active={selectedDetail === "work" && byMission} call={ready ? onProjectContent : undefined} onSelectAgent={ready ? chooseAgent : undefined} onOpenTask={ready ? setRelatedTask : undefined} />}
                 edit={edit}
                 ready={ready}
                 onEditTask={onEditTask}
@@ -302,11 +303,10 @@ export function FactoryConsole({
                   onOpenTerminal={onOpenTerminalForHumanRequest === undefined ? undefined : (request) => { selectProject(request.project_id); onOpenTerminalForHumanRequest(request); }}
                   terminalReady={ready}
                 />}
-                onSelectProduction={selectProduction}
                 onMission={(task) => openMission(task.project_id, task.mission_id!)}
                 onIntakeAction={ready ? onIntakeAction : undefined}
                 intake={projectId === undefined ? undefined : { state: intake?.get(projectId)?.state, failed: intakeErrors?.has(projectId) === true, busy: intakePending?.has(projectId) === true }}
-              /></div>
+              />
             </div>
             <div hidden={selectedDetail !== "agent"}>
               <div hidden={agent !== undefined && !browsingAgents} aria-label="Agents">
