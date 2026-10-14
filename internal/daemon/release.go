@@ -348,7 +348,15 @@ func (daemon *Daemon) release(project kernel.ProjectID, root string, source chan
 		fail(err.Error())
 		return
 	}
-	delivery.PullRequests = releasedPulls(ctx, filepath.Join(directory, "tree", ".git"), delivery.Revision)
+	// Only a running release that recorded what it shipped bounds the list;
+	// the first release after an upgrade names the backlog too.
+	since := ""
+	if running := buildinfo.Current(); running.Release() {
+		if _, prior, found, err := daemon.store.Delivery(ctx, "release:"+running.Source()); err == nil && found && len(prior.PullRequests) > 0 {
+			since = running.Source()
+		}
+	}
+	delivery.PullRequests = releasedPulls(ctx, filepath.Join(directory, "tree", ".git"), since, delivery.Revision)
 	delivery.Phase = "drain"
 	_ = daemon.writeRelease(ctx, project, &delivery)
 	daemon.releaseHold.Store(true)
@@ -475,14 +483,14 @@ func deployWorker(ctx context.Context, daemon *Daemon, tree, live, sha string, r
 // releasedPull is a squash merge's subject suffix, "(#N)".
 var releasedPull = regexp.MustCompile(`(?m)\(#([0-9]{1,15})\)$`)
 
-// releasedPulls names the pull requests sha ships beyond the running release
-// (its last 256 commits on a build that is not one), so the overseer's
-// verification wake learns which release made each merge live (#1906). An
-// unreadable history ships none.
-func releasedPulls(ctx context.Context, gitDir, sha string) []uint64 {
+// releasedPulls names the pull requests sha ships beyond since, or in its
+// last 256 commits when since is empty, so the overseer's verification wake
+// learns which release made each merge live (#1906). An unreadable history
+// ships none.
+func releasedPulls(ctx context.Context, gitDir, since, sha string) []uint64 {
 	revisions := sha
-	if running := buildinfo.Current(); running.Release() {
-		revisions = running.Source() + ".." + sha
+	if since != "" {
+		revisions = since + ".." + sha
 	}
 	subjects, _ := gitOutput(ctx, gitDir, "log", "--format=%s", "-n", "256", revisions)
 	pulls := []uint64{}

@@ -694,14 +694,22 @@ func TestReleasedPullsNameTheSquashMergesTheCommitShips(t *testing.T) {
 		return strings.TrimSpace(string(output))
 	}
 	git("init", "--quiet")
-	for _, subject := range []string{"Initial", "Fix intake (#1871)", "Mentions #12 but is no squash", "Verify merged intake (#1906)"} {
+	for _, subject := range []string{"Initial", "Fix intake (#1871)", "Mentions #12 but is no squash"} {
 		git("commit", "--quiet", "--allow-empty", "-m", subject)
 	}
-	pulls := releasedPulls(context.Background(), filepath.Join(tree, ".git"), git("rev-parse", "HEAD"))
-	if !slices.Equal(pulls, []uint64{1906, 1871}) {
+	running := git("rev-parse", "HEAD")
+	git("commit", "--quiet", "--allow-empty", "-m", "Verify merged intake (#1906)")
+	head := git("rev-parse", "HEAD")
+	gitDir := filepath.Join(tree, ".git")
+	// The first release after an upgrade names the backlog; later ones only
+	// what they add to the running release.
+	if pulls := releasedPulls(context.Background(), gitDir, "", head); !slices.Equal(pulls, []uint64{1906, 1871}) {
 		t.Fatalf("released pulls = %v", pulls)
 	}
-	if pulls := releasedPulls(context.Background(), filepath.Join(tree, ".git"), strings.Repeat("0", 40)); len(pulls) != 0 || pulls == nil {
+	if pulls := releasedPulls(context.Background(), gitDir, running, head); !slices.Equal(pulls, []uint64{1906}) {
+		t.Fatalf("pulls since the running release = %v", pulls)
+	}
+	if pulls := releasedPulls(context.Background(), gitDir, "", strings.Repeat("0", 40)); len(pulls) != 0 || pulls == nil {
 		t.Fatalf("an unreadable history shipped %v", pulls)
 	}
 }

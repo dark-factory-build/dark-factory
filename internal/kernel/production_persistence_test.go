@@ -818,26 +818,125 @@ func TestPublishableIntakeChangeIsFactorydsUntilPublishedOrFailed(t *testing.T) 
 	if found := candidates(); len(found) != 1 || found[0].Pull != 0 || !closed() {
 		t.Fatalf("an unpublished retried Change: candidates=%+v closed=%v", found, closed())
 	}
-	// A merged pull request is published again only once a run admitted after
-	// the merge settled its Change: the send-back of a live signal that failed
-	// after release (#1906), never the merged work itself.
-	var admitted int64
-	if err := store.writer.QueryRowContext(ctx, `SELECT u.admitted_at_ms FROM changes AS c JOIN runs AS u ON u.id = c.settled_run_id WHERE c.id = ?`, change.ID.Bytes()).Scan(&admitted); err != nil || admitted < 1 {
-		t.Fatalf("settled run admitted at %d: %v", admitted, err)
-	}
-	merged := pr
-	merged.Number, merged.URL, merged.State = 6, "https://github.com/example/factory/pull/6", "merged"
-	if err := store.RecordPublication(ctx, worker.ProjectID, worker.TaskID, "example/factory", merged, mustTime(t, admitted)); err != nil {
+}
+
+// When an intake task's live signal fails after its pull request merged, the
+// overseer sends that task back (#1906). The merged work is never published
+// again, but the correction its next run settles is, as a new pull request:
+// send-back, admission, settlement and publication, each through its own path.
+func TestMergedIntakeSentBackPublishesItsCorrectionAnew(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	proposal, err := NewSuccessProposal("done")
+	if err != nil {
 		t.Fatal(err)
 	}
-	if found := candidates(); len(found) != 0 {
+	store, finalizing := finalizingReleasedRun(t, RoleWorker, proposal)
+	defer store.Close()
+	change, _, err := store.Change(ctx, *finalizing.ChangeID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	merged, _ := NewCommitID(change.Selection.format, bytes.Repeat([]byte{2}, change.Selection.format.oidLength()))
+	settlement, err := NewRetainedChangeSettlement(change.Revision, &merged)
+	if err != nil {
+		t.Fatal(err)
+	}
+	worker, err := store.FinalizeWorkerRun(ctx, finalizing.ID, finalizing.Revision, settlement, mustTime(t, 60))
+	if err != nil {
+		t.Fatal(err)
+	}
+	overseer, err := store.CreateAgent(ctx, NewAgent{ID: agentID(t, 246), ProjectID: worker.ProjectID, Name: "overseer", Role: RoleOrchestrator, Provider: ProviderCodex, ToolBudgetLimit: 2}, mustTime(t, 61))
+	if err != nil {
+		t.Fatal(err)
+	}
+	sourceID, err := IntakeSourceIDFromBytes(bytes.Repeat([]byte{247}, IDBytes))
+	if err != nil {
+		t.Fatal(err)
+	}
+	source, err := store.CreateIntakeSource(ctx, NewIntakeSource{ID: sourceID, GitHubRepositoryID: 42, GitHubRepositoryName: "example/factory", ProjectID: worker.ProjectID, TargetRepositoryID: RepositoryID(worker.ProjectID), OverseerAgentID: overseer.ID, Policy: IntakePolicyManual, PollSeconds: 60, AdmissionLimit: 25}, mustTime(t, 62))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if source, err = store.SetIntakeSourceEnabled(ctx, source.ID, source.Revision, true, mustTime(t, 63)); err != nil {
+		t.Fatal(err)
+	}
+	accepted, err := store.AcceptIntakeSnapshot(ctx, source.ID, intakeSnapshotForTest(), mustTime(t, 64))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.BindRepositorySource(ctx, RepositoryID(worker.ProjectID), RepositorySourceIdentity{RootDevice: 61, RootInode: 62, GitDevice: 61, GitInode: 63, OriginDigest: [32]byte{1}, PublicationRepository: "example/factory"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.BindRepositoryGitHubID(ctx, RepositoryID(worker.ProjectID), 42); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.writer.ExecContext(ctx, `INSERT INTO intake_task_bindings (task_id, acceptance_id) VALUES (?, ?)`, worker.TaskID.Bytes(), accepted.ID.Bytes()); err != nil {
+		t.Fatal(err)
+	}
+	candidates := func(at int64) []PublishableChange {
+		t.Helper()
+		found, err := store.PublishableChanges(ctx, mustTime(t, at))
+		if err != nil {
+			t.Fatal(err)
+		}
+		return found
+	}
+	head := hex.EncodeToString(merged.Bytes())
+	pr := ProductionPullRequest{Number: 5, Title: "Improve intake", URL: "https://github.com/example/factory/pull/5", Head: head, HeadRepository: "example/factory", Branch: "factory/" + change.ID.String()[:12], Base: "main", State: "open", Review: ProductionReview{Head: head, State: "allow"}}
+	if err := store.RecordPublication(ctx, worker.ProjectID, worker.TaskID, "example/factory", pr, mustTime(t, 70)); err != nil {
+		t.Fatal(err)
+	}
+	pr.State = "merged"
+	if err := store.RecordProductionObservation(ctx, worker.ProjectID, ProductionObservation{Repository: "example/factory", ObservedAt: 75, PullRequests: []ProductionPullRequest{pr}, Checks: []ProductionCheck{}}, mustTime(t, 75)); err != nil {
+		t.Fatal(err)
+	}
+	if found := candidates(76); len(found) != 0 {
 		t.Fatalf("merged work published again: %+v", found)
 	}
-	if _, err := store.writer.ExecContext(ctx, `UPDATE production_records SET observed_at_ms = ? WHERE kind = 'pull_request' AND identity = '6'`, admitted-1); err != nil {
+	task, _, err := store.Task(ctx, worker.TaskID)
+	if err != nil {
 		t.Fatal(err)
 	}
-	if found := candidates(); len(found) != 1 || found[0].Pull != 0 {
-		t.Fatalf("work sent back after its merge: candidates=%+v", found)
+	if _, err := store.SendBackTask(ctx, nil, task.ID, task.Revision, head, "Live signal not met after release; gap and https://github.com/example/factory/pull/5", mustTime(t, 80)); err != nil {
+		t.Fatal(err)
+	}
+	candidate := changeID(t, 230)
+	keys := admissionKeys(t, 220, &candidate)
+	admission, err := store.AdmitNext(ctx, keys, mustTime(t, 81))
+	if err != nil || !admission.Admitted() || admission.Run.TaskID != task.ID {
+		t.Fatalf("correction admission = %+v, %v", admission, err)
+	}
+	activated := activateAllResourcesUnique(t, store, *admission.Run, 82, 220)
+	session := terminalSessionForRunTest(t, store, activated.ID)
+	if _, err := store.ActivateRun(ctx, activated.ID, session.ID, activated.Revision, session.Revision, mustTime(t, 90)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.ProposeAttemptOutcome(ctx, keys.AttemptDigest, proposal, mustTime(t, 91)); err != nil {
+		t.Fatal(err)
+	}
+	observeMissingProcessExits(t, store, activated.ID, 92)
+	releaseAllRunResources(t, store, activated.ID, 93)
+	closeTerminalSessionAtCurrent(t, store, activated.ID, 96)
+	run, _, err := store.Run(ctx, activated.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	reopened, _, err := store.Change(ctx, change.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	corrected, _ := NewCommitID(change.Selection.format, bytes.Repeat([]byte{3}, change.Selection.format.oidLength()))
+	settlement, err = NewRetainedChangeSettlement(reopened.Revision, &corrected)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.FinalizeWorkerRun(ctx, run.ID, run.Revision, settlement, mustTime(t, 100)); err != nil {
+		t.Fatal(err)
+	}
+	found := candidates(100)
+	if len(found) != 1 || found[0].Task.ID != task.ID || found[0].Pull != 0 || found[0].Head != hex.EncodeToString(corrected.Bytes()) || found[0].Accepted.ID != accepted.ID {
+		t.Fatalf("correction candidates = %+v", found)
 	}
 }
 

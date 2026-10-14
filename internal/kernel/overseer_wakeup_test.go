@@ -432,77 +432,96 @@ func TestOverseerWakeSkipsPublishedIntakeSuccess(t *testing.T) {
 
 // A succeeded intake task whose pull request merged wakes its overseer once,
 // when the merge is live: at the first verified self-release that ships it,
-// however late the merge is observed. That one look verifies the issue's live
-// signal (#1906); later releases do not wake it again, and nothing stalls.
+// whether that release came before or after the merge was observed, and after
+// an upgrade whose older release records name nothing. A full pass that ran
+// before the merge was observed is not that look. The look verifies the
+// issue's live signal (#1906); later releases do not wake it again, and
+// nothing stalls into a card.
 func TestOverseerVerifiesMergedIntakeOnceLive(t *testing.T) {
 	t.Parallel()
-	ctx := context.Background()
-	succeeded, _ := NewSuccessProposal("done")
-	store, finalizing := finalizingReleasedRun(t, RoleWorker, succeeded)
-	defer store.Close()
-	change, _, err := store.Change(ctx, *finalizing.ChangeID)
-	if err != nil {
-		t.Fatal(err)
-	}
-	moved, _ := NewCommitID(change.Selection.format, bytes.Repeat([]byte{0xd2}, change.Selection.format.oidLength()))
-	settlement, _ := NewRetainedChangeSettlement(change.Revision, &moved)
-	if _, err := store.FinalizeWorkerRun(ctx, finalizing.ID, finalizing.Revision, settlement, mustTime(t, 80)); err != nil {
-		t.Fatal(err)
-	}
-	for _, statement := range []string{`PRAGMA foreign_keys = OFF`, `INSERT INTO intake_task_bindings(task_id, acceptance_id) VALUES (?, zeroblob(16))`, `PRAGMA foreign_keys = ON`} {
-		args := []any{finalizing.TaskID.Bytes()}[:strings.Count(statement, "?")]
-		if _, err := store.writer.ExecContext(ctx, statement, args...); err != nil {
+	for _, releaseFirst := range []bool{true, false} {
+		ctx := context.Background()
+		succeeded, _ := NewSuccessProposal("done")
+		store, finalizing := finalizingReleasedRun(t, RoleWorker, succeeded)
+		defer store.Close()
+		change, _, err := store.Change(ctx, *finalizing.ChangeID)
+		if err != nil {
 			t.Fatal(err)
 		}
-	}
-	overseer, err := store.CreateAgent(ctx, NewAgent{ID: agentID(t, 3), ProjectID: finalizing.ProjectID, Name: "overseer", Role: RoleOrchestrator, Provider: ProviderCodex, ToolBudgetLimit: 2}, mustTime(t, 82))
-	if err != nil {
-		t.Fatal(err)
-	}
-	policy, after, instruction := IdleStandingInstruction, uint32(1), "Supervise."
-	if _, err := store.UpdateAgent(ctx, overseer.ID, overseer.Revision, AgentPatch{IdlePolicy: &policy, IdleAfterSeconds: &after, IdleInstruction: &instruction}, mustTime(t, 83)); err != nil {
-		t.Fatal(err)
-	}
-	release := func(sha byte, verifiedAt int64, pulls ...uint64) {
-		t.Helper()
-		revision := strings.Repeat(string(sha), 40)
-		delivery := ProductionDelivery{ID: "release:" + revision, Kind: "runtime", Destination: "factoryd", Revision: revision, State: "verified", VerifiedAt: verifiedAt, PullRequests: append([]uint64{}, pulls...)}
-		if err := store.RecordDelivery(ctx, finalizing.ProjectID, "dark-factory-build/dark-factory", delivery, mustTime(t, verifiedAt)); err != nil {
+		moved, _ := NewCommitID(change.Selection.format, bytes.Repeat([]byte{0xd2}, change.Selection.format.oidLength()))
+		settlement, _ := NewRetainedChangeSettlement(change.Revision, &moved)
+		if _, err := store.FinalizeWorkerRun(ctx, finalizing.ID, finalizing.Revision, settlement, mustTime(t, 80)); err != nil {
 			t.Fatal(err)
 		}
-	}
-	settle := overseerWakeSettle.Milliseconds()
-	head := hex.EncodeToString(moved.Bytes())
-	pr := ProductionPullRequest{Number: 7, Title: "Ship", URL: "https://github.com/dark-factory-build/dark-factory/pull/7", Head: head, Branch: "factory/" + change.ID.String()[:12], Base: "main", State: "merged", Review: ProductionReview{Head: head, State: "allow"}}
-	if err := store.RecordPublication(ctx, finalizing.ProjectID, finalizing.TaskID, "dark-factory-build/dark-factory", pr, mustTime(t, 84)); err != nil {
-		t.Fatal(err)
-	}
-	// A release that does not ship it leaves it unverified, at any age.
-	release('a', 1000, 6)
-	if bodies := wakeBodies(t, store, 1000+settle); len(bodies) != 0 {
-		t.Fatalf("merged but not yet live woke = %q", bodies)
-	}
-	// The release that ships it was verified before the merge was observed.
-	if _, err := store.writer.ExecContext(ctx, `UPDATE production_records SET observed_at_ms = 5000 WHERE kind = 'pull_request'`); err != nil {
-		t.Fatal(err)
-	}
-	release('b', 2000, 7)
-	bodies := wakeBodies(t, store, 5000+settle)
-	if len(bodies) != 1 || !strings.Contains(bodies[0], finalizing.TaskID.String()+` "verify" succeeded`) || !strings.Contains(bodies[0], "PR #7 merged/allow") {
-		t.Fatalf("live merge wake = %q", bodies)
-	}
-	settleCarrier(t, store, 5000+settle+1, 31, "ran")
-	release('c', 9000, 7)
-	for _, at := range []int64{9000 + settle, 9000 + OverseerRewakeAfter.Milliseconds()*5} {
-		if bodies := wakeBodies(t, store, at); len(bodies) != 0 {
-			t.Fatalf("verified merge re-woke at %d = %q", at, bodies)
+		for _, statement := range []string{`PRAGMA foreign_keys = OFF`, `INSERT INTO intake_task_bindings(task_id, acceptance_id) VALUES (?, zeroblob(16))`, `PRAGMA foreign_keys = ON`} {
+			args := []any{finalizing.TaskID.Bytes()}[:strings.Count(statement, "?")]
+			if _, err := store.writer.ExecContext(ctx, statement, args...); err != nil {
+				t.Fatal(err)
+			}
 		}
-	}
-	if requests, err := store.OperatorHumanRequests(ctx); err != nil || len(requests) != 0 {
-		t.Fatalf("a verified merge stalled into a card: %+v %v", requests, err)
-	}
-	if items, err := store.OverseerItems(ctx, finalizing.ProjectID, mustTime(t, 1<<40)); err != nil || len(items) != 0 {
-		t.Fatalf("a verified merge is still an item: %+v %v", items, err)
+		overseer, err := store.CreateAgent(ctx, NewAgent{ID: agentID(t, 3), ProjectID: finalizing.ProjectID, Name: "overseer", Role: RoleOrchestrator, Provider: ProviderCodex, ToolBudgetLimit: 2}, mustTime(t, 82))
+		if err != nil {
+			t.Fatal(err)
+		}
+		policy, after, instruction := IdleStandingInstruction, uint32(1), "Supervise."
+		if _, err := store.UpdateAgent(ctx, overseer.ID, overseer.Revision, AgentPatch{IdlePolicy: &policy, IdleAfterSeconds: &after, IdleInstruction: &instruction}, mustTime(t, 83)); err != nil {
+			t.Fatal(err)
+		}
+		release := func(sha byte, verifiedAt int64, pulls ...uint64) {
+			t.Helper()
+			revision := strings.Repeat(string(sha), 40)
+			delivery := ProductionDelivery{ID: "release:" + revision, Kind: "runtime", Destination: "factoryd", Revision: revision, State: "verified", VerifiedAt: verifiedAt, PullRequests: append([]uint64{}, pulls...)}
+			if err := store.RecordDelivery(ctx, finalizing.ProjectID, "dark-factory-build/dark-factory", delivery, mustTime(t, verifiedAt)); err != nil {
+				t.Fatal(err)
+			}
+		}
+		fullPass := func(at int64, seed byte) {
+			t.Helper()
+			if _, err := store.EnqueueTask(ctx, NewTask{ID: taskID(t, seed), IncarnationID: incarnationID(t, seed+1), ProjectID: finalizing.ProjectID, AssignedAgentID: overseer.ID, Title: overseerWakeTitle, Body: "Factory causal wake: mode=full"}, mustTime(t, at)); err != nil {
+				t.Fatal(err)
+			}
+			settleCarrier(t, store, at+1, seed, "ran")
+		}
+		merge := func(at int64) {
+			t.Helper()
+			head := hex.EncodeToString(moved.Bytes())
+			pr := ProductionPullRequest{Number: 7, Title: "Ship", URL: "https://github.com/dark-factory-build/dark-factory/pull/7", Head: head, Branch: "factory/" + change.ID.String()[:12], Base: "main", State: "merged", Review: ProductionReview{Head: head, State: "allow"}}
+			if err := store.RecordPublication(ctx, finalizing.ProjectID, finalizing.TaskID, "dark-factory-build/dark-factory", pr, mustTime(t, at)); err != nil {
+				t.Fatal(err)
+			}
+		}
+		settle := overseerWakeSettle.Milliseconds()
+		release('f', 500) // recorded before releases named what they ship
+		live := int64(5000)
+		if releaseFirst {
+			release('b', 2000, 7)
+			fullPass(3000, 31)
+			merge(live)
+		} else {
+			fullPass(2000, 31)
+			merge(3000)
+			if bodies := wakeBodies(t, store, 3000+settle); len(bodies) != 0 {
+				t.Fatalf("merged but not yet live woke = %q", bodies)
+			}
+			release('b', live, 7)
+		}
+		bodies := wakeBodies(t, store, live+settle)
+		if len(bodies) != 1 || !strings.Contains(bodies[0], finalizing.TaskID.String()+` "verify" succeeded`) || !strings.Contains(bodies[0], "PR #7 merged/allow") {
+			t.Fatalf("releaseFirst=%v live merge wake = %q", releaseFirst, bodies)
+		}
+		settleCarrier(t, store, live+settle+1, 52, "ran")
+		release('c', 9000, 7)
+		for _, at := range []int64{9000 + settle, 9000 + OverseerRewakeAfter.Milliseconds()*5} {
+			if bodies := wakeBodies(t, store, at); len(bodies) != 0 {
+				t.Fatalf("verified merge re-woke at %d = %q", at, bodies)
+			}
+		}
+		if requests, err := store.OperatorHumanRequests(ctx); err != nil || len(requests) != 0 {
+			t.Fatalf("a verified merge stalled into a card: %+v %v", requests, err)
+		}
+		if items, err := store.OverseerItems(ctx, finalizing.ProjectID, mustTime(t, 1<<40)); err != nil || len(items) != 0 {
+			t.Fatalf("a verified merge is still an item: %+v %v", items, err)
+		}
 	}
 }
 

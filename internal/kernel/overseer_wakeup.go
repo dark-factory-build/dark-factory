@@ -47,7 +47,9 @@ const (
 // sits ownerless; a withdrawn issue's task is not. A succeeded intake task
 // whose pull request merged needs one look once live (the first verified
 // self-release that ships it, or the merge where its repository releases
-// nothing): its issue's live signal is checked then (#1906). An item is due when
+// nothing), dated no earlier than the merge's observation, so a pass that ran
+// before the item existed is not its look: its issue's live signal is checked
+// then (#1906). An item is due when
 // no carrier named it since that version; after that, at most once per
 // OverseerRewakeAfter, while no carrier that named it started (one look), or
 // while it persists and at most its rewakes did: one wake and three re-wakes
@@ -99,7 +101,7 @@ item AS (
 	JOIN intake_task_bindings AS b ON b.task_id = t.id
 	JOIN intake_acceptances AS i ON i.id = b.acceptance_id
 	WHERE t.project_id = ?1 AND COALESCE(i.overseer_agent_id, ?4) = ?4 AND t.status IN ('failed', 'cancelled') AND NOT ` + taskIssueWithdrawn + `
-	UNION ALL SELECT id, live, NULL, '', lower(hex(id)) FROM (SELECT t.id, CASE WHEN EXISTS (SELECT 1 FROM production_records
+	UNION ALL SELECT id, MAX(live, observed), NULL, '', lower(hex(id)) FROM (SELECT t.id, r.observed_at_ms AS observed, CASE WHEN EXISTS (SELECT 1 FROM production_records
 			WHERE project_id = ?1 AND repository = r.repository AND kind = 'delivery' AND identity LIKE 'release:%')
 		THEN (SELECT at FROM released WHERE repository = r.repository AND pull = p.pull_number) ELSE r.observed_at_ms END AS live
 	  FROM tasks AS t JOIN publication_tasks AS p ON p.task_id = t.id
