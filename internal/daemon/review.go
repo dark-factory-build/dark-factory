@@ -841,6 +841,8 @@ func (b *daemonReviewBackend) Review(ctx context.Context, checkout string, reque
 	if len(homes) == 0 {
 		return review.Verdict{}, errors.New("review: no worker login for the provider")
 	}
+	// A reviewer may invoke daemon tests inside its already-granted short root;
+	// nest the review root there instead of creating a denied sibling.
 	reviewTemp, err := os.MkdirTemp(runner.ShortTempDir(), "dfr-")
 	if err != nil {
 		return review.Verdict{}, fmt.Errorf("review temp: %w", err)
