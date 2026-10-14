@@ -39,7 +39,12 @@ func createTestStore(ctx context.Context, path string, config FactoryConfig, at 
 	} else if info.Size() != int64(len(image)) {
 		return nil, io.ErrShortWrite
 	}
-	return Open(ctx, path)
+	store, err := Open(ctx, path)
+	if err != nil {
+		return nil, err
+	}
+	store.overseerReceiptCutover = 0
+	return store, nil
 }
 
 func canonicalTestDatabasePath(path string) (string, error) {

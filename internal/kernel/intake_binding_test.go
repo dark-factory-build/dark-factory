@@ -86,7 +86,7 @@ func TestIntakeImportNeitherWakesNorAssignsTheOverseer(t *testing.T) {
 	if _, err := store.ImportIntakeAcceptance(ctx, accepted.ID, mustTime(t, 7)); err != nil {
 		t.Fatal(err)
 	}
-	if woken, err := store.EnqueueOverseerWakeups(ctx, mustTime(t, 1_000_000)); err != nil || len(woken) != 0 {
+	if woken, err := store.EnqueueOverseerWakeups(ctx, mustTime(t, 1_000_000), 0); err != nil || len(woken) != 0 {
 		t.Fatalf("fresh import woke the overseer: %+v %v", woken, err)
 	}
 	if result, err := store.AdmitNext(ctx, admissionKeys(t, 225, nil), mustTime(t, 8)); err != nil || result.Admitted() {
@@ -198,7 +198,7 @@ func TestFailedIntakeWakesItsConfiguredOverseer(t *testing.T) {
 			if err != nil || !found {
 				t.Fatalf("overseer: %+v %v", overseer, err)
 			}
-			body, due, err := overseerWake(ctx, read.connection, overseer, 1000+overseerWakeSettle.Milliseconds(), nil)
+			body, due, err := overseerWake(ctx, read.connection, overseer, 1000+overseerWakeSettle.Milliseconds(), 0, nil)
 			if err != nil || due != test.due || due && !strings.Contains(body, accepted.TaskID.String()) {
 				t.Fatalf("intake wake: due=%v body=%q err=%v, want due=%v", due, body, err, test.due)
 			}

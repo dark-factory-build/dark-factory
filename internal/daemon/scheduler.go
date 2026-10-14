@@ -214,7 +214,11 @@ func (daemon *Daemon) RunScheduler(ctx context.Context, spec SupervisorSpec) err
 					for _, id := range orphaned {
 						LogFactoryd(daemon.log, "factoryd: task %s cancelled: a prerequisite was cancelled\n", id)
 					}
-					_, _ = daemon.store.EnqueueOverseerWakeups(ownedCtx, at, daemon.overseerHealth()...)
+					cutover := kernel.OverseerReceiptCutover
+					if at.Int64() < cutover {
+						cutover = 0
+					}
+					_, _ = daemon.store.EnqueueOverseerWakeups(ownedCtx, at, cutover, daemon.overseerHealth()...)
 					if _, promoteErr := daemon.store.PromoteQueuedContinuations(ownedCtx, at); promoteErr != nil {
 						fail(promoteErr)
 					}

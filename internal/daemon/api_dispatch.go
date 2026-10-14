@@ -1338,7 +1338,7 @@ func (daemon *Daemon) oversight(ctx context.Context, project kernel.ProjectID) (
 			status.Conditions = append(status.Conditions, api.HealthCondition{Key: held.Key, Detail: held.Detail, SinceMS: held.Since.Int64()})
 		}
 	}
-	items, err := daemon.store.OverseerItems(ctx, project, at, health...)
+	items, err := daemon.store.OverseerItems(ctx, project, at, kernel.OverseerReceiptCutover, health...)
 	if err != nil {
 		return status, err
 	}

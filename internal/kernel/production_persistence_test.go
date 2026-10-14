@@ -281,7 +281,7 @@ func TestOverseerWakeRule(t *testing.T) {
 	}
 	wake := func(at int64) []Task {
 		t.Helper()
-		tasks, err := store.EnqueueOverseerWakeups(ctx, mustTime(t, at))
+		tasks, err := store.EnqueueOverseerWakeups(ctx, mustTime(t, at), 0)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -939,7 +939,7 @@ func TestMergedIntakeSentBackPublishesItsCorrectionAnew(t *testing.T) {
 	if _, err := store.UpdateAgent(ctx, overseer.ID, overseer.Revision, AgentPatch{IdlePolicy: &policy, IdleAfterSeconds: &after, IdleInstruction: &instruction}, mustTime(t, 100)); err != nil {
 		t.Fatal(err)
 	}
-	if items, err := store.OverseerItems(ctx, worker.ProjectID, mustTime(t, 100+PublicationAttentionAfter.Milliseconds())); err != nil || slices.ContainsFunc(items, func(item OverseerItem) bool { return strings.Contains(item.Line, "unpublishable") }) {
+	if items, err := store.OverseerItems(ctx, worker.ProjectID, mustTime(t, 100+PublicationAttentionAfter.Milliseconds()), 0); err != nil || slices.ContainsFunc(items, func(item OverseerItem) bool { return strings.Contains(item.Line, "unpublishable") }) {
 		t.Fatalf("publishable correction reported = %+v, %v", items, err)
 	}
 	// A pull request closed unmerged never ships.
