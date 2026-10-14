@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState, type FormEvent, type ReactNode } from "react";
-import { MAX_TASK_ATTACHMENTS, MAX_TASK_ATTACHMENT_BYTES, MAX_TASK_PRIORITY, type IntakeView, type IntakeBody, type DiscoveredAccount, type AccountItem, type AgentItem, type IdleWakeOn, type GitHubConnectionBody, type GitHubDelegationBody, type HumanRequestItem, type ProjectItem, type RepositoryMutation, type RunTelemetry, type RepositoryView, type StateView, type TaskHistoryView, type TaskItem, type TaskPeerQuestion, type TaskContentPin } from "@dark-factory/client";
+import { MAX_TASK_ATTACHMENTS, MAX_TASK_ATTACHMENT_BYTES, MAX_TASK_PRIORITY, type IntakeView, type IntakeBody, type DiscoveredAccount, type AgentItem, type GitHubConnectionBody, type GitHubDelegationBody, type HumanRequestItem, type ProjectItem, type RepositoryMutation, type RunTelemetry, type RepositoryView, type StateView, type TaskHistoryView, type TaskItem, type TaskPeerQuestion, type TaskContentPin } from "@dark-factory/client";
 import type { FactoryEditView, FactoryHumanRequestView } from "./factory-app-controller.js";
 import { rankLabel } from "./console-screens.js";
 import { activityLabel, type KnowledgeActivity } from "./project-board.js";
@@ -12,12 +12,8 @@ import { Icon, IconButton } from "./icons.js";
 import { Badge, SectionHeader, Status, formatTime } from "./console-kit.js";
 import type { PublishedRelease, RuntimeBuild } from "./production-data.js";
 
-/** Only the controls the operator actually changed; the rest are left alone. */
-export type AgentConfigEdit = Readonly<{ model?: string; reasoningEffort?: string; accountId?: string; paused?: boolean; archived?: boolean; idlePolicy?: "wait" | "standing_instruction"; idleAfterSeconds?: number; idleInstruction?: string; idleWakeOn?: IdleWakeOn }>;
-
 export type TaskEdit = Readonly<{ title?: string; body?: string; priority?: number; assignedAgentId?: string; cancel?: boolean; retry?: boolean }>;
 export type TaskBrief = Readonly<{ taskId: string; revision: bigint; head: bigint; instruction: string; feedback: string; outcome?: string; peerQuestions: readonly TaskPeerQuestion[]; nextPeerOffset?: bigint }>;
-export type AgentPanelView = "terminal" | "config";
 export type TaskScope = { agent_id: string } | { project_id: string };
 type TaskCursor = { beforeUpdatedAtMs?: bigint; beforeTaskId?: string };
 
@@ -47,13 +43,10 @@ export function AgentPanel({
   state,
   edit,
   ready,
-  onSaveConfig,
   onEditAppearance,
   onLoadTaskDetail,
   onLoadTaskHistory,
   terminalContent,
-  panel: panelProp,
-  onPanel,
   telemetry,
   contributions = [],
   onOpenActivity,
@@ -65,14 +58,11 @@ export function AgentPanel({
   contributions?: readonly KnowledgeActivity[];
   onOpenActivity?: (item: KnowledgeActivity) => void;
   ready: boolean;
-  onSaveConfig?: (config: AgentConfigEdit) => void;
   onEditAppearance?: (agent: AgentItem) => void;
   onLoadTaskDetail?: (task: TaskItem, peerOffset?: bigint, expectedHead?: bigint) => Promise<TaskBrief>;
   onLoadTaskHistory?: (task: TaskItem) => Promise<TaskHistoryView>;
   /** The selected agent's mounted terminal and durable composer. */
   terminalContent?: ReactNode;
-  panel?: AgentPanelView;
-  onPanel?: (panel: AgentPanelView) => void;
   /** What the current run's agent CLI recorded; absent when it recorded nothing. */
   telemetry?: RunTelemetry;
 }) {
@@ -81,10 +71,6 @@ export function AgentPanel({
   const current = state === undefined ? undefined : agentCurrentTask(agent, state);
   const queued = state === undefined ? [] : [...state.tasks.values()]
     .filter((task) => task.assigned_agent_id === agent.id && task.status === "queued");
-  const [localPanel, setLocalPanel] = useState<AgentPanelView>("terminal");
-  const panel = panelProp ?? localPanel;
-  const selectPanel = onPanel ?? setLocalPanel;
-  const errorCopy = edit?.target === agent.id ? editErrorCopy(edit) : undefined;
   const archived = agent.archived === true;
   const specialist = isSpecialist(agent);
   const queueHint = !archived && agent.paused
@@ -92,13 +78,6 @@ export function AgentPanel({
     : current === undefined && queued.length > 0
       ? "Queued · waiting for capacity"
       : undefined;
-  // A form remounts when the served value moves under it and when its own
-  // edit is refused, so a rejected change reverts instead of being resent on
-  // the next blur. A refusal never changes the revision, so it needs its own
-  // token, and only the refused form's: a refused task edit must not throw
-  // away what the operator has typed into the config form.
-  const formKey = (id: string) =>
-    `${id}:${errorCopy !== undefined && edit?.target === id ? "refused" : ""}`;
   return (
     <section className="dfConsoleSidebar__panel" aria-label={`Agent ${agent.name}`}>
       <div className="dfConsoleSidebar__heading">
@@ -113,30 +92,22 @@ export function AgentPanel({
         </div>
       </div>
 
-      {specialist && state !== undefined ? <SpecialistSummary agent={agent} state={state} pending={edit?.pending === true} ready={ready} contributions={contributions} onOpenActivity={onOpenActivity} onSaveConfig={onSaveConfig} /> : <p className="dfConsoleSidebar__status"><Status stage={archived ? "archived" : activity} /></p>}
+      {specialist && state !== undefined ? <SpecialistSummary agent={agent} state={state} contributions={contributions} onOpenActivity={onOpenActivity} /> : <p className="dfConsoleSidebar__status"><Status stage={archived ? "archived" : activity} /></p>}
       {queueHint === undefined || specialist ? null : <p className="dfConsoleSidebar__inherit">{queueHint}</p>}
       {effort === "" ? null : <p className="dfConsoleSidebar__inherit" aria-label={`Recorded by the agent: ${effort}`}>{effort}</p>}
 
-      {archived ? null : <div className="dfConsoleViewToggle" role="group" aria-label="Agent controls">
-        <button type="button" aria-pressed={panel === "terminal"} onClick={() => selectPanel("terminal")}>Terminal</button>
-        <button type="button" aria-pressed={panel === "config"} onClick={() => selectPanel("config")}>Settings</button>
-      </div>}
-      {archived ? null : <section className="dfConsoleSidebar__section dfConsoleSidebar__terminalSlot" aria-label="Terminal" hidden={panel !== "terminal"}>
+      {archived ? null : <section className="dfConsoleSidebar__section dfConsoleSidebar__terminalSlot" aria-label="Terminal">
         {terminalContent ?? <p className="dfFactoryConsole__empty">Opening terminal…</p>}
       </section>}
-
-      <section className="dfConsoleSidebar__section" aria-label="Agent configuration" hidden={!archived && panel !== "config"}>
-        <AgentConfig key={formKey(agent.id)} agent={agent} accounts={state === undefined ? [] : [...state.accounts.values()]} pending={edit?.pending === true} ready={ready} onSave={onSaveConfig} running={current !== undefined} />
-      </section>
 
     </section>
   );
 }
 
 /** What a specialist is doing, owes and has done; nothing here is inferred beyond what the factory serves. */
-function SpecialistSummary({ agent, state, pending, ready, contributions, onOpenActivity, onSaveConfig }: {
-  agent: AgentItem; state: StateView; pending: boolean; ready: boolean;
-  contributions: readonly KnowledgeActivity[]; onOpenActivity?: (item: KnowledgeActivity) => void; onSaveConfig?: (config: AgentConfigEdit) => void;
+function SpecialistSummary({ agent, state, contributions, onOpenActivity }: {
+  agent: AgentItem; state: StateView;
+  contributions: readonly KnowledgeActivity[]; onOpenActivity?: (item: KnowledgeActivity) => void;
 }) {
   const { stage, text, next, remit } = specialistStatus(agent, state);
   const mine = contributions.filter((item) => item.agent_id === agent.id);
@@ -144,7 +115,6 @@ function SpecialistSummary({ agent, state, pending, ready, contributions, onOpen
     <p className="dfConsoleSidebar__status"><Status stage={stage}>{text}</Status></p>
     {remit === "" ? null : <p className="dfConsoleItem__meta" aria-label="Remit">{remit}</p>}
     {next === "" ? null : <p className="dfConsoleSidebar__inherit">{next}</p>}
-    {agent.archived || onSaveConfig === undefined ? null : <button type="button" disabled={pending || !ready} onClick={() => onSaveConfig({ paused: !agent.paused })}>{agent.paused ? "Resume" : "Pause"}</button>}
     <section className="dfConsoleSidebar__section" aria-label="Contributions">
       <h3>Contributions</h3>
       {mine.length === 0 ? <p className="dfFactoryConsole__empty">No recorded contributions yet.</p> : <ul>{mine.map((item) => <li key={item.key}><button type="button" disabled={!onOpenActivity} onClick={() => onOpenActivity?.(item)}>{activityLabel(item, state)}</button></li>)}</ul>}
@@ -410,134 +380,6 @@ function AttachmentPreview({ file }: { file: File }) {
   return url === undefined ? null : <img src={url} alt={`Preview of ${file.name}`} style={{ maxWidth: 160, maxHeight: 120, objectFit: "contain" }} />;
 }
 
-/**
- * The two inputs hold the agent's OWN override, so empty means inherit and the
- * placeholder shows what the run will use instead. This says where that came
- * from, because "inherited" is useless without the file that decided it.
- */
-function modelSourceCaption(agent: AgentItem): string {
-  if (agent.model_source === "agent") return "set on this agent";
-  if (agent.model_source === "") return "CLI default (not visible to the factory)";
-  return `inherited from ${agent.model_source}`;
-}
-
-function AgentConfig({
-  agent,
-  accounts,
-  pending,
-  ready,
-  onSave,
-  running = false,
-}: {
-  agent: AgentItem;
-  accounts: readonly AccountItem[];
-  pending: boolean;
-  ready: boolean;
-  onSave?: (config: AgentConfigEdit) => void;
-  /** A live run: the daemon refuses to archive under it. */
-  running?: boolean;
-}) {
-  const [model, setModel] = useState(agent.model);
-  const [reasoningEffort, setReasoningEffort] = useState(agent.reasoning_effort);
-  const [accountId, setAccountId] = useState(agent.account_id);
-  const [paused, setPaused] = useState(agent.paused);
-  const [archiveConfirm, setArchiveConfirm] = useState(false);
-  const [idlePolicy, setIdlePolicy] = useState(agent.idle_policy);
-  const [idleAfterSeconds, setIdleAfterSeconds] = useState(String(agent.idle_after_seconds));
-  const [idleInstruction, setIdleInstruction] = useState(agent.idle_instruction);
-  const [wakeOn, setWakeOn] = useState<IdleWakeOn>(agent.idle_wake_on ?? "");
-  const served = useRef({ model: agent.model, reasoningEffort: agent.reasoning_effort, accountId: agent.account_id, paused: agent.paused, idlePolicy: agent.idle_policy, idleAfterSeconds: String(agent.idle_after_seconds), idleInstruction: agent.idle_instruction });
-  useEffect(() => {
-    const previous = served.current;
-    if (model === previous.model) setModel(agent.model);
-    if (reasoningEffort === previous.reasoningEffort) setReasoningEffort(agent.reasoning_effort);
-    if (accountId === previous.accountId) setAccountId(agent.account_id);
-    if (paused === previous.paused) setPaused(agent.paused);
-    if (idlePolicy === previous.idlePolicy) setIdlePolicy(agent.idle_policy);
-    if (idleAfterSeconds === previous.idleAfterSeconds) setIdleAfterSeconds(String(agent.idle_after_seconds));
-    if (idleInstruction === previous.idleInstruction) setIdleInstruction(agent.idle_instruction);
-    served.current = { model: agent.model, reasoningEffort: agent.reasoning_effort, accountId: agent.account_id, paused: agent.paused, idlePolicy: agent.idle_policy, idleAfterSeconds: String(agent.idle_after_seconds), idleInstruction: agent.idle_instruction };
-  }, [agent, model, reasoningEffort, accountId, paused, idlePolicy, idleAfterSeconds, idleInstruction]);
-  if (onSave === undefined) return null;
-  if (agent.archived) return <div className="dfConsoleSidebar__config">
-    <button type="button" disabled={pending || !ready} onClick={() => onSave({ archived: false })}>Restore paused</button>
-  </div>;
-  // Sending a control the operator did not touch would make the daemon
-  // revalidate it, so a stored pair it no longer accepts could not be paused.
-  const idleAfter = Math.max(0, Math.floor(Number(idleAfterSeconds) || 0));
-  const standing = idlePolicy === "standing_instruction";
-  const supervising = agent.role === "orchestrator";
-  const specialist = isSpecialist(agent);
-  const toggleWake = (class_: "failures" | "merges", on: boolean) => {
-    const classes = new Set(wakeOn === "" ? [] : wakeOn.split(","));
-    if (on) classes.add(class_); else classes.delete(class_);
-    setWakeOn(["failures", "merges"].filter((item) => classes.has(item)).join(",") as IdleWakeOn);
-  };
-  // Submit the complete standing rule when its wait or instruction changes.
-  const ruleMoved = idlePolicy !== agent.idle_policy || idleAfter !== agent.idle_after_seconds || idleInstruction !== agent.idle_instruction;
-  const ruleIncomplete = standing && (idleAfter < 1 || idleInstruction.trim() === "");
-  const submit = (event: FormEvent) => {
-    event.preventDefault();
-    if (ruleIncomplete) return;
-    onSave({
-      ...(model === agent.model ? {} : { model }),
-      ...(reasoningEffort === agent.reasoning_effort ? {} : { reasoningEffort }),
-      ...(accountId === agent.account_id ? {} : { accountId }),
-      ...(paused === agent.paused ? {} : { paused }),
-      ...(!ruleMoved ? {} : standing ? { idlePolicy, idleAfterSeconds: idleAfter, idleInstruction } : { idlePolicy }),
-      ...(!standing || supervising || wakeOn === (agent.idle_wake_on ?? "") ? {} : { idleWakeOn: wakeOn }),
-    });
-  };
-  return (
-    <form className="dfConsoleSidebar__section dfConsoleSidebar__config" aria-label="Agent configuration" onSubmit={submit}>
-      {agent.provider === "shell" ? <p className="dfConsoleSidebar__inherit">shell has no model</p> : (
-        <>
-          <label htmlFor={`df-model-${agent.id}`}>Model</label>
-          <input id={`df-model-${agent.id}`} value={model} placeholder={agent.effective_model} disabled={pending} onChange={(event) => setModel(event.currentTarget.value)} />
-          <label htmlFor={`df-effort-${agent.id}`}>Reasoning effort</label>
-          <input id={`df-effort-${agent.id}`} value={reasoningEffort} placeholder={agent.effective_reasoning_effort} disabled={pending} onChange={(event) => setReasoningEffort(event.currentTarget.value)} />
-          <p className="dfConsoleSidebar__inherit">{modelSourceCaption(agent)}</p>
-          <label htmlFor={`df-account-${agent.id}`}>Account</label>
-          <select id={`df-account-${agent.id}`} value={accountId} disabled={pending} onChange={(event) => setAccountId(event.currentTarget.value)}>
-            <option value="">provider default</option>
-            {accounts.filter((account) => account.provider === agent.provider).map((account) => (
-              <option key={account.id} value={account.id}>{account.label}</option>
-            ))}
-          </select>
-        </>
-      )}
-      <label className="dfConsoleSidebar__toggle" htmlFor={`df-paused-${agent.id}`}>
-        <input id={`df-paused-${agent.id}`} type="checkbox" checked={paused} disabled={pending} onChange={(event) => setPaused(event.currentTarget.checked)} />
-        Paused
-      </label>
-      {agent.role !== "worker" || agent.archived === undefined ? null : archiveConfirm ? <span><button type="button" className="dfDanger" autoFocus disabled={pending || !ready} onClick={() => onSave({ archived: true })}>{specialist ? (running ? "Confirm stop (ends the running review)" : "Confirm stop") : "Confirm archive"}</button><button type="button" disabled={pending} onClick={() => setArchiveConfirm(false)}>{specialist ? "Keep specialist" : "Keep worker"}</button></span> : <button type="button" className="dfDanger" disabled={pending || !ready} onClick={() => setArchiveConfirm(true)}>{specialist ? "Stop specialist" : "Archive worker"}</button>}
-      <h3>{supervising ? "Supervision" : "Rules"}</h3>
-      <label htmlFor={`df-idle-${agent.id}`}>{supervising ? "When work changes" : "When ready"}</label>
-      <select id={`df-idle-${agent.id}`} value={idlePolicy} disabled={pending} onChange={(event) => setIdlePolicy(event.currentTarget.value as typeof idlePolicy)}>
-        <option value="wait">wait for work</option>
-        <option value="standing_instruction">{supervising ? "supervise worker activity" : "run a standing instruction"}</option>
-      </select>
-      {idlePolicy === "standing_instruction" ? (
-        <>
-          <label htmlFor={`df-idle-after-${agent.id}`}>{supervising ? "Cooldown seconds" : "After seconds ready"}</label>
-          <input id={`df-idle-after-${agent.id}`} inputMode="numeric" value={idleAfterSeconds} disabled={pending} onChange={(event) => setIdleAfterSeconds(event.currentTarget.value)} />
-          <label htmlFor={`df-idle-instruction-${agent.id}`}>Instruction</label>
-          <textarea id={`df-idle-instruction-${agent.id}`} rows={3} value={idleInstruction} disabled={pending} onChange={(event) => setIdleInstruction(event.currentTarget.value)} />
-          {supervising ? null : <>
-            <fieldset disabled={pending}><legend>Also review sooner on</legend>
-              <label><input type="checkbox" checked={wakeOn.includes("failures")} onChange={(event) => toggleWake("failures", event.currentTarget.checked)} /> failures</label>
-              <label><input type="checkbox" checked={wakeOn.includes("merges")} onChange={(event) => toggleWake("merges", event.currentTarget.checked)} /> merges</label>
-            </fieldset>
-          </>}
-          <p className="dfConsoleSidebar__inherit">{agent.idle_runs_used} idle runs</p>
-          {supervising ? <p className="dfConsoleSidebar__inherit">initial inspection, then worker events</p> : null}
-          {ruleIncomplete ? <p className="dfConsoleSidebar__inherit">a standing instruction needs at least a second and text</p> : null}
-        </>
-      ) : null}
-      <button type="submit" disabled={pending || !ready || ruleIncomplete}>{pending ? "Saving" : "Save"}</button>
-    </form>
-  );
-}
 
 /**
  * A priority is durable global scheduling input. Increasing or decreasing it

@@ -2,7 +2,7 @@ import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import type { AgentItem, OperationalNodeView, ProjectItem, RepositoryMutation, SpriteAppearance, TaskHistoryView, TaskItem } from "@dark-factory/client";
 import { type FactoryAgentSelection, type FactoryAppSnapshot, type FactoryHumanRequestView } from "./factory-app-controller.js";
 import { AgentList, FactoryFloor } from "./console-screens.js";
-import { AgentPanel, ConsoleDialog, HumanRequestPanel, WorkPanel, TaskDetail, editErrorCopy, type AgentConfigEdit, type AgentPanelView, type TaskEdit, type TaskBrief, type TaskScope, type TaskContentChip, type AddTask, type WorkFilter } from "./console-sidebar.js";
+import { AgentPanel, ConsoleDialog, HumanRequestPanel, WorkPanel, TaskDetail, editErrorCopy, type TaskEdit, type TaskBrief, type TaskScope, type TaskContentChip, type AddTask, type WorkFilter } from "./console-sidebar.js";
 import { ProjectLibrary, type ProjectContentCall } from "./project-library.js";
 import { activityTarget, onBoard, useKnowledgeActivity, type KnowledgeActivity } from "./project-board.js";
 import { useProduction } from "./production-data.js";
@@ -21,13 +21,10 @@ export type FactoryConsoleProps = FactoryAppSnapshot & {
   onSelectTask?: (taskId: string | undefined) => void;
   detail?: ConsoleDetail;
   onDetail?: (detail: ConsoleDetail) => void;
-  agentPanel?: AgentPanelView;
-  onAgentPanel?: (panel: AgentPanelView) => void;
   selectedAgent?: FactoryAgentSelection;
   onSelectAgent?: (agent: AgentItem) => void;
   onSetDispatch?: (expectedRevision: bigint, enabled: boolean) => Promise<{ revision: bigint; enabled: boolean }>;
   onProjectContent?: ProjectContentCall;
-  onSaveAgentConfig?: (config: AgentConfigEdit) => void;
   onSaveAgentAppearance?: (agentId: string, appearance: SpriteAppearance) => Promise<boolean>;
   appearanceAgentId?: string;
   onEditAppearance?: (agent: AgentItem) => void;
@@ -99,14 +96,11 @@ export function FactoryConsole({
   onDetail,
   selectedTaskId,
   onSelectTask,
-  agentPanel,
-  onAgentPanel,
   selectedHumanRequest,
   selectedAgent,
   onSelectAgent,
   onSetDispatch,
   onProjectContent,
-  onSaveAgentConfig,
   onSaveAgentAppearance,
   appearanceAgentId,
   onEditAppearance,
@@ -328,13 +322,10 @@ export function FactoryConsole({
                 state={scopedState}
                 edit={edit}
                 ready={ready}
-                onSaveConfig={onSaveAgentConfig}
                 onEditAppearance={ready && !agent.archived ? onEditAppearance : undefined}
                 onLoadTaskDetail={onLoadTaskDetail}
                 onLoadTaskHistory={onLoadTaskHistory}
                 terminalContent={terminalContent}
-                panel={agentPanel}
-                onPanel={onAgentPanel}
                 telemetry={agentTelemetry(agent, scopedState, runPaths)}
                 contributions={knowledgeActivity.recent}
                 onOpenActivity={ready ? openActivity : undefined}

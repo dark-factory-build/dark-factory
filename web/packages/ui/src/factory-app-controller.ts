@@ -1,6 +1,5 @@
 import {
   type BrowserClientsView,
-  type IdleWakeOn,
   MAX_TERMINAL_PAYLOAD,
   CAPABILITIES,
   MAX_TASK_INSTRUCTION_BYTES,
@@ -484,31 +483,6 @@ export class FactoryAppController {
       this.#lastRunPaths = last;
       this.#publish();
     });
-  }
-
-  /**
-   * Save the selected agent's configuration against its exact revision. Only
-   * the controls the caller changed are sent; an omitted one is left alone,
-   * and an empty change is not a write at all.
-   */
-  async updateAgentConfig(config: { model?: string; reasoningEffort?: string; accountId?: string; paused?: boolean; archived?: boolean; idlePolicy?: "wait" | "standing_instruction"; idleAfterSeconds?: number; idleInstruction?: string; idleWakeOn?: IdleWakeOn }): Promise<void> {
-    const selected = this.#selectedAgent;
-    const session = this.#client?.session;
-    if (this.#closed || this.#status !== "ready" || selected === undefined || session === undefined || this.#edit?.pending === true) return;
-    if (Object.values(config).every((value) => value === undefined)) return;
-    const generation = this.#generation;
-    const edit: FactoryEditView = { target: selected.agent.id, pending: true };
-    this.#edit = edit;
-    this.#publish();
-    try {
-      await session.updateAgent({ agentId: selected.agent.id, expectedRevision: selected.agent.revision, ...config });
-      if (!this.#current(generation) || this.#edit !== edit) return;
-      this.#edit = undefined;
-    } catch (error) {
-      if (!this.#current(generation) || this.#edit !== edit) return;
-      this.#edit = { target: selected.agent.id, pending: false, error: finiteError(error) };
-    }
-    this.#publish();
   }
 
   async updateAgentAppearance(agentId: string, appearance: SpriteAppearance): Promise<boolean> {

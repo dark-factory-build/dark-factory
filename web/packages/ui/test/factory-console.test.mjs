@@ -314,16 +314,13 @@ test("hostile names and titles are escaped as text and private detail is absent"
     tasks: new Map([[ids.task, { id: ids.task, project_id: ids.project, assigned_agent_id: ids.agent, title: hostile, status: "running", priority: 10, revision: 12n }]]),
   });
   for (const view of VIEWS) {
-    // The second pass renders the config form, so the hostile model reaches
-    // an input value rather than being dropped with the whole section.
-    for (const props of [{ view }, { view, selectedAgent: agentSelection(), onSaveAgentConfig: () => {} }]) {
+    for (const props of [{ view }, { view, selectedAgent: agentSelection() }]) {
       const markup = render({ state: hostileState, ...props });
       assert.equal(markup.includes("<img"), false, view);
       assert.equal(markup.includes("question"), false, view);
     }
   }
   assert.match(render({ state: hostileState }), /&lt;img src=x onerror=alert\(1\)&gt;/);
-  assert.match(render({ state: hostileState, selectedAgent: agentSelection(), onSaveAgentConfig: () => {} }), /<input id="df-model-[0-9a-f]+"[^>]*value="&lt;img src=x onerror=alert\(1\)&gt;"/);
 });
 
 test("the console never shows a kernel-grammar or retired vocabulary word", () => {
@@ -629,61 +626,18 @@ test("switching right panels keeps the selected terminal mounted", async () => {
   }
 });
 
-test("opening a selected question restores that agent's terminal panel", async () => {
-  const previousAct = globalThis.IS_REACT_ACT_ENVIRONMENT;
-  globalThis.IS_REACT_ACT_ENVIRONMENT = true;
-  function ConsoleHarness() {
-    const [detail, setDetail] = useState("agent");
-    const [panel, setPanel] = useState("terminal");
-    return createElement(FactoryConsole, {
-      status: "ready",
-      state: baseState(),
-      selectedAgent: agentSelection(),
-      selectedHumanRequest: selectedRequest(),
-      detail,
-      onDetail: setDetail,
-      agentPanel: panel,
-      onAgentPanel: setPanel,
-      onOpenTerminalForHumanRequest: () => { setDetail("agent"); setPanel("terminal"); },
-      terminalContent: createElement("p", null, "terminal"),
-    });
-  }
-  try {
-    let renderer;
-    await act(async () => { renderer = create(createElement(ConsoleHarness)); });
-    await act(async () => { renderer.root.findAllByType("button").find((button) => button.props.children === "Settings" && typeof button.props.onClick === "function").props.onClick(); });
-    await act(async () => { renderer.root.findByProps({ "aria-label": "Project" }).props.onChange({ currentTarget: { value: ids.secondProject } }); });
-    assert.equal(renderer.root.findAllByProps({ "aria-label": "Terminal" }).length, 0);
-    await act(async () => { renderer.root.findByProps({ "aria-label": "Project" }).props.onChange({ currentTarget: { value: "" } }); });
-    await act(async () => { renderer.root.findAllByType("button").find((button) => textOf(button).startsWith("Needs you")).props.onClick(); });
-    await act(async () => { renderer.root.findAllByType("button").find((button) => button.props.children === "Open terminal").props.onClick(); });
-    assert.equal(renderer.root.findByProps({ "aria-label": "Project" }).props.value, ids.project, "opening a global question switches to its agent’s project");
-    const terminal = renderer.root.findByProps({ "aria-label": "Terminal" });
-    const config = renderer.root.findByProps({ "aria-label": "Agent configuration" });
-    assert.equal(terminal.props.hidden, false);
-    assert.equal(config.props.hidden, true);
-    await act(async () => { renderer.unmount(); });
-  } finally {
-    globalThis.IS_REACT_ACT_ENVIRONMENT = previousAct;
-  }
-});
-
-test("selecting an agent exposes terminal and configuration controls", () => {
+test("selecting an agent exposes terminal directly without browser configuration controls", () => {
   const markup = render({
     detail: "agent",
     selectedAgent: agentSelection(),
     onSelectAgent: () => {},
-    onSaveAgentConfig: () => {},
     onEditTask: () => {},
   });
   assert.match(markup, /aria-label="Agent Builder One"/);
   assert.match(markup, /Builder One[\s\S]*?claude_code · claude-opus-5/);
-  assert.match(markup, /aria-label="Agent controls"/);
-  assert.match(markup, />Terminal</);
-  assert.match(markup, />Settings</);
-  assert.match(markup, /aria-label="Agent configuration"/);
-  assert.match(markup, /value="claude-opus-5"/);
-  assert.match(markup, /value="high"/);
+  assert.match(markup, /aria-label="Terminal"/);
+  assert.doesNotMatch(markup, /Agent configuration|Settings|aria-label="Agent controls"/);
+  assert.doesNotMatch(markup, />Pause<|>Resume</);
   assert.equal(markup.includes("aria-label=\"Agent queue\""), false);
   assert.match(markup, /dfConsoleLayout__left/);
   assert.equal(markup.includes("dfConsoleLayout__right"), false);
@@ -829,69 +783,6 @@ test("the queued task row keeps served order and changes its exact priority", as
   } finally {
     globalThis.IS_REACT_ACT_ENVIRONMENT = previousAct;
   }
-});
-
-test("a config refusal resets only its form and config saves remain partial", async () => {
-  const previousAct = globalThis.IS_REACT_ACT_ENVIRONMENT;
-  globalThis.IS_REACT_ACT_ENVIRONMENT = true;
-  try {
-    const edits = [];
-    const queued = [...fixtureState.tasks.values()].find((task) => task.status === "queued");
-    const agent = fixtureState.agents.get(ids.agent);
-    const props = {
-      status: "ready",
-      state: baseState(),
-      detail: "agent",
-      agentPanel: "config",
-      selectedAgent: agentSelection(),
-      onSaveAgentConfig: (config) => edits.push(config),
-    };
-    let renderer;
-    await act(async () => { renderer = create(createElement(FactoryConsole, props)); });
-    const model = () => renderer.root.findAllByType("input").find((input) => input.props.id === `df-model-${agent.id}`);
-    const config = () => renderer.root.findAllByType("form").find((form) => form.props["aria-label"] === "Agent configuration");
-    const paused = () => renderer.root.findAllByType("input").find((input) => input.props.type === "checkbox");
-
-    await act(async () => { model().props.onChange({ currentTarget: { value: "half-typed" } }); });
-    await act(async () => { renderer.update(createElement(FactoryConsole, { ...props, edit: { target: queued.id, pending: false, error: new SessionError("stale") } })); });
-    assert.equal(model().props.value, "half-typed", "a task refusal leaves the config draft intact");
-    assert.equal(renderer.root.findAllByProps({ role: "alert" }).length, 1, "the shared alert remains visible");
-
-    await act(async () => { renderer.update(createElement(FactoryConsole, { ...props, edit: { target: agent.id, pending: false, error: new SessionError("stale") } })); });
-    assert.equal(model().props.value, agent.model, "a config refusal remounts its own form");
-    assert.equal(renderer.root.findAllByProps({ role: "alert" }).length, 1, "a config refusal has one shared alert");
-    await act(async () => { renderer.update(createElement(FactoryConsole, props)); });
-
-    await act(async () => { paused().props.onChange({ currentTarget: { checked: true } }); });
-    await act(async () => { config().props.onSubmit({ preventDefault() {} }); });
-    assert.deepEqual(edits.at(-1), { paused: true });
-
-    await act(async () => { model().props.onChange({ currentTarget: { value: "claude-sonnet-5" } }); });
-    await act(async () => { config().props.onSubmit({ preventDefault() {} }); });
-    assert.deepEqual(edits.at(-1), { model: "claude-sonnet-5", paused: true });
-
-    await act(async () => { model().props.onChange({ currentTarget: { value: agent.model } }); });
-    await act(async () => { paused().props.onChange({ currentTarget: { checked: false } }); });
-    await act(async () => { config().props.onSubmit({ preventDefault() {} }); });
-    assert.deepEqual(edits.at(-1), {}, "an untouched config submits no changes");
-    await act(async () => { renderer.unmount(); });
-  } finally {
-    globalThis.IS_REACT_ACT_ENVIRONMENT = previousAct;
-  }
-});
-
-test("a rejected edit says plainly that the durable value did not change", () => {
-  const markup = render({
-    selectedAgent: agentSelection(),
-    onSaveAgentConfig: () => {},
-    edit: { target: ids.agent, pending: false, error: new SessionError("stale") },
-  });
-  assert.match(markup, /Someone else changed this\. Reopen it and try again\./);
-  assert.match(markup, /role="alert"/);
-  assert.equal((markup.match(/role="alert"/g) ?? []).length, 1, "a config refusal has one shared alert");
-  const unknown = render({ selectedAgent: agentSelection(), onSaveAgentConfig: () => {}, edit: { target: ids.agent, pending: false, error: { code: "internal" } } });
-  assert.match(unknown, /The edit did not complete\./);
-  assert.match(render({ selectedAgent: agentSelection(), onSaveAgentConfig: () => {}, edit: { pending: true } }), />Saving</);
 });
 
 test("a queued edit refusal remains visible after its task leaves the queue", () => {
@@ -1077,271 +968,6 @@ test("the console shows the model an agent will actually run with", () => {
   assert.match(withAgent(inheritingAgent()), /Builder Two[\s\S]*?codex · gpt-6-astra/);
   // The provider with no model says nothing extra rather than a dangling dot.
   assert.match(withAgent(shellAgent), /Shell Hand[\s\S]*?shell/);
-});
-
-test("archived workers stay selectable from the archived view and expose only restore", async () => {
-  const previousAct = globalThis.IS_REACT_ACT_ENVIRONMENT;
-  globalThis.IS_REACT_ACT_ENVIRONMENT = true;
-  const worker = { ...fixtureState.agents.get(ids.agent), archived: true, paused: true };
-  const state = baseState({ agents: new Map([[worker.id, worker]]) });
-  try {
-    let renderer;
-    await act(async () => { renderer = create(createElement(FactoryConsole, { status: "ready", state, detail: "agent", onSelectAgent() {} })); });
-    assert.equal(renderer.root.findAllByType("button").some((button) => String(button.props.className).includes("dfAgentList__row")), false);
-    const archived = renderer.root.findByProps({ type: "checkbox" });
-    await act(async () => { archived.props.onChange({ currentTarget: { checked: true } }); });
-    assert.equal(renderer.root.findAllByType("button").some((button) => String(button.props.className).includes("dfAgentList__row")), true);
-    await act(async () => { renderer.update(createElement(FactoryConsole, { status: "ready", state, detail: "agent", selectedAgent: { id: worker.id, name: worker.name, revision: worker.revision }, onSaveAgentConfig() {} })); });
-    const text = JSON.stringify(renderer.toJSON());
-    assert.match(text, /archived/);
-    assert.match(text, /Restore paused/);
-    assert.equal(text.includes("Archive worker"), false);
-    assert.equal(text.includes("TERMINAL"), false);
-    assert.equal(text.includes("Queue paused"), false);
-    assert.equal(renderer.root.findByProps({ className: "dfAgentSpriteEdit" }).props.disabled, true);
-    await act(async () => { renderer.unmount(); });
-  } finally {
-    globalThis.IS_REACT_ACT_ENVIRONMENT = previousAct;
-  }
-});
-
-test("archive confirmation follows connection readiness and submits only the lifecycle change", async () => {
-  const worker = { ...fixtureState.agents.get(ids.agent), archived: false };
-  const state = baseState({ agents: new Map([[worker.id, worker]]) });
-  const saves = [];
-  const props = { state, selectedAgent: { id: worker.id, name: worker.name, revision: worker.revision }, agentPanel: "config", onSaveAgentConfig: (edit) => saves.push(edit) };
-  let renderer;
-  const button = (label) => renderer.root.findAllByType("button").find((entry) => entry.props.children === label);
-  try {
-    await act(async () => { renderer = create(createElement(FactoryConsole, { ...props, status: "closed" })); });
-    assert.equal(button("Archive worker").props.disabled, true);
-    await act(async () => { renderer.update(createElement(FactoryConsole, { ...props, status: "ready" })); });
-    assert.equal(button("Archive worker").props.disabled, false);
-    await act(async () => { button("Archive worker").props.onClick(); });
-    assert.deepEqual(saves, []);
-    await act(async () => { renderer.update(createElement(FactoryConsole, { ...props, status: "closed" })); });
-    assert.equal(button("Confirm archive").props.disabled, true);
-    await act(async () => { renderer.update(createElement(FactoryConsole, { ...props, status: "ready" })); });
-    assert.equal(button("Confirm archive").props.disabled, false);
-    await act(async () => { button("Confirm archive").props.onClick(); });
-    assert.deepEqual(saves, [{ archived: true }]);
-  } finally {
-    if (renderer) await act(async () => { renderer.unmount(); });
-  }
-});
-
-test("the config inputs stay the agent's own override and caption where it came from", () => {
-  // Own: the served value is in the box and the caption names the agent.
-  const own = withAgent(fixtureState.agents.get(ids.agent));
-  assert.match(own, /<input id="df-model-[0-9a-f]+"[^>]*placeholder="claude-opus-5"/);
-  assert.match(own, /<input id="df-model-[0-9a-f]+"[^>]*value="claude-opus-5"/);
-  assert.match(own, />set on this agent</);
-
-  // Inherited: the box is empty because the override is, and the placeholder
-  // plus the caption say what the run gets and which file decided it.
-  const inherited = withAgent(inheritingAgent());
-  assert.match(inherited, /<input id="df-model-[0-9a-f]+"[^>]*placeholder="gpt-6-astra"/);
-  assert.match(inherited, /<input id="df-model-[0-9a-f]+"[^>]*value=""/);
-  assert.match(inherited, /<input id="df-effort-[0-9a-f]+"[^>]*placeholder="high"/);
-  assert.match(inherited, /inherited from \/Users\/operator\/\.codex\/config\.toml/);
-
-  // Unknown: an older daemon, or a CLI whose configuration the factory cannot
-  // read. The console says so rather than implying the model is unset.
-  const unknown = withAgent({ ...inheritingAgent(), effective_model: "", effective_reasoning_effort: "", model_source: "" });
-  assert.match(unknown, /CLI default \(not visible to the factory\)/);
-  assert.equal(unknown.includes("inherited from"), false);
-});
-
-test("agent config drafts survive an acknowledged live revision", async () => {
-  const previous = globalThis.IS_REACT_ACT_ENVIRONMENT;
-  globalThis.IS_REACT_ACT_ENVIRONMENT = true;
-  const original = fixtureState.agents.get(ids.agent);
-  const state = baseState({ agents: new Map([[original.id, original]]) });
-  const selectedAgent = { id: original.id, name: original.name, revision: original.revision };
-  let renderer;
-  try {
-    await act(async () => { renderer = create(createElement(FactoryConsole, { status: "ready", state, selectedAgent, agentPanel: "config", onSaveAgentConfig() {} })); });
-    const model = () => renderer.root.findByProps({ id: `df-model-${original.id}` });
-    await act(async () => model().props.onChange({ currentTarget: { value: "operator draft" } }));
-    const changed = { ...original, revision: original.revision + 1n, paused: !original.paused };
-    await act(async () => renderer.update(createElement(FactoryConsole, { status: "ready", state: baseState({ agents: new Map([[changed.id, changed]]) }), selectedAgent: { ...selectedAgent, revision: changed.revision }, agentPanel: "config", onSaveAgentConfig() {} })));
-    assert.equal(model().props.value, "operator draft");
-  } finally {
-    if (renderer) await act(async () => renderer.unmount());
-    globalThis.IS_REACT_ACT_ENVIRONMENT = previous;
-  }
-});
-
-test("the shell provider has no model inputs but keeps PAUSED", () => {
-  const markup = withAgent(shellAgent);
-  assert.match(markup, />shell has no model</);
-  assert.equal(markup.includes("df-model-"), false);
-  assert.equal(markup.includes("df-effort-"), false);
-  // The daemon rejects a model for shell; pausing it is still an edit.
-  assert.match(markup, /id="df-paused-[0-9a-f]+"/);
-  assert.match(markup, />Paused</);
-});
-
-test("the agent config offers its provider's linked accounts and the provider default", async () => {
-  const previousAct = globalThis.IS_REACT_ACT_ENVIRONMENT;
-  globalThis.IS_REACT_ACT_ENVIRONMENT = true;
-  try {
-    const edits = [];
-    const state = baseState();
-    const linked = [...state.accounts.values()][0];
-    const props = {
-      status: "ready",
-      state,
-      selectedAgent: agentSelection(),
-      onSaveAgentConfig: (config) => edits.push(config),
-    };
-    let renderer;
-    await act(async () => { renderer = create(createElement(FactoryConsole, props)); });
-    const account = renderer.root.findAllByType("select").find((select) => select.props.id === `df-account-${ids.agent}`);
-    // The selected agent is claude_code, so only claude_code logins are offered.
-    assert.deepEqual(account.props.children[0].props.children, "provider default");
-    assert.deepEqual(account.props.children[1].map((option) => option.props.children), [linked.label]);
-    assert.equal(account.props.value, linked.id);
-
-    // Only what the operator changed is sent, and "" clears the selection.
-    await act(async () => { account.props.onChange({ currentTarget: { value: "" } }); });
-    const form = renderer.root.findAllByProps({ "aria-label": "Agent configuration" })[0].findByType("form");
-    await act(async () => { form.props.onSubmit({ preventDefault() {} }); });
-    assert.deepEqual(edits.at(-1), { accountId: "" });
-
-    // A shell agent has no logins at all, so it has no account control.
-    const shell = { ...state.agents.get(ids.agent), provider: "shell", model: "", reasoning_effort: "", account_id: "" };
-    await act(async () => {
-      renderer.update(createElement(FactoryConsole, { ...props, state: baseState({ agents: new Map([[shell.id, shell]]) }) }));
-    });
-    assert.equal(renderer.root.findAllByType("select").some((select) => select.props.id === `df-account-${ids.agent}`), false);
-    await act(async () => { renderer.unmount(); });
-  } finally {
-    globalThis.IS_REACT_ACT_ENVIRONMENT = previousAct;
-  }
-});
-
-test("the RULES block saves an idle rule and sends only what changed", async () => {
-  const edits = [];
-  const props = { status: "ready", state: baseState(), selectedAgent: agentSelection(), onSaveAgentConfig: (config) => edits.push(config) };
-  let renderer;
-  await act(async () => { renderer = create(createElement(FactoryConsole, props)); });
-  const field = (id) => renderer.root.findAll((node) => node.props.id === id)[0];
-  const form = () => renderer.root.findAllByType("form")[0];
-  // Waiting agents show no instruction controls; choosing the rule reveals them.
-  assert.equal(field(`df-idle-instruction-${ids.agent}`), undefined);
-  await act(async () => { field(`df-idle-${ids.agent}`).props.onChange({ currentTarget: { value: "standing_instruction" } }); });
-  await act(async () => { field(`df-idle-after-${ids.agent}`).props.onChange({ currentTarget: { value: "2" } }); });
-  await act(async () => { field(`df-idle-instruction-${ids.agent}`).props.onChange({ currentTarget: { value: "Look for follow-up work." } }); });
-  await act(async () => { form().props.onSubmit({ preventDefault() {} }); });
-  assert.deepEqual(edits.at(-1), { idlePolicy: "standing_instruction", idleAfterSeconds: 2, idleInstruction: "Look for follow-up work." });
-  // A rule the daemon would refuse never leaves the form: no wait means no
-  // save, and the form says why.
-  await act(async () => { field(`df-idle-after-${ids.agent}`).props.onChange({ currentTarget: { value: "0" } }); });
-  const saveButton = () => renderer.root.findAllByType("button").find((button) => button.props.type === "submit");
-  assert.equal(saveButton().props.disabled, true);
-  const before = edits.length;
-  await act(async () => { form().props.onSubmit({ preventDefault() {} }); });
-  assert.equal(edits.length, before);
-  assert.ok(renderer.root.findAllByType("p").some((paragraph) => String(paragraph.props.children).includes("needs at least a second")));
-  await act(async () => { field(`df-idle-after-${ids.agent}`).props.onChange({ currentTarget: { value: "1" } }); });
-  assert.equal(saveButton().props.disabled, false);
-  await act(async () => { form().props.onSubmit({ preventDefault() {} }); });
-  assert.deepEqual(edits.at(-1), { idlePolicy: "standing_instruction", idleAfterSeconds: 1, idleInstruction: "Look for follow-up work." });
-  // Editing a standing rule preserves its recorded wake history.
-  const spent = { ...fixtureState.agents.get(ids.agent), idle_policy: "standing_instruction", idle_after_seconds: 600, idle_instruction: "Look for follow-up work.", idle_run_budget: 3, idle_runs_used: 3 };
-  const spentState = baseState({ agents: new Map([...fixtureState.agents, [spent.id, spent]]) });
-  const again = [];
-  let spentRenderer;
-  await act(async () => { spentRenderer = create(createElement(FactoryConsole, { status: "ready", state: spentState, selectedAgent: agentSelection(), onSaveAgentConfig: (config) => again.push(config) })); });
-  const spentField = (id) => spentRenderer.root.findAll((node) => node.props.id === id)[0];
-  assert.match(renderToStaticMarkup(createElement(FactoryConsole, { status: "ready", state: spentState, selectedAgent: agentSelection(), onSaveAgentConfig: () => {} })), /3 idle runs/);
-  await act(async () => { spentField(`df-idle-instruction-${ids.agent}`).props.onChange({ currentTarget: { value: "Look for follow-up work, then tidy." } }); });
-  await act(async () => { spentRenderer.root.findAllByType("form")[0].props.onSubmit({ preventDefault() {} }); });
-  assert.deepEqual(again.at(-1), { idlePolicy: "standing_instruction", idleAfterSeconds: 600, idleInstruction: "Look for follow-up work, then tidy." });
-});
-
-test("overseer supervision names worker events and a seconds cooldown", () => {
-  const agent = { ...fixtureState.agents.get(ids.agent), role: "orchestrator", idle_policy: "standing_instruction", idle_after_seconds: 10, idle_instruction: "Inspect worker activity.", idle_run_budget: 1 };
-  const agents = new Map(fixtureState.agents);
-  agents.set(agent.id, agent);
-  const markup = render({ state: baseState({ agents }), selectedAgent: { id: agent.id, name: agent.name, revision: agent.revision }, onSaveAgentConfig: () => {} });
-  for (const text of ["Supervision", "When work changes", "supervise worker activity", "Cooldown seconds", "initial inspection, then worker events"]) assert.match(markup, new RegExp(text));
-  assert.match(markup, new RegExp(`id="df-idle-after-${agent.id}"[^>]*value="10"`));
-});
-
-test("task selection and floor questions open the exact existing task detail and question route", async () => {
-  const loaded = [];
-  const questions = [];
-  const queueSelections = [];
-  const props = {
-    status: "ready", state: fixtureState, graphs: fixtureGraphs,
-    runPaths: new Map([[ids.agent, runSample(ids.agent, ["internal/kernel/state.go"])]]),
-    onLoadTaskDetail: async (task) => {
-      loaded.push(task);
-      return { taskId: task.id, revision: task.revision, head: fixtureState.head, instruction: "Observed task detail", feedback: "", peerQuestions: [] };
-    },
-  };
-  function Harness({ state = fixtureState, editable = false }) {
-    const [selectedTaskId, setSelectedTaskId] = useState();
-    const [detail, setDetail] = useState("work");
-    const [selectedHumanRequest, setSelectedHumanRequest] = useState();
-    return createElement(FactoryConsole, {
-      ...props,
-      state,
-      detail,
-      onDetail: setDetail,
-      selectedTaskId,
-      onSelectTask: (taskId) => { queueSelections.push(taskId); setSelectedTaskId(taskId); },
-      ...(editable ? { onEditTask: async () => true } : {}),
-      selectedHumanRequest,
-      onSelectHumanRequest: (request) => { questions.push(request); setSelectedHumanRequest(selectedRequest({ request, question: "Should the migration also cover the users table? The plan only names accounts." })); setDetail("work"); },
-    });
-  }
-  let tree;
-  await act(async () => { tree = create(createElement(Harness)); });
-  const task = fixtureState.tasks.get(ids.task);
-  // A running task with an open question is listed as that question; selecting the task is the console's own route.
-  const openRunning = () => act(async () => { tree.root.findByType(FactoryConsole).props.onSelectTask(task.id); });
-  await openRunning();
-  assert.equal(loaded.length, 1);
-  assert.equal(loaded[0], task);
-  assert.deepEqual(queueSelections, [task.id]);
-  assert.equal(tree.root.findByProps({ "aria-label": "Task details" }).findByType("h3").children.join(""), task.title);
-  await act(async () => { tree.root.findByProps({ "aria-label": "Task details" }).props.onClose(); });
-  const queuedTitle = tree.root.findByProps({ "aria-label": "Work" }).findAllByProps({ className: "dfConsoleItem__taskTitle dfWorkRow__title" }).find((node) => node.children.join("") === "Tighten the queue ordering");
-  await act(async () => { queuedTitle.props.onClick(); });
-  assert.deepEqual(queueSelections, [task.id, undefined, "32".repeat(16)]);
-  assert.equal(tree.root.findByProps({ "aria-label": "Task details" }).findByType("h3").children.join(""), fixtureState.tasks.get("32".repeat(16)).title);
-  await act(async () => { tree.root.findByProps({ "aria-label": "Project" }).props.onChange({ currentTarget: { value: "" } }); });
-  assert.equal(tree.root.findAllByProps({ "aria-label": "Work" }).length, 1, "queue remains one canonical panel");
-  assert.equal(tree.root.findAllByProps({ "data-floor-inbox": 1 }).length, 1, "the floor shows the pile; the panel is where it is read");
-  const queuedTask = fixtureState.tasks.get("32".repeat(16));
-  await act(async () => { tree.update(createElement(Harness, { editable: true })); });
-  await openRunning();
-  // The selected running task is retried: a queued, editable task has its inline editor, not a dialog.
-  const requeued = new Map(fixtureState.tasks).set(task.id, { ...task, status: "queued" });
-  await act(async () => { tree.update(createElement(Harness, { editable: true, state: { ...fixtureState, tasks: requeued } })); });
-  assert.equal(tree.root.findAllByProps({ "aria-label": "Task details" }).length, 0, "editable queued work stays in its inline editor");
-  await act(async () => { tree.update(createElement(Harness, { editable: true })); });
-  await act(async () => { tree.root.findByProps({ "aria-label": "Task details" }).props.onClose(); });
-  // Expanding a queued row selects nothing, so its start cannot open a dialog unasked.
-  const queuedRow = tree.root.findAllByProps({ className: "dfConsoleItem dfWorkRow" }).find((row) => rowTitle(row) === queuedTask.title);
-  await act(async () => { rowButton(queuedRow).props.onClick(); });
-  const started = new Map(fixtureState.tasks).set(queuedTask.id, { ...queuedTask, status: "running" });
-  await act(async () => { tree.update(createElement(Harness, { editable: true, state: { ...fixtureState, tasks: started } })); });
-  assert.equal(tree.root.findAllByProps({ "aria-label": "Task details" }).length, 0, "a queued task that starts running opens no dialog");
-  await act(async () => { tree.update(createElement(Harness, { editable: true })); });
-  await act(async () => { tree.root.findByProps({ "data-human-request-id": ids.request }).props.onClick(); });
-  assert.equal(questions[0], fixtureState.humanRequests.get(ids.request));
-  assert.equal(tree.root.findByProps({ "aria-label": "Selected question" }).findByProps({ className: "dfFactoryConsole__question" }).children.join(""), "Should the migration also cover the users table? The plan only names accounts.");
-  await openRunning();
-  assert.equal(tree.root.findAllByProps({ "aria-label": "Task details" }).length, 1);
-  const tasks = new Map(fixtureState.tasks);
-  tasks.delete(task.id);
-  await act(async () => { tree.update(createElement(Harness, { state: { ...fixtureState, tasks } })); });
-  assert.equal(tree.root.findAllByProps({ "aria-label": "Task details" }).length, 0, "removed work is not retained as invented history");
-  await act(async () => tree.unmount());
 });
 
 test("removed history controls leave inspected task detail intact", () => {
@@ -1732,29 +1358,19 @@ test("opening a question from the Library switches the header to its project so 
   await act(async () => tree.unmount());
 });
 
-test("a specialist is grouped, states what it is doing and owes, and Stop archives once idle", async () => {
+test("a specialist is grouped, states what it is doing and owes without browser pause controls", async () => {
   const worker = fixtureState.agents.get(ids.agent);
   const specialist = { ...worker, id: "5a".repeat(16), name: "Doc Watcher", archived: false, idle_policy: "standing_instruction", idle_after_seconds: 600, idle_instruction: "Keep the docs true to the code.\nSecond line stays out.", idle_run_budget: 4, idle_runs_used: 1, idle_wake_on: "failures",
     specialist: { next_review_at_ms: 1750000000000, next_reason: "events", waiting: "capacity", quiet_reviews: 0, open_proposals: 1, open_proposal_limit: 3, last_review_task_id: "" } };
   const state = baseState({ agents: new Map([...fixtureState.agents, [specialist.id, specialist]]), humanRequests: new Map() });
-  const markup = renderToStaticMarkup(createElement(FactoryConsole, { status: "ready", detail: "agent", state, selectedAgent: { id: specialist.id, name: specialist.name, revision: specialist.revision }, onSaveAgentConfig() {} }));
+  const markup = renderToStaticMarkup(createElement(FactoryConsole, { status: "ready", detail: "agent", state, selectedAgent: { id: specialist.id, name: specialist.name, revision: specialist.revision } }));
   assert.match(renderToStaticMarkup(createElement(FactoryConsole, { status: "ready", detail: "agent", state })), /<section aria-label="Specialist">/, "its own group");
   assert.match(markup, /waiting: waiting for a free background slot/);
   assert.match(markup, /aria-label="Remit">Keep the docs true to the code\.</);
   assert.match(markup, /Next review .*\(events\) or sooner on failures/);
-  assert.match(markup, /Stop specialist/);
-  assert.doesNotMatch(markup, /Archive worker/);
-  // Stop asks first, then archives; a running review is ended by the same archive.
-  const edits = [];
-  let renderer;
-  await act(async () => { renderer = create(createElement(FactoryConsole, { status: "ready", detail: "agent", state, selectedAgent: { id: specialist.id, name: specialist.name, revision: specialist.revision }, onSaveAgentConfig: (c) => edits.push(c) })); });
-  const button = (label) => renderer.root.findAllByType("button").find((b) => b.children.join("") === label);
-  await act(async () => { button("Stop specialist").props.onClick(); });
-  assert.deepEqual(edits, []);
-  await act(async () => { button("Confirm stop").props.onClick(); });
-  assert.deepEqual(edits, [{ archived: true }]);
+  assert.doesNotMatch(markup, />(?:Stop specialist|Pause|Resume|Archive worker)</);
   const running = baseState({ agents: state.agents, humanRequests: new Map(), tasks: new Map([...fixtureState.tasks, ["c1".repeat(16), { ...fixtureState.tasks.get(ids.task), id: "c1".repeat(16), title: "Standing instruction", status: "running", assigned_agent_id: specialist.id }]]) });
-  const live = renderToStaticMarkup(createElement(FactoryConsole, { status: "ready", detail: "agent", state: running, selectedAgent: { id: specialist.id, name: specialist.name, revision: specialist.revision }, onSaveAgentConfig() {} }));
+  const live = renderToStaticMarkup(createElement(FactoryConsole, { status: "ready", detail: "agent", state: running, selectedAgent: { id: specialist.id, name: specialist.name, revision: specialist.revision } }));
   assert.match(live, /reviewing: Keep the docs true to the code\./, "a running review is its remit at work");
-  assert.match(live, /Stop specialist/);
+  assert.doesNotMatch(live, />(?:Stop specialist|Pause|Resume)</);
 });

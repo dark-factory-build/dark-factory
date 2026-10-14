@@ -4,7 +4,7 @@ import { useEffect, useMemo, useRef, useState, type KeyboardEvent, type ReactNod
 import { IconButton } from "./icons.js";
 import { browserEndpoint, FactoryAppController, type FactoryAppSnapshot, type FactoryAppStatus, type FactoryTerminalView } from "./factory-app-controller.js";
 import { FactoryConsole, type ConsoleDetail } from "./factory-console.js";
-import { TaskConversation, type AgentPanelView } from "./console-sidebar.js";
+import { TaskConversation } from "./console-sidebar.js";
 import { primaryAgent } from "./console-view.js";
 import { XtermTerminal } from "./xterm-terminal.js";
 
@@ -21,7 +21,6 @@ export type FactoryAppProps = {
 export function FactoryApp({ onStatusChange, browserPort }: FactoryAppProps = {}) {
   const [snapshot, setSnapshot] = useState<FactoryAppSnapshot>(INITIAL_SNAPSHOT);
   const [detail, setDetail] = useState<ConsoleDetail>("work");
-  const [agentPanel, setAgentPanel] = useState<AgentPanelView>("terminal");
   const [selectedTaskId, setSelectedTaskId] = useState<string>();
   const [appearanceAgentId, setAppearanceAgentId] = useState<string>();
   const browser = useMemo(() => browserEndpoint(browserPort), [browserPort]);
@@ -93,12 +92,9 @@ export function FactoryApp({ onStatusChange, browserPort }: FactoryAppProps = {}
       {...snapshot}
       detail={detail}
       onDetail={setDetail}
-      agentPanel={agentPanel}
-      onAgentPanel={setAgentPanel}
-      onSelectAgent={(agent) => { setDetail("agent"); setAgentPanel("terminal"); owner.current?.selectAgent(agent); }}
+      onSelectAgent={(agent) => { setDetail("agent"); owner.current?.selectAgent(agent); }}
       onSetDispatch={snapshot.dispatchAllowed ? (revision, enabled) => owner.current?.setDispatch(revision, enabled) ?? Promise.reject(new Error("closed")) : undefined}
       onProjectContent={(operation, input) => owner.current?.projectContent(operation, input) ?? Promise.reject(new Error("closed"))}
-      onSaveAgentConfig={(config) => { void owner.current?.updateAgentConfig(config); }}
       onSaveProjectLimits={(project, limits) => { void owner.current?.updateProjectLimits(project, limits); }}
       onSaveAgentAppearance={(agentId, appearance) => owner.current?.updateAgentAppearance(agentId, appearance) ?? Promise.resolve(false)}
       appearanceAgentId={appearanceAgentId}
@@ -109,7 +105,7 @@ export function FactoryApp({ onStatusChange, browserPort }: FactoryAppProps = {}
       onLoadTaskDetail={(task, peerOffset, expectedHead) => owner.current?.taskDetail(task, peerOffset, expectedHead) ?? Promise.reject(new Error("closed"))}
       onLoadTaskHistory={(task) => owner.current?.taskHistory(task) ?? Promise.reject(new Error("closed"))}
       onLoadNode={(projectId, nodeId) => owner.current?.operationalNode(projectId, nodeId) ?? Promise.reject(new Error("closed"))}
-      onOpenTerminalForHumanRequest={(request) => { setDetail("agent"); setAgentPanel("terminal"); owner.current?.openTerminalForHumanRequest(request); }}
+      onOpenTerminalForHumanRequest={(request) => { setDetail("agent"); owner.current?.openTerminalForHumanRequest(request); }}
       onSelectHumanRequest={(request) => { setDetail("work"); void owner.current?.selectHumanRequest(request); }}
       onHumanReplyChange={(reply) => owner.current?.setHumanReply(reply)}
       onReplyHumanRequest={() => { void owner.current?.replyHumanRequest(); }}

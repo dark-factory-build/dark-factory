@@ -60,10 +60,7 @@ try {
   assert.ok(counters.terminals >= 1, "selected public terminal must construct xterm");
   assert.equal(counters.terminals - counters.disposes, 1, "one selected terminal must remain live before unmount");
 
-  const controls = renderer.root.findByProps({ "aria-label": "Agent controls" });
-  const terminalTab = controls.findAllByType("button").find((button) => button.props.children === "Terminal");
-  assert.ok(terminalTab);
-  await act(async () => { terminalTab.props.onClick(); });
+  assert.equal(renderer.root.findAllByProps({ "aria-label": "Agent controls" }).length, 0);
   assert.equal(counters.opens, 1, "surviving terminal navigation preserves the terminal session");
   assert.equal(counters.acquires, 1, "switching configuration preserves terminal input ownership");
   assert.equal(counters.detaches, 0);
