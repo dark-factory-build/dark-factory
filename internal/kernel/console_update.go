@@ -337,7 +337,7 @@ func (store *Store) updateTask(ctx context.Context, digest *AttemptDigest, id Ta
 	if task.Revision != expected || at.Int64() < task.UpdatedAt.Int64() {
 		return Task{}, tx.Rollback(ErrRevisionConflict)
 	}
-	if retire {
+	if retire && digest == nil {
 		if err := refuseAwaitedTask(ctx, tx.connection, task.ID); err != nil {
 			return Task{}, tx.Rollback(err)
 		}
@@ -414,7 +414,15 @@ func (store *Store) updateTask(ctx context.Context, digest *AttemptDigest, id Ta
 			return Task{}, tx.Rollback(err)
 		}
 	}
-	if err := appendInvalidations(ctx, tx.connection, at, []pendingInvalidation{{kind: EntityTask, id: id.Bytes(), revision: expected.Int64() + 1}}); err != nil {
+	pending := []pendingInvalidation{{kind: EntityTask, id: id.Bytes(), revision: expected.Int64() + 1}}
+	if retire && digest != nil {
+		requestInvalidations, err := transitionHumanRequestsForTask(ctx, tx.connection, task.ID, task.IncarnationID, at)
+		if err != nil {
+			return Task{}, tx.Rollback(err)
+		}
+		pending = append(pending, requestInvalidations...)
+	}
+	if err := appendInvalidations(ctx, tx.connection, at, pending); err != nil {
 		return Task{}, tx.Rollback(err)
 	}
 	updated, found, err := taskByID(ctx, tx.connection, id)

@@ -899,3 +899,42 @@ func transitionHumanRequestsForRun(ctx context.Context, connection *sql.Conn, ru
 	}
 	return pending, nil
 }
+
+// transitionHumanRequestsForTask closes requests whose terminal run is being
+// retired by the overseer. Run lifecycle transitions normally do this work;
+// retirement is the other terminal edge and must not strand its continuation.
+func transitionHumanRequestsForTask(ctx context.Context, connection *sql.Conn, taskID TaskID, incarnationID IncarnationID, at UnixMillis) ([]pendingInvalidation, error) {
+	rows, err := connection.QueryContext(ctx, `SELECT id FROM runs WHERE task_id = ? AND task_incarnation_id = ? AND phase = 'terminal'`, taskID.Bytes(), incarnationID.Bytes())
+	if err != nil {
+		return nil, err
+	}
+	var runIDs []RunID
+	for rows.Next() {
+		var raw []byte
+		if err := rows.Scan(&raw); err != nil {
+			rows.Close()
+			return nil, err
+		}
+		runID, err := RunIDFromBytes(raw)
+		if err != nil {
+			rows.Close()
+			return nil, err
+		}
+		runIDs = append(runIDs, runID)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	var pending []pendingInvalidation
+	for _, runID := range runIDs {
+		requestInvalidations, err := transitionHumanRequestsForRun(ctx, connection, runID, at, true, nil)
+		if err != nil {
+			return nil, err
+		}
+		pending = append(pending, requestInvalidations...)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return pending, nil
+}
