@@ -631,14 +631,18 @@ func TestCodexReviewerReadsOnlyItsCheckout(t *testing.T) {
 	joined := strings.Join(argv, "\n")
 	root := filepath.Dir(checkout)
 	profile := "\n" + `permissions.dark-factory-review={filesystem={":root"="deny",":minimal"="read","/private/tmp"="deny","/private/var/tmp"="deny",` + strconv.Quote(filepath.Join(root, ".review-home")) + `="write",`
+	reviewTempWrite := false
 	// Each path is granted under its resolved spelling as well (TMPDIR is
 	// a symlink on macOS), so writes are checked by name, not counted.
 	for _, write := range regexp.MustCompile(`"([^"]*)"="write"`).FindAllStringSubmatch(joined, -1) {
-		if name := filepath.Base(write[1]); name != ".review-home" && name != ".review-tmp" {
+		name := filepath.Base(write[1])
+		if strings.HasPrefix(name, "dfr-") {
+			reviewTempWrite = true
+		} else if name != ".review-home" && name != ".review-tmp" {
 			t.Fatalf("reviewer may write %q", write[1])
 		}
 	}
-	if strings.Contains(joined, "--sandbox") || strings.Contains(joined, "sandbox_mode") || !strings.Contains(joined, strconv.Quote(filepath.Join(root, ".review-tmp"))+`="write"`) || !strings.Contains(joined, strconv.Quote(checkout)+`="read"`) || !strings.Contains(joined, "\ndefault_permissions=\"dark-factory-review\"\n") || !strings.Contains(joined, profile) || !strings.Contains(joined, strconv.Quote(filepath.Join(registered, ".git", "objects"))+`="read"`) || !strings.Contains(joined, "},network={enabled=false}}\n") {
+	if strings.Contains(joined, "--sandbox") || strings.Contains(joined, "sandbox_mode") || !reviewTempWrite || !strings.Contains(joined, strconv.Quote(checkout)+`="read"`) || !strings.Contains(joined, "\ndefault_permissions=\"dark-factory-review\"\n") || !strings.Contains(joined, profile) || !strings.Contains(joined, strconv.Quote(filepath.Join(registered, ".git", "objects"))+`="read"`) || !strings.Contains(joined, "},network={enabled=false}}\n") {
 		t.Fatalf("reviewer argv = %q, want the deny-root read-only profile and no --sandbox", argv)
 	}
 }
