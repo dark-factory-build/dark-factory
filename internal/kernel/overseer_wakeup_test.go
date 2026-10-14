@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"context"
 	"encoding/hex"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"path/filepath"
@@ -282,13 +281,14 @@ func TestOverseerPublishFailureWake(t *testing.T) {
 	}
 }
 
-// #1949: a no-intake Change that re-settles after its task's pull request
-// merged, or whose factory/ branch alone carries a pull request (a pre-cutover
-// publication), is one the publisher skips without a refusal: the overseer's
-// wake names it exactly once, and it becomes one NEEDS YOU card.
+// #1949: a no-intake Change that settles after its task's pull request merged
+// (its run admitted before the merge) or closed is one PublishableChanges
+// skips without a refusal: the overseer's wake names it exactly once, and it
+// becomes one NEEDS YOU card. A correction it does publish is no item
+// (TestMergedIntakeSentBackPublishesItsCorrectionAnew).
 func TestOverseerUnpublishableSettledChangeWake(t *testing.T) {
 	t.Parallel()
-	for _, mode := range []string{"merged", "branch"} {
+	for _, mode := range []string{"merged", "closed"} {
 		ctx := context.Background()
 		succeeded, _ := NewSuccessProposal("done")
 		store, finalizing := finalizingReleasedRun(t, RoleWorker, succeeded)
@@ -299,21 +299,20 @@ func TestOverseerUnpublishableSettledChangeWake(t *testing.T) {
 		}
 		moved, _ := NewCommitID(change.Selection.format, bytes.Repeat([]byte{0xd2}, change.Selection.format.oidLength()))
 		head := hex.EncodeToString(moved.Bytes())
-		pr := ProductionPullRequest{Number: 7, Title: "Ship", URL: "https://github.com/example/factory/pull/7", Head: head, Branch: "factory/" + change.ID.String()[:12], Base: "main", State: "merged", Review: ProductionReview{Head: head, State: "unknown"}}
-		if mode == "merged" {
-			if err := store.RecordPublication(ctx, finalizing.ProjectID, finalizing.TaskID, "example/factory", pr, mustTime(t, 70)); err != nil {
-				t.Fatal(err)
-			}
-		} else {
-			pr.State = "open"
-			document, _ := json.Marshal(pr)
-			if _, err := store.writer.ExecContext(ctx, `INSERT INTO production_records (project_id, repository, kind, identity, visual_id, document, observed_at_ms) VALUES (?, 'example/factory', 'pull_request', '7', '', ?, 70)`, finalizing.ProjectID.Bytes(), string(document)); err != nil {
-				t.Fatal(err)
-			}
+		pr := ProductionPullRequest{Number: 7, Title: "Ship", URL: "https://github.com/example/factory/pull/7", Head: head, Branch: "factory/" + change.ID.String()[:12], Base: "main", State: "open", Review: ProductionReview{Head: head, State: "unknown"}}
+		if err := store.RecordPublication(ctx, finalizing.ProjectID, finalizing.TaskID, "example/factory", pr, mustTime(t, 70)); err != nil {
+			t.Fatal(err)
+		}
+		pr.State = mode
+		if err := store.RecordProductionObservation(ctx, finalizing.ProjectID, ProductionObservation{Repository: "example/factory", ObservedAt: 75, PullRequests: []ProductionPullRequest{pr}, Checks: []ProductionCheck{}}, mustTime(t, 75)); err != nil {
+			t.Fatal(err)
 		}
 		settlement, _ := NewRetainedChangeSettlement(change.Revision, &moved)
 		if _, err := store.FinalizeWorkerRun(ctx, finalizing.ID, finalizing.Revision, settlement, mustTime(t, 80)); err != nil {
 			t.Fatal(err)
+		}
+		if found, err := store.PublishableChanges(ctx, mustTime(t, 1<<40)); err != nil || len(found) != 0 {
+			t.Fatalf("%s publishable = %+v, %v", mode, found, err)
 		}
 		overseer, err := store.CreateAgent(ctx, NewAgent{ID: agentID(t, 3), ProjectID: finalizing.ProjectID, Name: "overseer", Role: RoleOrchestrator, Provider: ProviderCodex, ToolBudgetLimit: 2}, mustTime(t, 82))
 		if err != nil {

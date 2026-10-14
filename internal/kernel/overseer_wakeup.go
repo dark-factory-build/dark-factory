@@ -42,8 +42,9 @@ const (
 // that Change revision's publication refused, the item is that refusal, at the
 // Change's version however often the hourly retry repeats it. A Change that
 // re-settled with no publication since, no open pull request of its task and
-// no refusal, while its branch or task already has a pull request, is one
-// factoryd skips: the item names that pull request (#1949). A failed or
+// no refusal, while a pull request PublishableChanges still counts for it
+// keeps it unpublished, is one factoryd skips: the item names that pull
+// request (#1949). A failed or
 // cancelled intake task is an item too, re-woken while the overseer could
 // retry it (an automatic end) and otherwise one look, so a ready issue never
 // sits ownerless; a withdrawn issue's task is not. A succeeded intake task
@@ -100,10 +101,11 @@ item AS (
 	    ELSE printf('Escalated: factoryd cannot publish change %s for task %s: %s', change, task, failure) END,
 	  COALESCE('[reviewer:' || failed || ']', '[change:' || change || ']')
 	FROM (SELECT c.updated_at_ms AS version, lower(hex(c.id)) AS change, lower(hex(c.task_id)) AS task, f.identity AS failed, json_extract(f.document, '$.detail') AS failure,
-	    CASE WHEN f.identity IS NULL THEN (SELECT CAST(r.identity AS INTEGER) FROM production_records AS r WHERE r.project_id = c.project_id AND r.kind = 'pull_request'
-	        AND (json_extract(r.document, '$.branch') = 'factory/' || substr(lower(hex(c.id)), 1, 12) OR EXISTS (SELECT 1 FROM publication_tasks AS p
-	            WHERE p.task_id = c.task_id AND p.repository = r.repository AND CAST(p.pull_number AS TEXT) = r.identity))
-	      ORDER BY r.observed_at_ms DESC LIMIT 1) END AS pull
+	    CASE WHEN f.identity IS NULL THEN (SELECT q.pull_number FROM publication_tasks AS q WHERE (q.change_id = c.id OR q.task_id = c.task_id)
+	        AND NOT EXISTS (SELECT 1 FROM production_records AS r JOIN runs AS u ON u.id = c.settled_run_id
+	            WHERE r.project_id = q.project_id AND r.repository = q.repository AND r.kind = 'pull_request' AND r.identity = CAST(q.pull_number AS TEXT)
+	              AND json_extract(r.document, '$.state') = 'merged' AND u.admitted_at_ms > r.observed_at_ms)
+	      ORDER BY q.created_at_ms DESC LIMIT 1) END AS pull
 	  FROM changes AS c JOIN tasks AS t ON t.id = c.task_id
 	  LEFT JOIN production_records AS f ON f.project_id = c.project_id AND f.kind = 'reviewer' AND f.identity = 'publish-' || lower(hex(c.id)) || '-' || c.revision
 	  WHERE c.project_id = ?1 AND t.status = 'succeeded' AND c.head_commit IS NOT NULL AND c.base_commit IS NOT NULL
