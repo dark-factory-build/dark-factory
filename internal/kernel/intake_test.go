@@ -550,6 +550,16 @@ func TestTrustedIntakeSourcePersistsAndValidatesAuthorsAfterReopen(t *testing.T)
 	if len(source.TrustedGitHubLogins) != 1 || source.TrustedGitHubLogins[0] != "maintainer" {
 		t.Fatalf("trusted authors: %+v", source)
 	}
+	bot := intakeSnapshotForTest()
+	bot.IssueNumber, bot.NodeID, bot.AuthorLogin, bot.AuthorType = 8, "I_bot", strings.Repeat("b", maxGitHubLoginBytes)+"[bot]", GitHubAuthorBot
+	accepted, err := store.AcceptIntakeSnapshot(ctx, source.ID, bot, mustTime(t, 2), source.Revision)
+	if err != nil {
+		t.Fatalf("bot acceptance: %v", err)
+	}
+	stored, found, err := store.IntakeAcceptance(ctx, accepted.ID)
+	if err != nil || !found || stored.Snapshot.AuthorLogin != bot.AuthorLogin || stored.Snapshot.AuthorType != bot.AuthorType {
+		t.Fatalf("bot acceptance author: found=%v err=%v snapshot=%+v", found, err, stored.Snapshot)
+	}
 	if err := store.Close(); err != nil {
 		t.Fatal(err)
 	}

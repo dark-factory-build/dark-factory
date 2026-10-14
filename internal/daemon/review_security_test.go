@@ -60,7 +60,7 @@ func TestReviewContextUsesCurrentAcceptedIssue(t *testing.T) {
 	checkout, request := reviewCheckout(t)
 	request.PullNumber = 12
 	contextText := backend.reviewContext(ctx, checkout, request)
-	if !strings.Contains(contextText, "Current title") || strings.Contains(contextText, "Original scope") || strings.Contains(contextText, "Current scope") || strings.Contains(contextText, feedback) {
+	if !strings.Contains(contextText, "Original scope") || !strings.Contains(contextText, "Issue edited since acceptance: re-accept to apply") || strings.Contains(contextText, "Current title") || strings.Contains(contextText, "Current scope") || strings.Contains(contextText, feedback) {
 		t.Fatalf("review context = %q", contextText)
 	}
 	fixture.daemon.githubMCP = func(context.Context, json.RawMessage, map[string]uint64) (json.RawMessage, error) {

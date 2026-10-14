@@ -2707,7 +2707,7 @@ func TestSupervisorLaunchesImportedIssueEditThroughFD11(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(string(witness), "Edited scope") || strings.Contains(string(witness), "Original scope") {
+	if !strings.Contains(string(witness), "Original scope") || strings.Contains(string(witness), "Edited scope") {
 		t.Fatalf("provider FD11 task = %q", witness)
 	}
 }

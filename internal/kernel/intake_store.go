@@ -11,7 +11,7 @@ import (
 )
 
 const intakeSourceColumns = `id, github_repository_id, github_repository_name, project_id, target_repository_id, overseer_agent_id, label_filter, enabled, policy, poll_seconds, admission_limit, revision, created_at_ms, updated_at_ms, linear_team_id`
-const intakeAcceptanceColumns = `source_repository, id, github_repository_id, issue_number, issue_node_id, title, body, body_hash, project_id, repository_id, overseer_agent_id, task_id, incarnation_id, withdrawn_at_ms, created_at_ms, linear_team_id, source_url`
+const intakeAcceptanceColumns = `source_repository, id, github_repository_id, issue_number, issue_node_id, title, body, body_hash, project_id, repository_id, overseer_agent_id, task_id, incarnation_id, withdrawn_at_ms, created_at_ms, linear_team_id, source_url, author_login, author_type`
 
 func scanIntakeSource(scanner rowScanner) (IntakeSource, bool, error) {
 	var rawID, rawProject, rawRepository, rawAgent []byte
@@ -319,8 +319,8 @@ func scanIntakeAcceptance(scanner rowScanner) (IntakeAcceptance, bool, error) {
 	var rawID, rawProject, rawRepository, rawAgent, rawTask, rawIncarnation, hash []byte
 	var repositoryID, number, created int64
 	var withdrawn sql.NullInt64
-	var sourceRepository, node, title, body, linear, sourceURL string
-	if err := scanner.Scan(&sourceRepository, &rawID, &repositoryID, &number, &node, &title, &body, &hash, &rawProject, &rawRepository, &rawAgent, &rawTask, &rawIncarnation, &withdrawn, &created, &linear, &sourceURL); err != nil {
+	var sourceRepository, node, title, body, linear, sourceURL, authorLogin, authorType string
+	if err := scanner.Scan(&sourceRepository, &rawID, &repositoryID, &number, &node, &title, &body, &hash, &rawProject, &rawRepository, &rawAgent, &rawTask, &rawIncarnation, &withdrawn, &created, &linear, &sourceURL, &authorLogin, &authorType); err != nil {
 		if err == sql.ErrNoRows {
 			return IntakeAcceptance{}, false, nil
 		}
@@ -346,7 +346,7 @@ func scanIntakeAcceptance(scanner rowScanner) (IntakeAcceptance, bool, error) {
 			withdrawnAt = &value
 		}
 	}
-	snapshot := IntakeIssueSnapshot{LinearTeamID: linear, URL: sourceURL, GitHubRepositoryID: uint64(repositoryID), IssueNumber: uint64(number), NodeID: node, Title: title, Body: body}
+	snapshot := IntakeIssueSnapshot{LinearTeamID: linear, URL: sourceURL, GitHubRepositoryID: uint64(repositoryID), IssueNumber: uint64(number), NodeID: node, Title: title, Body: body, AuthorLogin: authorLogin, AuthorType: GitHubAuthorType(authorType)}
 	value := IntakeAcceptance{SourceRepository: sourceRepository, ID: id, Snapshot: snapshot, BodyHash: sha256.Sum256([]byte(body)), ProjectID: project, RepositoryID: repository, OverseerAgentID: agent, TaskID: task, IncarnationID: incarnation, WithdrawnAt: withdrawnAt, CreatedAt: at}
 	expectedID, expectedTask, expectedIncarnation, identityErr := intakeAcceptanceIDs(snapshot, project, repository)
 	if !validSourceName(sourceRepository, linear) || e1 != nil || e2 != nil || e3 != nil || e4 != nil || e5 != nil || e6 != nil || e7 != nil || identityErr != nil || !validIntakeOrigin(uint64(repositoryID), linear) || number < 1 || len(hash) != DigestBytes || value.BodyHash != [DigestBytes]byte(hash) || id != expectedID || task != expectedTask || incarnation != expectedIncarnation || withdrawn.Valid && (withdrawn.Int64 < 0 || withdrawn.Int64 < created) {
@@ -500,7 +500,7 @@ func (store *Store) AcceptIntakeSnapshot(ctx context.Context, sourceID IntakeSou
 		return IntakeAcceptance{}, tx.Rollback(ErrRevisionConflict)
 	}
 	bodyHash := snapshot.BodyHash()
-	if _, err := tx.connection.ExecContext(ctx, `INSERT INTO intake_acceptances(`+intakeAcceptanceColumns+`) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, ?, ?)`, source.GitHubRepositoryName, id.Bytes(), int64(snapshot.GitHubRepositoryID), int64(snapshot.IssueNumber), snapshot.NodeID, snapshot.Title, snapshot.Body, bodyHash[:], source.ProjectID.Bytes(), source.TargetRepositoryID.Bytes(), nullableAgentID(source.OverseerAgentID), task.Bytes(), incarnation.Bytes(), at.Int64(), snapshot.LinearTeamID, snapshot.URL); err != nil {
+	if _, err := tx.connection.ExecContext(ctx, `INSERT INTO intake_acceptances(`+intakeAcceptanceColumns+`) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, ?, ?, ?, ?)`, source.GitHubRepositoryName, id.Bytes(), int64(snapshot.GitHubRepositoryID), int64(snapshot.IssueNumber), snapshot.NodeID, snapshot.Title, snapshot.Body, bodyHash[:], source.ProjectID.Bytes(), source.TargetRepositoryID.Bytes(), nullableAgentID(source.OverseerAgentID), task.Bytes(), incarnation.Bytes(), at.Int64(), snapshot.LinearTeamID, snapshot.URL, snapshot.AuthorLogin, snapshot.AuthorType); err != nil {
 		return IntakeAcceptance{}, tx.Rollback(err)
 	}
 	value, found, err := intakeAcceptanceByID(ctx, tx.connection, id)

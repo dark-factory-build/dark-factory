@@ -14,6 +14,7 @@ const (
 	maxGitHubRepositoryNameBytes = 140
 	maxGitHubNodeIDBytes         = 256
 	maxGitHubLoginBytes          = 39
+	maxGitHubAuthorBytes         = maxGitHubLoginBytes + len("[bot]")
 	maxIntakeLabelBytes          = 100
 	maxIntakeTitleBytes          = 900
 	maxIntakeBodyBytes           = 5000
@@ -155,13 +156,17 @@ func PreviewIntake(source IntakeSource, snapshot IntakeIssueSnapshot, accepted *
 		}
 		return IntakeAlreadyAccepted
 	}
-	if source.Policy == IntakePolicyTrustedAuthors && snapshot.AuthorType == GitHubAuthorUser && trustedGitHubLogin(source.TrustedGitHubLogins, snapshot.AuthorLogin) {
+	if TrustedIntakeAuthor(source, snapshot) {
 		return IntakeEligibleTrusted
 	}
 	if source.Policy == IntakePolicyTrustedAuthors {
 		return IntakeUntrustedAuthor
 	}
 	return IntakeNeedsManualAcceptance
+}
+
+func TrustedIntakeAuthor(source IntakeSource, snapshot IntakeIssueSnapshot) bool {
+	return source.Policy == IntakePolicyTrustedAuthors && snapshot.AuthorType == GitHubAuthorUser && trustedGitHubLogin(source.TrustedGitHubLogins, snapshot.AuthorLogin)
 }
 
 // ValidIntakeSource checks the complete configuration before preview or mutation.

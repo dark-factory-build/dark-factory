@@ -3,6 +3,7 @@ package daemon
 import (
 	"context"
 	"encoding/hex"
+	"encoding/json"
 	"strings"
 	"testing"
 	"time"
@@ -85,6 +86,38 @@ func TestIntakeTickMaterializesOnlyExactAcceptedRevision(t *testing.T) {
 	}
 	if got := fixture.daemon.Intake(ctx, tick); got.State != "ok" || len(got.ImportedTasks) != 1 || got.ImportedTasks[0] != second.TaskID {
 		t.Fatalf("accepted edit import: %+v", got)
+	}
+	secondID, err := decodeID(second.TaskID, kernel.TaskIDFromBytes)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, found, err := fixture.store.IntakeAcceptanceForTask(ctx, secondID)
+	if err != nil || !found {
+		t.Fatalf("accepted task binding: found=%v err=%v", found, err)
+	}
+	customerMode(t, fixture)
+	fixture.daemon.githubMCP = func(_ context.Context, _ json.RawMessage, _ map[string]uint64) (json.RawMessage, error) {
+		return json.RawMessage(`{"jsonrpc":"2.0","id":1,"result":{"structuredContent":{"number":3,"url":"https://github.com/team/issues/issues/3","title":"Reviewed","body":"operator live edit","labels":[],"updated_at":"2026-10-13T00:00:00Z","state":"open","state_reason":null},"content":[{"type":"text","text":"operator live edit"}],"isError":false}}`), nil
+	}
+	queued, found, err := fixture.store.Task(ctx, secondID)
+	if err != nil || !found {
+		t.Fatalf("trusted task: found=%v err=%v", found, err)
+	}
+	liveText, err := fixture.daemon.currentTaskText(ctx, kernel.ProviderShell, queued)
+	if err != nil || !strings.Contains(liveText, "operator live edit") || strings.Contains(liveText, "edited since acceptance") {
+		t.Fatalf("trusted live task text = %q, %v", liveText, err)
+	}
+	source, err = fixture.store.UpdateIntakeSource(ctx, source.ID, source.Revision, kernel.NewIntakeSource{ID: source.ID, ProjectID: project, TargetRepositoryID: source.TargetRepositoryID, GitHubRepositoryID: source.GitHubRepositoryID, GitHubRepositoryName: source.GitHubRepositoryName, Policy: kernel.IntakePolicyTrustedAuthors, TrustedGitHubLogins: []string{"other-maintainer"}, PollSeconds: source.PollSeconds, AdmissionLimit: source.AdmissionLimit}, true, mustKernelTime(t, 104))
+	if err != nil {
+		t.Fatal(err)
+	}
+	queued, _, err = fixture.store.Task(ctx, secondID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	frozenText, err := fixture.daemon.currentTaskText(ctx, kernel.ProviderShell, queued)
+	if err != nil || !strings.Contains(frozenText, "edited after acceptance") || !strings.Contains(frozenText, "Issue edited since acceptance: re-accept to apply") || strings.Contains(frozenText, "operator live edit") {
+		t.Fatalf("removed trusted login task text = %q, %v", frozenText, err)
 	}
 
 	// Reverting the issue to the older accepted hash is a stale replay.
