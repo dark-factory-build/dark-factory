@@ -127,7 +127,10 @@ func TestOverseerEnqueuePinsContentAtInitialWorkRevision(t *testing.T) {
 	store, overseer, _ := runningOrchestratorRun(t)
 	defer store.Close()
 	ctx := context.Background()
-	content, err := store.CreateContent(ctx, contentSpec(t, overseer.ProjectID, 125, "accepted proposal"), mustTime(t, 40))
+	proposalSpec := contentSpec(t, overseer.ProjectID, 125, "accepted proposal")
+	proposalSpec.Kind = ContentObservation
+	proposalSpec.SourceReferences = `{"status":"tentative","record_type":"proposal"}`
+	content, err := store.CreateContent(ctx, proposalSpec, mustTime(t, 40))
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -323,6 +323,38 @@ func TestOverseerTaskRetryCLIUsesAtomicAPIRequest(t *testing.T) {
 	}
 }
 
+func TestOverseerTaskAddCLIForwardsContentPins(t *testing.T) {
+	fixture := newAPIFixture(t)
+	defer fixture.close(t)
+	t.Setenv("DARK_FACTORY_ATTEMPT_TOKEN_FILE", fixture.attemptPath)
+	taskID, incarnationID, contentID := strings.Repeat("5", 32), strings.Repeat("6", 32), strings.Repeat("7", 32)
+	done := serveOne(fixture.listener, func(call api.Call) api.Reply {
+		if call.Kind() != api.CallOverseerEnqueueTask {
+			t.Errorf("call kind = %v", call.Kind())
+		}
+		input, ok := call.OverseerTaskCreateInput()
+		if !ok || input.ID != taskID || input.IncarnationID != incarnationID || len(input.Content) != 1 || input.Content[0].ContentID != contentID || input.Content[0].ContentRevision != 1 {
+			t.Errorf("enqueue input = %+v, ok=%v", input, ok)
+		}
+		reply, err := api.NewMutationReply(api.MutationResult{Head: 18, Revision: 8})
+		if err != nil {
+			t.Errorf("new reply: %v", err)
+		}
+		return reply
+	})
+	var stdout, stderr bytes.Buffer
+	exit := run(context.Background(), []string{"overseer", "task", "add", "--agent", "any", "--title", "proposal", "--content", contentID + ":1", "--task-id", taskID, "--incarnation-id", incarnationID}, func(name string) string {
+		if name == "DARK_FACTORY_SOCKET" {
+			return fixture.socket
+		}
+		return ""
+	}, &stdout, &stderr)
+	result := awaitServer(t, done)
+	if exit != 0 || result.err != nil || stderr.Len() != 0 {
+		t.Fatalf("content CLI = exit %d, server %v, stderr %q", exit, result.err, stderr.String())
+	}
+}
+
 func TestParseOverseerStatusPaging(t *testing.T) {
 	id := "0123456789abcdef0123456789abcdef"
 	command, help, ok := parse([]string{"overseer", "status", "--task", id, "--offset", "4", "--text-offset", "4096", "--head", "7"})

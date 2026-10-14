@@ -1956,19 +1956,37 @@ func TestOverseerEnqueuePinsContentWhileSchedulerRunsAndRejectsPostHocAttach(t *
 drained:
 	started := make(chan struct{})
 	var startedOnce sync.Once
-	secondStarted := make(chan struct{})
-	var secondOnce sync.Once
 	var probes atomic.Int64
+	admitted := make(chan struct{})
+	var admittedOnce sync.Once
+	var admissionErr atomic.Value
+	keysReady := make(chan struct{})
+	var admissionKeys kernel.AdmissionKeys
+	at, err := kernel.NewUnixMillis(2000)
+	if err != nil {
+		t.Fatal(err)
+	}
 	schedulerDone := make(chan error, 1)
 	schedulerSpec := SupervisorSpec{scheduledAttempt: func(ctx context.Context, spec SupervisorSpec) (kernel.Run, error) {
-		if probes.Add(1) == 1 {
+		probe := probes.Add(1)
+		if probe == 1 {
 			startedOnce.Do(func() { close(started) })
-		} else {
-			secondOnce.Do(func() { close(secondStarted) })
 		}
-		spec.admissionObserved(false)
-		<-ctx.Done()
-		return kernel.Run{}, ctx.Err()
+		<-keysReady
+		admission, err := fixture.store.AdmitNext(context.Background(), admissionKeys, at)
+		if err != nil {
+			admissionErr.Store(err)
+			spec.admissionObserved(false)
+			return kernel.Run{}, err
+		}
+		spec.admissionObserved(admission.Admitted())
+		if admission.Admitted() {
+			admittedOnce.Do(func() { close(admitted) })
+		}
+		if admission.Run == nil {
+			return kernel.Run{}, nil
+		}
+		return *admission.Run, nil
 	}}
 	go func() { schedulerDone <- fixture.daemon.RunScheduler(ctx, schedulerSpec) }()
 	select {
@@ -1982,22 +2000,46 @@ drained:
 		t.Fatal(err)
 	}
 	done := fixture.serve(t)
-	content, err := operator.ContentCreate(context.Background(), api.ContentInput{ID: testID(234), ProjectID: active.run.ProjectID.String(), Kind: "proposal", Title: "accepted proposal", Body: "body"})
+	if _, err := operator.CreateAgent(context.Background(), api.CreateAgentInput{ID: testID(237), ProjectID: active.run.ProjectID.String(), Name: "worker", Role: "worker", Provider: "codex"}); err != nil {
+		t.Fatal(err)
+	}
+	waitDispatch(t, done)
+	bearer := bytes.Repeat([]byte{240}, 32)
+	digestBytes := sha256.Sum256(bearer)
+	digest, err := kernel.AttemptDigestFromBytes(digestBytes[:])
+	if err != nil {
+		t.Fatal(err)
+	}
+	candidate, err := kernel.ChangeIDFromBytes(mustIDBytes(t, testID(249)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	proof, err := kernel.ResultProofDigestFromBytes(bytes.Repeat([]byte{250}, 32))
+	if err != nil {
+		t.Fatal(err)
+	}
+	admissionKeys = kernel.AdmissionKeys{ResultProofDigest: proof, RunID: mustRunID(t, testID(244)), TerminalSessionID: mustTerminalSessionID(t, testID(254)), AttemptDigest: digest, CandidateChangeID: candidate, RuntimeRoot: filepath.Join(filepath.Dir(fixture.socket), "runtime-240"), Resources: kernel.AdmissionResourceIDs{RuntimeRoot: mustResourceID(t, testID(245)), RunnerProcess: mustResourceID(t, testID(246)), ProviderProcess: mustResourceID(t, testID(247)), ProviderGroup: mustResourceID(t, testID(248))}}
+	close(keysReady)
+	done = fixture.serve(t)
+	content, err := operator.ContentCreate(context.Background(), api.ContentInput{ID: testID(234), ProjectID: active.run.ProjectID.String(), Kind: "observation", Title: "accepted proposal", Body: "body", SourceReferences: `{"status":"tentative","record_type":"proposal"}`})
 	waitDispatch(t, done)
 	if err != nil || content.Revision != 1 {
 		t.Fatalf("proposal content = %+v, %v", content, err)
 	}
 	taskID := testID(235)
 	done = fixture.serve(t)
-	_, err = active.client.OverseerEnqueueTask(context.Background(), api.OverseerTaskCreateInput{ID: taskID, IncarnationID: testID(236), Title: "accepted proposal", Content: []api.ContentPinInput{{ContentID: content.ID, ContentRevision: content.Revision}}})
+	_, err = active.client.OverseerEnqueueTask(context.Background(), api.OverseerTaskCreateInput{ID: taskID, AssignedAgentID: testID(237), IncarnationID: testID(236), Title: "accepted proposal", Content: []api.ContentPinInput{{ContentID: content.ID, ContentRevision: content.Revision}}})
 	waitDispatch(t, done)
 	if err != nil {
 		t.Fatal(err)
 	}
 	select {
-	case <-secondStarted:
+	case <-admitted:
 	case <-time.After(2 * time.Second):
-		t.Fatal("scheduler did not observe enqueue wake")
+		if err, ok := admissionErr.Load().(error); ok {
+			t.Fatalf("admission = %v", err)
+		}
+		t.Fatal("scheduler did not admit enqueued task")
 	}
 	task, found, err := fixture.store.Task(context.Background(), mustTaskID(t, taskID))
 	if err != nil || !found {
