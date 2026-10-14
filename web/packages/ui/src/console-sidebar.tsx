@@ -8,7 +8,7 @@ import { telemetryLine } from "./factory-scene/scene.js";
 import { agentStatus, agentCurrentTask, agentActivity, isSpecialist, needsYou, specialistStatus, type WorkRow, type WorkState } from "./console-view.js";
 import { productionKey, productionStages } from "./production-view.js";
 import { AnswerControls } from "./console-interactions.js";
-import { Icon, IconButton } from "./icons.js";
+import { IconButton } from "./icons.js";
 import { Badge, SectionHeader, Status, formatTime } from "./console-kit.js";
 import type { PublishedRelease, RuntimeBuild } from "./production-data.js";
 
