@@ -193,7 +193,7 @@ func TestWebListAndRevokeUseTypedOperatorCalls(t *testing.T) {
 // The pairing link is a credential: web pair hands it to the browser opener
 // and nowhere else, including when the opener fails.
 func TestWebPairHandsTheLinkOnlyToTheBrowser(t *testing.T) {
-	const link = "https://app.darkfactory.build/#df_pair=00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff"
+	const link = "http://127.0.0.1:43123/#df_pair=00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff"
 	fixture := newAPIFixture(t)
 	defer fixture.close(t)
 	pair := func(call api.Call) api.Reply {

@@ -322,7 +322,7 @@ func (fixture *fixture) runNode(node, script string, test scenario) nodeResult {
 	if err != nil {
 		fixture.t.Fatalf("OpenBrowser: %v", err)
 	}
-	const fragmentPrefix = e2eOrigin + "/#df_pair="
+	fragmentPrefix := "http://" + fixture.browserAddress + "/#df_pair="
 	if !strings.HasPrefix(link, fragmentPrefix) {
 		fixture.t.Fatalf("unexpected pairing launch shape")
 	}
@@ -337,7 +337,7 @@ func (fixture *fixture) runNode(node, script string, test scenario) nodeResult {
 	configuration := map[string]string{
 		"url":       "ws://" + fixture.browserAddress + browser.Path,
 		"host":      fixture.browserAddress,
-		"origin":    e2eOrigin,
+		"origin":    "http://" + fixture.browserAddress,
 		"challenge": challenge,
 		"agentId":   fixture.agentID.String(),
 		"question":  test.question,

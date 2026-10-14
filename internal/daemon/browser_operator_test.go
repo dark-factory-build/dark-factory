@@ -34,7 +34,7 @@ func TestWebOperatorOpenStatusListAndRevoke(t *testing.T) {
 		t.Fatal(err)
 	}
 	parsed, err := url.Parse(link)
-	if err != nil || parsed.Scheme != "https" || parsed.Host != "app.darkfactory.build" || parsed.Path != "/" || parsed.RawQuery != "" || !strings.HasPrefix(parsed.Fragment, "df_pair=") {
+	if err != nil || parsed.Scheme != "http" || parsed.Host != fixture.runtime.Addr() || parsed.Path != "/" || parsed.RawQuery != "" || !strings.HasPrefix(parsed.Fragment, "df_pair=") {
 		t.Fatalf("launch URL = %q, err=%v", link, err)
 	}
 	rawChallenge, err := hex.DecodeString(strings.TrimPrefix(parsed.Fragment, "df_pair="))
