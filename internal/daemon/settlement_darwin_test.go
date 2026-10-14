@@ -866,9 +866,14 @@ func TestTickChangeReclaimRechecksAtTheDeadlineWithoutAStoreWrite(t *testing.T) 
 		t.Fatalf("settled = %+v, %v", settled, err)
 	}
 	changeID := *fixture.run.ChangeID
-	fixture.daemon.now = func() time.Time { return time.UnixMilli(400) }
+	task, found, err := fixture.store.Task(ctx, fixture.run.TaskID)
+	if err != nil || !found || task.CompletedAt == nil {
+		t.Fatalf("terminal task = %+v, found=%v, err=%v", task, found, err)
+	}
+	completedAt := task.CompletedAt.Int64()
+	fixture.daemon.now = func() time.Time { return time.UnixMilli(completedAt) }
 	fixture.daemon.tickChangeReclaim(ctx)
-	deadline := int64(400) + (14 * 24 * time.Hour).Milliseconds()
+	deadline := completedAt + (14 * 24 * time.Hour).Milliseconds()
 	for range 1000 {
 		if fixture.daemon.reclaimNext.Load() != 0 {
 			break
