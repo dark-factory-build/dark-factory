@@ -139,6 +139,7 @@ item AS (
 	  FROM tasks AS t JOIN publication_tasks AS p ON p.task_id = t.id
 	  JOIN production_records AS r ON r.project_id = p.project_id AND r.repository = p.repository AND r.kind = 'pull_request' AND r.identity = CAST(p.pull_number AS TEXT)
 	  WHERE t.project_id = ?1 AND t.status = 'succeeded' AND json_extract(r.document, '$.state') = 'merged'
+	    AND COALESCE(unixepoch(json_extract(r.document, '$.merged_at')) * 1000, r.observed_at_ms) >= 1792005293000
 	    AND EXISTS (SELECT 1 FROM intake_task_bindings AS b WHERE b.task_id = t.id) AND NOT ` + taskIssueWithdrawn + `) WHERE live IS NOT NULL
 	-- Only the newest of identical escalations (same pull, head and reason)
 	-- names a reviewer item. The cheap open-PR and head filters run first; a

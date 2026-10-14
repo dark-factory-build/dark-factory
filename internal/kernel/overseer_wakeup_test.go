@@ -578,7 +578,7 @@ func TestOverseerWakeSkipsPublishedIntakeSuccess(t *testing.T) {
 			t.Fatal(err)
 		}
 		head := hex.EncodeToString(moved.Bytes())
-		pr := ProductionPullRequest{Number: 7, Title: "Ship", URL: "https://github.com/example/factory/pull/7", Head: head, Branch: "factory/" + change.ID.String()[:12], Base: "main", State: map[bool]string{false: "open", true: "merged"}[mode == "reclaimed"], Review: ProductionReview{Head: head, State: "unknown"}}
+		pr := ProductionPullRequest{Number: 7, Title: "Ship", URL: "https://github.com/example/factory/pull/7", Head: head, Branch: "factory/" + change.ID.String()[:12], Base: "main", State: map[bool]string{false: "open", true: "merged"}[mode == "reclaimed"], MergedAt: "2026-10-14T19:14:54Z", Review: ProductionReview{Head: head, State: "unknown"}}
 		if mode != "empty" {
 			if err := store.RecordPublication(ctx, finalizing.ProjectID, finalizing.TaskID, "example/factory", pr, mustTime(t, 84)); err != nil {
 				t.Fatal(err)
@@ -608,7 +608,7 @@ func TestOverseerWakeSkipsPublishedIntakeSuccess(t *testing.T) {
 // nothing stalls into a card.
 func TestOverseerVerifiesMergedIntakeOnceLive(t *testing.T) {
 	t.Parallel()
-	for _, order := range []string{"release first", "merge first", "unshipped"} {
+	for _, order := range []string{"release first", "merge first", "unshipped", "before receipt cutover"} {
 		ctx := context.Background()
 		succeeded, _ := NewSuccessProposal("done")
 		store, finalizing := finalizingReleasedRun(t, RoleWorker, succeeded)
@@ -652,7 +652,11 @@ func TestOverseerVerifiesMergedIntakeOnceLive(t *testing.T) {
 			settleCarrier(t, store, at+1, seed, "ran")
 		}
 		head := hex.EncodeToString(moved.Bytes())
-		pr := ProductionPullRequest{Number: 7, Title: "Ship", URL: "https://github.com/dark-factory-build/dark-factory/pull/7", Head: head, Branch: "factory/" + change.ID.String()[:12], Base: "main", State: "open", Review: ProductionReview{Head: head, State: "allow"}}
+		mergedAt := "2026-10-14T19:14:54Z"
+		if order == "before receipt cutover" {
+			mergedAt = "2026-10-14T19:14:52Z"
+		}
+		pr := ProductionPullRequest{Number: 7, Title: "Ship", URL: "https://github.com/dark-factory-build/dark-factory/pull/7", Head: head, Branch: "factory/" + change.ID.String()[:12], Base: "main", State: "open", MergedAt: mergedAt, Review: ProductionReview{Head: head, State: "allow"}}
 		if err := store.RecordPublication(ctx, finalizing.ProjectID, finalizing.TaskID, "dark-factory-build/dark-factory", pr, mustTime(t, 90)); err != nil {
 			t.Fatal(err)
 		}
@@ -697,6 +701,13 @@ func TestOverseerVerifiesMergedIntakeOnceLive(t *testing.T) {
 				t.Fatalf("a merge after the listing release woke before one shipped it = %q", bodies)
 			}
 			release('d', live, outstanding()...)
+		case "before receipt cutover":
+			merge(3000)
+			release('b', live, outstanding()...)
+			if bodies := wakeBodies(t, store, live+settle); len(bodies) != 0 {
+				t.Fatalf("pre-cutover merge woke = %q", bodies)
+			}
+			continue
 		}
 		bodies := wakeBodies(t, store, live+settle)
 		if len(bodies) != 1 || !strings.Contains(bodies[0], finalizing.TaskID.String()+` "verify" succeeded`) || !strings.Contains(bodies[0], "PR #7 merged/allow") {
