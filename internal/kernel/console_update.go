@@ -404,11 +404,6 @@ func (store *Store) updateTask(ctx context.Context, digest *AttemptDigest, id Ta
 	if err := requireOneRow(result, err); err != nil {
 		return Task{}, tx.Rollback(err)
 	}
-	if retire {
-		if err := carryPrerequisites(ctx, tx.connection, task, task.WorkRevision.Int64()+1); err != nil {
-			return Task{}, tx.Rollback(err)
-		}
-	}
 	if patch.expired {
 		if _, err := tx.connection.ExecContext(ctx, `INSERT INTO task_automatic_events(task_id, task_revision, kind, at_ms) VALUES (?, ?, 'blocked_expired', ?)`, id.Bytes(), expected.Int64()+1, at.Int64()); err != nil {
 			return Task{}, tx.Rollback(err)
@@ -446,10 +441,10 @@ func (store *Store) ExpireBlockedTasks(ctx context.Context, at UnixMillis) ([]Ta
 }
 
 // taskPrerequisiteCancelled holds while queued task t waits on a producer
-// cancelled at the pinned work revision by a cancel that was not automatic:
-// only the operator revives it, and a retry carries the pin forward
-// (carryPrerequisites). A failure or an automatic end may still be retried.
-const taskPrerequisiteCancelled = `EXISTS (SELECT 1 FROM task_prerequisites AS p JOIN tasks AS u ON u.id = p.upstream_task_id AND u.work_revision = p.upstream_work_revision
+// cancelled at or after the pinned work revision by a cancel that was not
+// automatic: only the operator revives it. A failure or an automatic end may
+// still be retried.
+const taskPrerequisiteCancelled = `EXISTS (SELECT 1 FROM task_prerequisites AS p JOIN tasks AS u ON u.id = p.upstream_task_id AND u.work_revision >= p.upstream_work_revision
 	WHERE p.task_id = t.id AND p.consumed_run_id IS NULL AND u.status = 'cancelled' AND NOT EXISTS (SELECT 1 FROM tasks AS t WHERE t.id = u.id AND ` + taskEndedAutomatically + `))`
 
 // CancelOrphanedTasks cancels, through the operator cancel path, every queued
