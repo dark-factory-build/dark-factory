@@ -106,7 +106,8 @@ func TestTerminateDischargesEPERMOnlyAfterExactNaturalExit(t *testing.T) {
 	if setupErr != nil {
 		t.Fatalf("race setup: %v", setupErr)
 	}
-	if err != nil || exit.Code != 23 || exit.Signal != 0 {
+	// It exited on its own after Terminate saw it alive: not runner-caused.
+	if err != nil || exit.Code != 23 || exit.Signal != 0 || exit.Aborted {
 		t.Fatalf("exact exit did not discharge EPERM: exit=%+v err=%v", exit, err)
 	}
 	if got := calls.Load(); got != 1 {
