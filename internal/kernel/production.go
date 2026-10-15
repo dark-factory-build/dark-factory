@@ -239,7 +239,18 @@ func (store *Store) RecordProductionObservation(ctx context.Context, project Pro
 	if err := store.recordProductionObservation(ctx, tx.connection, project, observation, at); err != nil {
 		return tx.Rollback(err)
 	}
-	return tx.Commit(ctx)
+	if err := tx.Commit(ctx); err != nil {
+		return err
+	}
+	store.productionRevision.Add(1)
+	return nil
+}
+
+// ProductionRevision changes after every accepted production observation.
+// It is an in-process invalidation token for consumers that cache work derived
+// from live production state; unlike observation timestamps it cannot rewind.
+func (store *Store) ProductionRevision() uint64 {
+	return store.productionRevision.Load()
 }
 
 func (store *Store) recordProductionObservation(ctx context.Context, c *sql.Conn, project ProjectID, observation ProductionObservation, at UnixMillis) error {

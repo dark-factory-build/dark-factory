@@ -320,6 +320,32 @@ func (store *Store) ReclaimableChanges(ctx context.Context, at UnixMillis) ([]Re
 	return changes, errors.Join(rows.Err(), rows.Close())
 }
 
+// NextChangeReclaimAt returns the earliest future time at which a retained
+// terminal Change can become time-eligible. It lets the daemon preserve the
+// deadline rule without rescanning all retained Changes on every tick.
+func (store *Store) NextChangeReclaimAt(ctx context.Context, at UnixMillis) (UnixMillis, bool, error) {
+	tx, err := store.beginRead(ctx)
+	if err != nil {
+		return UnixMillis{}, false, err
+	}
+	defer tx.Close()
+	var next sql.NullInt64
+	if err := tx.connection.QueryRowContext(ctx, `SELECT MIN(CASE WHEN t.status IN ('failed', 'cancelled') THEN t.completed_at_ms + ?1 ELSE t.completed_at_ms + ?2 END)
+		FROM changes AS c JOIN tasks AS t ON t.id = c.task_id
+		WHERE c.phase = 'retained' AND t.status IN ('succeeded', 'failed', 'cancelled') AND t.completed_at_ms IS NOT NULL
+		AND CASE WHEN t.status IN ('failed', 'cancelled') THEN t.completed_at_ms + ?1 ELSE t.completed_at_ms + ?2 END > ?3`, changeReclaimAfterEnd.Milliseconds(), changeReclaimAfterSuccess.Milliseconds(), at.Int64()).Scan(&next); err != nil {
+		return UnixMillis{}, false, err
+	}
+	if !next.Valid {
+		return UnixMillis{}, false, nil
+	}
+	deadline, err := NewUnixMillis(next.Int64)
+	if err != nil {
+		return UnixMillis{}, false, fmt.Errorf("invalid Change reclaim deadline: %w", err)
+	}
+	return deadline, true, nil
+}
+
 // scanWith scans one more column after the ones its caller asks for.
 type scanWith struct {
 	rows  *sql.Rows

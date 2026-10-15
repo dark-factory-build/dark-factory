@@ -99,11 +99,13 @@ type Daemon struct {
 	// The scheduler's Change reclaim pass (tickChangeReclaim), alike, and the
 	// Changes it kept, each logged once with its project and reason; healthMu
 	// guards it for the operator's health read.
-	reclaimAt   atomic.Int64
-	reclaimBusy atomic.Bool
-	keptChanges map[kernel.ChangeID][2]string
-	store       *kernel.Store
-	now         func() time.Time
+	reclaimHead               atomic.Int64
+	reclaimProductionRevision atomic.Uint64
+	reclaimNext               atomic.Int64
+	reclaimBusy               atomic.Bool
+	keptChanges               map[kernel.ChangeID][2]string
+	store                     *kernel.Store
+	now                       func() time.Time
 	// livenessClock is deliberately separate from now. The latter is also
 	// used by supervisor ordering tests and may be an injected, blocking
 	// clock; liveness telemetry must never enter that ordering boundary.

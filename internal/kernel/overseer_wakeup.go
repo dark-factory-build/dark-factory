@@ -73,6 +73,17 @@ ORDER BY version LIMIT 33`
 const overseerStalledItems = overseerItems + `SELECT last, CASE WHEN id IS NULL THEN detail || CASE WHEN instr(detail, ' [reviewer:') > 0 THEN '' ELSE ' ' || item_key END ELSE (` + overseerWakeLine + `) END,
 	named_at + ?6 <= ?3, named_at + ?6 FROM counted AS due WHERE wakes > rewakes AND ?7 + ?8 >= 0 ORDER BY last, version`
 
+// overseerPassItems computes the shared item set once for a wake pass. The
+// two branches retain the shapes of overseerWakeItems and
+// overseerStalledItems, but SQLite materializes counted for both consumers.
+const overseerPassItems = overseerItems + `SELECT 1 AS due, id IS NULL, CASE WHEN id IS NULL THEN detail ELSE (` + overseerWakeLine + `) END, item_key, (` + overseerWakeCounts + `), NULL, NULL, NULL, version
+FROM (SELECT *, MIN(version) OVER () AS oldest, MAX(version) OVER () AS newest FROM counted
+	WHERE named = 0 OR named_at + ?6 <= ?3 AND (wakes = 0 OR wakes <= rewakes)) AS due
+WHERE ?3 - newest >= ?7 OR ?3 - oldest >= ?8
+UNION ALL SELECT 0, NULL, CASE WHEN id IS NULL THEN detail || CASE WHEN instr(detail, ' [reviewer:') > 0 THEN '' ELSE ' ' || item_key END ELSE (` + overseerWakeLine + `) END, NULL, NULL, last, named_at + ?6 <= ?3, named_at + ?6, version
+FROM counted AS due WHERE wakes > rewakes AND ?7 + ?8 >= 0
+ORDER BY 1 DESC, 9`
+
 const overseerItems = `WITH reviewer AS MATERIALIZED (SELECT e.repository, e.identity, e.observed_at_ms AS at,
 	json_extract(e.document, '$.escalation') AS escalation,
 	json_extract(e.document, '$.request.PullNumber') AS pull_number,
@@ -193,6 +204,43 @@ type overseerStalledState struct {
 // writer for tens of seconds.
 const overseerWakeNames = `at > version AND instr(names, item_key)`
 
+type overseerPassItem struct {
+	due               bool
+	escalation, ripe  bool
+	line, key, counts string
+	carrier           []byte
+	readyAt           int64
+}
+
+func readOverseerPass(ctx context.Context, connection *sql.Conn, agent Agent, at int64, health []OverseerHealth) ([]overseerPassItem, error) {
+	rows, err := connection.QueryContext(ctx, overseerPassItems, overseerItemArgs(agent, at, health)...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []overseerPassItem
+	for rows.Next() {
+		var item overseerPassItem
+		var kind int
+		var escalation, ripe sql.NullBool
+		var readyAt sql.NullInt64
+		var line, key, counts sql.NullString
+		var version sql.NullInt64
+		if err := rows.Scan(&kind, &escalation, &line, &key, &counts, &item.carrier, &ripe, &readyAt, &version); err != nil {
+			return nil, err
+		}
+		item.due = kind != 0
+		item.line, item.key, item.counts = line.String, key.String, counts.String
+		item.escalation = escalation.Valid && escalation.Bool
+		item.ripe = ripe.Valid && ripe.Bool
+		if readyAt.Valid {
+			item.readyAt = readyAt.Int64
+		}
+		items = append(items, item)
+	}
+	return items, rows.Err()
+}
+
 // EnqueueOverseerWakeups applies one level-triggered rule to each standing
 // overseer: while it has no unfinished wake carrier and some item is due, it
 // gets one carrier naming the due items (see overseerWakeItems), and the items
@@ -283,14 +331,20 @@ func (store *Store) EnqueueOverseerWakeups(ctx context.Context, at UnixMillis, h
 			}
 			state, known := store.overseerStalled[agent.ID.String()]
 			if !known || state.health != string(healthBytes) || cursor != factory.Head.Int64() || !found || cardOpen != 0 || state.nextAt != 0 && at.Int64() >= state.nextAt {
-				nextAt, err := raiseStalledItems(ctx, tx, agent, at, health)
+				pass, err := readOverseerPass(ctx, tx.connection, agent, at.Int64(), health)
+				if err != nil {
+					return nil, tx.Rollback(err)
+				}
+				nextAt, err := raiseStalledItemsFromPass(ctx, tx, agent, at, pass)
+				if err != nil {
+					return nil, tx.Rollback(err)
+				}
+				body, due, err = overseerWakeFromPass(ctx, tx.connection, agent, at.Int64(), pass)
 				if err != nil {
 					return nil, tx.Rollback(err)
 				}
 				store.overseerStalled[agent.ID.String()] = overseerStalledState{head: factory.Head.Int64(), nextAt: nextAt, health: string(healthBytes)}
-			}
-			var err error
-			if body, due, err = overseerWake(ctx, tx.connection, agent, at.Int64(), health); err != nil {
+			} else if body, due, err = overseerWake(ctx, tx.connection, agent, at.Int64(), health); err != nil {
 				return nil, tx.Rollback(err)
 			}
 		}
@@ -366,31 +420,28 @@ var stalledItemKey = [IDBytes]byte([]byte("stalled item key"))
 // waits. A card closes only once none of its carrier's items is stalled, so
 // a later wake that moves an item's timing never strands it uncarded.
 func raiseStalledItems(ctx context.Context, tx *writeTx, agent Agent, at UnixMillis, health []OverseerHealth) (int64, error) {
-	connection := tx.connection
-	rows, err := connection.QueryContext(ctx, overseerStalledItems, overseerItemArgs(agent, at.Int64(), health)...)
+	pass, err := readOverseerPass(ctx, tx.connection, agent, at.Int64(), health)
 	if err != nil {
 		return 0, err
 	}
+	return raiseStalledItemsFromPass(ctx, tx, agent, at, pass)
+}
+
+func raiseStalledItemsFromPass(ctx context.Context, tx *writeTx, agent Agent, at UnixMillis, pass []overseerPassItem) (int64, error) {
+	connection := tx.connection
 	lines, stalled := map[string][]string{}, map[string]bool{}
 	var nextAt int64
-	for rows.Next() {
-		var carrier []byte
-		var line string
-		var ripe bool
-		var readyAt int64
-		if err := rows.Scan(&carrier, &line, &ripe, &readyAt); err != nil {
-			return 0, errors.Join(err, rows.Close())
+	for _, item := range pass {
+		if item.due {
+			continue
 		}
-		if readyAt > at.Int64() && (nextAt == 0 || readyAt < nextAt) {
-			nextAt = readyAt
+		if item.readyAt > at.Int64() && (nextAt == 0 || item.readyAt < nextAt) {
+			nextAt = item.readyAt
 		}
-		stalled[string(carrier)] = true
-		if ripe {
-			lines[string(carrier)] = append(lines[string(carrier)], line)
+		stalled[string(item.carrier)] = true
+		if item.ripe {
+			lines[string(item.carrier)] = append(lines[string(item.carrier)], item.line)
 		}
-	}
-	if err := errors.Join(rows.Err(), rows.Close()); err != nil {
-		return 0, err
 	}
 	for _, carrier := range slices.Sorted(maps.Keys(lines)) {
 		id, err := TaskIDFromBytes([]byte(carrier))
@@ -542,31 +593,43 @@ func overseerWake(ctx context.Context, connection *sql.Conn, agent Agent, at int
 		return "", false, err
 	}
 	defer rows.Close()
+	var pass []overseerPassItem
+	for rows.Next() {
+		var item overseerPassItem
+		if err := rows.Scan(&item.escalation, &item.line, &item.key, &item.counts); err != nil {
+			return "", false, err
+		}
+		item.due = true
+		pass = append(pass, item)
+	}
+	if err := rows.Err(); err != nil {
+		return "", false, err
+	}
+	return overseerWakeFromPass(ctx, connection, agent, at, pass)
+}
+
+func overseerWakeFromPass(ctx context.Context, connection *sql.Conn, agent Agent, at int64, pass []overseerPassItem) (string, bool, error) {
 	var lines, escalations []string
 	var counts string
 	full := false
-	for rows.Next() {
-		var escalation bool
-		var detail, key string
-		if err := rows.Scan(&escalation, &detail, &key, &counts); err != nil {
-			return "", false, err
+	for _, item := range pass {
+		if !item.due {
+			continue
 		}
+		counts = item.counts
 		if len(lines)+len(escalations) == 32 {
 			full = true // more is due than one wake names
 			break
 		}
-		if escalation {
-			line := strings.ToValidUTF8(detail[:min(len(detail), 256)], "")
-			if !strings.Contains(line, key) {
-				line += " " + key
+		if item.escalation {
+			line := strings.ToValidUTF8(item.line[:min(len(item.line), 256)], "")
+			if !strings.Contains(line, item.key) {
+				line += " " + item.key
 			}
-			escalations = append(escalations, line+escalationWhy(ctx, connection, agent.ProjectID, key))
-		} else if !slices.Contains(lines, detail) {
-			lines = append(lines, detail)
+			escalations = append(escalations, line+escalationWhy(ctx, connection, agent.ProjectID, item.key))
+		} else if !slices.Contains(lines, item.line) {
+			lines = append(lines, item.line)
 		}
-	}
-	if err := rows.Err(); err != nil {
-		return "", false, err
 	}
 	if len(lines)+len(escalations) == 0 {
 		return "", false, nil

@@ -7,7 +7,6 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
-	"time"
 
 	"github.com/dark-factory-build/dark-factory/internal/change"
 	"github.com/dark-factory-build/dark-factory/internal/kernel"
@@ -154,34 +153,62 @@ func (daemon *Daemon) retainedSettlement(ctx context.Context, changeParent strin
 	return kernel.NewRetainedChangeSettlement(changeState.Revision, &head)
 }
 
-// changeReclaimBatch bounds the Changes one reclaim pass inspects, so the
-// backlog drains a few a minute without long writer holds or I/O spikes.
-const changeReclaimBatch = 4
-
-// tickChangeReclaim starts a reclaim pass off the scheduler loop, a minute
-// after the last one.
+// tickChangeReclaim starts a reclaim pass off the scheduler loop only when
+// the durable store has changed since the last pass.
 func (daemon *Daemon) tickChangeReclaim(ctx context.Context) {
-	if daemon.now().UnixNano() < daemon.reclaimAt.Load() || !daemon.reclaimBusy.CompareAndSwap(false, true) {
+	factory, err := daemon.store.Factory(ctx)
+	productionRevision := daemon.store.ProductionRevision()
+	now := daemon.now().UnixMilli()
+	next := daemon.reclaimNext.Load()
+	if err != nil || factory.Head.Int64() == daemon.reclaimHead.Load()-1 && productionRevision == daemon.reclaimProductionRevision.Load() && (next == 0 || now < next) || !daemon.reclaimBusy.CompareAndSwap(false, true) {
 		return
 	}
+	head := factory.Head.Int64()
+	passAt, err := daemon.timestamp()
+	if err != nil {
+		daemon.reclaimBusy.Store(false)
+		return
+	}
+	daemon.refreshReclaimDeadlineAt(ctx, passAt)
 	go func() {
 		defer daemon.reclaimBusy.Store(false)
-		daemon.reclaimChanges(ctx)
-		daemon.reclaimAt.Store(daemon.now().Add(time.Minute).UnixNano())
+		daemon.reclaimChangesAt(ctx, passAt)
+		daemon.refreshReclaimDeadlineAt(ctx, passAt)
+		daemon.reclaimHead.Store(head + 1)
+		daemon.reclaimProductionRevision.Store(productionRevision)
 	}()
 }
 
-// reclaimChanges inspects up to changeReclaimBatch retained Changes the
-// kernel's rule allows, removes each one's worktree and Git state
+func (daemon *Daemon) refreshReclaimDeadlineAt(ctx context.Context, at kernel.UnixMillis) {
+	next, found, err := daemon.store.NextChangeReclaimAt(ctx, at)
+	if err != nil {
+		return
+	}
+	if found {
+		daemon.reclaimNext.Store(next.Int64())
+	} else if daemon.reclaimNext.Load() <= at.Int64() {
+		daemon.reclaimNext.Store(0)
+	}
+}
+
+// reclaimChanges inspects the retained Changes the kernel's rule allows,
+// removes each one's worktree and Git state
 // (change.RemoveWorktree), and records it abandoned, as a Change whose
 // worktree is gone: the task's retry makes a fresh one. A Change reopened
 // since the rule was read is skipped; one RemoveWorktree refuses is kept and
 // logged once. A removal whose record failed is found again next pass and,
 // with nothing left on disk, only recorded.
 func (daemon *Daemon) reclaimChanges(ctx context.Context) int {
-	parent, git := daemon.changeParent.Load(), daemon.gitExecutable.Load()
 	at, err := daemon.timestamp()
-	if parent == nil || *parent == "" || git == nil || *git == "" || err != nil {
+	if err != nil {
+		return 0
+	}
+	return daemon.reclaimChangesAt(ctx, at)
+}
+
+func (daemon *Daemon) reclaimChangesAt(ctx context.Context, at kernel.UnixMillis) int {
+	parent, git := daemon.changeParent.Load(), daemon.gitExecutable.Load()
+	if parent == nil || *parent == "" || git == nil || *git == "" {
 		return 0
 	}
 	candidates, err := daemon.store.ReclaimableChanges(ctx, at)
@@ -191,7 +218,7 @@ func (daemon *Daemon) reclaimChanges(ctx context.Context) int {
 	}
 	inspected, reclaimed := 0, 0
 	for _, candidate := range candidates {
-		if inspected == changeReclaimBatch || ctx.Err() != nil {
+		if ctx.Err() != nil {
 			break
 		}
 		daemon.healthMu.Lock()
