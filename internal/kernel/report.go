@@ -203,14 +203,14 @@ func why(ctx context.Context, c *sql.Conn, archived history, project *ProjectID,
 			return nil, ErrNotFound
 		}
 		lines = append(lines, whyTask(task))
-		var phase, kind, detail sql.NullString
+		var phase, kind, detail, agent sql.NullString
 		var at int64
-		err := c.QueryRowContext(ctx, `SELECT phase, terminal_kind, terminal_detail, updated_at_ms FROM `+archived.table("runs")+` WHERE task_id = ? ORDER BY admitted_at_ms DESC, id DESC LIMIT 1`, taskID.Bytes()).Scan(&phase, &kind, &detail, &at)
+		err := c.QueryRowContext(ctx, `SELECT phase, terminal_kind, terminal_detail, lower(hex(agent_id)), updated_at_ms FROM `+archived.table("runs")+` WHERE task_id = ? ORDER BY admitted_at_ms DESC, id DESC LIMIT 1`, taskID.Bytes()).Scan(&phase, &kind, &detail, &agent, &at)
 		if err != nil && !errors.Is(err, sql.ErrNoRows) {
 			return nil, err
 		}
 		if err == nil {
-			lines = append(lines, fmt.Sprintf("run: %s %s at %s %s", phase.String, kind.String, time.UnixMilli(at).UTC().Format(time.RFC3339), oneLine(detail.String, 160)))
+			lines = append(lines, fmt.Sprintf("run: %s %s agent=%s at %s %s", phase.String, kind.String, agent.String, time.UnixMilli(at).UTC().Format(time.RFC3339), oneLine(detail.String, 160)))
 		}
 	}
 	// The pull request: the one asked for, or the newest the task published.

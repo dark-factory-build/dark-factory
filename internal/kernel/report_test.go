@@ -5,6 +5,7 @@ import (
 	"slices"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/dark-factory-build/dark-factory/internal/review"
 )
@@ -48,7 +49,7 @@ func TestReportAndWhyReadTheReconcilersState(t *testing.T) {
 		t.Fatalf("why pull = %q, %v", lines, err)
 	}
 	lines, err = store.Why(ctx, &project.ID, 0, task.ID)
-	if err != nil || len(lines) != 4 || lines[2] != "pull: none published" || lines[3] != "waits on: worker: its task is running" {
+	if err != nil || len(lines) != 4 || !strings.HasPrefix(lines[1], "run: admitted  agent="+agent.ID.String()+" at ") || lines[2] != "pull: none published" || lines[3] != "waits on: worker: its task is running" {
 		t.Fatalf("why task = %q, %v", lines, err)
 	}
 	if lines, err = store.Why(ctx, nil, 7, TaskID{}); err != nil || len(lines) != 8 || lines[0] != "pull: example/factory#7 open \"\"" {
@@ -272,5 +273,52 @@ func TestReportLessonCountersUseLatestRevision(t *testing.T) {
 	lines, err := store.Report(ctx, &run.ProjectID, 0, 3600000)
 	if err != nil || len(lines) != 3 || lines[1] != "lessons=1 reads=0 citations=1 stale=0" || !strings.HasPrefix(lines[2], "wal_bytes=") {
 		t.Fatalf("latest lesson report = %q, %v", lines, err)
+	}
+}
+
+// why names the agent whose run a provider exit ended, beside its status, time
+// and reason: every specialist wake shares the title "Standing instruction".
+func TestWhyNamesTheAgentOfAProviderExitRun(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	store, run, keys := admittedOrchestratorRun(t)
+	defer store.Close()
+	run, runtimeIdentity, runnerIdentity := activateStartedRunner(t, store, run, 120)
+	resources := resourcesForRunTest(t, store, run.ID)
+	process, group := resourceOfKind(t, resources, ResourceProviderProcess), resourceOfKind(t, resources, ResourceProviderGroup)
+	providerIdentity := processIdentity(t, 1220)
+	if _, _, err := store.ActivateProviderResources(ctx, run.ID, process.ID, process.Revision, group.ID, group.Revision, providerIdentity, mustTime(t, 23)); err != nil {
+		t.Fatal(err)
+	}
+	session := terminalSessionForRunTest(t, store, run.ID)
+	running, err := store.ActivateRun(ctx, run.ID, session.ID, run.Revision, session.Revision, mustTime(t, 24))
+	if err != nil {
+		t.Fatal(err)
+	}
+	exit, _ := NewAttemptResultExitCode(1)
+	result, _ := NewInnerConvergedAttemptResult(run.ID, keys.AttemptDigest, keys.ResultProofDigest, runtimeIdentity, providerIdentity, exit)
+	consumed, err := store.ConsumeAttemptResult(ctx, result, running.Revision, mustTime(t, 25))
+	if err != nil {
+		t.Fatal(err)
+	}
+	runner := resourceOfKind(t, resourcesForRunTest(t, store, run.ID), ResourceRunnerProcess)
+	afterRunner, _, err := store.RecordRecoveredRunnerAbsence(ctx, run.ID, runner.ID, consumed.Revision, runner.Revision, runnerIdentity, mustTime(t, 26))
+	if err != nil {
+		t.Fatal(err)
+	}
+	closed, _, err := store.CloseTerminalAfterRunner(ctx, result, afterRunner.Revision, terminalSessionForRunTest(t, store, run.ID).Revision, mustTime(t, 27))
+	if err != nil {
+		t.Fatal(err)
+	}
+	runtime := resourceOfKind(t, resourcesForRunTest(t, store, run.ID), ResourceRuntimeRoot)
+	if _, err := store.ReleaseResource(ctx, run.ID, runtime.ID, runtime.Revision, runtime.Identity, mustTime(t, 28)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.FinalizeRun(ctx, run.ID, closed.Revision, mustTime(t, 70)); err != nil {
+		t.Fatal(err)
+	}
+	lines, err := store.Why(ctx, nil, 0, run.TaskID)
+	if err != nil || len(lines) < 2 || lines[1] != "run: terminal failed agent="+run.AgentID.String()+" at "+time.UnixMilli(mustTime(t, 70).Int64()).UTC().Format(time.RFC3339)+" provider exited before an attempt outcome" {
+		t.Fatalf("why provider exit = %q, %v", lines, err)
 	}
 }
