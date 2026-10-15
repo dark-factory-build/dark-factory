@@ -137,6 +137,19 @@ func (store *Store) Report(ctx context.Context, project *ProjectID, since, bucke
 // the reconciler's own record (the review operation at the head); project
 // nil reads every project.
 func (store *Store) Why(ctx context.Context, project *ProjectID, pull uint64, task TaskID) ([]string, error) {
+	return store.whyInRepository(ctx, project, "", pull, task)
+}
+
+// WhyInRepository is the task-bound form of Why. The repository is an
+// authenticated production binding, not caller-selected project scope.
+func (store *Store) WhyInRepository(ctx context.Context, project *ProjectID, repository string, pull uint64) ([]string, error) {
+	if !productionRepository.MatchString(repository) {
+		return nil, ErrInvalidValue
+	}
+	return store.whyInRepository(ctx, project, repository, pull, TaskID{})
+}
+
+func (store *Store) whyInRepository(ctx context.Context, project *ProjectID, repository string, pull uint64, task TaskID) ([]string, error) {
 	if pull == 0 && task.zero() || pull > 1<<53-1 {
 		return nil, ErrInvalidValue
 	}
@@ -151,7 +164,7 @@ func (store *Store) Why(ctx context.Context, project *ProjectID, pull uint64, ta
 			return nil, err
 		}
 	}
-	return why(ctx, read.connection, archived, project, "", pull, task)
+	return why(ctx, read.connection, archived, project, repository, pull, task)
 }
 
 func singletonProject(ctx context.Context, c *sql.Conn) (*ProjectID, error) {
@@ -257,8 +270,8 @@ func why(ctx context.Context, c *sql.Conn, archived history, project *ProjectID,
 	// The required checks at the exact head that name this pull request: the
 	// reconciler (requiredChecks) ignores optional ones.
 	var passed, pending, failed int
-	var failing []string
-	rows, err := c.QueryContext(ctx, `SELECT json_extract(c.document, '$.name'), json_extract(c.document, '$.state'), COALESCE(json_extract(c.document, '$.conclusion'), '')
+	var failing, details []string
+	rows, err := c.QueryContext(ctx, `SELECT json_extract(c.document, '$.name'), json_extract(c.document, '$.state'), COALESCE(json_extract(c.document, '$.conclusion'), ''), c.document
 		FROM `+records+` AS c, json_each(c.document, '$.pull_requests') AS n
 		WHERE c.project_id = ? AND c.repository = ? AND c.kind = 'check' AND json_extract(c.document, '$.scope') = 'head'
 		  AND lower(json_extract(c.document, '$.revision')) = ? AND CAST(n.value AS INTEGER) = ? AND json_extract(c.document, '$.required')`, projectBytes, repository, head, int64(pr.Number))
@@ -266,8 +279,8 @@ func why(ctx context.Context, c *sql.Conn, archived history, project *ProjectID,
 		return nil, err
 	}
 	for rows.Next() {
-		var name, state, conclusion string
-		if err := rows.Scan(&name, &state, &conclusion); err != nil {
+		var name, state, conclusion, document string
+		if err := rows.Scan(&name, &state, &conclusion, &document); err != nil {
 			return nil, errors.Join(err, rows.Close())
 		}
 		switch {
@@ -278,6 +291,14 @@ func why(ctx context.Context, c *sql.Conn, archived history, project *ProjectID,
 		default:
 			failed++
 			failing = append(failing, name)
+			var check ProductionCheck
+			if json.Unmarshal([]byte(document), &check) == nil {
+				for _, job := range check.Jobs {
+					for _, annotation := range job.Annotations {
+						details = append(details, name+": "+oneLine(annotation, 240))
+					}
+				}
+			}
 		}
 	}
 	if err := errors.Join(rows.Err(), rows.Close()); err != nil {
@@ -299,6 +320,12 @@ func why(ctx context.Context, c *sql.Conn, archived history, project *ProjectID,
 		mergeable = strconv.FormatBool(*pr.Mergeable)
 	}
 	lines = append(lines, checks, verdict, fmt.Sprintf("queue: %s merge_state=%s mergeable=%s", cmp.Or(pr.MergeQueue, "none"), cmp.Or(pr.MergeState, "unknown"), mergeable))
+	if len(details) > 0 {
+		lines = append(lines, "check failure details: "+strings.Join(details, "; "))
+	}
+	if pr.Review.Findings != "" {
+		lines = append(lines, "review findings: "+oneLine(pr.Review.Findings, 4096))
+	}
 	if found {
 		lines = append(lines, whyTask(task))
 	} else {

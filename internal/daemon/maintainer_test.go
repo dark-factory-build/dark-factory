@@ -25,6 +25,30 @@ func TestFilterOverseerToolsRemovesEveryWriteTool(t *testing.T) {
 	}
 }
 
+func TestWorkerPullReadBindsRepositoryHeadAndNumber(t *testing.T) {
+	pull := kernel.ProductionPullRequest{Number: 7, Head: strings.Repeat("a", 40), Base: "main"}
+	call := func(name, repository, head, base string, number uint64) maintainerToolCall {
+		arguments := map[string]json.RawMessage{}
+		for key, value := range map[string]any{"repository": repository, "pull_number": number, "head_sha": head, "base": base, "page": uint32(1), "per_page": uint32(1)} {
+			encoded, _ := json.Marshal(value)
+			arguments[key] = encoded
+		}
+		return maintainerToolCall{Name: name, Arguments: arguments}
+	}
+	if !workerPullRead(call("observe_pull_request_checks", "team/repo", pull.Head, "", 7), "team/repo", pull) {
+		t.Fatal("accepted exact checks read")
+	}
+	for _, value := range []maintainerToolCall{
+		call("observe_pull_request_checks", "team/other", pull.Head, "", 7),
+		call("observe_pull_request_checks", "team/repo", strings.Repeat("b", 40), "", 7),
+		call("observe_pull_request_checks", "team/repo", pull.Head, "", 8),
+	} {
+		if workerPullRead(value, "team/repo", pull) {
+			t.Fatalf("accepted out-of-scope read: %+v", value)
+		}
+	}
+}
+
 func TestMaintainerRefusesWorkerAndInactiveOrchestrator(t *testing.T) {
 	for _, role := range []string{"worker", "orchestrator"} {
 		t.Run(role, func(t *testing.T) {
