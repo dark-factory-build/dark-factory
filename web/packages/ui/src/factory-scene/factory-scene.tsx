@@ -59,8 +59,6 @@ export type FactorySceneProps = Readonly<{
   onSelectTask?: (taskId: string) => void;
   /** Open the existing project task queue from the floor inbox. */
   onOpenTasks?: (projectId?: string) => void;
-  /** Open the operator's objective view from the planning table. */
-  onOpenMissions?: (projectId?: string) => void;
   onSelectHumanRequest?: (requestId: string) => void;
   /** A dropped session reconciles to its latest snapshot instead of replaying local motion. */
   connected?: boolean;
@@ -84,7 +82,7 @@ const FRAME = spriteAtlas.frame;
 const DAY = 24 * 60 * 60_000;
 const NO_QUESTIONS: readonly PeerQuestionItem[] = [];
 type Implement = ReturnType<typeof breakRoomNook>["furniture"][number];
-const IMPLEMENT_NAMES: Record<BreakRoomErrand, string> = { shelf: "bookshelf", coffee: "coffee station", board: "discussion board", missions: "planning table", tasks: "task tray" };
+const IMPLEMENT_NAMES: Record<BreakRoomErrand, string> = { shelf: "bookshelf", coffee: "coffee station", board: "discussion board", tasks: "task tray" };
 // A recorded visit: the walk over (the far end of the nook is a few seconds away by the aisles), a while at the implement, then back.
 const VISIT = 10000;
 
@@ -474,12 +472,12 @@ const tableOf = (rows: readonly (readonly Sitter[])[]) => rows.find((row) => row
 const DEFAULT_SCENE_APPEARANCE = { scenery: "subtle" as const, animation: "follow-device" as const };
 
 /** The fixtures this floor offers: each opens its panel; the coffee station is scenery. */
-export function offeredFixtures({ appearance = DEFAULT_SCENE_APPEARANCE, onOpenMissions, onOpenTasks }: Pick<FactorySceneProps, "appearance" | "onOpenMissions" | "onOpenTasks">): readonly BreakRoomErrand[] {
-  return (["board", "shelf", ["missions", onOpenMissions], ["tasks", onOpenTasks], ["coffee", appearance.scenery === "off" ? undefined : true]] as const).flatMap((entry) => typeof entry === "string" ? [entry as BreakRoomErrand] : entry[1] === undefined ? [] : [entry[0]]);
+export function offeredFixtures({ appearance = DEFAULT_SCENE_APPEARANCE, onOpenTasks }: Pick<FactorySceneProps, "appearance" | "onOpenTasks">): readonly BreakRoomErrand[] {
+  return (["board", "shelf", ["tasks", onOpenTasks], ["coffee", appearance.scenery === "off" ? undefined : true]] as const).flatMap((entry) => typeof entry === "string" ? [entry as BreakRoomErrand] : entry[1] === undefined ? [] : [entry[0]]);
 }
 
 /** A disposable SVG projection of the operational world and current factory state. */
-export function FactoryScene({ proposals, crates, tools, onLoadNode, onInvestigate, onSelectEntity, graph, workers, appearance = DEFAULT_SCENE_APPEARANCE, selectedWorkerId, onSelectWorker, tasks = [], peerQuestions = NO_QUESTIONS, selectedTaskId, onSelectTask, onOpenTasks, onOpenMissions, onSelectHumanRequest, projectId, connected = true, reading = false, unavailable }: FactorySceneProps) {
+export function FactoryScene({ proposals, crates, tools, onLoadNode, onInvestigate, onSelectEntity, graph, workers, appearance = DEFAULT_SCENE_APPEARANCE, selectedWorkerId, onSelectWorker, tasks = [], peerQuestions = NO_QUESTIONS, selectedTaskId, onSelectTask, onOpenTasks, onSelectHumanRequest, projectId, connected = true, reading = false, unavailable }: FactorySceneProps) {
   const [selectedId, setSelectedId] = useState<string>();
   // The crate pointed at or focused: the machines its change touches are lit.
   const [lit, setLit] = useState<string>();
@@ -518,7 +516,7 @@ export function FactoryScene({ proposals, crates, tools, onLoadNode, onInvestiga
   // Machinery and fixtures from structure alone; which fixtures are offered never moves anything.
   const previousFloor = useRef<SceneMachinery>(undefined);
   const machinery = useMemo(() => previousFloor.current = placeMachinery(graph, previousFloor.current), [graph.digest]);
-  const offered = offeredFixtures({ appearance, onOpenMissions, onOpenTasks });
+  const offered = offeredFixtures({ appearance, onOpenTasks });
   const layout = useMemo(() => furnish(machinery, offered), [machinery, offered.join()]);
   const placements = useMemo(() => placeWorkers(layout, workers), [layout, workers]);
   // Live readings change without moving anything: they are looked up by id at draw time.
@@ -550,7 +548,6 @@ export function FactoryScene({ proposals, crates, tools, onLoadNode, onInvestiga
   // The implements are always there: each opens its panel and the tray shows the queue. Coffee is scenery only.
   const implementsShown = nook.furniture;
   const opens: Partial<Record<BreakRoomErrand, readonly [((projectId?: string) => void) | undefined, string, string, string]>> = {
-    missions: [onOpenMissions, "Missions · inspect objectives", "Open Missions", "MISSIONS"],
     tasks: [onOpenTasks, queued === 0 ? "Tasks · queue is empty" : `Tasks · ${queued} queued`, "Open Tasks", "TASKS"],
   };
   const animate = connected && appearance.animation !== "off";
@@ -711,8 +708,7 @@ export function FactoryScene({ proposals, crates, tools, onLoadNode, onInvestiga
         {...(open === undefined ? {} : { className: "dfFactoryScene__target", "data-tooltip": tooltip, "aria-label": label, ...sceneAction(() => open(projectId)) })} transform={`translate(${piece.x} ${piece.y}) scale(${WORKER_SIZE / FRAME})`}>
         {open === undefined ? null : <rect className="dfFactoryScene__focus" x="-2" y="-2" width="20" height="28" fill="transparent" />}
         <g aria-hidden="true" pointerEvents="none" opacity=".8">
-          {piece.errand === "missions" ? <g><rect x="0" y="7" width="16" height="5" fill="#455c5e" stroke="#8c8871" strokeWidth=".5" /><rect x=".5" y="7.5" width="15" height="3" fill="#9fae9e" /><path d="M2 8.5h7v1.5H5 M11 9h2" fill="none" stroke="#536e70" strokeWidth=".5" /><path d="M2 12v4 M14 12v4" stroke="#393f3c" strokeWidth="1.5" /></g>
-            : piece.errand === "tasks" ? <g><rect x="0" y="9" width="16" height="4" fill="#5b5545" stroke="#a08f68" strokeWidth=".5" /><path d="M2 13v3 M14 13v3" stroke="#393b35" strokeWidth="1.5" />
+          {piece.errand === "tasks" ? <g><rect x="0" y="9" width="16" height="4" fill="#5b5545" stroke="#a08f68" strokeWidth=".5" /><path d="M2 13v3 M14 13v3" stroke="#393b35" strokeWidth="1.5" />
               {/* Waiting work, as the pile in a real tray: it says how the queue is doing. */}
               {[...Array(Math.min(queued, 3))].map((_, index) => <rect key={index} x="4" y={7 - index * 1.5} width="8" height="1.5" fill="#e4dcc0" strokeWidth=".4" stroke={tasks.some((task) => task.id === selectedTaskId && task.status === "queued") ? "#80ddff" : "#a6a087"} />)}
               <path d="M3 7v2h10v-2" fill="none" stroke="#c2b184" /></g>

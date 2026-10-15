@@ -85,7 +85,7 @@ const NO_CHANGES: readonly ProductionContraption[] = [];
 /** The operational floor; every action opens an existing inspector or control. */
 export function FactoryFloor({
   changes = NO_CHANGES, changesRead = false, selectedChange, onSelectChange, state, graphs, graphErrors, onLoadNode, onAddTask, runPaths, lastRunPaths, selectedAgentId, onSelectAgent,
-  onSelectHumanRequest, selectedTaskId, onSelectTask, onOpenTasks, onOpenMissions, connected = true, projectId,
+  onSelectHumanRequest, selectedTaskId, onSelectTask, onOpenTasks, connected = true, projectId,
 }: {
   changes?: readonly ProductionContraption[];
   /** Whether `changes` were read on this connection; until then the work line has nothing to look at. */
@@ -104,7 +104,6 @@ export function FactoryFloor({
   selectedTaskId?: string;
   onSelectTask?: (taskId: string) => void;
   onOpenTasks?: (projectId?: string) => void;
-  onOpenMissions?: (projectId?: string) => void;
   onSelectHumanRequest?: (request: HumanRequestItem) => void;
   connected?: boolean;
   projectId?: string;
@@ -161,7 +160,6 @@ export function FactoryFloor({
       peerQuestions={peerQuestions}
       onSelectTask={onSelectTask}
       onOpenTasks={onOpenTasks}
-      onOpenMissions={onOpenMissions}
       onSelectHumanRequest={onSelectHumanRequest === undefined || state === undefined ? undefined : (id) => {
         const request = state.humanRequests.get(id);
         if (request !== undefined) onSelectHumanRequest(request);

@@ -73,7 +73,7 @@ test("anyone not at work stands beside a machine: the one last worked at, else b
 
 test("the fixtures stand in free floor between the machines, and only the machines place them", () => {
   const layout = layoutScene(units(3)), whole = (piece) => ({ x: piece.x - 8, y: piece.y - 8, width: 36, height: 88 });
-  assert.deepEqual(layout.fixtures.map((piece) => piece.errand), ["board", "missions", "tasks", "shelf", "coffee"]);
+  assert.deepEqual(layout.fixtures.map((piece) => piece.errand), ["board", "tasks", "shelf", "coffee"]);
   const rects = layout.fixtures.map(whole), overlap = (a, b) => a.x < b.x + b.width && b.x < a.x + a.width && a.y < b.y + b.height && b.y < a.y + a.height;
   for (const [index, rect] of rects.entries()) {
     assert.ok(layout.stations.every((station) => !overlap(rect, station.footprint)), `${layout.fixtures[index].errand} is clear of every machine's footprint`);
