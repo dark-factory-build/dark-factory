@@ -31,6 +31,16 @@ func TestMain(m *testing.M) {
 		panic("a build that panics before run")
 	case "hang":
 		time.Sleep(time.Hour)
+	case "socket":
+		// Boot opens files before it listens; the first takes the lowest free fd.
+		if _, err := os.Open(os.Args[0]); err != nil || browserSocket == nil {
+			os.Exit(3)
+		}
+		listener, err := net.FileListener(browserSocket)
+		if err != nil {
+			os.Exit(4)
+		}
+		_, _ = os.Stdout.WriteString(listener.Addr().String())
 	default:
 		main()
 	}
@@ -70,6 +80,35 @@ func stagedHome(t *testing.T, mode, target string) string {
 	selfSource = func() string { return runningSource }
 	trialLimit, trialPoll = time.Minute, 50*time.Millisecond
 	return home
+}
+
+// A trial child adopts its supervisor's console socket from fd 3 even after
+// boot has opened other files, and never mistakes one of those for it.
+func TestTrialChildAdoptsOnlyItsInheritedConsoleSocket(t *testing.T) {
+	held, err := net.Listen("tcp4", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer held.Close()
+	socket, err := held.(*net.TCPListener).File()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer socket.Close()
+	for _, inherited := range []*os.File{socket, nil} {
+		child := exec.Command(os.Args[0])
+		child.Env = append(os.Environ(), "FACTORYD_TEST_CHILD=socket", trialEnv+"=1")
+		if inherited != nil {
+			child.ExtraFiles = []*os.File{inherited}
+		}
+		output, err := child.Output()
+		if inherited != nil && (err != nil || string(output) != held.Addr().String()) {
+			t.Fatalf("inherited socket = %q, %v", output, err)
+		}
+		if exit := (*exec.ExitError)(nil); inherited == nil && (!errors.As(err, &exit) || exit.ExitCode() != 3) {
+			t.Fatalf("no inherited socket = %q, %v", output, err)
+		}
+	}
 }
 
 func childArgs(home string, extra ...string) []string {

@@ -424,8 +424,8 @@ func superviseTrial(home string, args []string, marker install.UpgradeMarker) er
 	child := exec.CommandContext(ctx, filepath.Join(install.ServiceDirectoryPath(home), "bin", "previous", "factoryd"), args...)
 	child.Env = append(os.Environ(), trialEnv+"=1")
 	child.Stderr = recoveryLog
-	if socket := browserSocket(); socket != nil {
-		child.ExtraFiles = []*os.File{socket}
+	if browserSocket != nil {
+		child.ExtraFiles = []*os.File{browserSocket}
 	}
 	// Its own process group, recorded in the marker: launchd does not end a
 	// child whose supervisor died, so the next boot does.
@@ -616,7 +616,7 @@ func openProcess(ctx context.Context, configuration config) (_ *process, resultE
 		return nil, err
 	}
 	startupPhase("listener")
-	owner.browser, err = owner.daemon.ListenBrowser(configuration.browserAddress, browserSocket(), configuration.browserOrigins)
+	owner.browser, err = owner.daemon.ListenBrowser(configuration.browserAddress, browserSocket, configuration.browserOrigins)
 	if err != nil {
 		return nil, err
 	}
