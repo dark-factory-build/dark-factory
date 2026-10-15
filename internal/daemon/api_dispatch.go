@@ -569,7 +569,8 @@ func (daemon *Daemon) dispatch(ctx context.Context, call api.Call) api.Reply {
 // attemptOperatorCall admits a specialist's review run (its carrier) to the
 // operator's read views of its own project, and of intake only its list; an
 // overseer to report and why, the intake list and one fresh exact-head review
-// in its own project. Every other attempt, and every other write, is refused.
+// in its own project; and a worker only to why for its own task. Every other
+// attempt, and every other write, is refused.
 func (daemon *Daemon) attemptOperatorCall(ctx context.Context, raw api.AttemptDigest, call api.Call) (kernel.ProjectID, bool) {
 	digest, err := attemptDigest(raw)
 	if err != nil {
@@ -581,7 +582,20 @@ func (daemon *Daemon) attemptOperatorCall(ctx context.Context, raw api.AttemptDi
 	switch {
 	case err != nil:
 		return authority.ProjectID, false
-	case call.Kind() == api.CallReport, intake.Action == "list":
+	case call.Kind() == api.CallReport:
+		if authority.Specialist || overseer {
+			return authority.ProjectID, true
+		}
+		input, valid := call.ReportInput()
+		if !valid || authority.Role != kernel.RoleWorker || input.Pull != 0 || input.TaskID == "" {
+			return authority.ProjectID, false
+		}
+		if input.ProjectID != "" && input.ProjectID != authority.ProjectID.String() {
+			return authority.ProjectID, false
+		}
+		task, decodeErr := decodeID(input.TaskID, kernel.TaskIDFromBytes)
+		return authority.ProjectID, decodeErr == nil && task == authority.TaskID
+	case intake.Action == "list":
 		return authority.ProjectID, authority.Specialist || overseer
 	case call.Kind() != api.CallIntake:
 		return authority.ProjectID, authority.Specialist

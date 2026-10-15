@@ -644,6 +644,36 @@ pub(crate) struct ObservePullRequestMerge {
     pub(crate) base: String,
 }
 
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct ObservePullRequestComments {
+    pub(crate) repository: String,
+    pub(crate) pull_number: i64,
+    pub(crate) head_sha: String,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+pub(crate) struct PullRequestComment {
+    pub(crate) id: i64,
+    #[serde(rename(deserialize = "user", serialize = "author"))]
+    pub(crate) author: PullRequestCommentAuthor,
+    pub(crate) body: String,
+    pub(crate) created_at: String,
+    pub(crate) updated_at: String,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+pub(crate) struct PullRequestCommentAuthor {
+    pub(crate) login: String,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+pub(crate) struct PullRequestCommentsResult {
+    pub(crate) pull_number: i64,
+    pub(crate) head_sha: String,
+    pub(crate) comments: Vec<PullRequestComment>,
+}
+
 #[derive(Debug, Deserialize, Serialize)]
 pub(crate) struct PullRequestMergeResult {
     pub(crate) pull_number: i64,
@@ -1978,6 +2008,46 @@ impl AppAuthority {
         }
         Ok(result)
     }
+
+    #[cfg(target_arch = "wasm32")]
+    pub(crate) async fn observe_pull_request_comments(
+        &self,
+        mut request: ObservePullRequestComments,
+    ) -> Result<PullRequestCommentsResult, OperationError> {
+        request.validate()?;
+        let repository = RepositoryName::requested(&mut request.repository)?;
+        let token = self
+            .0
+            .installation_token(
+                repository,
+                BTreeMap::from([
+                    ("issues", "read"),
+                    ("metadata", "read"),
+                    ("pull_requests", "read"),
+                ]),
+            )
+            .await?;
+        self.0
+            .verify_pull_request_head(&token, request.pull_number, &request.head_sha)
+            .await?;
+        let comments: Vec<PullRequestComment> = github_json(
+            &format!(
+                "https://api.github.com/repos/{}/{}/issues/{}/comments?per_page=100",
+                token.repository.owner, token.repository.name, request.pull_number
+            ),
+            token.as_str(),
+        )
+        .await
+        .map_err(|error: Error| issue_read_error(error.into()))?;
+        if comments.len() > 100 {
+            return Err(OperationError::InvalidInput);
+        }
+        Ok(PullRequestCommentsResult {
+            pull_number: request.pull_number,
+            head_sha: request.head_sha,
+            comments,
+        })
+    }
 }
 
 impl CreatePullRequest {
@@ -2691,6 +2761,13 @@ impl ObservePullRequestMerge {
         valid_exact_integer(self.pull_number)?;
         valid_sha(&self.head_sha)?;
         valid_ref(&self.base)
+    }
+}
+
+impl ObservePullRequestComments {
+    fn validate(&self) -> Result<(), OperationError> {
+        valid_exact_integer(self.pull_number)?;
+        valid_sha(&self.head_sha)
     }
 }
 
@@ -9307,6 +9384,26 @@ mod tests {
             );
         }
     }
+}
+
+#[cfg(test)]
+#[test]
+fn pull_request_comments_decode_github_user_shape() {
+    let comments: Vec<PullRequestComment> = serde_json::from_value(serde_json::json!([
+        {
+            "id": 17,
+            "user": {"login": "reviewer"},
+            "body": "Please address this line.",
+            "created_at": "2026-10-15T12:00:00Z",
+            "updated_at": "2026-10-15T12:00:00Z"
+        }
+    ]))
+    .unwrap();
+    assert_eq!(comments[0].author.login, "reviewer");
+    assert_eq!(comments[0].body, "Please address this line.");
+    let encoded = serde_json::to_value(&comments).unwrap();
+    assert_eq!(encoded[0]["author"]["login"], "reviewer");
+    assert!(encoded[0].get("user").is_none());
 }
 
 #[cfg(test)]

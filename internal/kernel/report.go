@@ -291,6 +291,9 @@ func why(ctx context.Context, c *sql.Conn, archived history, project *ProjectID,
 	if strings.EqualFold(pr.Review.Head, head) {
 		verdict = "review: " + pr.Review.State + " at head"
 	}
+	if pr.Review.Findings != "" {
+		lines = append(lines, "review-of-record: "+oneLine(pr.Review.Findings, 16000))
+	}
 	mergeable := "unknown"
 	if pr.Mergeable != nil {
 		mergeable = strconv.FormatBool(*pr.Mergeable)
@@ -316,6 +319,12 @@ func why(ctx context.Context, c *sql.Conn, archived history, project *ProjectID,
 		op = &review.Operation{}
 		if json.Unmarshal([]byte(operation), op) != nil {
 			return nil, ErrCorruptState
+		}
+		if op.Detail != "" {
+			lines = append(lines, "review detail: "+oneLine(op.Detail, 16000))
+		}
+		if op.Conversation != "" {
+			lines = append(lines, "pull request comments: "+oneLine(op.Conversation, 16000))
 		}
 		last := cmp.Or(op.LastAction, "none yet")
 		if op.Escalation != "" {

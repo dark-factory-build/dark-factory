@@ -51,3 +51,13 @@ func (client *OperatorClient) Report(ctx context.Context, input ReportInput) (Re
 	err := client.client.call(ctx, "report", input, &v)
 	return v, err
 }
+
+// Report reads why for the authenticated worker's own task.
+func (client *AttemptClient) Report(ctx context.Context, input ReportInput) (Report, error) {
+	if !validReportInput(input) {
+		return Report{}, ErrInvalidInput
+	}
+	var v Report
+	err := client.client.call(ctx, "attempt_report", input, &v)
+	return v, err
+}
