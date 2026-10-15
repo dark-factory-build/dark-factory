@@ -2208,10 +2208,12 @@ func helpFlag(value string) bool { return value == "-h" || value == "--help" }
 
 // usageFailure answers a line parse rejected with the usage line of the
 // subcommand it names; a line naming no subcommand gets the full usage.
-func usageFailure(stderr io.Writer, args []string) int {
+func usageFailure(stderr io.Writer, args []string) int { return usageFailureIn(usage, stderr, args) }
+
+func usageFailureIn(lines string, stderr io.Writer, args []string) int {
 	var line []string
 	consumed := 0
-	for _, text := range strings.Split(usage, "\n") {
+	for _, text := range strings.Split(lines, "\n") {
 		fields := strings.Fields(text)
 		words := 1
 		for words < len(fields) && fields[words][0] >= 'a' && fields[words][0] <= 'z' {
@@ -2229,7 +2231,7 @@ func usageFailure(stderr io.Writer, args []string) int {
 		}
 	}
 	if line == nil {
-		_, _ = io.WriteString(stderr, usage)
+		_, _ = io.WriteString(stderr, lines)
 	} else {
 		_, _ = fmt.Fprintf(stderr, "factoryctl %s: invalid arguments\nusage: %s\n", strings.Join(args[:consumed], " "), strings.Join(line, " "))
 	}
