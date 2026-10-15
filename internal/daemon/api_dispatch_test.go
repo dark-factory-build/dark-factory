@@ -2050,6 +2050,9 @@ drained:
 		t.Fatal(err)
 	}
 	schedulerDone := make(chan error, 1)
+	// The stub ends probes as RunNext does: no admission is an ErrConflict, and
+	// an admitted run is held until shutdown, so its completion is always
+	// validated while the scheduler stops rather than only when CI is slow.
 	schedulerSpec := SupervisorSpec{scheduledAttempt: func(ctx context.Context, spec SupervisorSpec) (kernel.Run, error) {
 		probe := probes.Add(1)
 		if probe == 1 {
@@ -2063,13 +2066,20 @@ drained:
 			return kernel.Run{}, err
 		}
 		spec.admissionObserved(admission.Admitted())
-		if admission.Admitted() {
-			admittedOnce.Do(func() { close(admitted) })
+		if !admission.Admitted() {
+			return kernel.Run{}, fmt.Errorf("%w: no admission (%s)", kernel.ErrConflict, admission.Reason.String())
 		}
-		if admission.Run == nil {
-			return kernel.Run{}, nil
+		admittedOnce.Do(func() { close(admitted) })
+		<-ctx.Done()
+		return *admission.Run, ctx.Err()
+	}, scheduledCompletion: func(run kernel.Run) error {
+		// The stub never launches its run, so it stays admitted; production
+		// validation would rightly call that outcome-unknown. Require exactly
+		// this admission instead.
+		if run.ID != admissionKeys.RunID || run.Phase != kernel.RunAdmitted {
+			return fmt.Errorf("%w: unexpected scheduled completion %+v", kernel.ErrCorruptState, run)
 		}
-		return *admission.Run, nil
+		return nil
 	}}
 	go func() { schedulerDone <- fixture.daemon.RunScheduler(ctx, schedulerSpec) }()
 	select {
