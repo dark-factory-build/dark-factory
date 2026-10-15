@@ -444,15 +444,15 @@ func (daemon *Daemon) runNext(ctx context.Context, spec SupervisorSpec) (resultR
 	}
 	repositoryGitIdentity, _ = change.NewRepositoryIdentity(source.GitDevice, source.GitInode)
 	repositoryOriginDigest = source.OriginDigest
-	// Knowledge source status reads the bound source identity above.
-	rawProviderTask, suppliedKnowledge, err := daemon.prepareKnowledgeTask(ctx, run, rawProviderTask, true)
-	if err != nil {
-		return daemon.failRunBeforeRuntime(daemon.cleanupCtx, run, keys.resources.RuntimeRoot, kernel.FailureSpawn, err)
-	}
 	if retainedConflict != nil {
 		context := retainedConflictContext(changeState, retainedConflict)
 		rawProviderTask = append(rawProviderTask, []byte(context)...)
 		daemon.retainedConflictContexts.Store(run.ID, context)
+	}
+	// Reads the bound source identity above; one size decision covers conflict context.
+	rawProviderTask, suppliedKnowledge, err := daemon.prepareKnowledgeTask(ctx, run, rawProviderTask, true)
+	if err != nil {
+		return daemon.failRunBeforeRuntime(daemon.cleanupCtx, run, keys.resources.RuntimeRoot, kernel.FailureSpawn, err)
 	}
 	_, providerTask, err := provider.PrepareTask(run.Provider, rawProviderTask)
 	if err != nil {
@@ -832,7 +832,7 @@ func (daemon *Daemon) runNext(ctx context.Context, spec SupervisorSpec) (resultR
 	// until it observes TerminalReady, but it already owns the controller and
 	// will synchronously converge it if any later step fails.
 	live := newLiveAttempt(daemon, run.ID, session.ID, controller)
-	live.callFirst = bytes.HasPrefix(providerTask, []byte(taskFetchInstruction))
+	live.callFirst = string(providerTask) == taskFetchInstruction
 	if worker && changeState.AvailableAt != nil && run.RunningAt != nil {
 		live.agentID, live.changeID = run.AgentID, changeState.ID
 		live.pathsSince = *changeState.AvailableAt

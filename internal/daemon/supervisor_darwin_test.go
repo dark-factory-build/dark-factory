@@ -557,7 +557,18 @@ func runSupervisorClaudeFixture() error {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
+	// Only the oversized-launch pointer sends it to attempt task.
+	if task == taskFetchInstruction {
+		fetched, err := client.Task(ctx)
+		if err != nil {
+			return err
+		}
+		task = "fetched " + fetched.Task
+	}
 	result := fmt.Sprint(strings.Count(task, "Codify the operator scripts and the deploy order. "))
+	if strings.HasPrefix(task, "fetched ") && strings.Contains(task, "Retained Change rebase context (bounded):") {
+		result += " fetched with conflict context"
+	}
 	if err := os.WriteFile(filepath.Join(os.Getenv("HOME"), "prompt-progress"), []byte(result), 0o600); err != nil {
 		return err
 	}
@@ -1141,6 +1152,56 @@ func TestSupervisorRetainedRetryDeliversAutostashConflictContext(t *testing.T) {
 		if !strings.Contains(text, want) {
 			t.Fatalf("provider task missing %q: %s", want, text)
 		}
+	}
+}
+
+// A native task that fits its prompt alone but not with retained-conflict
+// context launches with the fetch pointer, and attempt task then supplies the
+// task with that context, instead of the launch failing.
+func TestSupervisorNearLimitNativeRetryWithConflictFallsBackToAttemptTask(t *testing.T) {
+	fixture := newSupervisorFixture(t, "set -eu\nprintf retained > payload.txt\nprintf x >> __WITNESS__\nexit 1\n")
+	first, err := fixture.daemon.RunNext(context.Background(), fixture.spec)
+	if err != nil {
+		t.Fatalf("first RunNext: %v", err)
+	}
+	fixture.assertTerminal(t, first, kernel.OutcomeFailed)
+	repository := filepath.Join(fixture.root, "repository")
+	supervisorGit(t, supervisorNativeGit(t), "-C", repository, "switch", "main")
+	if err := os.WriteFile(filepath.Join(repository, "payload.txt"), []byte("current main\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	supervisorGit(t, supervisorNativeGit(t), "-C", repository, "add", "payload.txt")
+	supervisorGit(t, supervisorNativeGit(t), "-C", repository, "commit", "-q", "-m", "advance main with conflict")
+	binding, found, err := fixture.store.TaskRepository(context.Background(), first.TaskID)
+	if err != nil || !found {
+		t.Fatalf("task repository binding: %v, found=%v", err, found)
+	}
+	registered, found, err := fixture.store.ProjectRepository(context.Background(), binding.ID)
+	if err != nil || !found {
+		t.Fatalf("registered repository: %v, found=%v", err, found)
+	}
+	if _, err := fixture.store.UpdateProjectRepositoryBase(context.Background(), registered.ID, registered.Revision, "refs/heads/main", supervisorTime()); err != nil {
+		t.Fatalf("advance registered repository base: %v", err)
+	}
+	queueSupervisorRetry(t, fixture, first)
+	// 8,000 bytes fits the 8 KiB native bound alone, not with the conflict context.
+	execSupervisorSQL(t, fixture.storePath, `UPDATE tasks SET body = ? WHERE id = ?`, strings.Repeat("Codify the operator scripts and the deploy order. ", 160), fixture.taskID.Bytes())
+	if err := replaceSupervisorAgentLaunchControls(fixture.storePath, fixture.agentID, kernel.ProviderClaudeCode, "", ""); err != nil {
+		t.Fatal(err)
+	}
+	tools := filepath.Join(fixture.root, "tools")
+	if err := os.Mkdir(tools, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	copySupervisorExecutable(t, supervisorTestExecutable(t), filepath.Join(tools, "claude"))
+	fixture.spec.ToolPath = tools + ":" + fixture.spec.ToolPath
+	second, err := fixture.daemon.RunNext(context.Background(), fixture.spec)
+	if err != nil {
+		t.Fatalf("conflicting retained RunNext: %v", err)
+	}
+	fixture.assertTerminal(t, second, kernel.OutcomeSucceeded)
+	if second.Proposal == nil || second.Proposal.Result() != "160 fetched with conflict context" {
+		t.Fatalf("near-limit conflict retry receipt = %+v", second.Proposal)
 	}
 }
 
