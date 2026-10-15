@@ -91,6 +91,7 @@ else
 echo "go-check: TypeScript install, build, and tests"
 (
     CDPATH= cd -- web
+    CI=true "$DF_CI_NODE" "$DF_CI_COREPACK" pnpm fetch --frozen-lockfile --registry "$npm_config_registry"
     CI=true "$DF_CI_NODE" "$DF_CI_COREPACK" pnpm install --frozen-lockfile --ignore-scripts --registry "$npm_config_registry"
     CI=true "$DF_CI_NODE" "$DF_CI_COREPACK" pnpm --filter @dark-factory/client build
     CI=true "$DF_CI_NODE" "$DF_CI_COREPACK" pnpm --filter @dark-factory/ui build
