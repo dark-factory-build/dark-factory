@@ -308,8 +308,13 @@ func Decide(pull Pull, ops []Operation, answered bool) (Action, string) {
 	switch {
 	case op.Failures >= FailuresBeforeEscalation:
 		return Wait, ""
-	case conflict && !op.Rebased:
-		action, note = Rebase, op.conflict()
+	case !op.Rebased && (conflict || len(pull.Failing) > 0):
+		action = Rebase
+		if conflict {
+			note = op.conflict()
+		} else {
+			note = pull.failing()
+		}
 	case conflict:
 		action, note = SendBack, op.conflict()
 	case len(pull.Failing) > 0:
