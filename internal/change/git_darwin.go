@@ -17,6 +17,7 @@ import (
 	"runtime"
 	"slices"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 	"unicode/utf8"
@@ -1104,6 +1105,14 @@ type gitAuthority struct {
 	hook           gitProcessHook
 }
 
+var worktreeAddLocks sync.Map // repository root -> *sync.Mutex
+
+func worktreeAddLock(repositoryRoot string) *sync.Mutex {
+	lock := &sync.Mutex{}
+	actual, _ := worktreeAddLocks.LoadOrStore(repositoryRoot, lock)
+	return actual.(*sync.Mutex)
+}
+
 func openGitAuthority(gitExecutable, repositoryRoot string, expected RepositoryIdentity, hook gitProcessHook, trusted bool) (*gitAuthority, error) {
 	repository, err := checkpointRepository(repositoryRoot, expected)
 	if err != nil {
@@ -1658,6 +1667,9 @@ func adoptWorktree(ctx context.Context, gitExecutable, repositoryRoot string, ex
 // in one repository contend for Git's own locks, so a refused add is retried
 // only when Git privately identifies a transient lock failure.
 func (a *gitAuthority) addWorktree(ctx context.Context, path, branch string, base ObjectID, staging bool) error {
+	lock := worktreeAddLock(a.repositoryRoot)
+	lock.Lock()
+	defer lock.Unlock()
 	arguments := []string{"-C", a.repositoryRoot, "-c", "core.hooksPath=/dev/null", "worktree", "add", "--quiet"}
 	if staging {
 		arguments = append(arguments, "--no-checkout", "--force")
