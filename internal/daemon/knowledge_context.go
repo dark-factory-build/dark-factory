@@ -12,12 +12,10 @@ import (
 	"github.com/dark-factory-build/dark-factory/internal/change"
 	"github.com/dark-factory-build/dark-factory/internal/kernel"
 	"github.com/dark-factory-build/dark-factory/internal/opgraph"
-	"github.com/dark-factory-build/dark-factory/internal/provider"
 	"github.com/dark-factory-build/dark-factory/internal/runner"
 )
 
 const knowledgeContextBytes = 3072
-const knowledgeTaskFetchInstruction = `Before doing anything else, use the Factory attempt tool with argv ["attempt","task"] to read the complete task and its pinned project knowledge.`
 
 // Knowledge is quoted data. It cannot alter the run's capabilities, task,
 // review source receipt, or standing instructions.
@@ -253,6 +251,16 @@ func (daemon *Daemon) knowledgeContext(ctx context.Context, run kernel.Run, task
 		}
 		if ok && state.Selection != nil {
 			head = hex.EncodeToString(state.Selection.Commit().Bytes())
+		} else if ok {
+			// Unselected at launch: runNext starts it at its open PR head, else the integrated revision.
+			pull, open, e := daemon.store.TaskOpenPullRequest(ctx, run.TaskID)
+			if e != nil {
+				return nil, e
+			}
+			head = strings.ToLower(pull.Head)
+			if !open {
+				head, _ = daemon.repositoryRevision(ctx, repository)
+			}
 		}
 	}
 	items := make([]knowledgeContextItem, 0, len(selected))
@@ -420,22 +428,19 @@ func (daemon *Daemon) prepareKnowledgeTask(ctx context.Context, run kernel.Run, 
 		}
 	}
 	combined := append(append(append([]byte(nil), task...), manifest...), knowledge...)
-	if launch && run.Provider != kernel.ProviderShell && (len(items) > 0 || len(manifest) > 0) {
-		// Both coding providers retrieve the frozen context through the same
-		// authenticated response boundary; a launch pointer is not a supply receipt.
-		if _, _, err := provider.PrepareTask(run.Provider, []byte(knowledgeTaskFetchInstruction)); err != nil {
-			return nil, nil, err
-		}
-		return []byte(knowledgeTaskFetchInstruction), nil, nil
-	}
 	if launch {
-		framed, e := providerTaskForContinuationLaunch(run.Provider, combined, run.ContinuationContexts)
-		if e != nil && len(items) == 0 {
+		candidates := [][]byte{combined}
+		if len(items) == 0 {
 			// The always-present Library line never displaces a task that fits alone.
-			framed, e = providerTaskForContinuationLaunch(run.Provider, combined[:len(task)+len(manifest)], run.ContinuationContexts)
+			candidates = append(candidates, combined[:len(task)+len(manifest)])
 		}
+		framed, e := providerTaskForContinuationLaunch(run.Provider, run.ContinuationContexts, candidates...)
 		if e != nil {
 			return nil, nil, e
+		}
+		if string(framed) == taskFetchInstruction {
+			// A launch pointer is not a supply receipt; attempt task records it.
+			accesses = nil
 		}
 		combined = framed
 	} else {
@@ -487,9 +492,6 @@ func (daemon *Daemon) prepareKnowledgeTask(ctx context.Context, run kernel.Run, 
 				combined = append(combined, []byte(notice)...)
 			}
 		}
-	}
-	if launch {
-		accesses = nil
 	}
 	return combined, accesses, nil
 }

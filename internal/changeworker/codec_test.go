@@ -100,24 +100,24 @@ func TestOrchestratorConfigCarriesNoChange(t *testing.T) {
 	}
 }
 
-func TestCodexConfigCarriesNoTaskBytes(t *testing.T) {
+// A native worker carries its exact prompt task, within the native bound.
+func TestCodexConfigCarriesExactPromptTask(t *testing.T) {
 	config := configFixture(t)
 	config.Provider = kernel.ProviderCodex
-	config.ProviderTask = nil
+	config.ProviderTask = []byte("private task")
 	encoded, err := EncodeConfig(config)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if bytes.Contains(encoded, []byte("printf exact")) {
-		t.Fatal("Codex worker config contains private task text")
-	}
 	got, err := DecodeConfig(encoded)
-	if err != nil || got.Provider != kernel.ProviderCodex || len(got.ProviderTask) != 0 {
-		t.Fatalf("Codex config round trip = provider %s task %d bytes, err %v", got.Provider, len(got.ProviderTask), err)
+	if err != nil || got.Provider != kernel.ProviderCodex || string(got.ProviderTask) != "private task" {
+		t.Fatalf("Codex config round trip = provider %s task %q, err %v", got.Provider, got.ProviderTask, err)
 	}
-	config.ProviderTask = []byte("private task")
-	if _, err := EncodeConfig(config); !errors.Is(err, ErrInvalidContract) {
-		t.Fatalf("Codex worker accepted task bytes: %v", err)
+	for _, task := range [][]byte{nil, make([]byte, runner.MaxNativeTaskBytes+1)} {
+		config.ProviderTask = task
+		if _, err := EncodeConfig(config); !errors.Is(err, ErrInvalidContract) {
+			t.Fatalf("Codex worker accepted a %d-byte task: %v", len(task), err)
+		}
 	}
 }
 

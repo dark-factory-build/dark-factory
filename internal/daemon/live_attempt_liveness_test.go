@@ -105,32 +105,36 @@ func TestRunLivenessFailsAttemptThatNeverBecomesReady(t *testing.T) {
 	}
 }
 
-// A Claude or Codex run must call the attempt API first, so a TUI that paints
-// without one is stuck and is requeued as never started at the short budget.
+// A native launch given only taskFetchInstruction must call the attempt API
+// first, so a TUI that paints without one is stuck and is requeued as never
+// started at the short budget. A launch whose prompt holds its task starts on
+// its first output, so an attempt API it cannot yet reach does not fail it.
 func TestRunLivenessFailsCallFirstAttemptThatPaintsWithoutACall(t *testing.T) {
-	fixture := newDispatchFixture(t)
-	active := prepareActiveAttempt(t, fixture, 211)
-	ctx := context.Background()
-	session, found, err := fixture.store.TerminalSessionForRun(ctx, active.run.ID)
-	if err != nil || !found {
-		t.Fatalf("terminal session: found=%v err=%v", found, err)
-	}
-	started := time.UnixMilli(10_000)
-	attempt := newLiveAttempt(fixture.daemon, active.run.ID, session.ID, nil)
-	attempt.callFirst = true
-	attempt.markStarted(started)
-	attempt.markTerminalOutput(started.Add(firstOutputBudget-time.Second), 900_000)
-	if err := fixture.daemon.registerLiveAttempt(attempt); err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { fixture.daemon.unregisterLiveAttempt(active.run.ID, attempt) })
-	fixture.daemon.livenessClock = func() time.Time { return started.Add(firstOutputBudget) }
-	if err := fixture.daemon.enforceRunLiveness(ctx, SupervisorSpec{}); err != nil {
-		t.Fatal(err)
-	}
-	run, _, _ := fixture.store.Run(ctx, active.run.ID)
-	if run.Phase != kernel.RunFinalizing || run.Proposal == nil || run.Proposal.Detail() != kernel.NeverStartedRunDetail {
-		t.Fatalf("painting run without an attempt call = %+v", run)
+	for i, callFirst := range []bool{true, false} {
+		fixture := newDispatchFixture(t)
+		active := prepareActiveAttempt(t, fixture, byte(211+i))
+		ctx := context.Background()
+		session, found, err := fixture.store.TerminalSessionForRun(ctx, active.run.ID)
+		if err != nil || !found {
+			t.Fatalf("terminal session: found=%v err=%v", found, err)
+		}
+		started := time.UnixMilli(10_000)
+		attempt := newLiveAttempt(fixture.daemon, active.run.ID, session.ID, nil)
+		attempt.callFirst = callFirst
+		attempt.markStarted(started)
+		attempt.markTerminalOutput(started.Add(firstOutputBudget-time.Second), 900_000)
+		if err := fixture.daemon.registerLiveAttempt(attempt); err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { fixture.daemon.unregisterLiveAttempt(active.run.ID, attempt) })
+		fixture.daemon.livenessClock = func() time.Time { return started.Add(firstOutputBudget) }
+		if err := fixture.daemon.enforceRunLiveness(ctx, SupervisorSpec{}); err != nil {
+			t.Fatal(err)
+		}
+		run, _, _ := fixture.store.Run(ctx, active.run.ID)
+		if neverStarted := run.Phase == kernel.RunFinalizing && run.Proposal != nil && run.Proposal.Detail() == kernel.NeverStartedRunDetail; neverStarted != callFirst || !callFirst && run.Phase != kernel.RunRunning {
+			t.Fatalf("callFirst=%v painting run without an attempt call = %+v", callFirst, run)
+		}
 	}
 }
 

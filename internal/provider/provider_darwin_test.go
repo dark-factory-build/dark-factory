@@ -422,7 +422,7 @@ func TestBuildOrchestratorClaudeIsGivenTheMaintainer(t *testing.T) {
 		t.Fatal(err)
 	}
 	wantWorkerArgv := append([]string{"/usr/bin/true", "--permission-mode", "dontAsk", "--setting-sources", ""}, wantClaudeWorkerSessionFlag(t, workerRequest)...)
-	wantWorkerArgv = append(wantWorkerArgv, "--strict-mcp-config", "--agents", claudeSweepAgent, "--settings", wantClaudeSettings(t, workerRequest, "factory_attempt"), "--mcp-config", wantClaudeServers(t, workerRequest, nil), "--", bootstrapPromptFor(workerRequest, "factory_attempt"))
+	wantWorkerArgv = append(wantWorkerArgv, "--strict-mcp-config", "--agents", claudeSweepAgent, "--settings", wantClaudeSettings(t, workerRequest, "factory_attempt"), "--mcp-config", wantClaudeServers(t, workerRequest, nil), "--", bootstrapPromptFor(workerRequest, "factory_attempt", false))
 	if !reflect.DeepEqual(worker.Argv(), wantWorkerArgv) {
 		t.Fatalf("worker argv = %q, want %q", worker.Argv(), wantWorkerArgv)
 	}
@@ -441,7 +441,7 @@ func TestBuildOrchestratorClaudeIsGivenTheMaintainer(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := []string{"/usr/bin/true", "--permission-mode", "dontAsk", "--setting-sources", "", "--strict-mcp-config", "--settings", wantClaudeSettings(t, unconnected, "factory_attempt"), "--mcp-config", wantClaudeServers(t, unconnected, nil), "--", bootstrapPromptFor(unconnected, "factory_attempt")}
+	want := []string{"/usr/bin/true", "--permission-mode", "dontAsk", "--setting-sources", "", "--strict-mcp-config", "--settings", wantClaudeSettings(t, unconnected, "factory_attempt"), "--mcp-config", wantClaudeServers(t, unconnected, nil), "--", bootstrapPromptFor(unconnected, "factory_attempt", false)}
 	if !reflect.DeepEqual(launch.Argv(), want) {
 		t.Fatalf("unconnected orchestrator argv = %q, want %q", launch.Argv(), want)
 	}
@@ -450,7 +450,7 @@ func TestBuildOrchestratorClaudeIsGivenTheMaintainer(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	want = []string{"/usr/bin/true", "--permission-mode", "dontAsk", "--setting-sources", "", "--strict-mcp-config", "--settings", wantClaudeSettings(t, overseerRequest, "factory_attempt", "maintainer"), "--mcp-config", wantClaudeServers(t, overseerRequest, map[string]any{"maintainer": map[string]any{"command": runtime.factoryctl, "args": []string{"attempt", "maintainer-mcp"}}}), "--", bootstrapPromptFor(overseerRequest, "factory_attempt")}
+	want = []string{"/usr/bin/true", "--permission-mode", "dontAsk", "--setting-sources", "", "--strict-mcp-config", "--settings", wantClaudeSettings(t, overseerRequest, "factory_attempt", "maintainer"), "--mcp-config", wantClaudeServers(t, overseerRequest, map[string]any{"maintainer": map[string]any{"command": runtime.factoryctl, "args": []string{"attempt", "maintainer-mcp"}}}), "--", bootstrapPromptFor(overseerRequest, "factory_attempt", false)}
 	if !reflect.DeepEqual(launch.Argv(), want) {
 		t.Fatalf("orchestrator argv = %q, want %q", launch.Argv(), want)
 	}
@@ -608,10 +608,10 @@ func TestBuildNativeReturnsExactArgvEnvironmentAndSafeStartupTask(t *testing.T) 
 		wantArgv     []string
 	}{
 		{
-			kind: kernel.ProviderClaudeCode, model: "claude-model", effort: "max", wantDelivery: TaskDeliveryAttemptAPI,
+			kind: kernel.ProviderClaudeCode, model: "claude-model", effort: "max", wantDelivery: TaskDeliveryPrompt,
 			wantArgv: []string{"/usr/bin/true", "--permission-mode", "dontAsk", "--setting-sources", "", "--model", "claude-model", "--effort", "max", "--strict-mcp-config", "--agents", claudeSweepAgent},
 		},
-		{kind: kernel.ProviderCodex, model: "codex-model", effort: "xhigh", wantDelivery: TaskDeliveryAttemptAPI,
+		{kind: kernel.ProviderCodex, model: "codex-model", effort: "xhigh", wantDelivery: TaskDeliveryPrompt,
 			wantArgv: []string{"/usr/bin/true", "-c", `hooks.Stop=[{hooks=[{type="command",command="<factoryctl>"}]}]`, "--strict-config", "--dangerously-bypass-hook-trust", "--no-alt-screen", "-c", `tui.resume_cwd="current"`, "-c", "check_for_update_on_startup=false", "-c", "tool_output_token_limit=32768", "-c", "projects=<working-directory>", "--model", "codex-model", "-c", `model_reasoning_effort="xhigh"`, bootstrapPrompt},
 		},
 	}
@@ -620,7 +620,7 @@ func TestBuildNativeReturnsExactArgvEnvironmentAndSafeStartupTask(t *testing.T) 
 			const privateTaskSentinel = "PRIVATE_TASK_SENTINEL"
 			task := []byte(privateTaskSentinel + "\nline 1\n\"quoted\"\x1b café 😀\u007f\u0085")
 			installation, runtime, _ := nativeFixture(t, test.kind)
-			request := requestFor(t, test.kind, installation, runtime, test.model, test.effort)
+			request := requestFor(t, test.kind, installation, runtime, test.model, test.effort).WithTask(task)
 			launch, err := Build(request)
 			if err != nil {
 				t.Fatal(err)
@@ -631,7 +631,7 @@ func TestBuildNativeReturnsExactArgvEnvironmentAndSafeStartupTask(t *testing.T) 
 			wantArgv := test.wantArgv
 			if test.kind == kernel.ProviderClaudeCode {
 				wantArgv = slices.Insert(slices.Clone(wantArgv), 5, wantClaudeWorkerSessionFlag(t, request)...)
-				wantArgv = append(wantArgv, "--settings", wantClaudeSettings(t, request, "factory_attempt"), "--mcp-config", wantClaudeServers(t, request, nil), "--", bootstrapPrompt)
+				wantArgv = append(wantArgv, "--settings", wantClaudeSettings(t, request, "factory_attempt"), "--mcp-config", wantClaudeServers(t, request, nil), "--", bootstrapPromptFor(request, "factory_attempt", false))
 			}
 			if test.kind == kernel.ProviderCodex {
 				stop := "'" + strings.ReplaceAll(runtime.factoryctl, "'", `'\''`) + "' attempt turn-complete"
@@ -641,7 +641,7 @@ func TestBuildNativeReturnsExactArgvEnvironmentAndSafeStartupTask(t *testing.T) 
 					t.Fatal(err)
 				}
 				wantArgv = slices.Replace(wantArgv, 12, 14, "-c", codexUntrustedProjectConfig(request.workingDirectory), "-c", "default_permissions="+tomlBasicString(codexPermissionName(request.runtime)), "-c", `approval_policy="never"`, "-c", permissions, "--disable", "computer_use", "--disable", "browser_use", "--disable", "plugins", "-c", "mcp_servers."+codexAttemptServerName(request.runtime)+"={command="+tomlBasicString(runtime.factoryctl)+`,args=["attempt","mcp"],env_vars=["DARK_FACTORY_SOCKET","DARK_FACTORY_ATTEMPT_TOKEN_FILE","DARK_FACTORY_OVERSEER_SESSION_RESUMED"],enabled=true,required=true,tools={factory={approval_mode="approve"}}}`)
-				wantArgv[len(wantArgv)-1] = bootstrapPromptFor(request, codexAttemptServerName(request.runtime))
+				wantArgv[len(wantArgv)-1] = bootstrapPromptFor(request, codexAttemptServerName(request.runtime), false)
 			}
 			if got := launch.Argv(); !slices.Equal(got, wantArgv) {
 				t.Fatalf("argv=%q, want %q", got, wantArgv)
@@ -677,9 +677,14 @@ func TestBuildNativeReturnsExactArgvEnvironmentAndSafeStartupTask(t *testing.T) 
 				}
 			}
 
-			for _, value := range append(launch.Argv(), launch.Environment()...) {
+			// The task is in the prompt exactly once, at its end, and nowhere else.
+			argv := launch.Argv()
+			if prompt := argv[len(argv)-1]; strings.Count(prompt, privateTaskSentinel) != 1 || !strings.HasSuffix(prompt, "\n\nTask:\n"+string(task)) {
+				t.Fatalf("prompt does not end with the exact task once: %q", prompt)
+			}
+			for _, value := range append(argv[:len(argv)-1], launch.Environment()...) {
 				if strings.Contains(value, privateTaskSentinel) {
-					t.Fatalf("private task reached provider argv or environment: %q", value)
+					t.Fatalf("task reached provider argv or environment outside its prompt: %q", value)
 				}
 			}
 			delivery, payload, err := PrepareTask(test.kind, task)
@@ -694,8 +699,8 @@ func TestBuildNativeReturnsExactArgvEnvironmentAndSafeStartupTask(t *testing.T) 
 					t.Fatalf("native provider lacks scoped discovery rule %q", rule)
 				}
 			}
-			if payload != nil {
-				t.Fatalf("task bytes escaped attempt API delivery: %q", payload)
+			if !bytes.Equal(payload, task) {
+				t.Fatalf("prepared prompt task = %q, want %q", payload, task)
 			}
 		})
 	}
@@ -1345,7 +1350,7 @@ func TestTaskValidationUsesDeliverySpecificBound(t *testing.T) {
 	}
 	for _, kind := range []kernel.Provider{kernel.ProviderClaudeCode, kernel.ProviderCodex} {
 		maximum := bytes.Repeat([]byte{'x'}, runner.MaxNativeTaskBytes)
-		if delivery, payload, err := PrepareTask(kind, maximum); err != nil || delivery != TaskDeliveryAttemptAPI || payload != nil {
+		if delivery, payload, err := PrepareTask(kind, maximum); err != nil || delivery != TaskDeliveryPrompt || !bytes.Equal(payload, maximum) {
 			t.Fatalf("%s maximum API task delivery=(%d, %d bytes), error=%v", kind, delivery, len(payload), err)
 		}
 		if _, _, err := PrepareTask(kind, append(maximum, 'x')); !errors.Is(err, ErrInvalid) {
@@ -1556,7 +1561,7 @@ func TestCodexOverseerDiscoversScopedControlsWithoutChangingWorkerTask(t *testin
 	if !strings.Contains(prompt, "factoryd reviews and enqueues every published head") || !strings.Contains(prompt, "never create review tasks for workers") || !strings.Contains(prompt, "never submit a verdict or enqueue yourself") {
 		t.Fatal("overseer lacks factoryd's verdict guidance")
 	}
-	for _, command := range []string{`["attempt","task"]`, "overseer status", "next_offset", "next_text_offset", "worker interrupt", "worker replace", "Maintainer App", "structuredContent", "capability refusal", "causal wake", "Continue actionable supervision", "without idle polling", "only next event is external", "merge queue", "attempt succeed", "30 minutes after admission", "overseer task update --body", "preserve the original acceptance criteria", "Send-back replaces previous feedback", "factoryd publishes that itself", "fully qualified source repository", "close_on_merge", "Refs #N", "external_source_url"} {
+	for _, command := range []string{"overseer status", "next_offset", "next_text_offset", "worker interrupt", "worker replace", "Maintainer App", "structuredContent", "capability refusal", "causal wake", "Continue actionable supervision", "without idle polling", "only next event is external", "merge queue", "attempt succeed", "30 minutes after admission", "overseer task update --body", "preserve the original acceptance criteria", "Send-back replaces previous feedback", "factoryd publishes that itself", "fully qualified source repository", "close_on_merge", "Refs #N", "external_source_url"} {
 		if !strings.Contains(prompt, command) {
 			t.Fatalf("overseer cannot discover %q", command)
 		}
@@ -1564,7 +1569,7 @@ func TestCodexOverseerDiscoversScopedControlsWithoutChangingWorkerTask(t *testin
 	if strings.Contains(prompt, "docs/development/OVERSEER.md") {
 		t.Fatal("overseer requires Dark Factory development documents in a customer checkout")
 	}
-	if overseer.TaskDelivery() != TaskDeliveryAttemptAPI {
+	if overseer.TaskDelivery() != TaskDeliveryPrompt {
 		t.Fatal("overseer stopped reading the exact durable task")
 	}
 }
@@ -2025,7 +2030,7 @@ func TestCodexLaunchGrantsTheRepositoryGitDirectoryByRole(t *testing.T) {
 // Claude and Codex start from one bootstrap prompt, the last argv element,
 // naming only their own attempt server; neither has a task typed into its PTY.
 func TestNativeProvidersShareTheBootstrapPrompt(t *testing.T) {
-	if !strings.Contains(bootstrapPrompt, `argv ["attempt","task"] before doing anything else`) || !strings.Contains(bootstrapPrompt, "including corrections after send-back") || strings.Contains(bootstrapPrompt, "attempt source") || !strings.Contains(bootstrapPrompt, "Never substitute another task or private Change path") || !strings.Contains(bootstrapPrompt, "screenshots are illustrative only and never blocking evidence") || !strings.Contains(bootstrapPrompt, `checks-failed send-back is the exception: CI's failure on the exact head is its premise`) {
+	if !strings.HasPrefix(bootstrapPrompt, `Your exact task follows "Task:" below`) || strings.Contains(bootstrapPrompt, `"attempt","task"`) || !strings.Contains(bootstrapPrompt, "including corrections after send-back") || strings.Contains(bootstrapPrompt, "attempt source") || !strings.Contains(bootstrapPrompt, "Never substitute another task or private Change path") || !strings.Contains(bootstrapPrompt, "screenshots are illustrative only and never blocking evidence") || !strings.Contains(bootstrapPrompt, `checks-failed send-back is the exception: CI's failure on the exact head is its premise`) {
 		t.Fatal("bootstrap prompt loses its task fetch, own-checkout or checks-failed premise instruction")
 	}
 	for _, role := range []kernel.AgentRole{kernel.RoleWorker, kernel.RoleOrchestrator} {
@@ -2034,7 +2039,7 @@ func TestNativeProvidersShareTheBootstrapPrompt(t *testing.T) {
 			installation, runtime, _ := nativeFixture(t, kind)
 			request := roleRequestFor(t, kind, installation, runtime, "", "", role)
 			launch, err := Build(request)
-			if err != nil || launch.TaskDelivery() != TaskDeliveryAttemptAPI {
+			if err != nil || launch.TaskDelivery() != TaskDeliveryPrompt {
 				t.Fatalf("%s %s delivery=%d err=%v", kind, role, launch.TaskDelivery(), err)
 			}
 			argv := launch.Argv()
@@ -2055,7 +2060,7 @@ func TestNativeProvidersShareTheBootstrapPrompt(t *testing.T) {
 func TestBootstrapPromptSettlesMergedLiveObservation(t *testing.T) {
 	installation, runtime, _ := nativeFixture(t, kernel.ProviderCodex)
 	request := roleRequestFor(t, kernel.ProviderCodex, installation, runtime, "", "", kernel.RoleOrchestrator)
-	prompt := bootstrapPromptFor(request, "factory_attempt")
+	prompt := bootstrapPromptFor(request, "factory_attempt", false)
 	if strings.Contains(prompt, "send-back that task at its line's change head") {
 		t.Fatal("bootstrap prompt sends a merged task back for live observation")
 	}
@@ -2069,6 +2074,36 @@ func TestBootstrapPromptSettlesMergedLiveObservation(t *testing.T) {
 		if !strings.Contains(prompt, want) {
 			t.Fatalf("bootstrap prompt lacks %q", want)
 		}
+	}
+}
+
+// The longest launch, a connected overseer with the largest native task,
+// still passes the runner's argv bound, so PrepareTask's acceptance is the
+// only gate a native task meets. A resumed Codex overseer session gets only
+// its causal wake; a fresh one gets the whole task.
+func TestNativePromptCarriesMaximumTaskAndTrimsResumedOverseer(t *testing.T) {
+	for _, kind := range []kernel.Provider{kernel.ProviderClaudeCode, kernel.ProviderCodex} {
+		installation, runtime, _ := nativeFixture(t, kind)
+		request := roleRequestFor(t, kind, installation, runtime.WithCustomerMaintainer(true), "", "", kernel.RoleOrchestrator)
+		launch, err := Build(request.WithTask(bytes.Repeat([]byte{0x7f}, runner.MaxNativeTaskBytes)))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := runner.PrepareCommittedExecSpec(launch.Executable(), launch.Argv(), launch.Environment(), t.TempDir()); err != nil {
+			t.Fatalf("%s maximum prompt refused: %v", kind, err)
+		}
+	}
+	installation, runtime, _ := nativeFixture(t, kernel.ProviderCodex)
+	overseer := roleRequestFor(t, kernel.ProviderCodex, installation, runtime, "", "", kernel.RoleOrchestrator).WithTask([]byte("standing overseer task\n\nFactory causal wake: mode=delta"))
+	if got := bootstrapPromptFor(overseer, "s", true); !strings.HasSuffix(got, "\n\nTask:\nFactory causal wake: mode=delta") || strings.Contains(got, "standing overseer task") {
+		t.Fatalf("resumed overseer prompt = %q", got)
+	}
+	if got := bootstrapPromptFor(overseer, "s", false); !strings.HasSuffix(got, "\n\nTask:\nstanding overseer task\n\nFactory causal wake: mode=delta") {
+		t.Fatalf("fresh overseer prompt = %q", got)
+	}
+	worker := roleRequestFor(t, kernel.ProviderCodex, installation, runtime, "", "", kernel.RoleWorker).WithTask([]byte("work\n\nFactory causal wake: x"))
+	if got := bootstrapPromptFor(worker, "s", true); !strings.HasSuffix(got, "\n\nTask:\nwork\n\nFactory causal wake: x") {
+		t.Fatalf("resumed worker prompt lost its task: %q", got)
 	}
 }
 

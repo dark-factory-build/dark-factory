@@ -407,18 +407,20 @@ Change is a path the CLI has never seen, and without the record the session
 would stop at that dialog instead of reading its startup instruction.
 
 Native providers do not inherit the shell task descriptor. Claude and Codex
-start from the same fixed, non-secret positional instruction to run
-`factoryctl attempt task` first through their factory tool; Claude's follows
-`--` because `--mcp-config` takes several values. That call authenticates with
-the attempt's private credential and returns the exact effective task as
-terminal-safe JSON; body wins, with title used only when a native task has no
-body. Task text is absent from argv, environment, PTY input, and Change-worker
-configuration, and is bounded to 8 KiB so a tool-result budget (Codex's is
-configured at 32,768 tokens) cannot truncate it even under worst-case
-control-character escaping. The attempt API serves it only while that exact
-run is `running`. That first call is also each run's startup proof: a native
-run with no attempt API call within three minutes is requeued as never
-started, whatever its TUI painted. A daemon-delivered human reply or overseer
+start from one positional prompt: the same fixed instructions, then `Task:` and
+the exact effective task with its attachments, project knowledge and
+continuation context; body wins, with title used only when a native task has no
+body. Claude's prompt follows `--` because `--mcp-config` takes several values.
+A resumed Codex overseer session gets only the task's causal wake, since its
+session already holds the standing task. The task is bounded to 8 KiB, and is
+absent from the environment and PTY input. When the task with its context does
+not fit, the prompt's task is instead one instruction to run
+`factoryctl attempt task` first through the factory tool, which authenticates
+with the attempt's private credential and returns the complete task as
+terminal-safe JSON while that exact run is `running`; such a run with no
+attempt API call within three minutes is requeued as never started, whatever
+its TUI painted. Any other run starts on its first terminal output, so an
+attempt API it cannot yet reach does not hold it back. A daemon-delivered human reply or overseer
 message reaches Claude and Codex the same way: the text as one write, then
 the runner's own Enter once the output is quiet, so the CLI submits it instead
 of holding it in its input box.

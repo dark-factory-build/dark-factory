@@ -158,12 +158,15 @@ func runProvider(ctx context.Context) (resultErr error) {
 			return err
 		}
 	}
-	launch, err := provider.Build(request)
+	delivery, program, err := provider.PrepareTask(config.Provider, config.ProviderTask)
 	if err != nil {
 		_ = cwd.Close()
 		return err
 	}
-	delivery, program, err := prepareProviderTask(config.Provider, config.ProviderTask)
+	if delivery == provider.TaskDeliveryPrompt {
+		request = request.WithTask(program)
+	}
+	launch, err := provider.Build(request)
 	if err != nil {
 		_ = cwd.Close()
 		return err
@@ -201,9 +204,6 @@ func runProvider(ctx context.Context) (resultErr error) {
 			_ = cwd.Close()
 			return err
 		}
-	} else if delivery != provider.TaskDeliveryAttemptAPI {
-		_ = cwd.Close()
-		return provider.ErrInvalid
 	}
 	clear(program)
 	taskOpen := task != nil
@@ -215,8 +215,7 @@ func runProvider(ctx context.Context) (resultErr error) {
 	// Retain the descriptor-bound runtime authority until exec. Its members are
 	// CLOEXEC, so a successful provider image receives none of them; a failed
 	// exec returns through the ordinary defer and closes them. Shell's task is
-	// unlinked and read-only; the attempt runner separately owns Claude startup,
-	// while Codex receives no task-bearing descriptor.
+	// unlinked and read-only; Claude and Codex receive no task-bearing descriptor.
 	if err := authority.verify(ctx); err != nil {
 		_ = cwd.Close()
 		return fmt.Errorf("runtime authority verification: %w", err)

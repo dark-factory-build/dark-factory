@@ -413,30 +413,6 @@ func (daemon *Daemon) runNext(ctx context.Context, spec SupervisorSpec) (resultR
 		return daemon.failRunBeforeRuntime(daemon.cleanupCtx, run, keys.resources.RuntimeRoot, kernel.FailureInternal, err)
 	}
 	rawProviderTask = []byte(instruction)
-	rawProviderTask, _, err = daemon.prepareKnowledgeTask(ctx, run, rawProviderTask, true)
-	if err != nil {
-		return daemon.failRunBeforeRuntime(daemon.cleanupCtx, run, keys.resources.RuntimeRoot, kernel.FailureSpawn, err)
-	}
-	if retainedConflict != nil {
-		context := retainedConflictContext(changeState, retainedConflict)
-		rawProviderTask = append(rawProviderTask, []byte(context)...)
-		daemon.retainedConflictContexts.Store(run.ID, context)
-	}
-	delivery, preparedTask, err := provider.PrepareTask(run.Provider, rawProviderTask)
-	if err != nil {
-		return daemon.failRunBeforeRuntime(daemon.cleanupCtx, run, keys.resources.RuntimeRoot, kernel.FailureSpawn, err)
-	}
-	var providerTask []byte
-	switch delivery {
-	case provider.TaskDeliveryFD11:
-		providerTask = preparedTask
-	case provider.TaskDeliveryAttemptAPI:
-		if len(preparedTask) != 0 {
-			return daemon.failRunBeforeRuntime(daemon.cleanupCtx, run, keys.resources.RuntimeRoot, kernel.FailureSpawn, provider.ErrInvalid)
-		}
-	default:
-		return daemon.failRunBeforeRuntime(daemon.cleanupCtx, run, keys.resources.RuntimeRoot, kernel.FailureSpawn, provider.ErrInvalid)
-	}
 	// A fresh Change for a task published on an open pull request (a repair,
 	// or work whose Change was reclaimed) starts at that pull request's exact
 	// observed head, never at the base it would otherwise revert to. An empty
@@ -468,6 +444,20 @@ func (daemon *Daemon) runNext(ctx context.Context, spec SupervisorSpec) (resultR
 	}
 	repositoryGitIdentity, _ = change.NewRepositoryIdentity(source.GitDevice, source.GitInode)
 	repositoryOriginDigest = source.OriginDigest
+	if retainedConflict != nil {
+		context := retainedConflictContext(changeState, retainedConflict)
+		rawProviderTask = append(rawProviderTask, []byte(context)...)
+		daemon.retainedConflictContexts.Store(run.ID, context)
+	}
+	// Reads the bound source identity above; one size decision covers conflict context.
+	rawProviderTask, suppliedKnowledge, err := daemon.prepareKnowledgeTask(ctx, run, rawProviderTask, true)
+	if err != nil {
+		return daemon.failRunBeforeRuntime(daemon.cleanupCtx, run, keys.resources.RuntimeRoot, kernel.FailureSpawn, err)
+	}
+	_, providerTask, err := provider.PrepareTask(run.Provider, rawProviderTask)
+	if err != nil {
+		return daemon.failRunBeforeRuntime(daemon.cleanupCtx, run, keys.resources.RuntimeRoot, kernel.FailureSpawn, err)
+	}
 	// The repository's Git directory holds every Change worktree's refs and
 	// commits; a run that cannot resolve it has no source to work in. CI is an
 	// optional execution capability on top: an unavailable or unsafe lease
@@ -835,11 +825,14 @@ func (daemon *Daemon) runNext(ctx context.Context, spec SupervisorSpec) (resultR
 	if err != nil {
 		return daemon.failRun(run, kernel.FailureActivation, err)
 	}
+	if err := daemon.store.RecordSuppliedContentForAttempt(ctx, digest, suppliedKnowledge, at); err != nil {
+		return daemon.failRun(run, kernel.FailureInternal, err)
+	}
 	// Register the owner before provider release. The owner is not attachable
 	// until it observes TerminalReady, but it already owns the controller and
 	// will synchronously converge it if any later step fails.
 	live := newLiveAttempt(daemon, run.ID, session.ID, controller)
-	live.callFirst = run.Provider != kernel.ProviderShell
+	live.callFirst = string(providerTask) == taskFetchInstruction
 	if worker && changeState.AvailableAt != nil && run.RunningAt != nil {
 		live.agentID, live.changeID = run.AgentID, changeState.ID
 		live.pathsSince = *changeState.AvailableAt

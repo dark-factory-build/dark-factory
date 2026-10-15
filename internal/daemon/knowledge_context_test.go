@@ -3,6 +3,7 @@ package daemon
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"github.com/dark-factory-build/dark-factory/internal/change"
 	"os"
@@ -218,12 +219,12 @@ func TestKnowledgeFallbackDoesNotRecordOmittedSupplies(t *testing.T) {
 	active := prepareActiveAttemptInProjectWithProvider(t, f, 81, testID(81), "orchestrator", "claude_code")
 	lesson := seedContextKnowledge(t, f, active.run.ProjectID, 201, kernel.ContentLesson, kernel.KnowledgeMetadata{Status: "tentative", Evidence: []string{"source"}}, "a useful lesson")
 	task := bytes.Repeat([]byte{'t'}, runner.MaxProviderTaskBytes)
-	launch, _, err := f.daemon.prepareKnowledgeTask(context.Background(), active.run, task, true)
+	launch, supplied, err := f.daemon.prepareKnowledgeTask(context.Background(), active.run, task, true)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if string(launch) != knowledgeTaskFetchInstruction {
-		t.Fatalf("oversized task lost fetch fallback: %q", knowledgeTextPrefix(string(launch), 100))
+	if string(launch) != taskFetchInstruction || len(supplied) != 0 {
+		t.Fatalf("oversized task lost fetch fallback: %q, %d receipts", knowledgeTextPrefix(string(launch), 100), len(supplied))
 	}
 	accesses, err := contentAccesses(context.Background(), f.store, active.run.ProjectID, kernel.ContentAccess{ContentID: lesson.ID, ContentRevision: lesson.Revision})
 	if err != nil {
@@ -233,6 +234,111 @@ func TestKnowledgeFallbackDoesNotRecordOmittedSupplies(t *testing.T) {
 		if a.Kind == "supplied" {
 			t.Fatal("fallback recorded omitted knowledge")
 		}
+	}
+}
+
+// An ordinary native launch carries its task and knowledge in the prompt and
+// returns the supply receipts the supervisor records at activation.
+func TestKnowledgeLaunchCarriesTaskAndKnowledge(t *testing.T) {
+	f := newDispatchFixture(t)
+	active := prepareActiveAttemptInProjectWithProvider(t, f, 82, testID(82), "orchestrator", "codex")
+	lesson := seedContextKnowledge(t, f, active.run.ProjectID, 202, kernel.ContentLesson, kernel.KnowledgeMetadata{Status: "tentative", Evidence: []string{"source"}}, "a useful lesson")
+	launch, supplied, err := f.daemon.prepareKnowledgeTask(context.Background(), active.run, []byte("do the useful thing"), true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.HasPrefix(launch, []byte("do the useful thing")) || !bytes.Contains(launch, []byte(lesson.ID.String())) || len(supplied) == 0 || supplied[0].ContentID != lesson.ID {
+		t.Fatalf("launch = %q, receipts %+v", launch, supplied)
+	}
+}
+
+// A fresh repair Change launches at its open pull request's head, so a lesson
+// pinned to the integrated revision is judged against that head, not the base.
+func TestKnowledgeLaunchJudgesFreshRepairAtItsPullRequestHead(t *testing.T) {
+	f := newDispatchFixture(t)
+	prepareActiveAttemptInProjectWithProvider(t, f, 84, testID(84), "orchestrator", "codex")
+	ctx := context.Background()
+	operator, err := api.NewOperatorClient(f.socket, f.operator)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, invoke := range []func() error{
+		func() error {
+			_, err := operator.CreateAgent(ctx, api.CreateAgentInput{ID: testID(141), ProjectID: testID(84), Name: "worker", Role: "worker", Provider: "codex"})
+			return err
+		},
+		func() error {
+			_, err := operator.EnqueueTask(ctx, api.EnqueueTaskInput{ID: testID(142), ProjectID: testID(84), AssignedAgentID: testID(141), IncarnationID: testID(143), Title: "repair", Body: "repair the guard", Priority: 1})
+			return err
+		},
+	} {
+		done := f.serve(t)
+		if err := invoke(); err != nil {
+			t.Fatal(err)
+		}
+		waitDispatch(t, done)
+	}
+	// Stop at admission: the run's Change is reserved, as when runNext builds its prompt.
+	digestBytes := sha256.Sum256(bytes.Repeat([]byte{150}, 32))
+	digest, err := kernel.AttemptDigestFromBytes(digestBytes[:])
+	if err != nil {
+		t.Fatal(err)
+	}
+	candidate, err := kernel.ChangeIDFromBytes(mustIDBytes(t, testID(159)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	proof, err := kernel.ResultProofDigestFromBytes(bytes.Repeat([]byte{170}, 32))
+	if err != nil {
+		t.Fatal(err)
+	}
+	admission, err := f.store.AdmitNext(ctx, kernel.AdmissionKeys{ResultProofDigest: proof, RunID: mustRunID(t, testID(154)), TerminalSessionID: mustTerminalSessionID(t, testID(164)), AttemptDigest: digest, CandidateChangeID: candidate, RuntimeRoot: filepath.Join(filepath.Dir(f.socket), "runtime-150"), Resources: kernel.AdmissionResourceIDs{RuntimeRoot: mustResourceID(t, testID(155)), RunnerProcess: mustResourceID(t, testID(156)), ProviderProcess: mustResourceID(t, testID(157)), ProviderGroup: mustResourceID(t, testID(158))}}, mustKernelTime(t, 1001))
+	if err != nil || !admission.Admitted() || admission.Run.ChangeID == nil {
+		t.Fatalf("worker admission = %+v, %v", admission, err)
+	}
+	run := *admission.Run
+	if state, ok, err := f.store.Change(ctx, *run.ChangeID); err != nil || !ok || state.Selection != nil {
+		t.Fatalf("worker Change is not fresh: %+v %v", state, err)
+	}
+	repository, found, err := f.store.TaskRepository(ctx, run.TaskID)
+	if err != nil || !found {
+		t.Fatalf("repository: %v", err)
+	}
+	git := func(args ...string) string {
+		t.Helper()
+		out, err := exec.Command(change.TrustedGitExecutable, append([]string{"-C", repository.Root}, args...)...).CombinedOutput()
+		if err != nil {
+			t.Fatalf("git: %v %s", err, out)
+		}
+		return strings.TrimSpace(string(out))
+	}
+	base := git("rev-parse", "HEAD")
+	lesson := seedContextKnowledge(t, f, run.ProjectID, 204, kernel.ContentLesson, kernel.KnowledgeMetadata{Status: "current", SourceRevision: base, Evidence: []string{"review: base"}}, "The guard holds at the base.")
+	launch := func() []byte {
+		t.Helper()
+		text, _, err := f.daemon.prepareKnowledgeTask(ctx, run, []byte("repair the guard"), true)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return text
+	}
+	if text := launch(); !bytes.Contains(text, []byte("The guard holds at the base.")) {
+		t.Fatalf("fresh Change at the base lost its current lesson: %s", text)
+	}
+	branch := git("symbolic-ref", "--short", "HEAD")
+	git("checkout", "-q", "-b", "repair")
+	if err := os.WriteFile(filepath.Join(repository.Root, "guard.go"), []byte("package guard\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	git("add", ".")
+	git("commit", "-q", "-m", "repair changes the guard")
+	head := git("rev-parse", "HEAD")
+	git("checkout", "-q", branch)
+	if err := f.store.RecordPublication(ctx, run.ProjectID, run.TaskID, "team/repo", kernel.ProductionPullRequest{Number: 7, Title: "Repair", URL: "https://github.com/team/repo/pull/7", Head: head, Branch: "repair", Base: branch, State: "open", Review: kernel.ProductionReview{Head: head, State: "unknown"}}, mustKernelTime(t, 104)); err != nil {
+		t.Fatal(err)
+	}
+	if text := launch(); bytes.Contains(text, []byte("The guard holds at the base.")) || !bytes.Contains(text, []byte(lesson.ID.String())) || !bytes.Contains(text, []byte(`"status":"needs_revalidation"`)) {
+		t.Fatalf("repair launch judged the lesson at the base, not its pull request head: %s", text)
 	}
 }
 

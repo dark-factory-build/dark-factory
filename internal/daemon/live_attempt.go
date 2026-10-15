@@ -30,9 +30,9 @@ const (
 	liveAttemptEffectLimit      = 4 * time.Second
 	stalledRunLivenessThreshold = 10 * time.Minute
 	// firstOutputBudget bounds a run that never started: no attempt API call
-	// (the Claude and Codex bootstrap prompt makes `attempt task` its first
-	// act, so painting a TUI without one is stuck) or, for shell, no terminal
-	// byte. Admission
+	// (a native launch whose prompt is taskFetchInstruction makes `attempt
+	// task` its first act, so painting a TUI without one is stuck) or, for any
+	// other launch, no terminal byte. Admission
 	// to running was 23 s at p99 over 3708 live runs; it is requeued once.
 	firstOutputBudget = 3 * time.Minute
 )
@@ -308,7 +308,7 @@ type liveAttempt struct {
 	usageScanned uint64
 
 	livenessMu           sync.Mutex
-	callFirst            bool // a freshly launched provider's first act is an attempt API call; never set on adoption
+	callFirst            bool // a fresh launch's prompt is taskFetchInstruction, so its first act is an attempt API call; never set on adoption
 	adopted              bool // taken over after a restart: it has already started
 	startedAt            time.Time
 	lastTerminalOutputAt time.Time

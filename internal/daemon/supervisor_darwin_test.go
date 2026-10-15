@@ -172,8 +172,8 @@ func TestCodexContinuationContextPreservesMaximumOriginalTask(t *testing.T) {
 	if err == nil || framed != nil {
 		t.Fatalf("maximum Codex API continuation framing: bytes=%d err=%v", len(framed), err)
 	}
-	launchTask, err := providerTaskForContinuationLaunch(kernel.ProviderCodex, task, contexts)
-	if err != nil || string(launchTask) != continuationTaskFetchInstruction {
+	launchTask, err := providerTaskForContinuationLaunch(kernel.ProviderCodex, contexts, task)
+	if err != nil || string(launchTask) != taskFetchInstruction {
 		t.Fatalf("maximum Codex launch task = %q, %v", launchTask, err)
 	}
 	if _, _, err := provider.PrepareTask(kernel.ProviderCodex, launchTask); err != nil {
@@ -184,13 +184,20 @@ func TestCodexContinuationContextPreservesMaximumOriginalTask(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	got, err := providerTaskForContinuationLaunch(kernel.ProviderClaudeCode, short, contexts)
+	got, err := providerTaskForContinuationLaunch(kernel.ProviderClaudeCode, contexts, short)
 	if err != nil || !bytes.Equal(got, want) {
 		t.Fatalf("short native continuation changed: %q, %v", got, err)
 	}
-	shell, err := providerTaskForContinuationLaunch(kernel.ProviderShell, []byte("printf ok"), contexts)
+	shell, err := providerTaskForContinuationLaunch(kernel.ProviderShell, contexts, []byte("printf ok"))
 	if err != nil || !bytes.Contains(shell, []byte("# Factory continuation context:")) || !bytes.Contains(shell, []byte("# condition=")) {
 		t.Fatalf("shell continuation comments = %q, %v", shell, err)
+	}
+	// Knowledge can overflow a fresh native launch too; shell has no pointer.
+	if got, err := providerTaskForContinuationLaunch(kernel.ProviderCodex, nil, append(task, 'x')); err != nil || string(got) != taskFetchInstruction {
+		t.Fatalf("oversized fresh native launch = %q, %v", got, err)
+	}
+	if got, err := providerTaskForContinuationLaunch(kernel.ProviderShell, nil, make([]byte, runner.MaxProviderTaskBytes+1)); err == nil {
+		t.Fatalf("oversized shell launch = %d bytes", len(got))
 	}
 }
 
@@ -220,12 +227,17 @@ func runSupervisorCodexFixture() error {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	task, err := client.Task(ctx)
-	if err != nil {
-		return err
+	// The task ends the prompt; only the oversized pointer sends it to attempt task.
+	_, task, _ := strings.Cut(os.Args[len(os.Args)-1], "\n\nTask:\n")
+	if task == taskFetchInstruction {
+		fetched, err := client.Task(ctx)
+		if err != nil {
+			return err
+		}
+		task = fetched.Task
 	}
 	// The Library line follows every task; fixture directives precede it.
-	directive, _, _ := strings.Cut(task.Task, "\n\nProject knowledge")
+	directive, _, _ := strings.Cut(task, "\n\nProject knowledge")
 	if directive == "capacity" {
 		// Codex's capacity warning, glyph and message styled apart; the real
 		// CLI then idles at its prompt.
@@ -233,7 +245,7 @@ func runSupervisorCodexFixture() error {
 		time.Sleep(30 * time.Second)
 		return nil
 	}
-	if strings.Contains(task.Task, "# Task attachments:") {
+	if strings.Contains(task, "# Task attachments:") {
 		contents, err := os.ReadFile(filepath.Join(os.Getenv("DARK_FACTORY_TASK_ATTACHMENTS"), "attachment-1.png"))
 		if err != nil || !bytes.Equal(contents, []byte{0, 1, 255}) {
 			return fmt.Errorf("provider attachment bytes: %v", err)
@@ -305,9 +317,9 @@ func runSupervisorCodexFixture() error {
 			return fmt.Errorf("source is not a worktree: %w", err)
 		}
 	}
-	for _, value := range append(append([]string(nil), os.Args[1:]...), os.Environ()...) {
-		if strings.Contains(value, task.Task) {
-			return errors.New("private task crossed the Codex argv/environment boundary")
+	for _, value := range append(append([]string(nil), os.Args[1:len(os.Args)-1]...), os.Environ()...) {
+		if strings.Contains(value, task) {
+			return errors.New("private task crossed the Codex argv/environment boundary outside its prompt")
 		}
 	}
 	size, err := unix.IoctlGetWinsize(0, unix.TIOCGWINSZ)
@@ -341,7 +353,7 @@ func runSupervisorCodexFixture() error {
 			}
 		}
 	}
-	_, err = client.Succeed(ctx, fmt.Sprintf("%s\nPTY=%dx%d", task.Task, size.Col, size.Row))
+	_, err = client.Succeed(ctx, fmt.Sprintf("%s\nPTY=%dx%d", task, size.Col, size.Row))
 	return err
 }
 
@@ -530,29 +542,36 @@ func TestSupervisorRunsOrchestratorInItsPrivateHomeWithoutAChange(t *testing.T) 
 }
 
 // runSupervisorClaudeFixture stands in for the Claude CLI: it starts from
-// the bootstrap prompt, the last argv element after "--", with nothing typed
-// into its terminal, and fetches its task through the attempt API as that
-// prompt says. The task never appears in argv.
+// the prompt, the last argv element after "--", with nothing typed into its
+// terminal, and reads its task there without calling attempt task. Its
+// result counts the long task's sentence in that prompt, which it records in
+// HOME/prompt-progress before its first attempt API call.
 func runSupervisorClaudeFixture() error {
-	if len(os.Args) < 2 || os.Args[len(os.Args)-2] != "--" || !strings.Contains(os.Args[len(os.Args)-1], `argv ["attempt","task"] before doing anything else`) {
-		return fmt.Errorf("launch argv lacks the bootstrap prompt")
+	_, task, found := strings.Cut(os.Args[len(os.Args)-1], "\n\nTask:\n")
+	if len(os.Args) < 2 || os.Args[len(os.Args)-2] != "--" || !found {
+		return fmt.Errorf("launch argv lacks the prompt task")
 	}
 	client, err := api.NewAttemptClientFromEnvironment(os.Getenv("DARK_FACTORY_SOCKET"))
 	if err != nil {
 		return err
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
-	task, err := client.Task(ctx)
-	if err != nil {
+	// Only the oversized-launch pointer sends it to attempt task.
+	if task == taskFetchInstruction {
+		fetched, err := client.Task(ctx)
+		if err != nil {
+			return err
+		}
+		task = "fetched " + fetched.Task
+	}
+	result := fmt.Sprint(strings.Count(task, "Codify the operator scripts and the deploy order. "))
+	if strings.HasPrefix(task, "fetched ") && strings.Contains(task, "Retained Change rebase context (bounded):") {
+		result += " fetched with conflict context"
+	}
+	if err := os.WriteFile(filepath.Join(os.Getenv("HOME"), "prompt-progress"), []byte(result), 0o600); err != nil {
 		return err
 	}
-	for _, arg := range os.Args {
-		if strings.Contains(arg, task.Task) {
-			return fmt.Errorf("task reached argv")
-		}
-	}
-	result := "exact"
 	// Stand in for the real CLI's own transcript write, so a later launch's
 	// on-disk check (provider.claudeSessionSelection) can observe this exact
 	// session the same way it would against the real tool. The escaping here
@@ -572,10 +591,9 @@ func runSupervisorClaudeFixture() error {
 	return err
 }
 
-// Claude starts from the bootstrap prompt and fetches a task longer than a
-// terminal line through the attempt API, as Codex does, through the real
-// runner, worker and PTY.
-func TestSupervisorClaudeFetchesALongTaskThroughTheAttemptAPI(t *testing.T) {
+// Claude receives a task longer than a terminal line whole in its prompt, as
+// Codex does, through the real runner, worker and PTY, with no attempt task.
+func TestSupervisorClaudeReceivesALongTaskInItsPrompt(t *testing.T) {
 	task := strings.Repeat("Codify the operator scripts and the deploy order. ", 128)
 	fixture := newSupervisorFixture(t, "unused shell task")
 	if err := replaceSupervisorAgentLaunchControls(fixture.storePath, fixture.agentID, kernel.ProviderClaudeCode, "", ""); err != nil {
@@ -593,10 +611,63 @@ func TestSupervisorClaudeFetchesALongTaskThroughTheAttemptAPI(t *testing.T) {
 		t.Fatalf("RunNext: %v", err)
 	}
 	fixture.assertTerminal(t, run, kernel.OutcomeSucceeded)
-	if run.Proposal == nil || run.Proposal.Result() != "exact" {
+	if run.Proposal == nil || run.Proposal.Result() != "128" {
 		t.Fatalf("Claude receipt = %+v", run.Proposal)
 	}
 	fixture.assertReleased(t, run)
+}
+
+// An ordinary launch does not wait for the attempt API: with the API
+// withheld, Claude starts through the real runner, worker and PTY and makes
+// progress from its prompt task; the run completes once the API returns.
+func TestSupervisorClaudeStartsWhileTheAttemptAPIIsWithheld(t *testing.T) {
+	fixture := newSupervisorFixture(t, "unused shell task")
+	if err := replaceSupervisorAgentLaunchControls(fixture.storePath, fixture.agentID, kernel.ProviderClaudeCode, "", ""); err != nil {
+		t.Fatal(err)
+	}
+	execSupervisorSQL(t, fixture.storePath, `UPDATE tasks SET title = ?, body = ? WHERE id = ?`, "withheld API", strings.Repeat("Codify the operator scripts and the deploy order. ", 3), fixture.taskID.Bytes())
+	tools := filepath.Join(fixture.root, "tools")
+	if err := os.Mkdir(tools, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	copySupervisorExecutable(t, supervisorTestExecutable(t), filepath.Join(tools, "claude"))
+	fixture.spec.ToolPath = tools + ":" + fixture.spec.ToolPath
+	fixture.apiGate.Lock()
+	var release sync.Once
+	t.Cleanup(func() { release.Do(fixture.apiGate.Unlock) })
+	type outcome struct {
+		run kernel.Run
+		err error
+	}
+	done := make(chan outcome, 1)
+	go func() {
+		run, err := fixture.daemon.RunNext(context.Background(), fixture.spec)
+		done <- outcome{run, err}
+	}()
+	progress := filepath.Join(fixture.spec.AccountHome, "prompt-progress")
+	for deadline := time.Now().Add(time.Minute); ; {
+		if body, err := os.ReadFile(progress); err == nil && string(body) == "3" {
+			break
+		}
+		select {
+		case result := <-done:
+			t.Fatalf("run ended while the attempt API was withheld: %+v, %v", result.run, result.err)
+		case <-time.After(20 * time.Millisecond):
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("provider made no prompt-driven progress while the attempt API was withheld")
+		}
+	}
+	release.Do(fixture.apiGate.Unlock)
+	result := <-done
+	if result.err != nil {
+		t.Fatalf("RunNext: %v", result.err)
+	}
+	fixture.assertTerminal(t, result.run, kernel.OutcomeSucceeded)
+	if result.run.Proposal == nil || result.run.Proposal.Result() != "3" {
+		t.Fatalf("Claude receipt = %+v", result.run.Proposal)
+	}
+	fixture.assertReleased(t, result.run)
 }
 
 // A send-back retry re-queues the same task incarnation and reuses the same
@@ -1081,6 +1152,61 @@ func TestSupervisorRetainedRetryDeliversAutostashConflictContext(t *testing.T) {
 		if !strings.Contains(text, want) {
 			t.Fatalf("provider task missing %q: %s", want, text)
 		}
+	}
+}
+
+// A native task that fits its prompt alone but not with retained-conflict
+// context launches with the fetch pointer, and attempt task then supplies the
+// task with that context, instead of the launch failing.
+func TestSupervisorNearLimitNativeRetryWithConflictFallsBackToAttemptTask(t *testing.T) {
+	fixture := newSupervisorFixture(t, "set -eu\nprintf retained > payload.txt\nprintf x >> __WITNESS__\nexit 1\n")
+	first, err := fixture.daemon.RunNext(context.Background(), fixture.spec)
+	if err != nil {
+		t.Fatalf("first RunNext: %v", err)
+	}
+	fixture.assertTerminal(t, first, kernel.OutcomeFailed)
+	repository := filepath.Join(fixture.root, "repository")
+	supervisorGit(t, supervisorNativeGit(t), "-C", repository, "switch", "main")
+	if err := os.WriteFile(filepath.Join(repository, "payload.txt"), []byte("current main\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	supervisorGit(t, supervisorNativeGit(t), "-C", repository, "add", "payload.txt")
+	supervisorGit(t, supervisorNativeGit(t), "-C", repository, "commit", "-q", "-m", "advance main with conflict")
+	binding, found, err := fixture.store.TaskRepository(context.Background(), first.TaskID)
+	if err != nil || !found {
+		t.Fatalf("task repository binding: %v, found=%v", err, found)
+	}
+	registered, found, err := fixture.store.ProjectRepository(context.Background(), binding.ID)
+	if err != nil || !found {
+		t.Fatalf("registered repository: %v, found=%v", err, found)
+	}
+	if _, err := fixture.store.UpdateProjectRepositoryBase(context.Background(), registered.ID, registered.Revision, "refs/heads/main", supervisorTime()); err != nil {
+		t.Fatalf("advance registered repository base: %v", err)
+	}
+	queueSupervisorRetry(t, fixture, first)
+	// 8,000 bytes fits the 8 KiB native bound alone, not with the conflict context.
+	execSupervisorSQL(t, fixture.storePath, `UPDATE tasks SET body = ? WHERE id = ?`, strings.Repeat("Codify the operator scripts and the deploy order. ", 160), fixture.taskID.Bytes())
+	if err := replaceSupervisorAgentLaunchControls(fixture.storePath, fixture.agentID, kernel.ProviderClaudeCode, "", ""); err != nil {
+		t.Fatal(err)
+	}
+	tools := filepath.Join(fixture.root, "tools")
+	if err := os.Mkdir(tools, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	copySupervisorExecutable(t, supervisorTestExecutable(t), filepath.Join(tools, "claude"))
+	fixture.spec.ToolPath = tools + ":" + fixture.spec.ToolPath
+	second, err := fixture.daemon.RunNext(context.Background(), fixture.spec)
+	if err != nil {
+		t.Fatalf("conflicting retained RunNext: %v", err)
+	}
+	// The Change is still mid-rebase, so settlement may refuse the success;
+	// the provider's own record proves it launched and fetched both.
+	fixture.trackRun(second.ID)
+	if second.Phase != kernel.RunTerminal {
+		t.Fatalf("near-limit conflict retry = %+v", second)
+	}
+	if progress, err := os.ReadFile(filepath.Join(fixture.spec.AccountHome, "prompt-progress")); err != nil || string(progress) != "160 fetched with conflict context" {
+		t.Fatalf("near-limit conflict retry provider progress = %q, %v; run %+v", progress, err, second)
 	}
 }
 
@@ -2391,6 +2517,8 @@ func TestReleaseResourceRejectsForeignRunEvenWhenAlreadyReleased(t *testing.T) {
 }
 
 type supervisorFixture struct {
+	// apiGate withholds the local API while a test holds it for writing.
+	apiGate                                      sync.RWMutex
 	root, witness, childReceipt, continueReceipt string
 	base, changeParent, runtimeParentPath        string
 	storePath                                    string
@@ -2547,6 +2675,8 @@ func newSupervisorRoleFixture(t *testing.T, program string, role kernel.AgentRol
 				fixture.serverDone <- acceptErr
 				return
 			}
+			fixture.apiGate.RLock()
+			fixture.apiGate.RUnlock()
 			if handleErr := daemon.HandleConnection(context.Background(), connection); handleErr != nil {
 				fixture.serverDone <- handleErr
 				return

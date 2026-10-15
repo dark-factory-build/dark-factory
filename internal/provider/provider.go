@@ -39,11 +39,10 @@ const (
 	codexConfigDir   = ".codex"
 	npmRegistry      = "https://registry.npmjs.org"
 	pnpmVersion      = "11.19.0"
-	// bootstrapPrompt is both native providers' fixed positional prompt: the
-	// exact task is read through the attempt API, never typed into the PTY.
-	// It names the attempt tool's exact callable name so no run spends a
-	// request listing tools to find it.
-	bootstrapPrompt = `Use the mcp__factory_attempt__factory tool with argv ["attempt","task"] before doing anything else. That is its exact callable name: never list or dump all tools to find it; if it is deferred, load only it with ToolSearch query "select:mcp__factory_attempt__factory". The returned JSON task field is the exact task: complete only that task. When it reports an observed problem, rerun its cited commands or read its cited file:line before editing, and quote each with what you saw in your attempt succeed result; if the problem does not reproduce, end with attempt fail and a detail starting "premise not reproduced:" that quotes them instead. A checks-failed send-back is the exception: CI's failure on the exact head is its premise, so if you cannot reproduce it, report what differs (environment, which tests you ran) and keep working from the CI log lines; never end it "premise not reproduced". Use this tool for every factoryctl attempt or overseer command, passing argv without the executable; shell commands cannot access the attempt API. Peer collaboration is asynchronous: use argv ["attempt","peer","status"] to read or answer task-linked questions, but it grants no task or terminal control. For a stale paged peer status, restart from the first page. Before exiting, report the durable outcome with attempt succeed, block, or fail through this tool. When assigned a writable task checkout, read and edit it directly, including corrections after send-back; never add Git remotes or fetch from the network inside it. Never substitute another task or private Change path. Scope file discovery to the task checkout and private runtime home. Locate tools with command -v and the checkout's documented setup. Search with rg -l or a bounded rg -m before printing matching lines, and never repeat an identical tool call whose result you already have. Never recursively search the user home, Library, Documents, Desktop, Music or Photos for tools or instructions. If a required path is not provided or present, report the missing prerequisite instead of widening the search. In UI review, screenshots are illustrative only and never blocking evidence; judge correctness from render tests and source behavior.`
+	// bootstrapPrompt leads both native providers' positional prompt; the exact
+	// task follows it in the same argument, never typed into the PTY. It names
+	// the attempt tool's exact callable name so no run lists tools to find it.
+	bootstrapPrompt = `Your exact task follows "Task:" below: complete only that task. Use the mcp__factory_attempt__factory tool (its exact callable name: never list or dump all tools to find it; if it is deferred, load only it with ToolSearch query "select:mcp__factory_attempt__factory") for every factoryctl attempt or overseer command. When the task reports an observed problem, rerun its cited commands or read its cited file:line before editing, and quote each with what you saw in your attempt succeed result; if the problem does not reproduce, end with attempt fail and a detail starting "premise not reproduced:" that quotes them instead. A checks-failed send-back is the exception: CI's failure on the exact head is its premise, so if you cannot reproduce it, report what differs (environment, which tests you ran) and keep working from the CI log lines; never end it "premise not reproduced". Pass argv without the executable; shell commands cannot access the attempt API. Peer collaboration is asynchronous: use argv ["attempt","peer","status"] to read or answer task-linked questions, but it grants no task or terminal control. For a stale paged peer status, restart from the first page. Before exiting, report the durable outcome with attempt succeed, block, or fail through this tool. When assigned a writable task checkout, read and edit it directly, including corrections after send-back; never add Git remotes or fetch from the network inside it. Never substitute another task or private Change path. Scope file discovery to the task checkout and private runtime home. Locate tools with command -v and the checkout's documented setup. Search with rg -l or a bounded rg -m before printing matching lines, and never repeat an identical tool call whose result you already have. Never recursively search the user home, Library, Documents, Desktop, Music or Photos for tools or instructions. If a required path is not provided or present, report the missing prerequisite instead of widening the search. In UI review, screenshots are illustrative only and never blocking evidence; judge correctness from render tests and source behavior.`
 )
 
 var (
@@ -312,6 +311,15 @@ type Request struct {
 	// same agent's most recent terminal run (see
 	// kernel.Store.LatestTerminalRuntimeRoot). See WithPreviousWorkingDirectory.
 	previousWorkingDirectory string
+	// task is a native provider's exact PrepareTask bytes, appended to its
+	// positional prompt; see WithTask.
+	task string
+}
+
+// WithTask carries a native provider's prepared task into Build's prompt.
+func (request Request) WithTask(task []byte) Request {
+	request.task = string(task)
+	return request
 }
 
 // WithPreviousWorkingDirectory names the working directory a previous run of
@@ -368,13 +376,12 @@ func (Launch) GoString() string { return "provider.Launch{private}" }
 
 // TaskDelivery is the one task-input channel selected with a provider launch.
 // Shell reads its program from the inherited sealed descriptor. Claude and
-// Codex start from the fixed positional bootstrap prompt and read the exact
-// task through their attempt-scoped local API capability.
+// Codex receive the exact task after the bootstrap in their positional prompt.
 type TaskDelivery uint8
 
 const (
 	TaskDeliveryFD11 TaskDelivery = iota + 1
-	TaskDeliveryAttemptAPI
+	TaskDeliveryPrompt
 )
 
 const (
@@ -691,10 +698,10 @@ func Build(request Request) (Launch, error) {
 			return Launch{}, ErrInvalid
 		}
 		// --mcp-config is variadic, so "--" ends options before the prompt.
-		argv = append(argv, "--mcp-config", string(config), "--", bootstrapPromptFor(request, "factory_attempt"))
+		argv = append(argv, "--mcp-config", string(config), "--", bootstrapPromptFor(request, "factory_attempt", false))
 		return Launch{
 			executable: request.installation.executable, argv: argv,
-			environment: environment, taskDelivery: TaskDeliveryAttemptAPI,
+			environment: environment, taskDelivery: TaskDeliveryPrompt,
 		}, nil
 	case kernel.ProviderCodex:
 		permissions, err := codexPermissions(request)
@@ -707,15 +714,16 @@ func Build(request Request) (Launch, error) {
 		// runtime root every run and could never itself be found again;
 		// previousWorkingDirectory instead names the same agent's most recent
 		// terminal run's cwd, so its standing tasks share one continuing
-		// session. A resumed Codex launch carries its marker through the attempt
-		// MCP server so the daemon can omit repeated standing context; Codex
-		// still assigns its own session id, so there is nothing to derive.
+		// session, so a resumed overseer's prompt omits repeated standing
+		// context; Codex still assigns its own session id, so there is nothing
+		// to derive.
 		discoveryCwd := request.workingDirectory
 		if request.role == kernel.RoleOrchestrator {
 			discoveryCwd = request.previousWorkingDirectory
 		}
 		argv := []string{path}
-		if id, resume := codexSessionSelection(request.runtime, discoveryCwd); resume {
+		id, resume := codexSessionSelection(request.runtime, discoveryCwd)
+		if resume {
 			argv = append(argv, "resume", id)
 		}
 		// Codex's explicit resume can otherwise open its interactive CWD
@@ -757,10 +765,10 @@ func Build(request Request) (Launch, error) {
 		if request.role == kernel.RoleOrchestrator && request.runtime.customerMaintainer {
 			argv = append(argv, "-c", "mcp_servers.dark_factory_maintainer={command="+tomlBasicString(request.runtime.factoryctl)+`,args=["attempt","maintainer-mcp"],env_vars=["DARK_FACTORY_SOCKET","DARK_FACTORY_ATTEMPT_TOKEN_FILE"],enabled=true,required=true,default_tools_approval_mode="approve"}`)
 		}
-		argv = append(argv, bootstrapPromptFor(request, codexAttemptServerName(request.runtime)))
+		argv = append(argv, bootstrapPromptFor(request, codexAttemptServerName(request.runtime), resume))
 		return Launch{
 			executable: request.installation.executable, argv: argv,
-			environment: environment, taskDelivery: TaskDeliveryAttemptAPI,
+			environment: environment, taskDelivery: TaskDeliveryPrompt,
 		}, nil
 	default:
 		return Launch{}, ErrInvalid
@@ -768,16 +776,21 @@ func Build(request Request) (Launch, error) {
 }
 
 // bootstrapPromptFor names the attempt tool as the provider exposes it,
-// mcp__<server>__factory, and adds the overseer's standing instructions for an
-// orchestrator.
-func bootstrapPromptFor(request Request, server string) string {
+// mcp__<server>__factory, adds the overseer's standing instructions for an
+// orchestrator, and ends with the exact task; a resumed overseer session
+// already holds the standing task, so it gets only the causal wake.
+func bootstrapPromptFor(request Request, server string, resumed bool) string {
+	task := request.task
+	if marker := strings.Index(task, "\n\nFactory causal wake:"); resumed && request.role == kernel.RoleOrchestrator && marker >= 0 {
+		task = task[marker+2:]
+	}
 	prompt := strings.ReplaceAll(bootstrapPrompt, "mcp__factory_attempt__factory", "mcp__"+server+"__factory")
 	if request.role == kernel.RoleOrchestrator {
 		publication := "inspect the exact retained Change and publish it through your Maintainer App, except accepted GitHub intake whose issue is in the destination repository and that you delegated to exactly one worker task: factoryd publishes that itself, its pull request and every correction, and escalates once if it cannot. factoryd reviews and enqueues every published head, merges and releases it, and sends findings back to the worker; never submit a verdict or enqueue yourself, never create review tasks for workers; act on a published pull request only when an Escalated: wake names it, or it is superseded. Close a superseded pull request with update_pull_request_body close true and a body naming its successor, then cancel its task. A BLOCK of record stands at its exact head: no fresh review clears it, only a new head does. Use attempt review only for a head with no verdict of record, such as one whose review failed or never ran; a BLOCK you have checked against the source and found wrong goes back once with that evidence, for a change that moves the head. After a second BLOCK on the same task, close its pull request and re-scope the work, split or rewritten as new tasks, instead of sending it back again."
 		prompt += " You are the project overseer. If no causal context is supplied, perform full reconciliation. On a causal wake, act on the summarized items; use overseer status --task only when a line is insufficient, then use the returned current head for subsequent pages; reconcile every fixed-head page only at startup, recovery, omissions, or an event that cannot be resolved narrowly. For a settled worker Change, request attempt source --task TASK_ID and verify its exact task/work/Change receipt; its branch and head_commit are the work, read from git_directory with git, and source_path is that branch's worktree; never reconstruct private paths. Prior work reaches a successor only through a succeeded --prerequisite, task update --retry of the same task when its retained Change is intended, or an attached source-patch content record; never instruct a worker to open another Change's source_path or git_directory. Follow next_offset with --offset and --head; use --task and next_text_offset for complete text. Delegate with overseer task add; supervise with task update, agent pause/resume, worker message, worker interrupt, worker stop, worker replace and human reply. Keep enduring acceptance criteria, prerequisites and owner authority in the complete base instruction using overseer task update --body while the task is queued; preserve the original acceptance criteria. Send-back replaces previous feedback, so use it only for current findings or pointers, not durable requirements. Use the factory tool description for exact flags. Routine supported task routing needs no checkout. Use the registered repository and its configured base for edits and checks; " + publication + " When you publish intake work, carry its source: for GitHub intake the fully qualified source repository and issue number, always with close_on_merge false and Refs #N until the steward records the installed live acceptance signal; for Linear intake its source_url as external_source_url with issue_number 0 and close_on_merge false. Never look up or create a GitHub issue for intake work, and never publish private source details into a public result. A successful Maintainer response's structuredContent is its result: do not repeat the identical read or write after its content acknowledgement; observe an ambiguous write instead. Respect direct operator interventions. A capability refusal is not actionable work: do not retry it until role, capability, or runtime state changes. If the only next event is external — including a pending check, merge queue or merge, configured deployment or release receipt, or human/external owner event — record the concrete pending gate and its exact identity in the durable result, call attempt succeed, and end this task immediately; do not wait or keep the overseer lane occupied, without idle polling; the factory cancels any overseer run " + fmt.Sprint(kernel.MaxOverseerRunSeconds/60) + " minutes after admission. Events remain pending for the next supervision task and existing wake tasks resume observation from that checkpoint. Continue actionable supervision and delivery in this session only while useful in-session work remains. Use attempt request-human only for operator decisions; non-shell overseers yield and release their lane, while shell overseers remain live for the answer."
 		prompt += " For every linked issue, treat merge as unproven: check the installed revision, record the live acceptance signal with a quotation, and close or reopen the issue to match it. A wake line for a succeeded intake task whose PR is merged means it is live: run its issue's Live signal as the issue body states it; if it holds, update_issue state_reason completed with the quoted evidence; if the signal is pending or does not hold but no concrete code defect is identified, record the quoted gap and exact external gate, leave or reopen the issue with the PR link as appropriate, and finish successfully without sending the merged task back; if live observation identifies a concrete code defect, reopen the issue with the observed gap and PR link and create new actionable intake work for the correction, never resurrecting the merged task. A failed or cancelled intake task's line carries its reason: retry it, or record in your result why its issue waits. Any claimed cost, speed, or failure-rate gain must include its rerunnable baseline query."
 	}
-	return prompt
+	return prompt + "\n\nTask:\n" + task
 }
 
 // The provider keeps its account/model configuration, but local commands get
@@ -1075,10 +1088,9 @@ func tomlBasicString(value string) string {
 }
 
 // PrepareTask is also available before executable selection so the daemon can
-// freeze descriptor input where required. Claude and Codex task bytes remain
-// in the daemon and are retrieved through the attempt-scoped API. Build returns
-// the same closed delivery value, which the Change worker must compare before
-// exec.
+// freeze descriptor input where required. Claude and Codex task bytes go to
+// Build through Request.WithTask. Build returns the same closed delivery value,
+// which the Change worker must compare before exec.
 func PrepareTask(kind kernel.Provider, task []byte) (TaskDelivery, []byte, error) {
 	if len(task) == 0 || len(task) > runner.MaxProviderTaskBytes || !utf8.Valid(task) || bytes.IndexByte(task, 0) >= 0 {
 		return 0, nil, ErrInvalid
@@ -1087,13 +1099,14 @@ func PrepareTask(kind kernel.Provider, task []byte) (TaskDelivery, []byte, error
 	case kernel.ProviderShell:
 		return TaskDeliveryFD11, bytes.Clone(task), nil
 	case kernel.ProviderClaudeCode, kernel.ProviderCodex:
-		// The provider reads this value through a tool result. Keep the exact
-		// task comfortably below the model-visible result bound even after JSON
-		// turns every DEL/C1 code point into a six-byte escape.
+		// The prompt and any attempt task result share this bound, which keeps
+		// the task below the model-visible result bound even after JSON turns
+		// every DEL/C1 code point into a six-byte escape, and the whole prompt
+		// within one argument.
 		if len(task) > runner.MaxNativeTaskBytes {
 			return 0, nil, ErrInvalid
 		}
-		return TaskDeliveryAttemptAPI, nil, nil
+		return TaskDeliveryPrompt, bytes.Clone(task), nil
 	default:
 		return 0, nil, ErrInvalid
 	}
