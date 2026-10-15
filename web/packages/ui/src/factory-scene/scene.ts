@@ -158,7 +158,7 @@ export type SceneLayout = Readonly<{
   stations: readonly SceneStation[];
   /** Each unit's area: the footprints of its stations, in lobes where they are apart. Painted only; layout never reads it. */
   regions: readonly SceneRegion[];
-  /** The five fixtures, each in free floor between machines. They depend on the machines alone, never on who is offered or who is here. */
+  /** The four fixtures, each in free floor between machines. They depend on the machines alone, never on who is offered or who is here. */
   fixtures: readonly SceneFixture[];
   /** The fixtures this floor shows. */
   implements: readonly BreakRoomErrand[];
