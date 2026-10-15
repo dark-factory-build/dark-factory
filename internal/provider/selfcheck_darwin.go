@@ -10,6 +10,9 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync"
+	"syscall"
+	"time"
 	"unicode/utf8"
 
 	"github.com/dark-factory-build/dark-factory/internal/gitauthor"
@@ -68,11 +71,23 @@ func (r confinedNativeSelfCheckRunner) Start(ctx context.Context, launch Launch,
 	if err := command.Start(); err != nil {
 		return nil, err
 	}
-	return &confinedNativeSelfCheckProcess{command: command, checkout: checkout, factoryctl: factoryctl.Path(), environment: launch.Environment()}, nil
+	process := &confinedNativeSelfCheckProcess{command: command, done: make(chan error, 1), checkout: checkout, factoryctl: factoryctl.Path(), environment: launch.Environment()}
+	go func() {
+		err := command.Wait()
+		process.waitMu.Lock()
+		process.waitErr = err
+		process.waitMu.Unlock()
+		process.done <- err
+	}()
+	return process, nil
 }
 
 type confinedNativeSelfCheckProcess struct {
 	command     *exec.Cmd
+	done        chan error
+	waitMu      sync.Mutex
+	waitErr     error
+	waitDone    bool
 	checkout    string
 	factoryctl  string
 	environment []string
@@ -81,6 +96,9 @@ type confinedNativeSelfCheckProcess struct {
 func (p *confinedNativeSelfCheckProcess) ReadCheckout(ctx context.Context) error {
 	if p == nil || p.command == nil {
 		return ErrInvalid
+	}
+	if err := p.running(); err != nil {
+		return err
 	}
 	command := exec.CommandContext(ctx, "/usr/bin/git", "-C", p.checkout, "rev-parse", "--show-toplevel")
 	command.Env = []string{"PATH=/usr/bin:/bin", "GIT_CONFIG_NOSYSTEM=1", "GIT_CONFIG_GLOBAL=/dev/null"}
@@ -92,29 +110,60 @@ func (p *confinedNativeSelfCheckProcess) ReadCheckout(ctx context.Context) error
 	if err != nil || filepath.Clean(strings.TrimSpace(string(output))) != filepath.Clean(want) {
 		return fmt.Errorf("%w: self-check checkout is not a real Change", ErrInvalid)
 	}
-	return nil
+	return p.running()
 }
 
 func (p *confinedNativeSelfCheckProcess) CommitChange(ctx context.Context) error {
 	if p == nil || p.command == nil {
 		return ErrInvalid
 	}
+	if err := p.running(); err != nil {
+		return err
+	}
 	if err := p.git(ctx, "-C", p.checkout, "add", "--all"); err != nil {
 		return err
 	}
-	return p.git(ctx, "-C", p.checkout, "-c", "user.name="+gitauthor.AutomationName, "-c", "user.email="+gitauthor.AutomationEmail, "commit", "--allow-empty", "-m", "provider self-check")
+	if err := p.git(ctx, "-C", p.checkout, "-c", "user.name="+gitauthor.AutomationName, "-c", "user.email="+gitauthor.AutomationEmail, "commit", "--allow-empty", "-m", "provider self-check"); err != nil {
+		return err
+	}
+	return p.running()
 }
 
 func (p *confinedNativeSelfCheckProcess) ReachAttemptAPI(ctx context.Context) error {
 	if p == nil || p.command == nil {
 		return ErrInvalid
 	}
+	if err := p.running(); err != nil {
+		return err
+	}
 	command := exec.CommandContext(ctx, p.factoryctl, "attempt", "task")
 	command.Dir = p.checkout
 	command.Env = append([]string(nil), p.environment...)
 	command.Stdout = io.Discard
 	command.Stderr = io.Discard
-	return command.Run()
+	if err := command.Run(); err != nil {
+		return err
+	}
+	return p.running()
+}
+
+func (p *confinedNativeSelfCheckProcess) running() error {
+	if p == nil || p.command == nil || p.command.Process == nil || p.done == nil {
+		return ErrInvalid
+	}
+	select {
+	case err := <-p.done:
+		p.waitMu.Lock()
+		p.waitErr = err
+		p.waitDone = true
+		p.waitMu.Unlock()
+		return fmt.Errorf("native provider self-check provider exited: %w", err)
+	default:
+		if err := p.command.Process.Signal(syscall.Signal(0)); err != nil {
+			return fmt.Errorf("native provider self-check provider exited: %w", err)
+		}
+		return nil
+	}
 }
 
 func (p *confinedNativeSelfCheckProcess) git(ctx context.Context, args ...string) error {
@@ -126,16 +175,31 @@ func (p *confinedNativeSelfCheckProcess) git(ctx context.Context, args ...string
 }
 
 func (p *confinedNativeSelfCheckProcess) Close() error {
-	if p == nil || p.command == nil || p.command.Process == nil {
+	if p == nil || p.command == nil || p.command.Process == nil || p.done == nil {
+		return nil
+	}
+	select {
+	case <-p.done:
+		return nil
+	default:
+	}
+	p.waitMu.Lock()
+	waitDone := p.waitDone
+	p.waitMu.Unlock()
+	if waitDone {
 		return nil
 	}
 	_ = p.command.Process.Kill()
-	err := p.command.Wait()
-	var exitErr *exec.ExitError
-	if errors.As(err, &exitErr) {
-		return nil
+	select {
+	case err := <-p.done:
+		var exitErr *exec.ExitError
+		if errors.As(err, &exitErr) {
+			return nil
+		}
+		return err
+	case <-time.After(time.Second):
+		return errors.New("native provider self-check provider did not exit")
 	}
-	return err
 }
 
 // RunNativeSelfCheck builds the exact native launch, starts it once in the
