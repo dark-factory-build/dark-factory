@@ -127,7 +127,7 @@ func (store *Store) Report(ctx context.Context, project *ProjectID, since, bucke
 		lines = append(lines, fmt.Sprintf("failure %s x%d last=%s %s: repository=%s run=%s %s", age, entry.count, time.UnixMilli(entry.last).UTC().Format("2006-01-02T15:04Z"), entry.signature, entry.repository, entry.url, entry.example))
 	}
 	lines = append(lines, fmt.Sprintf("lessons=%d reads=%d citations=%d stale=%d", lessons, reads, citations, stale))
-	lines = append(lines, fmt.Sprintf("wal_bytes=%d", walBytes))
+	lines = append(lines, "factoryd since="+store.opened.UTC().Format("2006-01-02T15:04Z"), fmt.Sprintf("wal_bytes=%d", walBytes))
 	return lines, nil
 }
 

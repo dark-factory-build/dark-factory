@@ -40,6 +40,7 @@ type Store struct {
 	// writes and snapshot reads refuse while it is set (see Validate).
 	held               atomic.Pointer[error]
 	productionRevision atomic.Uint64
+	opened             time.Time // When this process opened the store; Report prints it.
 
 	repositoryBase  string // Boot-owned initial binding default; protected by writerGate.
 	archivePath     string // The history archive beside the database; see ArchiveHistory.
@@ -93,7 +94,7 @@ func writerCaller(stack [8]uintptr) string {
 func newStore() *Store {
 	writerGate := make(chan struct{}, 1)
 	writerGate <- struct{}{}
-	return &Store{writerGate: writerGate, waitReport: time.Minute, overseerStalled: make(map[string]overseerStalledState)}
+	return &Store{writerGate: writerGate, opened: time.Now(), waitReport: time.Minute, overseerStalled: make(map[string]overseerStalledState)}
 }
 
 func openFixedPools(ctx context.Context, store *Store, path string, recheck func() error) error {

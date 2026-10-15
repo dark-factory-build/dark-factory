@@ -33,11 +33,13 @@ func TestReportAndWhyReadTheReconcilersState(t *testing.T) {
 	if _, err := store.writer.ExecContext(ctx, insert, project.ID.Bytes(), `{"number":9,"state":"merged","head":"`+strings.Repeat("c", 40)+`","merged_at":"1970-01-01T00:00:01Z"}`); err != nil {
 		t.Fatal(err)
 	}
+	store.opened = time.Date(2026, 10, 15, 5, 30, 59, 0, time.FixedZone("", 3600))
 	lines, err := store.Report(ctx, &project.ID, 0, 3600000)
 	want := []string{
 		"1970-01-01T00:00Z runs=1 failed=0% tokens=300 worker=0 overseer=300 specialist=0 merges=1 tokens/merge=300",
 		"top task tokens=300 " + task.ID.String() + ` running "oversee"`,
 		"lessons=0 reads=0 citations=0 stale=0",
+		"factoryd since=2026-10-15T04:30Z",
 	}
 	if err != nil || len(lines) != len(want)+1 || !slices.Equal(lines[:len(want)], want) || !strings.HasPrefix(lines[len(want)], "wal_bytes=") {
 		t.Fatalf("report = %q, %v", lines, err)
@@ -132,7 +134,7 @@ func TestReportIncludesFailedMergeGroupCheck(t *testing.T) {
 		t.Fatal(err)
 	}
 	lines, err := store.Report(context.Background(), &project.ID, 0, 3600000)
-	if err != nil || len(lines) != 3 || !strings.Contains(lines[0], "failure new x1") || !strings.Contains(lines[0], "TestQueue") {
+	if err != nil || len(lines) != 4 || !strings.Contains(lines[0], "failure new x1") || !strings.Contains(lines[0], "TestQueue") {
 		t.Fatalf("report = %q, %v", lines, err)
 	}
 }
@@ -182,7 +184,7 @@ func TestReportIncludesMainCheckWithoutPullRequest(t *testing.T) {
 		t.Fatal(err)
 	}
 	lines, err := store.Report(context.Background(), &project.ID, 0, 3600000)
-	if err != nil || len(lines) != 3 || !strings.Contains(lines[0], "failure new x1") || !strings.Contains(lines[0], "example/factory") || !strings.Contains(lines[0], check.URL) || !strings.Contains(lines[0], "main at aaaaaaaa") {
+	if err != nil || len(lines) != 4 || !strings.Contains(lines[0], "failure new x1") || !strings.Contains(lines[0], "example/factory") || !strings.Contains(lines[0], check.URL) || !strings.Contains(lines[0], "main at aaaaaaaa") {
 		t.Fatalf("report = %q, %v", lines, err)
 	}
 }
@@ -196,7 +198,7 @@ func TestReportIncludesCheckRepositoryAndRunURL(t *testing.T) {
 		t.Fatal(err)
 	}
 	lines, err := store.Report(context.Background(), &project.ID, 0, 3600000)
-	if err != nil || len(lines) != 3 || !strings.Contains(strings.Join(lines, "\n"), "dark-factory-build/dark-factory-site") || !strings.Contains(strings.Join(lines, "\n"), check.URL) {
+	if err != nil || len(lines) != 4 || !strings.Contains(strings.Join(lines, "\n"), "dark-factory-build/dark-factory-site") || !strings.Contains(strings.Join(lines, "\n"), check.URL) {
 		t.Fatalf("report = %q, %v", lines, err)
 	}
 }
@@ -271,7 +273,7 @@ func TestReportLessonCountersUseLatestRevision(t *testing.T) {
 		t.Fatal(err)
 	}
 	lines, err := store.Report(ctx, &run.ProjectID, 0, 3600000)
-	if err != nil || len(lines) != 3 || lines[1] != "lessons=1 reads=0 citations=1 stale=0" || !strings.HasPrefix(lines[2], "wal_bytes=") {
+	if err != nil || len(lines) != 4 || lines[1] != "lessons=1 reads=0 citations=1 stale=0" || !strings.HasPrefix(lines[2], "factoryd since=") || !strings.HasPrefix(lines[3], "wal_bytes=") {
 		t.Fatalf("latest lesson report = %q, %v", lines, err)
 	}
 }
