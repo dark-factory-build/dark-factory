@@ -255,37 +255,27 @@ func (daemon *Daemon) HandleConnection(ctx context.Context, connection *api.Conn
 	if call.Kind() != api.CallOverseerSnapshot {
 		daemon.markAttemptAPICall(ctx, call)
 	}
-	dispatchContext, cancel := context.WithTimeout(ctx, defaultDispatchTimeout)
-	defer cancel()
+	timeout := defaultDispatchTimeout
+	if _, attempt := call.AttemptDigest(); attempt {
+		// Match the attempt client's own wait instead of failing a call it still
+		// awaits at the default budget (#1780).
+		timeout = api.RestartRetryWindow
+	}
 	// A project's health runs its repositories' fetch checks (oversight).
 	if project, _ := call.HealthProject(); call.Kind() == api.CallMaintainer || call.Kind() == api.CallIntake || project != "" {
-		cancel()
-		dispatchContext, cancel = context.WithTimeout(ctx, 90*time.Second)
-		defer cancel()
-	}
-	if call.Kind() == api.CallAttemptTask {
-		// A worker cannot start without its task; match the attempt client's
-		// own wait instead of failing the run at the default budget (#1780).
-		cancel()
-		dispatchContext, cancel = context.WithTimeout(ctx, api.RestartRetryWindow)
-		defer cancel()
+		timeout = 90 * time.Second
 	}
 	if call.Kind() == api.CallAttemptSource {
-		cancel()
-		dispatchContext, cancel = context.WithTimeout(ctx, retainedSourceDispatchTimeout)
-		defer cancel()
+		timeout = retainedSourceDispatchTimeout
 	}
-	if call.Kind() == api.CallProfile {
-		input, _ := call.ProfileInput()
-		cancel()
-		dispatchContext, cancel = context.WithTimeout(ctx, time.Duration(input.Seconds+30)*time.Second)
-		defer cancel()
+	if input, profile := call.ProfileInput(); profile {
+		timeout = time.Duration(input.Seconds+30) * time.Second
 	}
 	if call.Kind() == api.CallCompactStorage || call.Kind() == api.CallBackupCreate || call.Kind() == api.CallBackupVerify {
-		cancel()
-		dispatchContext, cancel = context.WithTimeout(ctx, storageCompactionDispatchTimeout)
-		defer cancel()
+		timeout = storageCompactionDispatchTimeout
 	}
+	dispatchContext, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
 	if err := connection.RefreshDeadline(dispatchContext); err != nil {
 		return err
 	}
