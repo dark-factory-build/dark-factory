@@ -204,6 +204,57 @@ func TestIntakePollKeepsWaitingIssuesForTheInbox(t *testing.T) {
 	}
 }
 
+func TestIntakePollImportsReceiptsBeforeBoundedIssueFailure(t *testing.T) {
+	fixture := newIntakePollFixture(t, 60)
+	ctx := context.Background()
+	priorDeadline := intakePassDeadline
+	intakePassDeadline = 100 * time.Millisecond
+	defer func() { intakePassDeadline = priorDeadline }()
+	if _, err := fixture.store.AcceptIntakeSnapshot(ctx, fixture.source.ID, intakeSnapshot(fixture.source, fixture.issue), mustKernelTime(t, 105), fixture.source.Revision); err != nil {
+		t.Fatal(err)
+	}
+	lock, err := sql.Open("sqlite3", "file:"+fixture.databasePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer lock.Close()
+	lock.SetMaxOpenConns(1)
+	listed := fixture.issue
+	listed.Number, listed.NodeID, listed.Title = 8, "I_slow", "Slow candidate"
+	fixture.daemon.intakeIssues = func(_ context.Context, _ string, _ uint64, _ uint32, _ string, number uint64) (maintainer.IssuePage, error) {
+		if number != 0 {
+			return maintainer.IssuePage{RepositoryID: 42, Issues: []maintainer.Issue{fixture.issue}}, nil
+		}
+		if _, err := lock.Exec("BEGIN EXCLUSIVE"); err != nil {
+			t.Fatal(err)
+		}
+		return maintainer.IssuePage{RepositoryID: 42, Issues: []maintainer.Issue{listed}}, nil
+	}
+
+	started := time.Now()
+	fixture.daemon.pollIntakeSource(ctx, fixture.source)
+	if elapsed := time.Since(started); elapsed >= intakePassDeadline {
+		t.Fatalf("issue processing used the whole pass deadline: %s", elapsed)
+	}
+	if _, err := lock.Exec("ROLLBACK"); err != nil {
+		t.Fatal(err)
+	}
+	if tasks := fixture.tasks(t); len(tasks) != 1 || tasks[0].Status != kernel.TaskQueued {
+		t.Fatalf("durable receipt was stranded: %+v", tasks)
+	}
+	result := fixture.daemon.Intake(ctx, api.IntakeInput{Action: "list"})
+	if len(result.Sources) != 1 || result.Sources[0].Sync == nil || result.Sources[0].Sync.State != "error" || result.Sources[0].Sync.Error != "unavailable" {
+		t.Fatalf("failed sync = %+v", result.Sources)
+	}
+	fixture.attach(fixture.daemon)
+	fixture.now = fixture.now.Add(time.Hour)
+	fixture.daemon.pollIntakeSource(ctx, fixture.source)
+	result = fixture.daemon.Intake(ctx, api.IntakeInput{Action: "list"})
+	if len(result.Sources) != 1 || result.Sources[0].Sync == nil || result.Sources[0].Sync.State != "ok" || result.Sources[0].Sync.LastSuccessAt == 0 {
+		t.Fatalf("recovered sync = %+v", result.Sources)
+	}
+}
+
 func TestIntakeAcceptMidScanDoesNotRepublishTheIssue(t *testing.T) {
 	fixture := newIntakePollFixture(t, 60)
 	fixture.issue.Author.Login = "stranger"

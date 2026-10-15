@@ -439,7 +439,7 @@ func (daemon *Daemon) withdrawIntakeTask(ctx context.Context, acceptanceID kerne
 }
 
 // intakePassDeadline leaves response time inside the 90-second dispatch budget.
-const intakePassDeadline = 75 * time.Second
+var intakePassDeadline = 75 * time.Second
 
 func (daemon *Daemon) previewIntake(ctx context.Context, source kernel.IntakeSource, page uint32, tick bool, cursor string) api.IntakeResult {
 	ctx, cancel := context.WithTimeout(ctx, intakePassDeadline)
@@ -505,7 +505,9 @@ func (daemon *Daemon) previewIntake(ctx context.Context, source kernel.IntakeSou
 		}
 	}
 	step("list")
-	observed, err := daemon.sourceIssues(ctx, source, page, source.LabelFilter, 0)
+	issueCtx, issueCancel := context.WithTimeout(ctx, intakePassDeadline/2)
+	defer issueCancel()
+	observed, err := daemon.sourceIssues(issueCtx, source, page, source.LabelFilter, 0)
 	if err != nil {
 		return failure(err)
 	}
@@ -513,7 +515,7 @@ func (daemon *Daemon) previewIntake(ctx context.Context, source kernel.IntakeSou
 	result.NextPage = observed.NextPage
 	for _, issue := range observed.Issues {
 		snapshot := intakeSnapshot(source, issue)
-		accepted, found, err := daemon.store.LatestIntakeAcceptance(ctx, snapshot, source.ProjectID, source.TargetRepositoryID)
+		accepted, found, err := daemon.store.LatestIntakeAcceptance(issueCtx, snapshot, source.ProjectID, source.TargetRepositoryID)
 		if err != nil {
 			return failure(err)
 		}
@@ -545,11 +547,11 @@ func (daemon *Daemon) previewIntake(ctx context.Context, source kernel.IntakeSou
 			if err != nil {
 				return failure(err)
 			}
-			accepted, err = daemon.store.AcceptIntakeSnapshot(ctx, source.ID, snapshot, at, source.Revision)
+			accepted, err = daemon.store.AcceptIntakeSnapshot(issueCtx, source.ID, snapshot, at, source.Revision)
 			if err != nil {
 				return failure(err)
 			}
-			task, err := daemon.importAcceptedIntake(ctx, accepted, false, &issue)
+			task, err := daemon.importAcceptedIntake(issueCtx, accepted, false, &issue)
 			if err != nil {
 				return failure(err)
 			}
@@ -559,12 +561,12 @@ func (daemon *Daemon) previewIntake(ctx context.Context, source kernel.IntakeSou
 			result.ImportedTasks = append(result.ImportedTasks, task.ID.String())
 		}
 		if tick && found && reason == string(kernel.IntakeAlreadyAccepted) {
-			_, imported, err := daemon.store.Task(ctx, accepted.TaskID)
+			_, imported, err := daemon.store.Task(issueCtx, accepted.TaskID)
 			if err != nil {
 				return failure(err)
 			}
 			if imported || len(result.ImportedTasks) < int(source.AdmissionLimit) {
-				task, err := daemon.importAcceptedIntake(ctx, accepted, false, &issue)
+				task, err := daemon.importAcceptedIntake(issueCtx, accepted, false, &issue)
 				if err == nil && !imported {
 					result.ImportedTasks = append(result.ImportedTasks, task.ID.String())
 					candidate.Reason = "imported"
@@ -574,7 +576,7 @@ func (daemon *Daemon) previewIntake(ctx context.Context, source kernel.IntakeSou
 			}
 		}
 		if tick && found && accepted.WithdrawnAt != nil {
-			if err := daemon.reconcileIntakeWithdrawal(ctx, accepted); err != nil {
+			if err := daemon.reconcileIntakeWithdrawal(issueCtx, accepted); err != nil {
 				candidate.Reason = "withdrawal_pending"
 			}
 		}
