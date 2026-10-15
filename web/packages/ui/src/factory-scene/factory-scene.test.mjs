@@ -453,9 +453,9 @@ test("resting workers take fair, uninterrupted turns at the break-room furniture
   // The furniture stands on free floor, clear of everyone resting, on a wide floor and on the narrowest.
   const wide = layoutScene(unitsOf(Array.from({ length: 16 }, (_, index) => `room-${index}`)));
   const nook = breakRoomNook(wide);
-  assert.deepEqual(nook.furniture.map((piece) => piece.errand), ["shelf", "coffee", "board", "missions", "tasks"]);
+  assert.deepEqual(nook.furniture.map((piece) => piece.errand), ["shelf", "coffee", "board", "tasks"]);
   const narrow = layoutScene(unitsOf(["room-0"])), narrowNook = breakRoomNook(narrow);
-  assert.deepEqual(narrowNook.furniture.map((piece) => piece.errand), ["shelf", "coffee", "board", "missions", "tasks"]);
+  assert.deepEqual(narrowNook.furniture.map((piece) => piece.errand), ["shelf", "coffee", "board", "tasks"]);
   for (const [layout, pieces, count] of [[wide, nook.furniture, 12], [narrow, narrowNook.furniture, 40]]) for (const piece of pieces) {
     assert.ok(standable(layout, piece.stand), `${piece.errand} is used from free floor`);
     for (const seat of placeWorkers(layout, Array.from({ length: count }, (_, index) => person(`rest-${index}`)))) assert.ok(Math.abs(seat.x - piece.stand.x) >= 24 || Math.abs(seat.y - piece.stand.y) >= 24, "furniture visitors do not overlap a resting worker");
@@ -521,11 +521,11 @@ test("resting workers take fair, uninterrupted turns at the break-room furniture
   assert.ok(atShelf.some((name) => name.endsWith(".hold")) && atShelf.includes("person.held.book.chest") && atShelf.some((name) => name.includes("legs.") && name.endsWith(".stand")));
   assert.ok(workerFrames(crowd[0], { action: "still", frame: 0, at: 0 }, undefined, "coffee").includes("person.held.cup.chest"));
   assert.ok(atShelf.every((name) => !name.startsWith("person.tool.")));
-  for (const implement of ["board", "missions", "tasks"]) assert.ok(workerFrames(crowd[0], { action: "still", frame: 0, at: 0 }, undefined, implement).includes("person.held.clipboard.chest"), implement);
+  for (const implement of ["board", "tasks"]) assert.ok(workerFrames(crowd[0], { action: "still", frame: 0, at: 0 }, undefined, implement).includes("person.held.clipboard.chest"), implement);
   // The floor draws exactly the furniture the nook has; with the scenery off, only the implements, never the coffee.
   assert.equal((render().match(/data-break-room=/g) ?? []).length, breakRoomNook(floorFor(graph)).furniture.length);
   assert.equal(breakRoomNook(floorFor(graph)).furniture.length, 3, "the board and shelf remain scenery beside the coffee");
-  assert.deepEqual(render({ appearance: { scenery: "off", animation: "on" }, onOpenMissions() {}, onOpenTasks() {} }).match(/data-break-room="\w+"/g), ['data-break-room="shelf"', 'data-break-room="board"', 'data-break-room="missions"', 'data-break-room="tasks"']);
+  assert.deepEqual(render({ appearance: { scenery: "off", animation: "on" }, onOpenTasks() {} }).match(/data-break-room="\w+"/g), ['data-break-room="shelf"', 'data-break-room="board"', 'data-break-room="tasks"']);
 });
 
 test("a floor mounted late still starts seated, then someone gets up, stands at the furniture, and comes back", async () => {
@@ -813,21 +813,17 @@ test("stationary tasks link the existing queue and questions", () => {
   assert.doesNotMatch(noObservation, /data-human-request-id=/);
 });
 
-test("the board and shelf remain passive scenery while live-work implements open their panels", () => {
-  const markup = render({ projectId: "project-a", onOpenTasks() {}, onOpenMissions() {} });
+test("the board and shelf remain passive scenery while the task tray opens its panel", () => {
+  const markup = render({ projectId: "project-a", onOpenTasks() {} });
   assert.doesNotMatch(markup, /data-floor-tray-desk|data-common-table/);
-  assert.equal((markup.match(/>(MISSIONS|TASKS)</g) ?? []).length, 2, "only live-work implements are signed");
+  assert.equal((markup.match(/>TASKS</g) ?? []).length, 1, "only the live-work implement is signed");
   assert.match(markup, /data-break-room="tasks" data-floor-inbox="0"[^>]*aria-label="Open Tasks"[^>]*role="button"[^>]*tabindex="0"/);
-  assert.match(markup, /data-break-room="missions"[^>]*data-tooltip="Missions · inspect objectives"[^>]*aria-label="Open Missions"[^>]*role="button"[^>]*tabindex="0"/);
   assert.match(markup, /data-break-room="board"(?![^>]*role="button")/);
   assert.match(markup, /data-break-room="shelf"(?![^>]*role="button")/);
-  // Without a panel to open, an implement is scenery, not a dead button.
-  assert.doesNotMatch(render({ projectId: "project-a" }), /data-break-room="missions"[^>]*role="button"/);
 });
 
-test("floor action hit areas invoke existing task and mission routes", async () => {
+test("the floor task hit area invokes the existing task route", async () => {
   let tasksOpened;
-  let missionsOpened;
   let conversationTask;
   const task = { id: "task-peer", agentId: "worker-b", projectId: "project", title: "Peer work", status: "running", humanRequestIds: [] };
   let renderer;
@@ -840,18 +836,14 @@ test("floor action hit areas invoke existing task and mission routes", async () 
       tasks: [task],
       peerQuestions: [{ id: "peer-1", source_task_id: "task-peer", target_task_id: "task-other", answered: false, revision: 1n }],
       onOpenTasks: (projectId) => { tasksOpened = projectId; },
-      onOpenMissions: (projectId) => { missionsOpened = projectId; },
       onSelectTask: (taskId) => { conversationTask = taskId; },
       connected: false,
     }));
   });
   const tray = renderer.root.findByProps({ "data-floor-inbox": 0 });
-  const planning = renderer.root.findByProps({ "data-break-room": "missions" });
-  for (const target of [tray, planning]) assert.equal(target.findAll((node) => node.props.className === "dfFactoryScene__focus").length, 1, "one focus ring per implement");
+  assert.equal(tray.findAll((node) => node.props.className === "dfFactoryScene__focus").length, 1, "one focus ring for the task tray");
   await act(async () => tray.props.onClick());
-  await act(async () => planning.props.onKeyDown({ key: "Enter", preventDefault() {} }));
   assert.equal(tasksOpened, "project");
-  assert.equal(missionsOpened, "project");
   await act(async () => renderer.root.findByProps({ "data-peer-question-count": 1 }).props.onClick());
   assert.equal(conversationTask, "task-peer");
   await act(async () => renderer.unmount());
