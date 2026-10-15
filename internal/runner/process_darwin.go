@@ -885,9 +885,11 @@ func (c *OwnedChild) Terminate(timeout time.Duration) (Exit, error) {
 		timeout = defaultStopTimeout
 	}
 	var signalFailure error
-	// Aborted means this signal ended the provider: an exit already queued is
-	// the provider's own, however it died.
-	aborted := c.refreshExit() == nil && !c.exitObserved
+	// Aborted means this signal ended the provider: a leader already a zombie
+	// died on its own, however it died. The process table, not the shared
+	// kqueue, answers that, so unread PTY or daemon readiness cannot delay it.
+	leader, leaderErr := unix.SysctlKinfoProc("kern.proc.pid", c.identity.PID)
+	aborted := !c.exitObserved && leaderErr == nil && leader.Proc.P_stat != darwinZombieState
 	if !c.exitObserved {
 		if err := c.signalGroup(unix.SIGTERM); err != nil {
 			// The exact child can exit between signalOwnedGroup's census and
