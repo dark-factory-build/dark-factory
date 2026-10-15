@@ -41,9 +41,13 @@ func wakeFixture(t testing.TB) (*Store, Agent, Agent) {
 	return store, worker, overseer
 }
 
-func wakeBodies(t testing.TB, store *Store, at int64) []string {
+func wakeBodies(t testing.TB, store *Store, at int64, cutover ...int64) []string {
 	t.Helper()
-	tasks, err := store.EnqueueOverseerWakeups(context.Background(), mustTime(t, at), 0)
+	threshold := int64(0)
+	if len(cutover) != 0 {
+		threshold = cutover[0]
+	}
+	tasks, err := store.EnqueueOverseerWakeups(context.Background(), mustTime(t, at), threshold)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -704,7 +708,7 @@ func TestOverseerVerifiesMergedIntakeOnceLive(t *testing.T) {
 		case "before receipt cutover":
 			merge(3000)
 			release('b', live, outstanding()...)
-			if bodies := wakeBodies(t, store, live+settle); len(bodies) != 0 {
+			if bodies := wakeBodies(t, store, live+settle, OverseerReceiptCutover); len(bodies) != 0 {
 				t.Fatalf("pre-cutover merge woke = %q", bodies)
 			}
 			continue
