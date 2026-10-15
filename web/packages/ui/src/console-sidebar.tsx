@@ -196,7 +196,6 @@ export function WorkPanel({
 }) {
   if (state === undefined) return <section className="dfConsoleSidebar__panel" aria-label="Work"><p className="dfFactoryConsole__empty">Waiting for the latest state…</p></section>;
   const agents = [...state.agents.values()];
-  const shown = rows.filter((row) => row.origin !== "overseer" && row.origin !== "specialist" || row.state === "needs-you");
   const busy = selectedHumanRequest?.phase === "replying" || selectedHumanRequest?.phase === "cancelling";
   const owner = (task?: TaskItem) => task === undefined ? "" : task.assigned_agent_id === "" ? "Any eligible worker" : state.agents.get(task.assigned_agent_id)?.name ?? "Agent";
   const chips = (row: WorkRow) => <>
@@ -231,7 +230,7 @@ export function WorkPanel({
     {state.factory.dispatch_enabled ? null : <p role="status">New work is paused. Queued tasks wait; active processes continue. An administrator can resume new work above.</p>}
     {onAddTask === undefined ? null : <NewTask agents={agents} state={state} disabled={!ready || edit?.pending === true} onAddTask={onAddTask} />}
     {rows.some((row) => row.intake !== undefined) && (intake?.failed || !["ok", "accepted", "imported", "withdrawn", "withdrawal_pending", undefined].includes(intake?.state)) ? <p role="alert">Could not accept: {intake?.failed ? "try again" : intake?.state?.replaceAll("_", " ")}.</p> : null}
-    {shown.length === 0 ? <p className="dfFactoryConsole__empty">No open work</p> : <ul className="dfConsoleItems">{shown.map(item)}</ul>}
+    {rows.length === 0 ? <p className="dfFactoryConsole__empty">No open work</p> : <ul className="dfConsoleItems">{rows.map(item)}</ul>}
   </section>;
 }
 
