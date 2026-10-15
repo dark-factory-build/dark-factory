@@ -680,8 +680,10 @@ func loadRunRelationshipsWithTopology(ctx context.Context, connection *sql.Conn,
 					}
 					return runRelationships{}, err
 				}
+				// A late rebase moves a retained Change after its run; reclaiming it
+				// later clears the head, so a reclaimed Change keeps that update time.
 				lateRebase := run.TerminalAt != nil && value.AvailableAt != nil && value.AvailableAt.Int64() <= run.TerminalAt.Int64() && value.HeadCommit != nil && value.Selection != nil && !value.HeadCommit.equal(value.Selection.commit)
-				if run.TerminalAt == nil || value.UpdatedAt.Int64() > run.TerminalAt.Int64() && !lateRebase {
+				if run.TerminalAt == nil || value.UpdatedAt.Int64() > run.TerminalAt.Int64() && !lateRebase && changeOwnership != workerChangeReclaimed {
 					return runRelationships{}, fmt.Errorf("%w: terminal run predates Change settlement", ErrCorruptState)
 				}
 			}
@@ -1267,7 +1269,7 @@ func validateChanges(ctx context.Context, connection *sql.Conn) error {
 		if ownershipErr != nil && !errors.Is(ownershipErr, ErrCorruptState) {
 			return ownershipErr
 		}
-		if run.Phase != RunTerminal || ownershipErr != nil || !ownership.settled() || run.TerminalAt == nil || change.UpdatedAt.Int64() > run.TerminalAt.Int64() && !lateRebase {
+		if run.Phase != RunTerminal || ownershipErr != nil || !ownership.settled() || run.TerminalAt == nil || change.UpdatedAt.Int64() > run.TerminalAt.Int64() && !lateRebase && ownership != workerChangeReclaimed {
 			return fmt.Errorf("%w: invalid Change settlement authority", ErrCorruptState)
 		}
 	}
