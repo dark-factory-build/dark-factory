@@ -6,6 +6,8 @@ use base64::{Engine as _, engine::general_purpose};
 use serde::{Deserialize, Serialize};
 #[cfg(any(target_arch = "wasm32", test))]
 use sha2::{Digest as _, Sha256};
+#[cfg(any(target_arch = "wasm32", test))]
+use std::future::Future;
 use zeroize::{Zeroize as _, Zeroizing};
 
 #[cfg(any(target_arch = "wasm32", test))]
@@ -4265,10 +4267,9 @@ impl Authority {
             "https://api.github.com/repos/{}/{}",
             token.repository.owner, token.repository.name
         );
-        let runs: WorkflowRuns = github_json(
-            &format!("{api}/actions/runs?event=merge_group&status=completed&per_page=50"),
-            token.as_str(),
-        )
+        let runs = fetch_merge_group_runs(&api, token.as_str(), |url, credential| async move {
+            github_response(worker::Method::Get, &url, &credential, None).await
+        })
         .await
         .ok()?;
         let run = select_merge_group_run(runs.workflow_runs, &request.base, request.pull_number)?;
@@ -5691,6 +5692,23 @@ fn select_merge_group_run(
         }
     }
     Some(newest)
+}
+
+#[cfg(any(target_arch = "wasm32", test))]
+async fn fetch_merge_group_runs<F, Fut>(
+    api: &str,
+    credential: &str,
+    fetch: F,
+) -> Result<WorkflowRuns, Error>
+where
+    F: FnOnce(String, String) -> Fut,
+    Fut: Future<Output = Result<Vec<u8>, Error>>,
+{
+    // GitHub returns these newest first. Use its maximum page size so a busy
+    // repository does not hide the PR's latest queue run from send-back evidence.
+    let url = format!("{api}/actions/runs?event=merge_group&status=completed&per_page=100");
+    let bytes = fetch(url, credential.to_owned()).await?;
+    serde_json::from_slice(&bytes).map_err(|_| Error::Unavailable)
 }
 
 #[cfg(any(target_arch = "wasm32", test))]
@@ -9215,6 +9233,48 @@ mod tests {
             Some(6)
         );
         assert!(select_merge_group_run(Vec::new(), "main", 7).is_none());
+
+        let mut page = Vec::new();
+        for id in 0..99 {
+            page.push(serde_json::json!({
+                "id": id,
+                "head_branch": format!("gh-readonly-queue/main/pr-8-{id}"),
+                "head_sha": "f".repeat(40),
+                "conclusion": "failure",
+                "html_url": format!("https://github.com/o/r/actions/runs/{id}"),
+            }));
+        }
+        page.push(serde_json::json!({
+            "id": 7,
+            "head_branch": "gh-readonly-queue/main/pr-7-bbbb",
+            "head_sha": "c".repeat(40),
+            "conclusion": "failure",
+            "html_url": "https://github.com/o/r/actions/runs/7",
+        }));
+        let response = serde_json::to_vec(&serde_json::json!({"workflow_runs": page})).unwrap();
+        let mut requested = None;
+        let page = tokio::runtime::Runtime::new()
+            .unwrap()
+            .block_on(fetch_merge_group_runs(
+                "https://api.github.com/repos/o/r",
+                "test-token",
+                |url, credential| {
+                    requested = Some((url, credential));
+                    async { Ok(response) }
+                },
+            ))
+            .unwrap();
+        assert_eq!(
+            requested,
+            Some((
+                "https://api.github.com/repos/o/r/actions/runs?event=merge_group&status=completed&per_page=100".into(),
+                "test-token".into()
+            ))
+        );
+        assert_eq!(
+            select_merge_group_run(page.workflow_runs, "main", 7).map(|run| run.id),
+            Some(7)
+        );
 
         let jobs: WorkflowJobs = serde_json::from_value(serde_json::json!({"jobs": [
             {"id": 1, "name": "scope", "conclusion": "success"},
