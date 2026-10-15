@@ -140,15 +140,6 @@ func (store *Store) Why(ctx context.Context, project *ProjectID, pull uint64, ta
 	return store.whyInRepository(ctx, project, "", pull, task)
 }
 
-// WhyInRepository is the task-bound form of Why. The repository is an
-// authenticated production binding, not caller-selected project scope.
-func (store *Store) WhyInRepository(ctx context.Context, project *ProjectID, repository string, pull uint64) ([]string, error) {
-	if !productionRepository.MatchString(repository) {
-		return nil, ErrInvalidValue
-	}
-	return store.whyInRepository(ctx, project, repository, pull, TaskID{})
-}
-
 func (store *Store) whyInRepository(ctx context.Context, project *ProjectID, repository string, pull uint64, task TaskID) ([]string, error) {
 	if pull == 0 && task.zero() || pull > 1<<53-1 {
 		return nil, ErrInvalidValue

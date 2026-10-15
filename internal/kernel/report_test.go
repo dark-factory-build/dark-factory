@@ -75,9 +75,6 @@ func TestReportAndWhyReadTheReconcilersState(t *testing.T) {
 	if !strings.Contains(line, "pull: example/factory#7") || !strings.Contains(line, "head: "+head) {
 		t.Fatalf("escalation why = %q", line)
 	}
-	if lines, err := store.WhyInRepository(ctx, &project.ID, "example/factory", 7); err != nil || !strings.Contains(strings.Join(lines, "\n"), "head: "+head) {
-		t.Fatalf("repository-bound why = %q, %v", lines, err)
-	}
 	// Only required checks count, as in the reconciler: an optional failure or
 	// pending check predicts nothing.
 	for id, check := range map[string]string{"c1": `"name":"go","state":"completed","conclusion":"success","required":true`, "c2": `"name":"lint","state":"completed","conclusion":"failure"`, "c3": `"name":"docs","state":"in_progress","conclusion":""`} {

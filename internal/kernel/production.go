@@ -842,29 +842,21 @@ func storedProductionReview(ctx context.Context, c *sql.Conn, project ProjectID,
 // on, the one OpenPulls names it the task of, and its observed head:
 // a fresh Change for that task starts there, never at the base.
 func (store *Store) TaskOpenPullRequest(ctx context.Context, task TaskID) (ProductionPullRequest, bool, error) {
-	_, pr, found, err := store.TaskOpenPullRequestRepository(ctx, task)
-	return pr, found, err
-}
-
-// TaskOpenPullRequestRepository returns the task's current open pull and the
-// repository that owns its production record. Callers that authorize a pull
-// read must retain this binding rather than resolve a project-wide number.
-func (store *Store) TaskOpenPullRequestRepository(ctx context.Context, task TaskID) (string, ProductionPullRequest, bool, error) {
 	tx, err := store.beginRead(ctx)
 	if err != nil {
-		return "", ProductionPullRequest{}, false, err
+		return ProductionPullRequest{}, false, err
 	}
 	defer tx.Close()
-	var repository, document string
-	err = tx.connection.QueryRowContext(ctx, `SELECT r.repository, r.document FROM publication_tasks p JOIN production_records r ON r.project_id = p.project_id AND r.repository = p.repository AND r.kind = 'pull_request' AND r.identity = CAST(p.pull_number AS TEXT) WHERE p.task_id = ? AND json_extract(r.document, '$.state') = 'open' ORDER BY p.created_at_ms DESC LIMIT 1`, task.Bytes()).Scan(&repository, &document)
+	var document string
+	err = tx.connection.QueryRowContext(ctx, `SELECT r.document FROM publication_tasks p JOIN production_records r ON r.project_id = p.project_id AND r.repository = p.repository AND r.kind = 'pull_request' AND r.identity = CAST(p.pull_number AS TEXT) WHERE p.task_id = ? AND json_extract(r.document, '$.state') = 'open' ORDER BY p.created_at_ms DESC LIMIT 1`, task.Bytes()).Scan(&document)
 	if errors.Is(err, sql.ErrNoRows) {
-		return "", ProductionPullRequest{}, false, nil
+		return ProductionPullRequest{}, false, nil
 	}
 	var pr ProductionPullRequest
 	if err == nil && (json.Unmarshal([]byte(document), &pr) != nil || pr.Number == 0 || !productionSHA(pr.Head)) {
 		err = ErrCorruptState
 	}
-	return repository, pr, err == nil, err
+	return pr, err == nil, err
 }
 
 func (store *Store) ProductionReviewBlocks(ctx context.Context, project ProjectID, repo string, number uint64, head string) (bool, error) {
