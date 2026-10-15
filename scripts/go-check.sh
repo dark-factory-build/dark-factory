@@ -74,9 +74,9 @@ fi
 # A direct run (a worker's check loop) skips the TypeScript block when nothing
 # under web/ or protocol/ differs from the merge base. local-ci and CI always
 # run it: the process gate needs the built client. No base means run it.
-web_changed=1
+web_changed=1; base=$(git merge-base HEAD origin/main 2>/dev/null || git merge-base HEAD '@{upstream}' 2>/dev/null || true)
 if [ "$go_check_mode" = source ] && [ -z "${DARK_FACTORY_LOCAL_CI-}" ] && [ -z "${CI-}" ] \
-    && base=$(git merge-base HEAD origin/main 2>/dev/null || git merge-base HEAD '@{upstream}' 2>/dev/null) \
+    && [ -n "$base" ] \
     && changed=$({ git diff --name-only "$base" --; git ls-files --others --exclude-standard; } 2>/dev/null); then
     case "$changed" in
         web/*|protocol/*|*"
@@ -99,5 +99,5 @@ echo "go-check: TypeScript install, build, and tests"
 fi
 
 echo "go-check: git diff --check"
-git diff --check
+git diff --check ${base:+"$base"} --
 echo "go-check: PASS"
