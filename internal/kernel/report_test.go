@@ -48,8 +48,14 @@ func TestReportAndWhyReadTheReconcilersState(t *testing.T) {
 		t.Fatalf("why pull = %q, %v", lines, err)
 	}
 	lines, err = store.Why(ctx, &project.ID, 0, task.ID)
-	if err != nil || len(lines) != 4 || lines[2] != "pull: none published" || lines[3] != "waits on: worker: its task is running" {
+	if err != nil || len(lines) != 4 || !strings.HasPrefix(lines[1], "run: admitted  agent="+agent.ID.String()+" at ") || lines[2] != "pull: none published" || lines[3] != "waits on: worker: its task is running" {
 		t.Fatalf("why task = %q, %v", lines, err)
+	}
+	// A provider exit names the agent whose run it ended beside its status,
+	// time and reason, as a crashed specialist's "Standing instruction" needs.
+	corruptSQLUnvalidated(t, store, `UPDATE runs SET phase = 'terminal', terminal_kind = 'failed', terminal_code = 'provider_exit', terminal_detail = 'provider exited before an attempt outcome', updated_at_ms = 0 WHERE id = ?`, admitted.Run.ID.Bytes())
+	if lines, err = store.Why(ctx, &project.ID, 0, task.ID); err != nil || lines[1] != "run: terminal failed agent="+agent.ID.String()+" at 1970-01-01T00:00:00Z provider exited before an attempt outcome" {
+		t.Fatalf("why provider exit = %q, %v", lines, err)
 	}
 	if lines, err = store.Why(ctx, nil, 7, TaskID{}); err != nil || len(lines) != 8 || lines[0] != "pull: example/factory#7 open \"\"" {
 		t.Fatalf("singleton why pull = %q, %v", lines, err)
