@@ -394,11 +394,19 @@ const OverseerRunLimitDetail = "overseer run limit reached"
 // running attempt. It never acts as attempt authority and never overwrites an
 // outcome that reached finalizing first.
 func (store *Store) FailRun(ctx context.Context, runID RunID, expected Revision, failure Proposal, at UnixMillis) (Run, error) {
+	return store.failRun(ctx, runID, expected, failure, at, false)
+}
+
+func (store *Store) failRun(ctx context.Context, runID RunID, expected Revision, failure Proposal, at UnixMillis, allowProviderExit bool) (Run, error) {
 	if runID.zero() || !failure.valid() || failure.kind != OutcomeFailed {
 		return Run{}, fmt.Errorf("%w: invalid run failure", ErrInvalidValue)
 	}
 	switch failure.code {
-	case FailureSpawn, FailureActivation, FailureSource, FailureProtocol, FailureInternal, FailureTransient, FailureProviderExit:
+	case FailureSpawn, FailureActivation, FailureSource, FailureProtocol, FailureInternal, FailureTransient:
+	case FailureProviderExit:
+		if !allowProviderExit {
+			return Run{}, fmt.Errorf("%w: failure code is not daemon infrastructure authority", ErrInvalidValue)
+		}
 	default:
 		return Run{}, fmt.Errorf("%w: failure code is not daemon infrastructure authority", ErrInvalidValue)
 	}
@@ -424,6 +432,16 @@ func (store *Store) FailRun(ctx context.Context, runID RunID, expected Revision,
 		return Run{}, tx.Rollback(ErrConflict)
 	}
 	return store.enterFinalizing(ctx, tx, run, expected, failure, at, nil)
+}
+
+// FailRunProviderExit records a daemon-owned provider launch failure after
+// runtime activation. Provider exits from an established attempt remain
+// attempt outcomes and are rejected by FailRun.
+func (store *Store) FailRunProviderExit(ctx context.Context, runID RunID, expected Revision, failure Proposal, at UnixMillis) (Run, error) {
+	if failure.code != FailureProviderExit {
+		return Run{}, fmt.Errorf("%w: provider exit failure required", ErrInvalidValue)
+	}
+	return store.failRun(ctx, runID, expected, failure, at, true)
 }
 
 // FailRunWithRuntimeAbsent is the sole no-runtime-effect failure edge. Its

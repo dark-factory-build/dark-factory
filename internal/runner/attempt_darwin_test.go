@@ -458,6 +458,18 @@ func runAttemptWorkerHelper(args []string) error {
 		cwd.Close()
 		return err
 	}
+	if err := control.AwaitProviderAdoption(); err != nil {
+		cwd.Close()
+		return err
+	}
+	if err := write("provider-adoption", "adopted"); err != nil {
+		cwd.Close()
+		return err
+	}
+	if err := control.ReportProviderAdoption([]byte("adopted")); err != nil {
+		cwd.Close()
+		return err
+	}
 	if err := control.AwaitProvider(); err != nil {
 		cwd.Close()
 		return err

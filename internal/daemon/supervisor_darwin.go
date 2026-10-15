@@ -1408,7 +1408,13 @@ func (daemon *Daemon) failRun(run kernel.Run, code kernel.FailureCode, cause err
 			lastErr = clockErr
 			continue
 		}
-		failed, failErr := daemon.store.FailRun(daemon.cleanupCtx, current.ID, current.Revision, failure, at)
+		var failed kernel.Run
+		var failErr error
+		if code == kernel.FailureProviderExit {
+			failed, failErr = daemon.store.FailRunProviderExit(daemon.cleanupCtx, current.ID, current.Revision, failure, at)
+		} else {
+			failed, failErr = daemon.store.FailRun(daemon.cleanupCtx, current.ID, current.Revision, failure, at)
+		}
 		if failErr == nil {
 			return failed, cause
 		}
