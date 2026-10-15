@@ -507,54 +507,109 @@ func (daemon *Daemon) rebaseChange(ctx context.Context, open kernel.OpenPull) (b
 	if err != nil || !found || state.Phase != kernel.ChangeRetained || state.Selection == nil || state.HeadCommit == nil {
 		return false, err
 	}
-	parent, git := daemon.changeParent.Load(), daemon.gitExecutable.Load()
-	if parent == nil || *parent == "" || git == nil || *git == "" {
+	parent := daemon.changeParent.Load()
+	if parent == nil || *parent == "" {
 		return false, errPublishLater
 	}
-	repositoryState, err := daemon.repositoryForChange(ctx, state)
+	updated, conflict, err := daemon.prepareRetainedChange(ctx, state, filepath.Join(*parent, state.ID.String()))
 	if err != nil {
 		return false, err
 	}
-	source, verified, err := daemon.store.RepositorySourceIdentity(ctx, repositoryState.ID)
+	if conflict != nil {
+		return false, nil
+	}
+	return !kernelCommitEqual(*state.HeadCommit, *updated.HeadCommit), nil
+}
+
+// prepareRetainedChange is the one factory-owned preparation boundary for a
+// retained Change. It refreshes the registered repository, rebases the exact
+// retained worktree, and records a new head without changing task history.
+// The worker never fetches or mutates the public head itself.
+func (daemon *Daemon) prepareRetainedChange(ctx context.Context, state kernel.Change, path string) (kernel.Change, *change.RebaseConflict, error) {
+	if state.Selection == nil || state.HeadCommit == nil {
+		return state, nil, nil
+	}
+	git := daemon.gitExecutable.Load()
+	if git == nil || *git == "" {
+		return state, nil, errPublishLater
+	}
+	repository, err := daemon.repositoryForChange(ctx, state)
+	if err != nil {
+		return state, nil, err
+	}
+	registered, found, err := daemon.store.ProjectRepository(ctx, repository.ID)
+	if err != nil || !found {
+		if err == nil {
+			err = kernel.ErrCorruptState
+		}
+		return state, nil, err
+	}
+	source, verified, err := daemon.store.RepositorySourceIdentity(ctx, repository.ID)
 	if err != nil || !verified {
-		return false, errors.Join(err, kernel.ErrConflict)
+		return state, nil, errors.Join(err, kernel.ErrConflict)
 	}
 	root, err := change.NewRepositoryIdentity(source.RootDevice, source.RootInode)
 	if err != nil {
-		return false, err
+		return state, nil, err
 	}
 	gitIdentity, err := change.NewRepositoryIdentity(source.GitDevice, source.GitInode)
 	if err != nil {
-		return false, err
+		return state, nil, err
 	}
-	current, err := change.SelectRegisteredGit(ctx, *git, repositoryState.Root, repositoryState.BaseRef, change.RepositorySourceIdentity{Root: root, Git: gitIdentity, OriginDigest: source.OriginDigest})
+	selection, err := change.SelectRegisteredGit(ctx, *git, registered.Root, registered.BaseRef, change.RepositorySourceIdentity{Root: root, Git: gitIdentity, OriginDigest: source.OriginDigest})
 	if err != nil {
-		return false, err
+		return state, nil, err
 	}
-	path := filepath.Join(*parent, state.ID.String())
-	if err := change.FetchBase(ctx, current, path); err != nil {
-		return false, err
+	if err := change.FetchBase(ctx, selection, path); err != nil {
+		return state, nil, err
 	}
-	facts, err := change.RebaseWorktree(ctx, current, path)
-	if errors.Is(err, change.ErrRebaseConflict) {
-		return false, nil
+	currentBase, err := change.DescendsFrom(ctx, *git, repository.Root, root, path, selection.Base())
+	if err != nil {
+		return state, nil, err
+	}
+	if currentBase {
+		return state, nil, nil
+	}
+	facts, err := change.RebaseWorktree(ctx, selection, path)
+	if conflict, ok := err.(*change.RebaseConflict); ok {
+		return state, conflict, nil
 	}
 	if err != nil {
-		return false, err
+		return state, nil, err
 	}
-	if facts.Dirty() || facts.Branch() != change.BranchName(state.ID.String()) {
-		return false, errors.New("rebased Change worktree failed verification")
+	if facts.Branch() != change.BranchName(state.ID.String()) {
+		return state, nil, errors.New("rebased Change worktree failed verification")
 	}
 	newHead, err := kernelCommit(facts.Head())
-	if err != nil || kernelCommitEqual(*state.HeadCommit, newHead) {
-		return false, err
+	if err != nil {
+		return state, nil, err
+	}
+	if kernelCommitEqual(*state.HeadCommit, newHead) {
+		return state, nil, nil
 	}
 	at, err := daemon.timestamp()
 	if err != nil {
-		return false, err
+		return state, nil, err
 	}
-	_, err = daemon.store.RecordChangeRebased(ctx, state.ID, state.Revision, *state.HeadCommit, newHead, at)
-	return err == nil, err
+	updated, err := daemon.store.RecordChangeRebased(ctx, state.ID, state.Revision, *state.HeadCommit, newHead, at)
+	return updated, nil, err
+}
+
+func retainedConflictContext(state kernel.Change, conflict *change.RebaseConflict) string {
+	paths := conflict.Paths
+	if len(paths) > 32 {
+		paths = paths[:32]
+	}
+	base := "unknown"
+	if state.Selection != nil {
+		base = hex.EncodeToString(state.Selection.Commit().Bytes())
+	}
+	context := fmt.Sprintf("\n\nRetained Change rebase context (bounded): current-main=%s base=%s conflicting-paths=%s. Resolve these paths on the retained Change; factoryd refreshed the registered repository before this worker turn.\n", conflict.CurrentBase, base, strings.Join(paths, ","))
+	const maxContext = 2048
+	if len(context) > maxContext {
+		context = context[:maxContext]
+	}
+	return context
 }
 
 func (daemon *Daemon) reviewCoordinator(ctx context.Context, project kernel.ProjectID, repository string) (review.Coordinator, error) {

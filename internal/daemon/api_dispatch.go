@@ -46,6 +46,9 @@ type Daemon struct {
 	// by intakeMu, and whether a pass is running.
 	intakePolls map[kernel.IntakeSourceID]*intakePoll
 	intakeBusy  atomic.Bool
+	// retainedConflictContexts bridges admission-owned conflict evidence to
+	// Attempt API delivery without mutating the task receipt.
+	retainedConflictContexts sync.Map // kernel.RunID -> string
 	// reviewBackend is a package-test seam; production always uses the
 	// Maintainer-backed daemonReviewBackend.
 	reviewBackend func(string, uint64) review.Backend
@@ -988,6 +991,9 @@ func (daemon *Daemon) attemptTask(ctx context.Context, call api.Call) api.Reply 
 	mark("knowledge")
 	if err != nil {
 		return newErrorReply(api.RemoteInternal)
+	}
+	if conflict, ok := daemon.retainedConflictContexts.Load(authority.RunID); ok {
+		task = append(task, []byte(conflict.(string))...)
 	}
 	if call.AttemptTaskResumed() && authority.Role == kernel.RoleOrchestrator && authority.Provider == kernel.ProviderCodex {
 		if marker := bytes.Index(task, []byte("\n\nFactory causal wake:")); marker >= 0 {

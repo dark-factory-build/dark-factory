@@ -405,9 +405,10 @@ func (store *Store) PublishedChangeID(ctx context.Context, project ProjectID, re
 	return id, err == nil, err
 }
 
-// RecordChangeRebased advances a retained Change's durable head after
-// factoryd has cleanly rebased its worktree onto the current main. The Change
-// revision remains the worker's settled revision; only the Git head changed.
+// RecordChangeRebased advances a retained or admitted Change's durable head
+// after factoryd has cleanly rebased its worktree onto the current main. The
+// Change revision remains the task's receipt revision; only the Git head
+// changes. Admission may already have moved the retained row to available.
 func (store *Store) RecordChangeRebased(ctx context.Context, id ChangeID, expected Revision, oldHead, newHead CommitID, at UnixMillis) (Change, error) {
 	if id.zero() || oldHead.Format() == ObjectFormat(0) || newHead.Format() == ObjectFormat(0) || oldHead.Format() != newHead.Format() {
 		return Change{}, fmt.Errorf("%w: invalid rebased Change", ErrInvalidValue)
@@ -424,13 +425,13 @@ func (store *Store) RecordChangeRebased(ctx context.Context, id ChangeID, expect
 		}
 		return Change{}, tx.Rollback(err)
 	}
-	if current.Revision != expected || current.Phase != ChangeRetained || current.HeadCommit == nil || !current.HeadCommit.equal(oldHead) {
+	if current.Revision != expected || current.Phase != ChangeRetained && current.Phase != ChangeAvailable || current.HeadCommit == nil || !current.HeadCommit.equal(oldHead) {
 		return Change{}, tx.Rollback(ErrRevisionConflict)
 	}
 	if at.Int64() < current.UpdatedAt.Int64() {
 		return Change{}, tx.Rollback(ErrRevisionConflict)
 	}
-	result, err := tx.connection.ExecContext(ctx, `UPDATE changes SET head_commit = ?, updated_at_ms = ? WHERE id = ? AND revision = ? AND phase = 'retained' AND head_commit = ?`, newHead.Bytes(), at.Int64(), id.Bytes(), expected.Int64(), oldHead.Bytes())
+	result, err := tx.connection.ExecContext(ctx, `UPDATE changes SET head_commit = ?, updated_at_ms = ? WHERE id = ? AND revision = ? AND phase IN ('retained', 'available') AND head_commit = ?`, newHead.Bytes(), at.Int64(), id.Bytes(), expected.Int64(), oldHead.Bytes())
 	if err := requireOneRow(result, err); err != nil {
 		return Change{}, tx.Rollback(err)
 	}

@@ -1271,6 +1271,14 @@ func TestDaemonServesCurrentWorkerAssignmentReceipt(t *testing.T) {
 	if receipt.AdmittedChangeRevision == receipt.ChangeRevision {
 		t.Fatalf("worker receipt did not distinguish admitted/current Change revisions: %+v", receipt)
 	}
+	const retainedConflict = "\n\nRetained Change rebase context (bounded): current-main=current-main base=original-base conflicting-paths=README.md."
+	fixture.daemon.retainedConflictContexts.Store(active.run.ID, retainedConflict)
+	done = fixture.serve(t)
+	task, err := active.client.Task(ctx)
+	waitDispatch(t, done)
+	if err != nil || !strings.Contains(task.Task, retainedConflict) {
+		t.Fatalf("retained conflict context delivery = %q, %v", task.Task, err)
+	}
 }
 
 func TestAttemptTaskUsesCurrentAcceptedIssueBody(t *testing.T) {

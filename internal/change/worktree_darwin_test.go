@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"syscall"
 	"testing"
@@ -582,6 +583,160 @@ func TestFetchBaseGivesAPrivateChangeTheCurrentMainTip(t *testing.T) {
 	}
 	if got := strings.TrimSpace(runFixtureGitOutput(t, fixture.git, admin, "rev-parse", "refs/remotes/origin/main")); got != tip {
 		t.Fatalf("origin/main = %s, want %s", got, tip)
+	}
+}
+
+func TestRebaseWorktreeAutostashesRetainedTrackedEdits(t *testing.T) {
+	ctx := context.Background()
+	fixture := newLocalGitFixture(t, "sha1")
+	selected, err := SelectGit(ctx, fixture.git, fixture.repository, "HEAD", fixture.identity)
+	if err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(secureTempDir(t), testChangeID)
+	branch := BranchName(testChangeID)
+	if _, err := AddPrivateWorktree(ctx, selected, path, branch); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(path, "README.md"), []byte("retained draft\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(fixture.repository, "main.txt"), []byte("main fix\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	runFixtureGit(t, fixture.git, fixture.repository, "add", "main.txt")
+	runFixtureGit(t, fixture.git, fixture.repository, "commit", "-m", "advance main")
+	newer, err := SelectGit(ctx, fixture.git, fixture.repository, "HEAD", fixture.identity)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := FetchBase(ctx, newer, path); err != nil {
+		t.Fatal(err)
+	}
+	facts, err := RebaseWorktree(ctx, newer, path)
+	if err != nil || !facts.Head().equal(newer.Base()) || facts.Branch() != branch || !facts.Dirty() {
+		t.Fatalf("rebased retained worktree = %+v, %v", facts, err)
+	}
+	if got, err := os.ReadFile(filepath.Join(path, "README.md")); err != nil || string(got) != "retained draft\n" {
+		t.Fatalf("retained draft = %q, %v", got, err)
+	}
+}
+
+func TestRebaseWorktreeReportsAutostashConflict(t *testing.T) {
+	ctx := context.Background()
+	fixture := newLocalGitFixture(t, "sha1")
+	selected, err := SelectGit(ctx, fixture.git, fixture.repository, "HEAD", fixture.identity)
+	if err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(secureTempDir(t), testChangeID)
+	branch := BranchName(testChangeID)
+	if _, err := AddPrivateWorktree(ctx, selected, path, branch); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(path, "README.md"), []byte("retained draft\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(fixture.repository, "README.md"), []byte("current main\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	runFixtureGit(t, fixture.git, fixture.repository, "add", "README.md")
+	runFixtureGit(t, fixture.git, fixture.repository, "commit", "-m", "advance main")
+	newer, err := SelectGit(ctx, fixture.git, fixture.repository, "HEAD", fixture.identity)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := FetchBase(ctx, newer, path); err != nil {
+		t.Fatal(err)
+	}
+	var conflict *RebaseConflict
+	if _, err := RebaseWorktree(ctx, newer, path); !errors.As(err, &conflict) || !slices.Contains(conflict.Paths, "README.md") {
+		t.Fatalf("autostash conflict = %+v, %v", conflict, err)
+	}
+	facts, err := InspectWorktree(ctx, fixture.git, fixture.repository, fixture.identity, path)
+	if err != nil || !facts.Dirty() || facts.Branch() != branch {
+		t.Fatalf("aborted autostash conflict worktree = %+v, %v", facts, err)
+	}
+	if got, err := os.ReadFile(filepath.Join(path, "README.md")); err != nil || string(got) != "retained draft\n" {
+		t.Fatalf("retained draft after autostash conflict = %q, %v", got, err)
+	}
+}
+
+func TestRebaseWorktreeReportsUntrackedOverwriteConflict(t *testing.T) {
+	ctx := context.Background()
+	fixture := newLocalGitFixture(t, "sha1")
+	selected, err := SelectGit(ctx, fixture.git, fixture.repository, "HEAD", fixture.identity)
+	if err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(secureTempDir(t), testChangeID)
+	branch := BranchName(testChangeID)
+	if _, err := AddPrivateWorktree(ctx, selected, path, branch); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(path, "new.txt"), []byte("retained\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(fixture.repository, "new.txt"), []byte("current main\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	runFixtureGit(t, fixture.git, fixture.repository, "add", "new.txt")
+	runFixtureGit(t, fixture.git, fixture.repository, "commit", "-m", "add main file")
+	newer, err := SelectGit(ctx, fixture.git, fixture.repository, "HEAD", fixture.identity)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := FetchBase(ctx, newer, path); err != nil {
+		t.Fatal(err)
+	}
+	var conflict *RebaseConflict
+	if _, err := RebaseWorktree(ctx, newer, path); !errors.As(err, &conflict) || !slices.Contains(conflict.Paths, "new.txt") {
+		t.Fatalf("untracked overwrite conflict = %+v, %v", conflict, err)
+	}
+	facts, err := InspectWorktree(ctx, fixture.git, fixture.repository, fixture.identity, path)
+	if err != nil || !facts.Dirty() || facts.Branch() != branch {
+		t.Fatalf("untracked conflict worktree = %+v, %v", facts, err)
+	}
+	if got, err := os.ReadFile(filepath.Join(path, "new.txt")); err != nil || string(got) != "retained\n" {
+		t.Fatalf("retained untracked file = %q, %v", got, err)
+	}
+}
+
+func TestRebaseWorktreeAbortsAndReportsConflict(t *testing.T) {
+	ctx := context.Background()
+	fixture := newLocalGitFixture(t, "sha1")
+	selected, err := SelectGit(ctx, fixture.git, fixture.repository, "HEAD", fixture.identity)
+	if err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(secureTempDir(t), testChangeID)
+	if _, err := AddPrivateWorktree(ctx, selected, path, BranchName(testChangeID)); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(path, "README.md"), []byte("retained change\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	runFixtureGit(t, fixture.git, path, "add", "README.md")
+	runFixtureGit(t, fixture.git, path, "commit", "-m", "retained change")
+	if err := os.WriteFile(filepath.Join(fixture.repository, "README.md"), []byte("current main\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	runFixtureGit(t, fixture.git, fixture.repository, "add", "README.md")
+	runFixtureGit(t, fixture.git, fixture.repository, "commit", "-m", "advance main")
+	newer, err := SelectGit(ctx, fixture.git, fixture.repository, "HEAD", fixture.identity)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := FetchBase(ctx, newer, path); err != nil {
+		t.Fatal(err)
+	}
+	var conflict *RebaseConflict
+	if _, err := RebaseWorktree(ctx, newer, path); !errors.As(err, &conflict) || conflict.CurrentBase != newer.Base().Hex() || !slices.Contains(conflict.Paths, "README.md") {
+		t.Fatalf("rebase conflict = %+v, %v", conflict, err)
+	}
+	facts, err := InspectWorktree(ctx, fixture.git, fixture.repository, fixture.identity, path)
+	if err != nil || facts.Dirty() || facts.Branch() != BranchName(testChangeID) {
+		t.Fatalf("aborted conflict worktree = %+v, %v", facts, err)
 	}
 }
 

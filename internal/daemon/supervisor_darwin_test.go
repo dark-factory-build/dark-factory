@@ -58,6 +58,24 @@ func TestMain(m *testing.M) {
 			err = runner.RunAttemptRunner()
 		case "--change-worker":
 			err = changeworker.Run(context.Background())
+		case "--supervisor-attempt-task":
+			if len(os.Args) != 3 {
+				err = errors.New("invalid attempt task helper invocation")
+				break
+			}
+			client, clientErr := api.NewAttemptClientFromEnvironment(os.Getenv("DARK_FACTORY_SOCKET"))
+			if clientErr != nil {
+				err = clientErr
+				break
+			}
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			assignment, taskErr := client.Task(ctx)
+			cancel()
+			if taskErr != nil {
+				err = taskErr
+				break
+			}
+			err = os.WriteFile(os.Args[2], []byte(assignment.Task), 0o600)
 		case "--supervisor-attempt-succeed", "--supervisor-attempt-block", "--supervisor-attempt-fail":
 			if len(os.Args) != 3 {
 				err = errors.New("invalid attempt helper invocation")
@@ -936,12 +954,10 @@ func TestSupervisorCodexOverseerReadsMultipleExactRetainedChanges(t *testing.T) 
 	fixture.assertReleased(t, overseer)
 }
 
-// A retry reopens the same worktree: the worker's commit on the Change
-// branch and its uncommitted edits are exactly as it left them, the
-// settled head is what the daemon recorded, and no fresh selection or
-// upstream refresh happens.
+// A retry refreshes the retained worktree onto the registered repository's
+// current main while preserving its identity and uncommitted worker edits.
 func TestSupervisorRetainedRetryReopensTheSameWorktree(t *testing.T) {
-	program := "set -eu\nif [ ! -s __WITNESS__ ]; then printf committed > committed.txt; git add committed.txt; git commit -q -m committed; printf edited > edited.txt; fi\nprintf x >> __WITNESS__\nexit 0\n"
+	program := "set -eu\nif [ ! -s __WITNESS__ ]; then printf committed > committed.txt; git add committed.txt; git commit -q -m committed; printf edited > edited.txt; else git rev-parse HEAD > observed-head.txt; fi\nprintf x >> __WITNESS__\nexit 0\n"
 	fixture := newSupervisorFixture(t, program)
 	first, err := fixture.daemon.RunNext(context.Background(), fixture.spec)
 	if err != nil {
@@ -964,8 +980,28 @@ func TestSupervisorRetainedRetryReopensTheSameWorktree(t *testing.T) {
 	if fmt.Sprintf("%x", firstChange.Selection.Commit().Bytes()) != fixture.base {
 		t.Fatalf("settled base moved: %x", firstChange.Selection.Commit().Bytes())
 	}
+	repository := filepath.Join(fixture.root, "repository")
+	supervisorGit(t, supervisorNativeGit(t), "-C", repository, "switch", "main")
+	if err := os.WriteFile(filepath.Join(repository, "main-fix.txt"), []byte("main fix\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	supervisorGit(t, supervisorNativeGit(t), "-C", repository, "add", "main-fix.txt")
+	supervisorGit(t, supervisorNativeGit(t), "-C", repository, "commit", "-q", "-m", "advance main")
+	mainHead := strings.TrimSpace(supervisorGitOutput(t, supervisorNativeGit(t), "-C", repository, "rev-parse", "HEAD"))
+	binding, found, err := fixture.store.TaskRepository(context.Background(), first.TaskID)
+	if err != nil || !found {
+		t.Fatalf("task repository binding: %v, found=%v", err, found)
+	}
+	registered, found, err := fixture.store.ProjectRepository(context.Background(), binding.ID)
+	if err != nil || !found {
+		t.Fatalf("registered repository: %v, found=%v", err, found)
+	}
+	if _, err := fixture.store.UpdateProjectRepositoryBase(context.Background(), registered.ID, registered.Revision, "refs/heads/main", supervisorTime()); err != nil {
+		t.Fatalf("advance registered repository base: %v", err)
+	}
 	queueSupervisorRetry(t, fixture, first)
-	// A retained retry must not resolve a selector again.
+	// A retained retry must not resolve a selector again; preparation uses the
+	// registered repository and refreshes the existing Change in place.
 	fixture.spec.BaseRevision = "refs/heads/retained-retry-must-not-resolve"
 	second, err := fixture.daemon.RunNext(context.Background(), fixture.spec)
 	if err != nil {
@@ -981,8 +1017,14 @@ func TestSupervisorRetainedRetryReopensTheSameWorktree(t *testing.T) {
 			t.Fatalf("retained %s = %q, %v", name, body, err)
 		}
 	}
-	if got := strings.TrimSpace(supervisorGitOutput(t, supervisorNativeGit(t), "-C", changePath, "rev-parse", "HEAD")); got != head {
-		t.Fatalf("retry moved the branch to %s", got)
+	if got := strings.TrimSpace(supervisorGitOutput(t, supervisorNativeGit(t), "-C", changePath, "rev-parse", "HEAD")); got == head || strings.TrimSpace(supervisorGitOutput(t, supervisorNativeGit(t), "-C", changePath, "rev-parse", "HEAD~1")) != mainHead {
+		t.Fatalf("retry did not refresh the branch: old=%s new=%s parent=%s main=%s", head, got, supervisorGitOutput(t, supervisorNativeGit(t), "-C", changePath, "rev-parse", "HEAD~1"), mainHead)
+	}
+	if body, err := os.ReadFile(filepath.Join(changePath, "edited.txt")); err != nil || string(body) != "edited" {
+		t.Fatalf("retained edit after refresh = %q, %v", body, err)
+	}
+	if observed, err := os.ReadFile(filepath.Join(changePath, "observed-head.txt")); err != nil || strings.TrimSpace(string(observed)) != strings.TrimSpace(supervisorGitOutput(t, supervisorNativeGit(t), "-C", changePath, "rev-parse", "HEAD")) {
+		t.Fatalf("provider observed head = %q, %v", observed, err)
 	}
 	if witness, err := os.ReadFile(fixture.witness); err != nil || string(witness) != "xx" {
 		t.Fatalf("retained provider witness = %q, %v", witness, err)
@@ -991,8 +1033,100 @@ func TestSupervisorRetainedRetryReopensTheSameWorktree(t *testing.T) {
 		t.Fatalf("retained retry changed canonical Change: first=%+v second=%+v", first.ChangeID, second.ChangeID)
 	}
 	secondChange, found, err := fixture.store.Change(context.Background(), *second.ChangeID)
-	if err != nil || !found || secondChange.Selection == nil || secondChange.Selection.RepositoryIdentity() != firstChange.Selection.RepositoryIdentity() || secondChange.HeadCommit == nil || fmt.Sprintf("%x", secondChange.HeadCommit.Bytes()) != head {
+	if err != nil || !found || secondChange.Selection == nil || secondChange.Selection.RepositoryIdentity() != firstChange.Selection.RepositoryIdentity() || secondChange.HeadCommit == nil || fmt.Sprintf("%x", secondChange.HeadCommit.Bytes()) == head {
 		t.Fatalf("retained retry changed identities: Change=%+v found=%v err=%v", secondChange, found, err)
+	}
+}
+
+func TestSupervisorRetainedRetryDeliversAutostashConflictContext(t *testing.T) {
+	executable := quoteShell(supervisorTestExecutable(t))
+	program := "set -eu\nif [ ! -s __WITNESS__ ]; then printf retained > payload.txt; else " + executable + " --supervisor-attempt-task \"$(dirname __WITNESS__)/conflict-task.txt\"; fi\nprintf x >> __WITNESS__\nexit 1\n"
+	fixture := newSupervisorFixture(t, program)
+	first, err := fixture.daemon.RunNext(context.Background(), fixture.spec)
+	if err != nil {
+		t.Fatalf("first RunNext: %v", err)
+	}
+	fixture.assertTerminal(t, first, kernel.OutcomeFailed)
+	repository := filepath.Join(fixture.root, "repository")
+	supervisorGit(t, supervisorNativeGit(t), "-C", repository, "switch", "main")
+	if err := os.WriteFile(filepath.Join(repository, "payload.txt"), []byte("current main\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	supervisorGit(t, supervisorNativeGit(t), "-C", repository, "add", "payload.txt")
+	supervisorGit(t, supervisorNativeGit(t), "-C", repository, "commit", "-q", "-m", "advance main with conflict")
+	mainHead := strings.TrimSpace(supervisorGitOutput(t, supervisorNativeGit(t), "-C", repository, "rev-parse", "HEAD"))
+	binding, found, err := fixture.store.TaskRepository(context.Background(), first.TaskID)
+	if err != nil || !found {
+		t.Fatalf("task repository binding: %v, found=%v", err, found)
+	}
+	registered, found, err := fixture.store.ProjectRepository(context.Background(), binding.ID)
+	if err != nil || !found {
+		t.Fatalf("registered repository: %v, found=%v", err, found)
+	}
+	if _, err := fixture.store.UpdateProjectRepositoryBase(context.Background(), registered.ID, registered.Revision, "refs/heads/main", supervisorTime()); err != nil {
+		t.Fatalf("advance registered repository base: %v", err)
+	}
+	queueSupervisorRetry(t, fixture, first)
+	second, err := fixture.daemon.RunNext(context.Background(), fixture.spec)
+	if err != nil {
+		t.Fatalf("conflicting retained RunNext: %v", err)
+	}
+	fixture.assertTerminal(t, second, kernel.OutcomeFailed)
+	observed, err := os.ReadFile(filepath.Join(fixture.root, "conflict-task.txt"))
+	if err != nil {
+		t.Fatalf("provider task receipt: %v", err)
+	}
+	text := string(observed)
+	for _, want := range []string{"Retained Change rebase context (bounded):", "current-main=" + mainHead, "base=" + fixture.base, "conflicting-paths=payload.txt"} {
+		if !strings.Contains(text, want) {
+			t.Fatalf("provider task missing %q: %s", want, text)
+		}
+	}
+}
+
+func TestSupervisorRetainedRetryDeliversUntrackedConflictContext(t *testing.T) {
+	executable := quoteShell(supervisorTestExecutable(t))
+	program := "set -eu\nif [ ! -s __WITNESS__ ]; then printf retained > new.txt; else " + executable + " --supervisor-attempt-task \"$(dirname __WITNESS__)/untracked-task.txt\"; fi\nprintf x >> __WITNESS__\nexit 1\n"
+	fixture := newSupervisorFixture(t, program)
+	first, err := fixture.daemon.RunNext(context.Background(), fixture.spec)
+	if err != nil {
+		t.Fatalf("first RunNext: %v", err)
+	}
+	fixture.assertTerminal(t, first, kernel.OutcomeFailed)
+	repository := filepath.Join(fixture.root, "repository")
+	supervisorGit(t, supervisorNativeGit(t), "-C", repository, "switch", "main")
+	if err := os.WriteFile(filepath.Join(repository, "new.txt"), []byte("current main\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	supervisorGit(t, supervisorNativeGit(t), "-C", repository, "add", "new.txt")
+	supervisorGit(t, supervisorNativeGit(t), "-C", repository, "commit", "-q", "-m", "add main file")
+	mainHead := strings.TrimSpace(supervisorGitOutput(t, supervisorNativeGit(t), "-C", repository, "rev-parse", "HEAD"))
+	binding, found, err := fixture.store.TaskRepository(context.Background(), first.TaskID)
+	if err != nil || !found {
+		t.Fatalf("task repository binding: %v, found=%v", err, found)
+	}
+	registered, found, err := fixture.store.ProjectRepository(context.Background(), binding.ID)
+	if err != nil || !found {
+		t.Fatalf("registered repository: %v, found=%v", err, found)
+	}
+	if _, err := fixture.store.UpdateProjectRepositoryBase(context.Background(), registered.ID, registered.Revision, "refs/heads/main", supervisorTime()); err != nil {
+		t.Fatalf("advance registered repository base: %v", err)
+	}
+	queueSupervisorRetry(t, fixture, first)
+	second, err := fixture.daemon.RunNext(context.Background(), fixture.spec)
+	if err != nil {
+		t.Fatalf("untracked retained RunNext: %v", err)
+	}
+	fixture.assertTerminal(t, second, kernel.OutcomeFailed)
+	observed, err := os.ReadFile(filepath.Join(fixture.root, "untracked-task.txt"))
+	if err != nil {
+		t.Fatalf("provider task receipt: %v", err)
+	}
+	text := string(observed)
+	for _, want := range []string{"Retained Change rebase context (bounded):", "current-main=" + mainHead, "base=" + fixture.base, "conflicting-paths=new.txt"} {
+		if !strings.Contains(text, want) {
+			t.Fatalf("provider task missing %q: %s", want, text)
+		}
 	}
 }
 
@@ -2306,6 +2440,7 @@ func newSupervisorRoleFixture(t *testing.T, program string, role kernel.AgentRol
 	}
 	supervisorGit(t, git, "-C", repository, "add", "payload.txt")
 	supervisorGit(t, git, "-C", repository, "commit", "-m", "base")
+	supervisorGit(t, git, "-C", repository, "branch", "main")
 	base := strings.TrimSpace(supervisorGitOutput(t, git, "-C", repository, "rev-parse", "HEAD"))
 	fixture.base = base
 

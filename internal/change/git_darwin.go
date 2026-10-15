@@ -45,6 +45,16 @@ const (
 // Operational failures are returned separately so the caller can retry them.
 var ErrRebaseConflict = errors.New("Change rebase conflicts with the current base")
 
+// RebaseConflict preserves only repository-relative paths from a failed
+// rebase. The worktree has already been restored by RebaseWorktree.
+type RebaseConflict struct {
+	Paths       []string
+	CurrentBase string
+}
+
+func (e *RebaseConflict) Error() string        { return ErrRebaseConflict.Error() }
+func (e *RebaseConflict) Is(target error) bool { return target == ErrRebaseConflict }
+
 type gitCommandSpec struct {
 	program     string
 	repository  string
@@ -1401,8 +1411,8 @@ func FetchBase(ctx context.Context, selection Selection, path string) error {
 // RebaseWorktree rebases a retained Change onto the selected current base.
 // The caller must have fetched selection.base to refs/remotes/origin/main
 // first. A clean rebase leaves the Change branch at its new head; a textual
-// conflict is reported only after a successful abort, while operational Git
-// failures remain retryable by the caller.
+// conflict, including an autostash conflict reported after a successful
+// rebase, is reported only after a successful abort.
 func RebaseWorktree(ctx context.Context, selection Selection, path string) (WorktreeFacts, error) {
 	if !selection.valid() {
 		return WorktreeFacts{}, &ValidationError{Reason: "worktree selection is invalid"}
@@ -1420,8 +1430,8 @@ func RebaseWorktree(ctx context.Context, selection Selection, path string) (Work
 	}
 	// Use the linked worktree's .git indirection. Passing the private bare
 	// repository as --git-dir would select its unrelated HEAD and index.
-	gitArgs := []string{"-c", "core.hooksPath=/dev/null", "-c", "protocol.file.allow=always", "-C", path}
-	gitArgs = append(gitArgs, "rebase", "refs/remotes/origin/main")
+	gitPrefix := []string{"-c", "core.hooksPath=/dev/null", "-c", "protocol.file.allow=always", "-C", path}
+	gitArgs := append(append([]string{}, gitPrefix...), "rebase", "--autostash", "refs/remotes/origin/main")
 	result, err := authority.runWithEnvironment(ctx, maxGitSelectionOutput, []string{
 		"GIT_COMMITTER_NAME=" + gitauthor.AutomationName,
 		"GIT_COMMITTER_EMAIL=" + gitauthor.AutomationEmail,
@@ -1429,19 +1439,89 @@ func RebaseWorktree(ctx context.Context, selection Selection, path string) (Work
 	if err != nil {
 		return WorktreeFacts{}, err
 	}
-	if result.exitCode != 0 {
-		abort := append([]string{}, gitArgs[:len(gitArgs)-2]...)
+	paths := conflictPaths(ctx, authority, path)
+	untrackedObstruction := result.exitCode != 0 && len(paths) == 0 && strings.Contains(strings.ToLower(string(result.stderr)), "untracked")
+	if untrackedObstruction {
+		paths = untrackedPaths(ctx, authority, path)
+		if len(paths) > 0 {
+			return WorktreeFacts{}, &RebaseConflict{Paths: paths, CurrentBase: selection.base.Hex()}
+		}
+	}
+	if result.exitCode != 0 || len(paths) > 0 {
+		abort := append([]string{}, gitPrefix...)
 		abort = append(abort, "rebase", "--abort")
 		aborted, abortErr := authority.run(ctx, maxGitSelectionOutput, abort...)
-		if abortErr != nil {
-			return WorktreeFacts{}, abortErr
+		if abortErr != nil || aborted.exitCode != 0 {
+			// Git may have completed the rebase before applying the autostash.
+			// In that case there is no rebase state for --abort; ORIG_HEAD is
+			// the pre-rebase branch and --merge restores the retained edits.
+			if result.exitCode != 0 || len(paths) == 0 {
+				if abortErr != nil {
+					return WorktreeFacts{}, abortErr
+				}
+				return WorktreeFacts{}, newGitError(gitFailureProcess)
+			}
+			reset, resetErr := authority.run(ctx, maxGitSelectionOutput, append(append([]string{}, gitPrefix...), "reset", "--merge", "ORIG_HEAD")...)
+			if resetErr != nil {
+				return WorktreeFacts{}, resetErr
+			}
+			if reset.exitCode != 0 {
+				return WorktreeFacts{}, newGitError(gitFailureProcess)
+			}
+			stash, stashErr := authority.run(ctx, maxGitSelectionOutput, append(append([]string{}, gitPrefix...), "rev-parse", "--verify", "--quiet", "refs/stash")...)
+			if stashErr != nil {
+				return WorktreeFacts{}, stashErr
+			}
+			if stash.exitCode == 0 {
+				reapplied, reapplyErr := authority.run(ctx, maxGitSelectionOutput, append(append([]string{}, gitPrefix...), "stash", "pop", "--index")...)
+				if reapplyErr != nil {
+					return WorktreeFacts{}, reapplyErr
+				}
+				if reapplied.exitCode != 0 {
+					return WorktreeFacts{}, newGitError(gitFailureProcess)
+				}
+			}
 		}
 		if aborted.exitCode == 0 {
-			return WorktreeFacts{}, ErrRebaseConflict
+			return WorktreeFacts{}, &RebaseConflict{Paths: paths, CurrentBase: selection.base.Hex()}
+		}
+		if result.exitCode == 0 && len(paths) > 0 {
+			return WorktreeFacts{}, &RebaseConflict{Paths: paths, CurrentBase: selection.base.Hex()}
 		}
 		return WorktreeFacts{}, newGitError(gitFailureProcess)
 	}
 	return authority.inspectWorktree(ctx, path)
+}
+
+func untrackedPaths(ctx context.Context, authority *gitAuthority, path string) []string {
+	result, err := authority.run(ctx, maxGitSelectionOutput, "-C", path, "ls-files", "--others", "--exclude-standard", "-z")
+	if err != nil || result.exitCode != 0 {
+		return nil
+	}
+	var paths []string
+	for _, value := range strings.Split(string(result.output), "\x00") {
+		if value != "" && validateContentPath(value) == nil {
+			paths = append(paths, value)
+		}
+		if len(paths) == 32 {
+			break
+		}
+	}
+	return paths
+}
+
+func conflictPaths(ctx context.Context, authority *gitAuthority, path string) []string {
+	result, err := authority.run(ctx, maxGitSelectionOutput, "-C", path, "diff", "--name-only", "--diff-filter=U")
+	if err != nil || result.exitCode != 0 {
+		return nil
+	}
+	var paths []string
+	for _, value := range strings.Split(strings.TrimSpace(string(result.output)), "\n") {
+		if value != "" && validateContentPath(value) == nil {
+			paths = append(paths, value)
+		}
+	}
+	return paths
 }
 
 // InspectWorktree verifies that path is a linked worktree of the repository
