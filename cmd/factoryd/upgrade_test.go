@@ -111,6 +111,49 @@ func TestTrialChildAdoptsOnlyItsInheritedConsoleSocket(t *testing.T) {
 	}
 }
 
+// installedReceipt makes home an installed service whose plist renders the
+// console Sockets at address, as ServiceInstall would record it.
+func installedReceipt(t *testing.T, home, address string) {
+	t.Helper()
+	digest := sha256.Sum256([]byte(currentProgram))
+	receipt := `{"version":1,"label":"com.dark-factory.test.console","plist_path":"/private/tmp/com.dark-factory.test.console.plist","plist_digest":"` + strings.Repeat("a", 64) + `","program_digest":"` + hex.EncodeToString(digest[:]) + `","development_browser_address":"` + address + `"}` + "\n"
+	if err := os.WriteFile(filepath.Join(install.ServiceDirectoryPath(home), "receipt"), []byte(receipt), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if !install.ServiceHoldsBrowser(home) {
+		t.Fatal("the installed receipt does not hold the console address")
+	}
+}
+
+// Across a release from a build launchd gave no console socket, the new
+// build's trial proves boot without taking the installed console address
+// (here held by another listener) and releasing it.
+func TestTrialWithoutTheConsoleSocketNeverBindsTheInstalledAddress(t *testing.T) {
+	other, err := net.Listen("tcp4", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer other.Close()
+	home := stagedHome(t, "serve", "development")
+	installedReceipt(t, home, other.Addr().String())
+	args := []string{"--home", home, "--runner", "/bin/sh", "--factoryctl", "/bin/sh", "--development-browser-address", other.Addr().String()}
+	if err := superviseTrial(home, args, install.UpgradeMarker{Target: "development"}); !errors.Is(err, errRestart) || !strings.HasSuffix(err.Error(), ": promoted development") {
+		t.Fatalf("trial = %v", err)
+	}
+}
+
+// An installed factoryd without the console socket never binds the address
+// itself: launchd did not start this one, so it refuses before opening the
+// home rather than serve the paired origin.
+func TestBootWithoutTheConsoleSocketOutsideLaunchdRefuses(t *testing.T) {
+	home := stagedHome(t, "serve", "development")
+	installedReceipt(t, home, "127.0.0.1:43123")
+	var stdout, stderr bytes.Buffer
+	if exit := run(context.Background(), childArgs(home), &stdout, &stderr); exit != exitFailure || !strings.Contains(stderr.String(), "launchd job holds the console address") || strings.Contains(stderr.String(), "startup") {
+		t.Fatalf("boot outside launchd = %d %q", exit, stderr.String())
+	}
+}
+
 func childArgs(home string, extra ...string) []string {
 	return append([]string{"--home", home, "--runner", "/bin/sh", "--factoryctl", "/bin/sh", "--development-browser-address", "127.0.0.1:0"}, extra...)
 }

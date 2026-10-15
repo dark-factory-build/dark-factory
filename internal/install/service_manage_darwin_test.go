@@ -290,8 +290,8 @@ func TestServiceUninstallAcceptsAReceiptBoundPriorPlist(t *testing.T) {
 }
 
 // A release replaces only binaries, so an installation from before the
-// console Sockets keeps its plist, and the port unheld, until the promoted
-// build migrates the plist and has launchd reload the job.
+// console Sockets keeps its plist, and the port unheld, until a build that
+// launchd started without the socket migrates the plist and reloads the job.
 func TestMigrateServicePlistBringsAPreSocketsInstallationToSockets(t *testing.T) {
 	fixture := newManageFixture(t)
 	fixture.install(t, (&recordedLaunchctl{results: append(fixture.printAbsent(), launchctlResult{status: 0}, fixture.printRunning(77))}).run)
@@ -343,13 +343,27 @@ func TestMigrateServicePlistBringsAPreSocketsInstallationToSockets(t *testing.T)
 			t.Fatalf("migrated plist %s receipt %s", plist, rebound)
 		}
 	}
+	// Done means activated, not rendered: a boot after both writes whose
+	// reload was interrupted, so launchd still holds the pre-Sockets
+	// definition, rewrites nothing and reloads again.
+	if err := MigrateServicePlist(context.Background(), fixture.home); err != nil {
+		t.Fatal(err)
+	}
+	plist, _ := os.ReadFile(fixture.plistPath())
+	rebound, _ := os.ReadFile(receiptPath)
 	want := fmt.Sprintf("gui/%d %s %s", os.Geteuid(), fixture.config.Label, fixture.plistPath())
-	if len(reloads) != 2 || reloads[0] != want || reloads[1] != want {
-		t.Fatalf("reloads = %q, want two of %q", reloads, want)
+	if !bytes.Equal(plist, current) || !bytes.Equal(rebound, currentReceipt) || len(reloads) != 3 || reloads[0] != want || reloads[1] != want || reloads[2] != want {
+		t.Fatalf("reloads = %q, want three of %q", reloads, want)
 	}
-	if err := MigrateServicePlist(context.Background(), fixture.home); err != nil || len(reloads) != 2 {
-		t.Fatalf("a current installation migrated again: %v %q", err, reloads)
+	if !ServiceHoldsBrowser(fixture.home) || ServiceHoldsBrowser(filepath.Join(fixture.root, "absent")) {
+		t.Fatal("ServiceHoldsBrowser misread the installation")
 	}
+	ephemeral := receipt
+	ephemeral.DevelopmentBrowserAddress = "127.0.0.1:0"
+	if body, err := encodeServiceReceipt(ephemeral); err != nil || os.WriteFile(receiptPath, body, 0o600) != nil || ServiceHoldsBrowser(fixture.home) {
+		t.Fatal("an ephemeral console address is held by launchd")
+	}
+	reloads = reloads[:2]
 	foreign := bytes.Replace(prior, []byte("<integer>63</integer>"), []byte("<integer>18</integer>"), 1)
 	if err := errors.Join(os.WriteFile(fixture.plistPath(), foreign, 0o600), os.WriteFile(receiptPath, priorReceipt, 0o600)); err != nil {
 		t.Fatal(err)
