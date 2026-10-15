@@ -596,15 +596,26 @@ func TestGitExecutableMustBeActualNativeGitForHost(t *testing.T) {
 		t.Fatalf("renamed native non-Git binary executed: %v", err)
 	}
 
+	// Cross-compile a thin executable for the other architecture rather than
+	// thinning the host Git, which need not be a universal binary.
 	wrongArchitecture := filepath.Join(secureTempDir(t), "git")
-	architecture := "x86_64"
+	architecture := "amd64"
 	if runtime.GOARCH == "amd64" {
 		architecture = "arm64"
 	}
-	command := exec.Command("/usr/bin/lipo", actual, "-thin", architecture, "-output", wrongArchitecture)
-	command.Env = []string{"HOME=/dev/null", "TMPDIR=" + os.Getenv("TMPDIR"), "LC_ALL=C", "LANG=C"}
+	source := filepath.Join(t.TempDir(), "main.go")
+	if err := os.WriteFile(source, []byte("package main\nfunc main() {}\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	command := exec.Command(filepath.Join(runtime.GOROOT(), "bin", "go"), "build", "-o", wrongArchitecture, source)
+	command.Env = []string{"GOENV=off", "GOWORK=off", "GOTOOLCHAIN=local", "CGO_ENABLED=0", "GOOS=darwin", "GOARCH=" + architecture, "TMPDIR=" + t.TempDir()}
+	for _, key := range []string{"GOCACHE", "HOME", "GOMODCACHE", "GOPATH", "GOTMPDIR"} {
+		if value := os.Getenv(key); value != "" {
+			command.Env = append(command.Env, key+"="+value)
+		}
+	}
 	if output, err := command.CombinedOutput(); err != nil {
-		t.Fatalf("create wrong-architecture Git fixture: %v: %s", err, output)
+		t.Fatalf("build wrong-architecture Git fixture: %v: %s", err, output)
 	}
 	if err := os.Chmod(wrongArchitecture, 0o700); err != nil {
 		t.Fatal(err)
