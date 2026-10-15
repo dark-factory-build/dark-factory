@@ -38,6 +38,9 @@ func TestWorkerPullReadBindsRepositoryHeadAndNumber(t *testing.T) {
 	if !workerPullRead(call("observe_pull_request_checks", "team/repo", pull.Head, "", 7), "team/repo", pull) {
 		t.Fatal("accepted exact checks read")
 	}
+	if !workerPullRead(call("observe_pull_request_comments", "team/repo", pull.Head, "", 7), "team/repo", pull) {
+		t.Fatal("accepted exact comments read")
+	}
 	for _, value := range []maintainerToolCall{
 		call("observe_pull_request_checks", "team/other", pull.Head, "", 7),
 		call("observe_pull_request_checks", "team/repo", strings.Repeat("b", 40), "", 7),
@@ -46,6 +49,46 @@ func TestWorkerPullReadBindsRepositoryHeadAndNumber(t *testing.T) {
 		if workerPullRead(value, "team/repo", pull) {
 			t.Fatalf("accepted out-of-scope read: %+v", value)
 		}
+	}
+}
+
+func TestWorkerMaintainerReadsTaskPullCommentsThroughAuthenticatedPath(t *testing.T) {
+	fixture := newDispatchFixture(t)
+	ctx := context.Background()
+	active := prepareActiveAttemptInProject(t, fixture, 152, testID(152), "worker")
+	repository := "team/repo"
+	head := strings.Repeat("a", 40)
+	if err := fixture.store.BindRepositoryGitHubID(ctx, kernel.RepositoryID(active.run.ProjectID), 7); err != nil {
+		t.Fatal(err)
+	}
+	if err := fixture.store.RecordPublication(ctx, active.run.ProjectID, active.run.TaskID, repository, kernel.ProductionPullRequest{
+		Number: 7, URL: "https://github.com/team/repo/pull/7", Head: head, Base: "main", State: "open",
+		Review: kernel.ProductionReview{Head: head, State: "unknown"},
+	}, mustKernelTime(t, 1001)); err != nil {
+		t.Fatal(err)
+	}
+	session, found, err := fixture.store.TerminalSessionForRun(ctx, active.run.ID)
+	if err != nil || !found {
+		t.Fatalf("session: %v %v", found, err)
+	}
+	owner := newLiveAttempt(fixture.daemon, active.run.ID, session.ID, nil)
+	owner.agentID, owner.attemptDigest = active.run.AgentID, active.run.CredentialDigest
+	if err := fixture.daemon.registerLiveAttempt(owner); err != nil {
+		t.Fatal(err)
+	}
+	defer fixture.daemon.unregisterLiveAttempt(active.run.ID, owner)
+	customerMode(t, fixture)
+	fixture.daemon.githubMCP = func(_ context.Context, request json.RawMessage, repositories map[string]uint64) (json.RawMessage, error) {
+		if repositories[repository] != 7 || !strings.Contains(string(request), `"observe_pull_request_comments"`) {
+			t.Fatalf("worker broker request = %s, repositories = %v", request, repositories)
+		}
+		return json.RawMessage(`{"jsonrpc":"2.0","id":1,"result":{"structuredContent":{"pull_number":7,"head_sha":"` + head + `","comments":[{"id":9,"url":"https://github.com/team/repo/issues/7#issuecomment-9","body":"review note"}]},"content":[{"type":"text","text":"Pull request comments were observed."}],"isError":false}}`), nil
+	}
+	done := fixture.serve(t)
+	result, err := active.client.Maintainer(ctx, api.MaintainerInput{Request: json.RawMessage(`{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"observe_pull_request_comments","arguments":{"repository":"team/repo","pull_number":7,"head_sha":"` + head + `"}}}`)})
+	waitDispatch(t, done)
+	if err != nil || result.State != "ok" || !strings.Contains(string(result.Response), "review note") {
+		t.Fatalf("worker comment read: %+v %v", result, err)
 	}
 }
 
