@@ -1,7 +1,9 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { createElement } from "react";
+import { renderToStaticMarkup } from "react-dom/server";
 import { act, create } from "react-test-renderer";
+import { FactoryScene } from "../dist/src/factory-scene/factory-scene.js";
 import { FactoryFloor } from "../dist/src/console-screens.js";
 import { projectGraph, projectProposals, projectFloor } from "../dist/src/console-view.js";
 import { deriveProductionView, productionKey } from "../dist/src/production-view.js";
@@ -120,6 +122,19 @@ test("a worker carries its run's recorded effort only when the run recorded some
   const stalled = worker({ ...recorded, quiet_seconds: 300 });
   assert.equal(stalled.activity, "waiting");
   assert.match(recordedEffort(stalled.telemetry), /No tool call or API request recorded for 5m$/);
+  const sprite = (telemetry) => {
+    const scene = projectFloor(state, prepared, new Map([["actor", { taskId: "task", taskRevision: 1n, runId: "run", projectId: "project", paths: [], telemetry }]]));
+    const markup = renderToStaticMarkup(createElement(FactoryScene, { graph: scene.graph, workers: scene.workers, tasks: scene.tasks }));
+    const workerMarkup = markup.slice(markup.indexOf('data-worker-id="actor"'));
+    return workerMarkup.slice(0, workerMarkup.indexOf("</g></g>"));
+  };
+  const waitingSprite = sprite({ ...recorded, quiet_seconds: 300 });
+  assert.match(waitingSprite, /person\.skin\.\d+\.waiting/);
+  assert.match(waitingSprite, /person\.legs\.\w+\.sit/);
+  assert.doesNotMatch(waitingSprite, /person\.held\.pencil\./);
+  const busySprite = sprite({ ...recorded, quiet_seconds: 0 });
+  assert.match(busySprite, /person\.skin\.\d+\.type\.[01]/);
+  assert.match(busySprite, /person\.held\.pencil\./);
   // A recorded zero is left out rather than shown.
   assert.equal(telemetryLine({ tokens_in: 0, tokens_out: 0, cost_micro_usd: 0, tool_calls: 0, api_requests: 1 }), "");
   assert.equal(telemetryLine({ tokens_in: 900, tokens_out: 0, cost_micro_usd: 4000, tool_calls: 1, api_requests: 1 }), "900 tokens · <$0.01 · 1 tool call");

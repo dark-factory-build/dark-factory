@@ -125,7 +125,7 @@ export function workerFrames(worker: SceneWorker, motion?: WorkerMotion, seat?: 
     // Standing at the shelf with a book, the coffee station with a cup, or any other implement with a clipboard.
     : errand !== undefined ? "hold"
     : worker.activity === "needs-you" ? `wave.${at === undefined ? 0 : Math.floor(at / 400) % 2}`
-    : seat === "planning" ? `type.${scribble}`
+    : seat === "planning" && worker.activity === "busy" ? `type.${scribble}`
     : duty !== undefined ? "idle"
     : seat === "resting" && stroking !== undefined ? `pet.${Math.floor(stroking / 400) % 2}`
     : seat === "resting" ? rest.where === "mouth" ? "sip" : rest.where === "chest" ? "hold" : "idle"

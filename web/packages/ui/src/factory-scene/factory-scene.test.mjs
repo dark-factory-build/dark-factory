@@ -345,6 +345,17 @@ test("every generated person layer is reachable, including fallbacks", () => {
   assert.deepEqual(workerFrames({ ...fallback, activity: "needs-you" }).filter((name) => /wave|blink/.test(name)).map((name) => name.split(".").slice(-2).join(".")), ["wave.0", "wave.0"]);
 });
 
+test("planning workers show waiting or busy poses truthfully", () => {
+  const planning = { id: "planner", name: "Planner", role: "worker", provider: "codex", location: "unobserved" };
+  const waiting = workerFrames({ ...planning, activity: "waiting" }, undefined, "planning");
+  assert.ok(waiting.some((name) => /^person\.skin\.\d+\.waiting$/.test(name)), waiting);
+  assert.ok(waiting.includes("person.legs.plain.sit"), waiting);
+  assert.ok(!waiting.some((name) => name.startsWith("person.held.pencil.")), waiting);
+  const busy = workerFrames({ ...planning, activity: "busy" }, { action: "still", frame: 0, at: 0 }, "planning");
+  assert.ok(busy.some((name) => /^person\.skin\.\d+\.type\.[01]$/.test(name)), busy);
+  assert.ok(busy.some((name) => name.startsWith("person.held.pencil.")), busy);
+});
+
 test("at a machine empty hands work it facing it or type, a reviewing specialist inspects, and a stilled clock rests on frame 0", () => {
   const appearance = (tool = "none") => ({ automatic: false, skin: 0, hair: 0, hair_colour: 0, face: 0, outfit: 0, clothes_colour: 0, shoes: 0, tool: spriteOptions.tool.findIndex(({ name }) => name === tool), headwear: 0 });
   const person = (id, extra = {}) => ({ id, name: id, role: "worker", provider: "codex", activity: "busy", location: "working", nodeId: "src", appearance: appearance(), ...extra });
