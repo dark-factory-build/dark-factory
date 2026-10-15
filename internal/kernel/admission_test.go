@@ -1492,8 +1492,18 @@ func TestRequeuedProducerKeepsPrerequisitePins(t *testing.T) {
 			if lines, err := store.Why(ctx, nil, 0, consumer.ID); err != nil || lines[len(lines)-1] != "waits on: prerequisite: task "+producer.ID.String()+" is queued at work revision 2; it needs revision 1 or later to succeed and merge" {
 				t.Fatalf("why = %q, %v", lines, err)
 			}
-			if _, err := store.EnqueueTask(ctx, NewTask{ID: taskID(t, 229), ProjectID: finalizing.ProjectID, AssignedAgentID: consumerAgent.ID, IncarnationID: incarnationID(t, 230), Title: "consumer", Prerequisites: []TaskPrerequisite{{TaskID: finalizing.TaskID, WorkRevision: mustRevision(t, 1)}}}, mustTime(t, 80)); err != nil {
+			replay := NewTask{ID: taskID(t, 229), ProjectID: finalizing.ProjectID, AssignedAgentID: consumerAgent.ID, IncarnationID: incarnationID(t, 230), Title: "consumer", Prerequisites: []TaskPrerequisite{{TaskID: finalizing.TaskID, WorkRevision: mustRevision(t, 1)}}}
+			if _, err := store.EnqueueTask(ctx, replay, mustTime(t, 80)); err != nil {
 				t.Fatalf("replayed creation: %v", err)
+			}
+			// A release before this one carried the pin to the requeued
+			// revision; the original creation still replays over it.
+			corruptSQL(t, store, `UPDATE task_prerequisites SET upstream_work_revision = 2 WHERE task_id = ?`, consumer.ID.Bytes())
+			if _, err := store.EnqueueTask(ctx, replay, mustTime(t, 81)); err != nil {
+				t.Fatalf("replayed creation over a carried pin: %v", err)
+			}
+			if err := store.Validate(ctx); err != nil {
+				t.Fatal(err)
 			}
 		})
 	}
