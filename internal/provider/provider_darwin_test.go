@@ -261,7 +261,8 @@ func copyProviderTree(t *testing.T, source, destination string) error {
 		if err != nil {
 			return err
 		}
-		if relative == "node_modules" || strings.HasPrefix(relative, "node_modules"+string(filepath.Separator)) {
+		nodeModules := string(filepath.Separator) + "node_modules"
+		if relative == "node_modules" || strings.HasPrefix(relative, "node_modules"+string(filepath.Separator)) || strings.HasSuffix(relative, nodeModules) || strings.Contains(relative, nodeModules+string(filepath.Separator)) {
 			if entry.IsDir() {
 				return filepath.SkipDir
 			}
