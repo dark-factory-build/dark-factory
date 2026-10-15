@@ -263,8 +263,19 @@ func (daemon *Daemon) RunScheduler(ctx context.Context, spec SupervisorSpec) err
 						fail(errors.Join(event.err, fmt.Errorf("%w: attempt ended before admission was observed", kernel.ErrCorruptState)))
 					}
 				} else if owner.admitted {
-					if completionErr := validateCompletion(event.run); completionErr != nil {
-						fail(errors.Join(event.err, completionErr))
+					// Shutdown hands an admitted attempt to the next daemon. The
+					// attempt may return cleanly after admission (or with only the
+					// shutdown cancellation), before it has a terminal row for the
+					// normal completion check. Preserve every other error and keep
+					// reconciliation failures visible.
+					handoff := schedulerOnlyCancellation(event.err, ownedCtx.Err()) ||
+						(event.err == nil && (stopping || ownedCtx.Err() != nil))
+					if !handoff {
+						if completionErr := validateCompletion(event.run); completionErr != nil {
+							fail(errors.Join(event.err, completionErr))
+						} else if event.err != nil {
+							fail(event.err)
+						}
 					}
 				} else if event.run.ID != (kernel.RunID{}) || event.err == nil || !errors.Is(event.err, kernel.ErrConflict) {
 					fail(errors.Join(event.err, fmt.Errorf("%w: invalid no-admission completion", kernel.ErrCorruptState)))
