@@ -511,24 +511,25 @@ func TestUnreadableMarkerIsDiscardedNotCrashLooped(t *testing.T) {
 }
 
 // bootUntilSettled serves as launchd's next boot would until the release is
-// settled, then stops.
+// settled, then stops. It waits for the record, not the marker: the marker
+// goes first, and stopping then would cancel the record's write.
 func bootUntilSettled(t *testing.T, home string) {
 	t.Helper()
+	settled, hook := make(chan struct{}, 1), releaseSettledHook
+	releaseSettledHook = func(string, string) { settled <- struct{}{} }
+	defer func() { releaseSettledHook = hook }()
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan error, 1)
 	go func() { done <- serve(ctx, testConfig(home)) }()
-	for deadline := time.Now().Add(5 * time.Second); ; time.Sleep(10 * time.Millisecond) {
-		if _, present, err := install.ReadUpgradeMarker(home); !present && err == nil {
-			break
-		}
-		select {
-		case err := <-done:
-			t.Fatalf("boot = %v", err)
-		default:
-		}
-		if time.Now().After(deadline) {
-			t.Fatal("the boot never settled the release")
-		}
+	select {
+	case <-settled:
+	case err := <-done:
+		t.Fatalf("boot = %v", err)
+	case <-time.After(5 * time.Second):
+		t.Fatal("the boot never settled the release")
+	}
+	if _, present, err := install.ReadUpgradeMarker(home); present || err != nil {
+		t.Fatalf("settled release left its marker: %t, %v", present, err)
 	}
 	cancel()
 	if err := <-done; err != nil {
