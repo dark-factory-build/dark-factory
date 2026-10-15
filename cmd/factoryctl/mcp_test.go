@@ -76,6 +76,70 @@ func TestAttemptMCPRefusesOperatorShellRecursiveAndInvalidCommands(t *testing.T)
 	}
 }
 
+func TestAttemptMCPKeepsUsageForMalformedAllowedCommands(t *testing.T) {
+	key := "0123456789abcdef0123456789abcdef"
+	for _, test := range []struct {
+		argv []string
+		want string
+	}{
+		{[]string{"attempt", "request-human", "--question", "q", "--idempotency-key", key}, "factoryctl attempt request-human: invalid arguments\nusage: factoryctl attempt request-human --idempotency-key HEX32"},
+		{[]string{"attempt", "request-human", "--idempotency-key", "00000000000000000000000000000000", "--question", "q"}, "factoryctl attempt request-human: invalid arguments"},
+		{[]string{"attempt", "request-human", "--question", "--body-file", "--idempotency-key", key}, "factoryctl attempt request-human: invalid arguments"},
+		{[]string{"overseer", "task", "update", "--task", key, "--revision", "0"}, "factoryctl overseer task update: invalid arguments\nusage: factoryctl overseer task update --task ID"},
+		{[]string{"attempt", "succeed", "--result-file", "/secret"}, "factoryctl attempt succeed: invalid arguments"},
+		{[]string{"attempt", "content", "read", "--id", key}, "factoryctl attempt content read: invalid arguments\nusage: factoryctl content read --id ID --revision REVISION"},
+		{[]string{"attempt", "mcp"}, "unsupported attempt command"},
+		{[]string{"attempt", "turn-complete", "--detail", "x"}, "unsupported attempt command"},
+		{[]string{"attempt", "content", "create", "--project", key, "--kind", "procedure", "--title", "x", "--body-file", "/secret"}, "unsupported attempt command"},
+		{[]string{"status", "--project", key}, "unsupported attempt command"},
+		{[]string{"attempt", "human", "list", "--bad", "x"}, "factoryctl attempt human list: invalid arguments\nusage: factoryctl human list"},
+		{[]string{"attempt", "task", "read", "--task", key}, "factoryctl attempt task read: invalid arguments\nusage: factoryctl task read --task ID"},
+		{[]string{"attempt", "intake", "list", "--project", "x"}, "factoryctl attempt intake list: invalid arguments\nusage: factoryctl intake list"},
+		{[]string{"attempt", "why", "--pull", "x"}, "factoryctl attempt why: invalid arguments"},
+		{[]string{"attempt", "status", "--bad"}, "factoryctl attempt status: invalid arguments"},
+		{[]string{"attempt", "intake", "config", "--project", "x"}, "factoryctl attempt intake config: invalid arguments\nusage: factoryctl intake config [--project ID]"},
+		{[]string{"attempt", "human", "cancel"}, "unsupported attempt command"},
+		{[]string{"attempt", "human", "reply"}, "unsupported attempt command"},
+		{[]string{"attempt", "intake", "pause"}, "unsupported attempt command"},
+		{[]string{"attempt", "content", "create", "--body-file", "/secret"}, "unsupported attempt command"},
+		{[]string{"attempt", "outcome", "write", "--document-file", "/secret"}, "unsupported attempt command"},
+		{[]string{"attempt", "content", "create", "--body", "--body-file"}, "factoryctl attempt content create: invalid arguments"},
+		{[]string{"attempt", "outcome", "write", "--document", "--document-file"}, "factoryctl attempt outcome write: invalid arguments"},
+		{[]string{"attempt", "outcome", "write", "--document=x", "--document-file"}, "factoryctl attempt outcome write: invalid arguments"},
+		{[]string{"attempt", "outcome", "write", "--project", key, "--document-file", "/secret"}, "unsupported attempt command"},
+		{[]string{"attempt", "outcome", "write", "--project", "x", "--document-file", "/secret"}, "unsupported attempt command"},
+		{[]string{"attempt", "content", "create", "--bad", "x", "--body-file", "/secret"}, "unsupported attempt command"},
+		{[]string{"attempt", "content", "create", "--title=x", "--body", "--body-file"}, "factoryctl attempt content create: invalid arguments"},
+		{[]string{"attempt", "content", "create", "body-file", "x"}, "factoryctl attempt content create: invalid arguments"},
+		{[]string{"attempt", "content", "create", "--", "x", "--body-file", "/secret"}, "factoryctl attempt content create: invalid arguments"},
+		{[]string{"attempt", "content", "create", "x", "y", "--body-file", "/secret"}, "factoryctl attempt content create: invalid arguments"},
+		{[]string{"attempt", "content", "create", "--title", "x", "--body-file", "/secret"}, "unsupported attempt command"},
+		{[]string{"attempt", "outcome", "write", "document-file", "x"}, "factoryctl attempt outcome write: invalid arguments"},
+		{[]string{"attempt", "content", "create", "--body-file=/secret"}, "unsupported attempt command"},
+		{[]string{"attempt", "content", "create", "--title=x", "-body-file", "/secret"}, "unsupported attempt command"},
+		{[]string{"attempt", "outcome", "read", "--id", key}, "factoryctl attempt outcome read: invalid arguments\nusage: factoryctl outcome read --project ID"},
+	} {
+		request, _ := json.Marshal(map[string]any{"jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": map[string]any{"name": "factory", "arguments": map[string]any{"argv": test.argv}}})
+		var output bytes.Buffer
+		if runAttemptMCP(context.Background(), bytes.NewReader(request), &output, func(string) string { t.Fatal("malformed command reached environment"); return "" }) != 0 {
+			t.Fatalf("MCP failed for %q", test.argv)
+		}
+		var response struct {
+			Result struct {
+				Content []struct{ Text string } `json:"content"`
+				IsError bool                    `json:"isError"`
+			} `json:"result"`
+		}
+		if json.Unmarshal(output.Bytes(), &response) != nil || !response.Result.IsError || len(response.Result.Content) != 1 {
+			t.Fatalf("unexpected response for %q: %s", test.argv, output.String())
+		}
+		text := response.Result.Content[0].Text
+		if !strings.HasPrefix(text, test.want) || strings.Contains(test.want, "invalid") == strings.Contains(text, "unsupported") {
+			t.Fatalf("%q answered %q, want prefix %q", test.argv, text, test.want)
+		}
+	}
+}
+
 func TestAttemptMCPContentListUsesAttemptAuthority(t *testing.T) {
 	fixture := newAPIFixture(t)
 	defer fixture.close(t)
