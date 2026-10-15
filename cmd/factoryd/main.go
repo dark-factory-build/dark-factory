@@ -656,6 +656,9 @@ func openProcess(ctx context.Context, configuration config) (_ *process, resultE
 		if err := owner.browser.Close(); err != nil {
 			return nil, err
 		}
+		// It refuses every call but web_status by dropping it, which a client
+		// replays on the build that serves next.
+		owner.listener.Retire()
 		owner.apiStart = true
 		go owner.accept(ownedContext, owner.listener)
 		startupPhase("trial")
@@ -830,6 +833,8 @@ func (owner *process) shutdown() error {
 		cancel()
 		startupPhase("withdrawn")
 	}
+	// Before cancelling any request: a reply dropped from here on replays.
+	owner.listener.Retire()
 	if owner.cancel != nil {
 		owner.cancel()
 	}

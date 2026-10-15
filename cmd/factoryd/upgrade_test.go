@@ -218,6 +218,9 @@ func TestStagedBuildThatAnswersAndStopsCleanlyIsPromoted(t *testing.T) {
 // Under launchd the trial serves the canonical socket its supervisor was
 // handed: without it the trial would find that socket live, refuse to bind
 // and never answer. The trial leaves the socket in place for the next build.
+// An attempt read and outcome queued before the trial are refused by it and
+// replay until the build launchd starts next, inheriting the same socket,
+// answers them: never a transport failure.
 func TestStagedBuildServesTheActivatedSocketAndLeavesIt(t *testing.T) {
 	home := stagedHome(t, "serve", "development")
 	path := install.LocalAPISocketPath(home)
@@ -244,11 +247,42 @@ func TestStagedBuildServesTheActivatedSocketAndLeavesIt(t *testing.T) {
 	original := activatedLocalAPI
 	t.Cleanup(func() { activatedLocalAPI = original })
 	activatedLocalAPI = func() *os.File { return activated }
+	token := filepath.Join(filepath.Dir(home), "attempt.token")
+	if err := os.WriteFile(token, bytes.Repeat([]byte{'Q'}, 32), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("DARK_FACTORY_ATTEMPT_TOKEN_FILE", token)
+	client, err := api.NewAttemptClientFromEnvironment(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
+	defer cancel()
+	answers := make(chan error, 2)
+	go func() { _, err := client.Task(ctx); answers <- err }()
+	go func() { _, err := client.Succeed(ctx, "queued across the release"); answers <- err }()
 	if err := superviseTrial(home, childArgs(home), install.UpgradeMarker{Target: "development"}); !errors.Is(err, errRestart) || !strings.HasSuffix(err.Error(), ": promoted development") {
 		t.Fatalf("trial = %v", err)
 	}
 	if after, err := os.Lstat(path); err != nil || !os.SameFile(before, after) {
 		t.Fatalf("the trial changed the activated socket: %v, %v", after, err)
+	}
+	successor := exec.Command(filepath.Join(install.ServiceDirectoryPath(home), "bin", "current", "factoryd"), childArgs(home)...)
+	successor.Env = append(os.Environ(), install.LocalAPIInheritEnv+"=3")
+	successor.ExtraFiles, successor.Stderr = []*os.File{activated}, os.Stderr
+	if err := successor.Start(); err != nil {
+		t.Fatal(err)
+	}
+	defer func() {
+		_ = successor.Process.Signal(syscall.SIGTERM)
+		_ = successor.Wait()
+	}()
+	for range 2 {
+		// The successor knows no such attempt: its refusal is its answer.
+		var remote *api.RemoteError
+		if err := <-answers; !errors.As(err, &remote) || remote.Code() != api.RemoteUnauthorized {
+			t.Fatalf("queued attempt call across the release = %v", err)
+		}
 	}
 }
 

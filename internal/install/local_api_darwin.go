@@ -43,6 +43,7 @@ type localAPIState struct {
 	listener         *net.UnixListener
 	socketID         identity
 	adopted          bool // the socket is activatedLocalAPI's, never unlinked
+	retiring         bool // this generation serves no more: mark before each drop
 	connections      map[*LocalAPIConnection]struct{}
 	quarantined      map[*LocalAPIConnection]struct{}
 	probeConnections []net.Conn
@@ -722,9 +723,12 @@ func (state *localAPIState) closeExactConnection(connection *LocalAPIConnection,
 		state.mu.Unlock()
 		return nil
 	}
-	raw := connection.state.raw
+	raw, retiring := connection.state.raw, state.retiring
 	state.mu.Unlock()
 
+	if retiring {
+		state.mark()
+	}
 	closeErr := localAPICloseConnection(raw)
 	state.mu.Lock()
 	if closeErr != nil && !errors.Is(closeErr, net.ErrClosed) {
@@ -795,7 +799,7 @@ func (state *localAPIState) close() error {
 		state.mu.Unlock()
 		return err
 	}
-	state.closing = true
+	state.closing, state.retiring = true, true
 	state.closeRunning = true
 	listener := state.listener
 	connections := make([]*LocalAPIConnection, 0, len(state.connections))
@@ -812,13 +816,6 @@ func (state *localAPIState) close() error {
 		if err := localAPICloseListener(listener); err != nil && !errors.Is(err, net.ErrClosed) {
 			result = errors.Join(result, errors.New("close local API listener failed"))
 		}
-	}
-	if state.adopted {
-		// The activated socket outlives this generation, so its inode cannot
-		// mark the restart: a new mtime, set before any connection drops,
-		// tells a client whose reply is lost here to replay it.
-		now := unix.NsecToTimespec(time.Now().UnixNano())
-		_ = unix.UtimesNanoAt(int(state.runtimes.Fd()), LocalAPISocketName, []unix.Timespec{now, now}, unix.AT_SYMLINK_NOFOLLOW)
 	}
 	for _, connection := range connections {
 		if err := state.closeExactConnection(connection, false); err != nil && !errors.Is(err, ErrClosed) {
@@ -856,6 +853,23 @@ func (state *localAPIState) close() error {
 	state.cond.Broadcast()
 	state.mu.Unlock()
 	return result
+}
+
+// retire marks this generation as serving no more. A launchd-owned socket
+// outlives it, so its inode cannot tell a client its reply was lost to a
+// restart: from here every connection this generation drops first gets the
+// socket a new mtime, which the client's socket identity includes, and the
+// client replays the call on the next generation.
+func (state *localAPIState) retire() {
+	state.mu.Lock()
+	state.retiring = true
+	state.mu.Unlock()
+	state.mark()
+}
+
+func (state *localAPIState) mark() {
+	now := unix.NsecToTimespec(time.Now().UnixNano())
+	_ = unix.UtimesNanoAt(int(state.runtimes.Fd()), LocalAPISocketName, []unix.Timespec{now, now}, unix.AT_SYMLINK_NOFOLLOW)
 }
 
 func (state *localAPIState) fenceClose() {

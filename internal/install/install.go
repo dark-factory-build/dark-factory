@@ -178,6 +178,14 @@ func (protocol *LocalAPIProtocol) BeginDispatch() (*LocalAPIDispatch, error) {
 	return protocol.state.beginProtocolDispatch(protocol)
 }
 
+// Retire marks every connection this authority drops from now on as lost to
+// a restart, so a client replays it on the next generation.
+func (authority *LocalAPIAuthority) Retire() {
+	if authority != nil && authority.state != nil {
+		authority.state.retire()
+	}
+}
+
 // Close joins accepted connections, removes only the exact owned socket, and
 // releases retained descriptors. Any uncertain external result is stable and
 // retains the owning home lease.
