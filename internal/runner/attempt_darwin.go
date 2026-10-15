@@ -756,7 +756,7 @@ func (w *WorkerControl) RunProviderAdoptionSelfCheck(gateExecutable string, spec
 		return err
 	}
 	defer lease.Close()
-	child, err := StartBlocked(lease, gateExecutable, spec, false)
+	child, err := StartBlockedPTY(lease, gateExecutable, spec, false)
 	if err != nil {
 		return err
 	}

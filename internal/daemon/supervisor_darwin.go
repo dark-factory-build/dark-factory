@@ -351,7 +351,7 @@ func (daemon *Daemon) runNext(ctx context.Context, spec SupervisorSpec) (resultR
 	var providerCandidateCommitment []byte
 	var providerCommitment [32]byte
 	var providerUnavailable error
-	if run.Provider != kernel.ProviderShell {
+	if worker && run.Provider != kernel.ProviderShell {
 		discovered, resolveErr := provider.ResolveInstallation(run.Provider, spec.ToolPath)
 		if resolveErr != nil {
 			if !errors.Is(resolveErr, provider.ErrUnavailable) {

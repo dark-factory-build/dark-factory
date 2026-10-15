@@ -20,6 +20,7 @@ import (
 )
 
 const liveAttemptPoll = 100 * time.Millisecond
+const providerAdoptionCheckpointTimeout = 5 * time.Minute
 const terminalEffectsSupported = true
 
 func startLiveAttempt(attempt *liveAttempt, ctx context.Context) {
@@ -213,15 +214,15 @@ func (attempt *liveAttempt) handleBeforeRelease(ctx context.Context, command liv
 		}
 		if err == nil {
 			err = attempt.controller.Release(releaseStage)
-			if err == nil && adoptionRelease {
-				var checkpoint runner.AttemptEvent
-				checkpoint, err = attempt.controller.Next(12 * time.Second)
-				if err == nil && (checkpoint.Kind != runner.AttemptCheckpoint || checkpoint.Stage != runner.StageProviderAdoption) {
-					err = runner.ErrState
-				}
-			}
 		}
 		attempt.daemon.operationMu.Unlock()
+		if err == nil && adoptionRelease {
+			var checkpoint runner.AttemptEvent
+			checkpoint, err = attempt.controller.Next(providerAdoptionCheckpointTimeout)
+			if err == nil && (checkpoint.Kind != runner.AttemptCheckpoint || checkpoint.Stage != runner.StageProviderAdoption) {
+				err = runner.ErrState
+			}
+		}
 		if err != nil {
 			command.result <- err
 			return false, err

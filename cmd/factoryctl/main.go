@@ -498,6 +498,19 @@ func runWithDependencies(ctx context.Context, args []string, getenv func(string)
 			writeFailure(stderr, command.kind, taskErr)
 			return exitFailure
 		}
+		if witness := getenv("DARK_FACTORY_PROVIDER_ADOPTION_WITNESS"); witness != "" {
+			file, openErr := os.OpenFile(witness, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
+			if openErr != nil {
+				writeFailure(stderr, command.kind, openErr)
+				return exitFailure
+			}
+			_, writeErr := io.WriteString(file, "provider task\n")
+			closeErr := file.Close()
+			if writeErr != nil || closeErr != nil {
+				writeFailure(stderr, command.kind, errors.Join(writeErr, closeErr))
+				return exitFailure
+			}
+		}
 		return writeJSON(stdout, result)
 	}
 	if command.kind == commandAttemptSource {

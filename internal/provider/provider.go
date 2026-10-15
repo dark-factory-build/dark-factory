@@ -726,6 +726,9 @@ func Build(request Request) (Launch, error) {
 			},
 		}
 		environment := request.runtime.environmentForRole(request.provider, request.role)
+		if request.providerAdoption {
+			environment = append(environment, "DARK_FACTORY_PROVIDER_ADOPTION_WITNESS="+filepath.Join(request.runtime.temp, runner.ProviderAdoptionWitnessName))
+		}
 		if browser != "" {
 			servers["factory_browser"] = map[string]any{"command": browser, "args": browserArgs}
 		}
@@ -801,6 +804,9 @@ func Build(request Request) (Launch, error) {
 			argv = append(argv, "-c", fmt.Sprintf("model_reasoning_effort=%q", request.reasoningEffort))
 		}
 		environment := request.runtime.environmentForRole(request.provider, request.role)
+		if request.providerAdoption {
+			environment = append(environment, "DARK_FACTORY_PROVIDER_ADOPTION_WITNESS="+filepath.Join(request.runtime.temp, runner.ProviderAdoptionWitnessName))
+		}
 		// Codex exports only through its [otel] configuration; its resource
 		// still reads OTEL_RESOURCE_ATTRIBUTES, which names the run.
 		if receiver := request.runtime.telemetryReceiver(); receiver != "" && request.role == kernel.RoleWorker {

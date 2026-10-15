@@ -193,6 +193,14 @@ func runProvider(ctx context.Context) (resultErr error) {
 			return selfCheckErr
 		}
 		if config.Role == kernel.RoleWorker {
+			witness := filepath.Join(config.RuntimePath, TempName, runner.ProviderAdoptionWitnessName)
+			witnessData, witnessErr := os.ReadFile(witness)
+			if witnessErr != nil || string(witnessData) != "provider task\n" {
+				_ = os.Remove(witness)
+				_ = cwd.Close()
+				return fmt.Errorf("provider adoption self-check did not reach attempt MCP")
+			}
+			_ = os.Remove(witness)
 			selfCheckFacts, inspectErr := change.InspectWorktree(ctx, config.GitExecutable, config.RepositoryRoot, config.RepositoryIdentity, publishedPath)
 			selfCheckErr = inspectErr
 			if selfCheckErr == nil && (selfCheckFacts.Dirty() || selfCheckFacts.Head().Equal(beforeSelfCheck)) {

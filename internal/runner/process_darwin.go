@@ -277,6 +277,24 @@ func StartBlocked(lease *GateLease, gateExecutable string, spec *LaunchSpec, kee
 	return child, nil
 }
 
+// StartBlockedPTY launches through the same activation gate with a controlling
+// terminal, preserving native provider launch behavior for adoption checks.
+func StartBlockedPTY(lease *GateLease, gateExecutable string, spec *LaunchSpec, keepDirectoryAcrossExec bool) (child *OwnedChild, err error) {
+	prepared, err := PrepareBlockedPTY(lease, gateExecutable, spec, keepDirectoryAcrossExec)
+	if err != nil {
+		return nil, err
+	}
+	started, err := prepared.Start()
+	if err != nil {
+		return nil, err
+	}
+	child, err = started.Bind()
+	if err != nil {
+		return nil, errors.Join(err, convergeStartedChild(started))
+	}
+	return child, nil
+}
+
 // PreparedChild owns a completely prepared fork/exec attempt before its sole
 // Start call. Callers may place a durable transaction immediately between
 // PrepareBlocked and Start without hiding further setup inside that cut.
