@@ -603,17 +603,14 @@ func TestGitExecutableMustBeActualNativeGitForHost(t *testing.T) {
 	if runtime.GOARCH == "amd64" {
 		architecture = "arm64"
 	}
-	source := filepath.Join(t.TempDir(), "main.go")
-	if err := os.WriteFile(source, []byte("package main\nfunc main() {}\n"), 0o600); err != nil {
+	source := filepath.Join(secureTempDir(t), "git.c")
+	if err := os.WriteFile(source, []byte("int main(void) { return 0; }\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	command := exec.Command(filepath.Join(runtime.GOROOT(), "bin", "go"), "build", "-o", wrongArchitecture, source)
-	command.Env = []string{"GOENV=off", "GOWORK=off", "GOTOOLCHAIN=local", "CGO_ENABLED=0", "GOOS=darwin", "GOARCH=" + architecture, "TMPDIR=" + t.TempDir()}
-	for _, key := range []string{"GOCACHE", "HOME", "GOMODCACHE", "GOPATH", "GOTMPDIR"} {
-		if value := os.Getenv(key); value != "" {
-			command.Env = append(command.Env, key+"="+value)
-		}
-	}
+	// Compile the rejection fixture directly so this test does not assume the
+	// installed Command Line Tools Git is a universal binary.
+	command := exec.Command("/usr/bin/clang", "-arch", architecture, "-x", "c", source, "-o", wrongArchitecture)
+	command.Env = []string{"HOME=/dev/null", "TMPDIR=" + os.Getenv("TMPDIR"), "LC_ALL=C", "LANG=C"}
 	if output, err := command.CombinedOutput(); err != nil {
 		t.Fatalf("build wrong-architecture Git fixture: %v: %s", err, output)
 	}
