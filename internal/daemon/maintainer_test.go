@@ -58,8 +58,18 @@ func TestWorkerMaintainerReadsTaskPullCommentsThroughAuthenticatedPath(t *testin
 	active := prepareActiveAttemptInProject(t, fixture, 152, testID(152), "worker")
 	repository := "team/repo"
 	head := strings.Repeat("a", 40)
-	if err := fixture.store.BindRepositoryGitHubID(ctx, kernel.RepositoryID(active.run.ProjectID), 7); err != nil {
+	githubID, bound, err := fixture.store.RepositoryGitHubID(ctx, kernel.RepositoryID(active.run.ProjectID))
+	if err != nil {
 		t.Fatal(err)
+	}
+	if !bound {
+		githubID = 7
+		if err := fixture.store.BindRepositoryGitHubID(ctx, kernel.RepositoryID(active.run.ProjectID), githubID); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if githubID == 0 {
+		t.Fatal("repository GitHub ID is zero")
 	}
 	if err := fixture.store.RecordPublication(ctx, active.run.ProjectID, active.run.TaskID, repository, kernel.ProductionPullRequest{
 		Number: 7, URL: "https://github.com/team/repo/pull/7", Head: head, Base: "main", State: "open",
@@ -79,7 +89,7 @@ func TestWorkerMaintainerReadsTaskPullCommentsThroughAuthenticatedPath(t *testin
 	defer fixture.daemon.unregisterLiveAttempt(active.run.ID, owner)
 	customerMode(t, fixture)
 	fixture.daemon.githubMCP = func(_ context.Context, request json.RawMessage, repositories map[string]uint64) (json.RawMessage, error) {
-		if repositories[repository] != 7 || !strings.Contains(string(request), `"observe_pull_request_comments"`) {
+		if repositories[repository] != githubID || !strings.Contains(string(request), `"observe_pull_request_comments"`) {
 			t.Fatalf("worker broker request = %s, repositories = %v", request, repositories)
 		}
 		return json.RawMessage(`{"jsonrpc":"2.0","id":1,"result":{"structuredContent":{"pull_number":7,"head_sha":"` + head + `","comments":[{"id":9,"url":"https://github.com/team/repo/issues/7#issuecomment-9","body":"review note"}]},"content":[{"type":"text","text":"Pull request comments were observed."}],"isError":false}}`), nil
