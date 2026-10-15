@@ -1548,6 +1548,9 @@ func TestCodexOverseerDiscoversScopedControlsWithoutChangingWorkerTask(t *testin
 	if !strings.Contains(strings.Join(overseerArgs, " "), "mcp_servers.dark_factory_maintainer={command=") {
 		t.Fatal("overseer lost its explicit Maintainer tools")
 	}
+	if !strings.Contains(strings.Join(overseerArgs, " "), "mcp_servers.dark_factory_maintainer={command=") || !strings.Contains(strings.Join(overseerArgs, " "), "enabled=true,required=false,default_tools_approval_mode=\"approve\"") {
+		t.Fatalf("overseer Maintainer must be optional while retaining tools: %q", overseerArgs)
+	}
 	if _, err := runner.PrepareCommittedExecSpec(overseer.Executable(), overseer.Argv(), overseer.Environment(), t.TempDir()); err != nil {
 		t.Fatalf("runner rejected Codex overseer environment: %v", err)
 	}
