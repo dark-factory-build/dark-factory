@@ -81,3 +81,17 @@ func TestFailRunAcceptsOnlyInfrastructureFailureCodes(t *testing.T) {
 		})
 	}
 }
+
+func TestFailRunProviderExitRecordsDaemonLaunchFailure(t *testing.T) {
+	t.Parallel()
+	store, run, _ := runningOrchestratorRun(t)
+	defer store.Close()
+	failure, _ := NewFailureProposal(FailureProviderExit, "provider unavailable before attempt")
+	failed, err := store.FailRunProviderExit(context.Background(), run.ID, run.Revision, failure, mustTime(t, 40))
+	if err != nil {
+		t.Fatalf("FailRunProviderExit = %+v, %v", failed, err)
+	}
+	if failed.Phase != RunFinalizing || failed.Proposal == nil || failed.Proposal.Code() != FailureProviderExit {
+		t.Fatalf("provider launch failure footprint = %+v", failed)
+	}
+}
