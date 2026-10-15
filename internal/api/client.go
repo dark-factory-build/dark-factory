@@ -933,7 +933,7 @@ func verifySocketConnection(connection net.Conn, expected socketRecord) error {
 		return err
 	}
 	current, err := inspectSocket(connection.RemoteAddr().String())
-	if err != nil || !current.same(expected) {
+	if err != nil || !current.bound(expected) {
 		return ErrInvalidClient
 	}
 	return nil
@@ -941,7 +941,7 @@ func verifySocketConnection(connection net.Conn, expected socketRecord) error {
 
 func (client client) revalidate(before socketRecord) error {
 	after, err := inspectSocket(client.socketPath)
-	if err != nil || !after.same(before) {
+	if err != nil || !after.bound(before) {
 		return ErrInvalidClient
 	}
 	latest, err := loadToken(client.tokenPath)

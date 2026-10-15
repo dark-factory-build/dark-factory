@@ -73,6 +73,14 @@ func (left socketRecord) same(right socketRecord) bool {
 	return left.parent.sameDirectory(right.parent) && left.socket.same(right.socket)
 }
 
+// bound is same but for the socket's mtime, which a retiring generation sets
+// to mark its dropped connections as lost to a restart: that changes no
+// binding, so only the lost-reply check compares it.
+func (left socketRecord) bound(right socketRecord) bool {
+	left.socket.modifiedNS = right.socket.modifiedNS
+	return left.same(right)
+}
+
 func validCanonicalPath(path string, maximum int) bool {
 	return filepath.IsAbs(path) && filepath.Clean(path) == path && path != string(filepath.Separator) && utf8.ValidString(path) && !strings.ContainsRune(path, 0) && len(path) <= maximum
 }
