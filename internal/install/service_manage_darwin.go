@@ -11,8 +11,10 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strconv"
+	"syscall"
 	"time"
 
 	"github.com/dark-factory-build/dark-factory/internal/buildinfo"
@@ -486,6 +488,53 @@ func RebindServiceReceipt(home string) error {
 }
 
 var renameSwap = unix.RenamexNp
+
+// MigrateServicePlist re-renders the plist an earlier build installed, still
+// bound by its receipt, as this build renders the same settings, then
+// rebinds the receipt. A release replaces only binaries, so this is how one
+// that changes the plist (such as adding Sockets) reaches an installation.
+// launchd keeps the definition it loaded, so the job is then reloaded.
+func MigrateServicePlist(ctx context.Context, home string) error {
+	_, err := withServiceMutation(ctx, home, func(*serviceHomeCapability) (ServiceStatus, error) {
+		receipt, present, err := readServiceReceipt(home)
+		if err != nil || !present {
+			return ServiceStatus{}, err
+		}
+		config := ServiceConfig{Label: receipt.Label, RelayOrigin: receipt.RelayOrigin, DevelopmentBrowserAddress: receipt.DevelopmentBrowserAddress, ToolPath: receipt.ToolPath, ToolchainReadRoots: receipt.ToolchainReadRoots}
+		plist, body, err := renderServiceJob(home, receipt.PlistPath, config, receipt.ProgramDigest)
+		if err != nil || bytes.Equal(body, readFileOrNil(filepath.Join(ServiceDirectoryPath(home), serviceReceiptName))) {
+			return ServiceStatus{}, err
+		}
+		// The plist is the receipt's, or already this build's after a crash
+		// between the two writes below.
+		installed := readFileOrNil(receipt.PlistPath)
+		if digest := sha256.Sum256(installed); hex.EncodeToString(digest[:]) != receipt.PlistDigest && !bytes.Equal(installed, plist) {
+			return ServiceStatus{}, fmt.Errorf("%w: plist is not the one the receipt binds", ErrServiceForeign)
+		}
+		if err := errors.Join(replaceFile(filepath.Dir(receipt.PlistPath), filepath.Base(receipt.PlistPath), plist, 0o600), replaceFile(ServiceDirectoryPath(home), serviceReceiptName, body, 0o600)); err != nil {
+			return ServiceStatus{}, err
+		}
+		return ServiceStatus{}, reloadService("gui/"+strconv.Itoa(os.Geteuid()), receipt.Label, receipt.PlistPath)
+	})
+	return err
+}
+
+func readFileOrNil(path string) []byte {
+	body, _ := os.ReadFile(path)
+	return body
+}
+
+// reloadService has a launchctl outside this job's process group boot the
+// job out, ending this process, and bootstrap its plist again. It is a
+// package-test seam.
+var reloadService = func(domain, label, plistPath string) error {
+	reload := exec.Command("/bin/sh", "-c", `"$0" bootout "$1/$2"; exec "$0" bootstrap "$1" "$3"`, launchctlPath, domain, label, plistPath)
+	reload.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
+	if err := reload.Start(); err != nil {
+		return err
+	}
+	return reload.Process.Release()
+}
 
 func serviceStart(ctx context.Context, home string, config ServiceConfig) (ServiceStatus, error) {
 	userHome, err := AccountHome()

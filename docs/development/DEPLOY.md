@@ -10,10 +10,10 @@ node key. So a daemon release ships its own console, and no change here waits
 on a site deploy. launchd binds that port for as long as the job is loaded
 (the plist's `Sockets`) and hands factoryd the socket, so while factoryd
 restarts or after it crashes no other local process, such as a sandboxed
-worker allowed to bind loopback, can serve the paired console origin. An
-installation whose plist predates `Sockets` gains it only through `factoryctl
-service uninstall` and `service install` with the existing settings; until
-then factoryd binds the port itself.
+worker allowed to bind loopback, can serve the paired console origin. A
+release replaces only binaries, so on boot factoryd re-renders a plist an
+earlier build installed (still bound by its receipt) and has a detached
+launchctl boot the job out and bootstrap it again, which loads `Sockets`.
 
 ```sh
 factoryctl release <commit-sha> [--start] [--wait]
