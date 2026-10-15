@@ -1200,8 +1200,13 @@ test("a fold's inspector names its routes as plain text and investigates the fol
     assert.deepEqual(list.findAllByType("li").map((item) => item.children.join("")), ["/a", "/b", "/c"]);
     assert.equal(list.findAllByType("button").length, 0, "members are names, not drill-downs");
     assert.doesNotMatch(JSON.stringify(renderer.toJSON()), /Evidence|Back to folded routes/);
+    const buttons = inspector.findAllByType("button");
+    assert.equal(buttons.some((button) => button.children.join("") === "Focus on floor"), false);
+    assert.equal(buttons.some((button) => button.children.join("") === "Discuss this machine"), false);
     await act(async () => inspector.findAllByType("button").find((button) => button.children.join("") === "Investigate").props.onClick());
     assert.deepEqual(investigated, [["n0", "n1", "n2"]]);
+    await act(async () => inspector.findAllByType("button").find((button) => button.children.join("") === "Close").props.onClick());
+    assert.equal(renderer.root.findAllByProps({ "aria-label": "Machine inspector" }).length, 0);
   } finally {
     await act(async () => renderer?.unmount());
   }

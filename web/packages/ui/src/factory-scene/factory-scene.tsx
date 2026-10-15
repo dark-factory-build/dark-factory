@@ -521,7 +521,6 @@ export function FactoryScene({ proposals, crates, tools, onInvestigate, onSelect
     ...[...graph.shared, ...graph.parties, ...graph.quarantine].map((machine) => [machine.id, machine] as const)]);
   const unitOf = new Map(graph.units.flatMap((unit) => [[unit.id, unit] as const, ...unit.machines.map((machine) => [machine.id, unit] as const)]));
   const labels = new Map([...machines].map(([id, machine]) => [id, machine.label] as const));
-  const focusEntity = (id: string) => { selectEntity(id); const station = stationOf(layout, id); if (station) Array.from(mapElement.current?.querySelectorAll("[data-entity-id]") ?? []).find((element) => element.getAttribute("data-entity-id") === station.entityId)?.scrollIntoView({ block: "center", inline: "center", behavior: "instant" }); };
   const nook = breakRoomNook(layout);
   const sceneWidth = layout.width;
   // A crowd beside one machine stands below it, and an empty plant's reason below that: the scene grows, the floor does not move.
@@ -726,7 +725,7 @@ export function FactoryScene({ proposals, crates, tools, onInvestigate, onSelect
     </div>
     {selected === undefined ? null : <MachineInspector key={selectedId} machine={selected} unit={unitOf.get(selected.id)} onInvestigate={onInvestigate}
       proposals={proposals === undefined ? [] : proposalsForEntity(proposals.items, selected.id)} onSelectProposal={proposals?.onSelect}
-      onFocus={() => focusEntity(selected.id)} onClose={() => selectEntity(undefined)} />}
+      onClose={() => selectEntity(undefined)} />}
     </div>
   );
 }
@@ -940,9 +939,9 @@ function kindText(machine: SceneMachine, unit?: SceneUnit) {
 }
 
 /** The inspector reads the machine as the floor shows it; a fold lists its members by name. */
-function MachineInspector({ machine, unit, onInvestigate, proposals, onSelectProposal, onFocus, onDiscuss, onClose }: {
+function MachineInspector({ machine, unit, onInvestigate, proposals, onSelectProposal, onClose }: {
   machine: SceneMachine; unit?: SceneUnit; onInvestigate?: (machine: SceneMachine, unit?: SceneUnit) => void;
-  proposals: readonly SceneProposal[]; onSelectProposal?: (id: string) => void; onFocus: () => void; onDiscuss?: () => void; onClose: () => void;
+  proposals: readonly SceneProposal[]; onSelectProposal?: (id: string) => void; onClose: () => void;
 }) {
   const [asked, setAsked] = useState(false);
   const reading = machine.reading;
@@ -952,8 +951,6 @@ function MachineInspector({ machine, unit, onInvestigate, proposals, onSelectPro
     <p>{machine.represented === undefined ? kindText(machine, unit) : `${machine.represented.length} folded ${machine.kind} nodes`}{unit !== undefined && unit.id !== machine.id ? ` in ${unit.label}` : ""}</p>
     <p className={`dfPlantReading s-${reading.observation} op-${reading.state}`}>{OBSERVATION_TEXT[reading.observation]}{reading.state === "unknown" ? "" : ` · ${reading.state}`}{reading.ratePerHour > 0 ? ` · ${rate(reading.ratePerHour)}` : ""}{reading.errorPermille > 0 ? ` · ${reading.errorPermille / 10}% errors` : ""}{reading.latencyMs > 0 ? ` · p95 ${reading.latencyMs} ms` : ""}</p>
     <p>{EVIDENCE_TEXT[reading.evidence]}</p>
-    <button type="button" onClick={onFocus}>Focus on floor</button>
-    {onDiscuss ? <button type="button" onClick={onDiscuss}>Discuss this machine</button> : null}
     {onInvestigate && worth ? <button type="button" disabled={asked} onClick={() => { setAsked(true); onInvestigate(machine, unit); }}>{asked ? "Investigation queued" : "Investigate"}</button> : null}
     <button type="button" onClick={onClose}>Close</button>
     {proposals.length === 0 ? null : <div aria-label="Changes affecting this machine">{proposals.map((proposal) => <button type="button" key={proposal.id} onClick={() => onSelectProposal?.(proposal.id)}>{proposal.title}</button>)}</div>}
