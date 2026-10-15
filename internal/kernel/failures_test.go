@@ -52,6 +52,21 @@ func TestFailureCauseScoresOnTheCorpus(t *testing.T) {
 	t.Logf("%d/%d right", right, len(corpus))
 }
 
+// A daemon-set FailureTransient is no transport cause by its code; only a
+// transport detail makes it one.
+func TestFailureCauseOfTransientFollowsItsDetail(t *testing.T) {
+	for detail, want := range map[string]string{
+		"local API transport failed": "transport_api",
+		OverseerRunLimitDetail:       "other",
+		NeverStartedRunDetail:        "other",
+		ProviderCapacityRunDetail:    "other",
+	} {
+		if got := failureCause(FailureTransient.String(), detail); got != want {
+			t.Errorf("failureCause(transient, %q) = %s, want %s", detail, got, want)
+		}
+	}
+}
+
 func TestFailureSignatureHandlesUnicodeBeforeMarker(t *testing.T) {
 	signature := failureSignature("failed", "checks", sql.NullInt64{}, sql.NullInt64{}, sql.NullInt64{}, "Ⱥ not ok TestUnicode")
 	if !strings.Contains(signature, "testunicode") {
