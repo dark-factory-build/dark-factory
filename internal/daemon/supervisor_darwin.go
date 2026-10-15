@@ -349,32 +349,37 @@ func (daemon *Daemon) runNext(ctx context.Context, spec SupervisorSpec) (resultR
 	var providerExecutable string
 	var providerAdoptionPending bool
 	var providerCandidateCommitment []byte
+	var providerUnavailable error
 	if run.Provider != kernel.ProviderShell {
 		discovered, resolveErr := provider.ResolveInstallation(run.Provider, spec.ToolPath)
 		if resolveErr != nil {
-			return daemon.failRunBeforeRuntime(daemon.cleanupCtx, run, keys.resources.RuntimeRoot, kernel.FailureSpawn, resolveErr)
-		}
-		digest := discovered.Digest()
-		digestBytes := append([]byte(nil), digest[:]...)
-		adoption, found, adoptionErr := daemon.store.ProviderAdoption(ctx, run.Provider)
-		if adoptionErr != nil {
-			return daemon.failRunBeforeRuntime(daemon.cleanupCtx, run, keys.resources.RuntimeRoot, kernel.FailureInternal, adoptionErr)
-		}
-		if !found {
-			adoption, adoptionErr = daemon.store.InitializeProviderAdoption(ctx, run.Provider, discovered.Executable().Path(), digestBytes, at)
+			if !errors.Is(resolveErr, provider.ErrUnavailable) {
+				return daemon.failRunBeforeRuntime(daemon.cleanupCtx, run, keys.resources.RuntimeRoot, kernel.FailureSpawn, resolveErr)
+			}
+			providerUnavailable = resolveErr
+		} else {
+			digest := discovered.Digest()
+			digestBytes := append([]byte(nil), digest[:]...)
+			adoption, found, adoptionErr := daemon.store.ProviderAdoption(ctx, run.Provider)
 			if adoptionErr != nil {
 				return daemon.failRunBeforeRuntime(daemon.cleanupCtx, run, keys.resources.RuntimeRoot, kernel.FailureInternal, adoptionErr)
 			}
-		}
-		providerExecutable = adoption.ActivePath
-		if !bytes.Equal(adoption.ActiveCommitment, digestBytes) && !(adoption.CandidateState == "failed" && bytes.Equal(adoption.CandidateCommitment, digestBytes)) {
-			adoption, adoptionErr = daemon.store.ObserveProviderCandidate(ctx, run.Provider, adoption.ActivePath, adoption.ActiveCommitment, digestBytes, discovered.Executable().Path(), at)
-			if adoptionErr != nil {
-				return daemon.failRunBeforeRuntime(daemon.cleanupCtx, run, keys.resources.RuntimeRoot, kernel.FailureInternal, adoptionErr)
+			if !found {
+				adoption, adoptionErr = daemon.store.InitializeProviderAdoption(ctx, run.Provider, discovered.Executable().Path(), digestBytes, at)
+				if adoptionErr != nil {
+					return daemon.failRunBeforeRuntime(daemon.cleanupCtx, run, keys.resources.RuntimeRoot, kernel.FailureInternal, adoptionErr)
+				}
 			}
-			providerExecutable = adoption.CandidatePath
-			providerAdoptionPending = adoption.CandidateState == "pending" && bytes.Equal(adoption.CandidateCommitment, digestBytes)
-			providerCandidateCommitment = append([]byte(nil), adoption.CandidateCommitment...)
+			providerExecutable = adoption.ActivePath
+			if !bytes.Equal(adoption.ActiveCommitment, digestBytes) && !(adoption.CandidateState == "failed" && bytes.Equal(adoption.CandidateCommitment, digestBytes)) {
+				adoption, adoptionErr = daemon.store.ObserveProviderCandidate(ctx, run.Provider, adoption.ActivePath, adoption.ActiveCommitment, digestBytes, discovered.Executable().Path(), at)
+				if adoptionErr != nil {
+					return daemon.failRunBeforeRuntime(daemon.cleanupCtx, run, keys.resources.RuntimeRoot, kernel.FailureInternal, adoptionErr)
+				}
+				providerExecutable = adoption.CandidatePath
+				providerAdoptionPending = adoption.CandidateState == "pending" && bytes.Equal(adoption.CandidateCommitment, digestBytes)
+				providerCandidateCommitment = append([]byte(nil), adoption.CandidateCommitment...)
+			}
 		}
 	}
 	repositoryIdentity, err := inspectRepositoryIdentity(repository.Root)
@@ -565,6 +570,13 @@ func (daemon *Daemon) runNext(ctx context.Context, spec SupervisorSpec) (resultR
 	}
 	if _, err := daemon.activateResource(ctx, run.ID, keys.resources.RuntimeRoot, runtimeIdentity); err != nil {
 		return kernel.Run{}, kernel.NewOutcomeUnknownError(err)
+	}
+	if providerUnavailable != nil {
+		failed, failErr := daemon.failRun(run, kernel.FailureProviderExit, providerUnavailable)
+		if failed.ID != (kernel.RunID{}) {
+			return failed, nil
+		}
+		return failed, failErr
 	}
 	if _, err := runtimeValue.PublishAttemptToken(ctx, keys.token); err != nil {
 		return daemon.failRun(run, kernel.FailureSpawn, err)

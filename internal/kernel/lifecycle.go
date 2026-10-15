@@ -398,7 +398,7 @@ func (store *Store) FailRun(ctx context.Context, runID RunID, expected Revision,
 		return Run{}, fmt.Errorf("%w: invalid run failure", ErrInvalidValue)
 	}
 	switch failure.code {
-	case FailureSpawn, FailureActivation, FailureSource, FailureProtocol, FailureInternal, FailureTransient:
+	case FailureSpawn, FailureActivation, FailureSource, FailureProtocol, FailureInternal, FailureTransient, FailureProviderExit:
 	default:
 		return Run{}, fmt.Errorf("%w: failure code is not daemon infrastructure authority", ErrInvalidValue)
 	}
