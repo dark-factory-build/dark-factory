@@ -28,6 +28,17 @@ func TestCurrentBuildIdentityIsDeterministicAndDevelopmentFailsClosed(t *testing
 	if got.BuildID() != "development" {
 		t.Fatalf("build ID = %q", got.BuildID())
 	}
+	// attempt report prints Source: a linked release names its full commit,
+	// and a short or missing source falls back to development, never blank.
+	source := "1234567890abcdef1234567890abcdef12345678"
+	short := "1.2.3|1234567|" + runtime.GOOS + "/" + runtime.GOARCH + "|" + digest("1.2.3", "1234567", runtime.GOOS+"/"+runtime.GOARCH)
+	original := receipt
+	t.Cleanup(func() { receipt = original })
+	for value, want := range map[string]string{"1.2.3|" + source + "|" + runtime.GOOS + "/" + runtime.GOARCH + "|" + digest("1.2.3", source, runtime.GOOS+"/"+runtime.GOARCH): source, short: "development", "1.2.3||" + runtime.GOOS + "/" + runtime.GOARCH + "|": "development"} {
+		if receipt = value; runtime.GOOS == "darwin" && Current().Source() != want || Current().Source() == "" {
+			t.Fatalf("source of receipt %q = %q", value, Current().Source())
+		}
+	}
 }
 
 func TestReleaseIdentityRequiresExactClosedFields(t *testing.T) {

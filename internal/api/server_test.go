@@ -1041,6 +1041,42 @@ func TestRetiredListenerDropsAttemptCallsTheClientReplays(t *testing.T) {
 	}
 }
 
+// A call a retired generation answers in full is no drop, so closing it
+// leaves the socket unmarked: the installed build's client, which compares
+// the socket's mtime after a reply, judges a release trial by that answer.
+func TestRetiredListenerLeavesAnAnsweredCallsSocketUnmarked(t *testing.T) {
+	bearer := testCredential('U')
+	listener, socketPath := newAPITestListener(t, bearer)
+	listener.Retire()
+	before, err := inspectSocket(socketPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	closed := make(chan error, 1)
+	go func() {
+		connection, err := listener.Accept()
+		if err == nil {
+			var response Reply
+			if _, err = connection.Receive(t.Context()); err == nil {
+				if response, err = connection.Dispatch(replyForCall); err == nil {
+					err = connection.Respond(response)
+				}
+			}
+			err = errors.Join(err, connection.Close())
+		}
+		closed <- err
+	}()
+	if _, err := exchangeRaw(socketPath, rawRequest(operatorDomain, bearer, []byte(`{"method":"health","params":{}}`)), true); err != nil {
+		t.Fatal(err)
+	}
+	if err := <-closed; err != nil {
+		t.Fatal(err)
+	}
+	if after, err := inspectSocket(socketPath); err != nil || !after.same(before) {
+		t.Fatalf("answered call marked the socket: %+v, %v (before %+v)", after, err, before)
+	}
+}
+
 // A generation that retires while a request is still being written cuts
 // the client's send, not its read: an outcome far larger than the socket
 // buffers is accepted, partly read, then dropped by the retiring authority,

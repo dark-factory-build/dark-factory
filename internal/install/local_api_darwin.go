@@ -65,6 +65,7 @@ type localAPIConnectionState struct {
 	raw             *net.UnixConn
 	closeMu         sync.Mutex
 	transportClosed bool
+	answered        bool // its reply was written whole: closing it drops nothing
 	closed          bool
 	once            sync.Once
 	closeErr        error
@@ -723,7 +724,7 @@ func (state *localAPIState) closeExactConnection(connection *LocalAPIConnection,
 		state.mu.Unlock()
 		return nil
 	}
-	raw, retiring := connection.state.raw, state.retiring
+	raw, retiring := connection.state.raw, state.retiring && !connection.state.answered
 	state.mu.Unlock()
 
 	if retiring {
@@ -952,7 +953,11 @@ func (connection *LocalAPIConnection) CloseWrite() error {
 	if connection == nil || connection.state == nil || connection.state.self != connection || connection.state.raw == nil {
 		return ErrClosed
 	}
-	return connection.state.raw.CloseWrite()
+	connection.state.closeMu.Lock()
+	defer connection.state.closeMu.Unlock()
+	err := connection.state.raw.CloseWrite()
+	connection.state.answered = err == nil
+	return err
 }
 
 func (connection *LocalAPIConnection) Close() error {
