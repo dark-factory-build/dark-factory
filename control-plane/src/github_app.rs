@@ -655,6 +655,7 @@ pub(crate) struct ObservePullRequestComments {
 #[derive(Debug, Deserialize, Serialize)]
 pub(crate) struct PullRequestComment {
     pub(crate) id: i64,
+    #[serde(rename = "user")]
     pub(crate) author: PullRequestCommentAuthor,
     pub(crate) body: String,
     pub(crate) created_at: String,
@@ -9383,6 +9384,23 @@ mod tests {
             );
         }
     }
+}
+
+#[cfg(test)]
+#[test]
+fn pull_request_comments_decode_github_user_shape() {
+    let comments: Vec<PullRequestComment> = serde_json::from_value(serde_json::json!([
+        {
+            "id": 17,
+            "user": {"login": "reviewer"},
+            "body": "Please address this line.",
+            "created_at": "2026-10-15T12:00:00Z",
+            "updated_at": "2026-10-15T12:00:00Z"
+        }
+    ]))
+    .unwrap();
+    assert_eq!(comments[0].author.login, "reviewer");
+    assert_eq!(comments[0].body, "Please address this line.");
 }
 
 #[cfg(test)]
