@@ -587,14 +587,18 @@ func (daemon *Daemon) attemptOperatorCall(ctx context.Context, raw api.AttemptDi
 			return authority.ProjectID, true
 		}
 		input, valid := call.ReportInput()
-		if !valid || authority.Role != kernel.RoleWorker || input.Pull != 0 || input.TaskID == "" {
+		if !valid || authority.Role != kernel.RoleWorker || input.Pull == 0 && input.TaskID == "" || input.Pull != 0 && input.TaskID != "" {
 			return authority.ProjectID, false
 		}
 		if input.ProjectID != "" && input.ProjectID != authority.ProjectID.String() {
 			return authority.ProjectID, false
 		}
-		task, decodeErr := decodeID(input.TaskID, kernel.TaskIDFromBytes)
-		return authority.ProjectID, decodeErr == nil && task == authority.TaskID
+		if input.TaskID != "" {
+			task, decodeErr := decodeID(input.TaskID, kernel.TaskIDFromBytes)
+			return authority.ProjectID, decodeErr == nil && task == authority.TaskID
+		}
+		pull, found, pullErr := daemon.store.TaskOpenPullRequest(ctx, authority.TaskID)
+		return authority.ProjectID, pullErr == nil && found && input.Pull == pull.Number
 	case intake.Action == "list":
 		return authority.ProjectID, authority.Specialist || overseer
 	case call.Kind() != api.CallIntake:

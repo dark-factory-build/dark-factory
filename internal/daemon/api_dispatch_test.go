@@ -2493,6 +2493,15 @@ func TestDaemonOperatorReadsAdmitOnlySpecialistCarrier(t *testing.T) {
 	}
 	humanRequests := func() error { _, err := reader.HumanRequests(ctx); return err }
 	forbidden("ordinary worker human list", humanRequests)
+	done := fixture.serve(t)
+	if report, err := reader.Report(ctx, api.ReportInput{TaskID: active.run.TaskID.String()}); err != nil || len(report.Lines) == 0 {
+		t.Fatalf("ordinary worker own why = %+v, %v", report, err)
+	}
+	waitDispatch(t, done)
+	forbidden("ordinary worker sibling why", func() error {
+		_, err := reader.Report(ctx, api.ReportInput{TaskID: testID(212)})
+		return err
+	})
 
 	agent, _, err := fixture.store.Agent(ctx, active.run.AgentID)
 	if err != nil {
