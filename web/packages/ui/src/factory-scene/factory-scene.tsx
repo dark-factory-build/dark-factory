@@ -80,7 +80,7 @@ const FRAME = spriteAtlas.frame;
 const DAY = 24 * 60 * 60_000;
 const NO_QUESTIONS: readonly PeerQuestionItem[] = [];
 type Implement = ReturnType<typeof breakRoomNook>["furniture"][number];
-const IMPLEMENT_NAMES: Record<BreakRoomErrand, string> = { shelf: "bookshelf", coffee: "coffee station", board: "discussion board", tasks: "task tray" };
+const IMPLEMENT_NAMES: Record<BreakRoomErrand, string> = { shelf: "bookshelf", coffee: "coffee station", tasks: "task tray" };
 // A recorded visit: the walk over (the far end of the nook is a few seconds away by the aisles), a while at the implement, then back.
 const VISIT = 10000;
 
@@ -289,7 +289,7 @@ function SceneWorkers({ nook, errands, peerQuestions, layout, placements: seated
   animate: boolean;
   /** Whether the break-room furniture is there to be visited, and the cat to be found. */
   errands: boolean;
-  /** The floor's fixtures: where handed-over work and recorded Library or Board operations come from or go to. */
+  /** The floor's fixtures: where handed-over work and recorded operations come from or go to. */
   nook: readonly Implement[];
   peerQuestions: readonly PeerQuestionItem[];
 }) {
@@ -319,7 +319,7 @@ function SceneWorkers({ nook, errands, peerQuestions, layout, placements: seated
     seen.current = next;
     const started = now();
     const kept = mail.current.filter((message) => endsAt(message) > started);
-    // A recorded operation flies between the agent, wherever it already is, and the shelf or board; one per agent at a time.
+    // A recorded operation flies between the agent, wherever it already is, and the task tray; one per agent at a time.
     visits.current = new Map([...visits.current].filter(([, visit]) => visit.until > started));
     mail.current = [...kept, ...(!live.current ? [] : events).flatMap((event) => {
       // Someone idling beside a machine gets up and uses the implement instead; anyone at work stays put and the message flies.
@@ -471,7 +471,7 @@ const DEFAULT_SCENE_APPEARANCE = { scenery: "subtle" as const, animation: "follo
 
 /** The fixtures this floor offers: each opens its panel; the coffee station is scenery. */
 export function offeredFixtures({ appearance = DEFAULT_SCENE_APPEARANCE, onOpenTasks }: Pick<FactorySceneProps, "appearance" | "onOpenTasks">): readonly BreakRoomErrand[] {
-  return (["board", "shelf", ["tasks", onOpenTasks], ["coffee", appearance.scenery === "off" ? undefined : true]] as const).flatMap((entry) => typeof entry === "string" ? [entry as BreakRoomErrand] : entry[1] === undefined ? [] : [entry[0]]);
+  return (["shelf", ["tasks", onOpenTasks], ["coffee", appearance.scenery === "off" ? undefined : true]] as const).flatMap((entry) => typeof entry === "string" ? [entry as BreakRoomErrand] : entry[1] === undefined ? [] : [entry[0]]);
 }
 
 /** A disposable SVG projection of the operational world and current factory state. */
@@ -541,7 +541,7 @@ export function FactoryScene({ proposals, crates, tools, onInvestigate, onSelect
   const litUnit = selectedId !== undefined && unitOf.get(selectedId)?.id === selectedId ? selectedId : undefined;
   const members = new Set(litUnit === undefined ? [] : layout.stations.filter((station) => station.unit === litUnit).map((station) => station.entityId));
   const queued = tasks.filter((order) => order.status === "queued" && fromTray(order)).length;
-  // The implements are always there, but only the tray is live: it shows the queue and opens the console's Work view. Board, shelf and coffee are scenery.
+  // The implements are always there, but only the tray is live: it shows the queue and opens the console's Work view. Shelf and coffee are scenery.
   const implementsShown = nook.furniture;
   const opens: Partial<Record<BreakRoomErrand, readonly [((projectId?: string) => void) | undefined, string, string, string]>> = {
     tasks: [onOpenTasks, queued === 0 ? "Work · queue is empty" : `Work · ${queued} queued`, "Open Work", "WORK"],
@@ -702,7 +702,7 @@ export function FactoryScene({ proposals, crates, tools, onInvestigate, onSelect
               {/* Waiting work, as the pile in a real tray: it says how the queue is doing. */}
               {[...Array(Math.min(queued, 3))].map((_, index) => <rect key={index} x="4" y={7 - index * 1.5} width="8" height="1.5" fill="#e4dcc0" strokeWidth=".4" stroke={tasks.some((task) => task.id === selectedTaskId && task.status === "queued") ? "#80ddff" : "#a6a087"} />)}
               <path d="M3 7v2h10v-2" fill="none" stroke="#c2b184" /></g>
-            : <Frame name={piece.errand === "shelf" ? "prop.bookshelf" : piece.errand === "board" ? "prop.board" : "prop.coffeestation"} x={0} y={0} />}
+            : <Frame name={piece.errand === "shelf" ? "prop.bookshelf" : "prop.coffeestation"} x={0} y={0} />}
           {sign === undefined ? <path d="M2 15v3 M14 15v3" stroke="#303b3b" strokeWidth="2" /> : <text x="8" y="23" textAnchor="middle" fill="#d4ddd2" fontSize="4">{sign}</text>}
         </g>
       </g>; })}

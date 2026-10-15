@@ -110,7 +110,7 @@ export function workerFrames(worker: SceneWorker, motion?: WorkerMotion, seat?: 
   const tool = spriteOptions.tool[appearance.tool]?.name ?? "";
   const wielding = motion?.action === "interacting" && ["clipboard", "wrench", "tablet"].includes(tool);
   // A specialist's running review is inspection, at a machine or at the planning table: it reads its
-  // board for a while, then lowers it to look past it.
+  // clipboard for a while, then lowers it to look past it.
   const inspecting = worker.specialist !== undefined && worker.activity === "busy" && (motion?.action === "interacting" || seat === "planning");
   // Empty hands at a machine work it: most reach up to its controls, facing it; some type at it.
   // Which is fixed per worker and machine, so a floor is mixed but nobody flickers between them.
