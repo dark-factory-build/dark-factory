@@ -775,6 +775,8 @@ test("a refused graph read shows the plant unavailable with its code, not still 
   await settle();
   const markup = renderToStaticMarkup(createElement(FactoryConsole, { ...context.latest(), view: "floor" }));
   assert.match(markup, /PLANT UNAVAILABLE · .*internal/);
+  assert.match(markup, /<p class="dfFactoryEntityTools__notice" role="status">Plant unavailable:/);
+  assert.doesNotMatch(markup, /<details|dfFloorMenu/);
   assert.doesNotMatch(markup, /READING THE PLANT/);
 });
 

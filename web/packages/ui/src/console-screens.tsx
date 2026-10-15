@@ -113,7 +113,6 @@ export function FactoryFloor({
   const crates = useMemo(() => changesRead ? projectCrates(changes) : undefined, [changes, changesRead]);
   const peerQuestions = useMemo(() => [...(state?.peerQuestions?.values() ?? [])], [state]);
   const projectOf = (nodeId: string) => projects.find((id) => graphs?.get(id)?.nodes.some((node) => node.id === nodeId || nodeId.startsWith(`${node.id}:`)));
-  const unplaced = proposed.proposals.filter((proposal) => proposal.state === "unavailable" || proposal.operations.some((operation) => operation.entityId === undefined)).length;
   const unavailable = projects.flatMap((id) => graphs?.get(id)?.sources.filter((source) => source.kind === "unavailable") ?? []);
   const refused = projects.flatMap((id) => { const code = graphErrors?.get(id); return code === undefined ? [] : [`${state?.projects.get(id)?.name ?? id} · ${code}`]; });
   const investigate = onAddTask === undefined || state === undefined ? undefined : (machine: SceneMachine, unit?: SceneUnit) => {
@@ -135,11 +134,8 @@ export function FactoryFloor({
   return <div className="dfFactoryFloor">
     <FactoryScene
       tools={<>
-        {unplaced + refused.length + unavailable.length === 0 ? null : <details className="dfFloorMenu" name="floor-tools"><summary>Notices · {unplaced + refused.length + unavailable.length}</summary><div className="dfFloorMenu__body">
-        {unplaced > 0 ? <p className="dfFactoryEntityTools__notice" role="status">{unplaced} {unplaced === 1 ? "change is" : "changes are"} not fully placed on the floor; its pull request in Work lists every path.</p> : null}
         {refused.length > 0 ? <p className="dfFactoryEntityTools__notice" role="status">Plant unavailable: {refused.join(", ")}; retrying.</p> : null}
         {unavailable.length > 0 ? <p className="dfFactoryEntityTools__notice" role="status">Source unavailable for {unavailable.map((source) => source.name).join(", ")}; those units cannot be inferred.</p> : null}
-        </div></details>}
       </>}
       onInvestigate={investigate}
       crates={crates}

@@ -25,8 +25,9 @@ test("the floor controls wrap instead of becoming horizontal overflow", () => {
   const page = readFileSync(out, "utf8");
   const css = readFileSync(new URL("../src/factory-console.css", import.meta.url), "utf8");
   assert.doesNotMatch(page, /<summary>Search<\/summary>/);
+  assert.doesNotMatch(page, /dfFloorMenu|<details/);
   assert.match(css, /\.dfFactoryEntityTools \{[^}]*flex-wrap: wrap;[^}]*min-height: 2\.75rem;[^}]*overflow: visible;[^}]*white-space: normal;/);
-  assert.match(css, /\.dfFactoryEntityTools \.dfFloorMenu__body \{[^}]*top: 100%;/);
+  assert.doesNotMatch(css, /dfFloorMenu/);
 });
 
 test("fixture server advertises only after binding and has a bounded lifecycle", async () => {
