@@ -156,7 +156,7 @@ func validateContentGitPins(ctx context.Context, connection *sql.Conn) error {
 // store is published, and before refreshing its pinned sidecar facts, which the
 // sidecar binding relies on. The migration is one way: the rollback plan for
 // an operator home is the pre-upgrade copy docs/install.md tells them to take.
-func (store *Store) migrateLegacy(ctx context.Context) error {
+func (store *Store) migrateLegacy(ctx context.Context, path string, recheck func() error) error {
 	connection, err := store.writerConnection(ctx)
 	if err != nil {
 		return err
@@ -183,7 +183,10 @@ func (store *Store) migrateLegacy(ctx context.Context) error {
 		releaseUncertainConnection(connection)
 		return err
 	}
-	return connection.Close()
+	if err := connection.Close(); err != nil {
+		return err
+	}
+	return store.refreshReadPools(ctx, path, recheck)
 }
 
 // migrateFrom adds and drops tables and columns and rewrites checks in
