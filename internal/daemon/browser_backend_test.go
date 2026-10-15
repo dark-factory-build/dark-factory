@@ -278,6 +278,9 @@ func TestBrowserAdapterPairsAuthenticatesSnapshotsAndReloadsRevocation(t *testin
 	if len(snapshot.Projects) != 1 || len(snapshot.Agents) != 1 || len(snapshot.Tasks) != 1 {
 		t.Fatalf("one snapshot did not carry the whole Factory: %+v", snapshot)
 	}
+	if project := snapshot.Projects[0]; project.MaxRunSeconds != 0 {
+		t.Fatalf("snapshot project limits = %+v", project)
+	}
 	for _, sentinel := range []string{"PRIVATE_ROOT_SENTINEL", "PRIVATE_BODY_SENTINEL"} {
 		if bytes.Contains(payload, []byte(sentinel)) {
 			t.Fatalf("public state leaked %q: %s", sentinel, payload)
@@ -306,6 +309,20 @@ func TestBrowserAdapterPairsAuthenticatesSnapshotsAndReloadsRevocation(t *testin
 	}
 }
 
+func TestBrowserProjectDurationRejectsStaleEdits(t *testing.T) {
+	fixture := newAdapterFixture(t, kernel.BrowserCapabilityObserve|kernel.BrowserCapabilityHumanActions|kernel.BrowserCapabilityAdministration)
+	ctx := context.Background()
+	projectID, _ := kernel.ProjectIDFromBytes(adapterID(t, 21))
+	project, err := fixture.store.CreateProject(ctx, kernel.NewProject{ID: projectID, Name: "limits", Root: "/limits"}, adapterTime(t, 10))
+	if err != nil {
+		t.Fatal(err)
+	}
+	connection := fixture.pair(t)
+	_ = connection.Close(websocket.StatusNormalClosure, "")
+	if _, err := fixture.backend.SetProjectLimits(ctx, rawBrowserClient(fixture.client.ID), browserprotocol.ProjectLimits{ProjectID: project.ID.String(), ExpectedRevision: decimalRevision(project.Revision), MaxRunSeconds: 60}); !errors.Is(mapBrowserError(err), browser.ErrInvalidRequest) {
+		t.Fatalf("project limit edit = %v", err)
+	}
+}
 func TestBrowserAdapterBadPairProofDoesNotConsumeChallenge(t *testing.T) {
 	fixture := newAdapterFixture(t, kernel.BrowserCapabilityObserve)
 	connection := adapterDial(t, fixture.server)
