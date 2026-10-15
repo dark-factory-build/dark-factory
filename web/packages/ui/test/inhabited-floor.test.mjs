@@ -206,7 +206,7 @@ test("thirty proposals draw no floor Changes button or Help", async () => {
   try {
     await act(async () => { tree = create(createElement(FactoryFloor, props)); });
     const header = () => tree.root.findByProps({ className: "dfFactoryEntityTools" });
-    assert.equal(header().findAllByProps({ type: "search" }).length, 1);
+    assert.equal(header().findAllByProps({ type: "search" }).length, 0);
     assert.deepEqual(header().findAllByType("button").map(text), []);
     assert.ok(header().findAllByType("details").length >= 4, "PR stages have compact menus");
     await act(async () => tree.update(createElement(FactoryFloor, { ...props, selectedChange: productionKey(changes[29]) })));

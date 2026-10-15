@@ -23,7 +23,7 @@ test("the floor and work controls wrap instead of becoming horizontal overflow",
   execFileSync(process.execPath, [preview, out]);
   const page = readFileSync(out, "utf8");
   const css = readFileSync(new URL("../src/factory-console.css", import.meta.url), "utf8");
-  assert.match(page, /<summary>Search<\/summary>/);
+  assert.doesNotMatch(page, /<summary>Search<\/summary>/);
   assert.match(css, /\.dfFactoryEntityTools \{[^}]*flex-wrap: wrap;[^}]*min-height: 2\.75rem;[^}]*overflow: visible;[^}]*white-space: normal;/);
   assert.match(css, /\.dfFactoryEntityTools \.dfFloorMenu__body \{[^}]*top: 100%;/);
   assert.match(css, /\.dfWorkBar \{[^}]*flex-wrap: wrap;[^}]*overflow: visible;/);
