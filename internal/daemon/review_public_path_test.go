@@ -904,8 +904,16 @@ func TestMergeQueueEjectionSendsBackOnceAndAMergeCloses(t *testing.T) {
 		if op.State != test.state || sentBack != (test.note != "") || current.WorkRevision.Int64() > 2 || backend.enqueues != 1 {
 			t.Fatalf("%s: operation=%+v task revision %d feedback %q", test.state, op, current.WorkRevision.Int64(), kernel.TaskFeedback(current))
 		}
-		if test.pull.Failing != nil && strings.Contains(kernel.TaskFeedback(current), "failure-40") {
-			t.Fatalf("failing detail was not bounded: %q", kernel.TaskFeedback(current))
+		if test.pull.Failing != nil {
+			feedback := kernel.TaskFeedback(current)
+			for _, line := range test.pull.Tests[:40] {
+				if !strings.Contains(feedback, "\n- "+line) {
+					t.Fatalf("failing detail lost %q: %q", line, feedback)
+				}
+			}
+			if strings.Contains(feedback, "\n- failure-40") {
+				t.Fatalf("failing detail was not bounded: %q", feedback)
+			}
 		}
 	}
 }
