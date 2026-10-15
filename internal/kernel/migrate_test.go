@@ -23,7 +23,6 @@ import (
 // (also without the specialist columns) migrate, keep every row, and then
 // record a transient failure.
 func TestCurrentAndLegacyHomesOpenWithEveryRow(t *testing.T) {
-	t.Parallel()
 	for _, version := range []int{userVersion, v44UserVersion, v43UserVersion, v42UserVersion, v41UserVersion, v40UserVersion, v39UserVersion, v38UserVersion, v37UserVersion} {
 		t.Run(fmt.Sprintf("v%d", version), func(t *testing.T) { testHomeOpensWithEveryRow(t, version) })
 	}
