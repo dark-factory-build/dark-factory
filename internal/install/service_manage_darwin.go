@@ -4,15 +4,19 @@ package install
 
 import (
 	"bytes"
+	"cmp"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strconv"
+	"syscall"
 	"time"
 
 	"github.com/dark-factory-build/dark-factory/internal/buildinfo"
@@ -486,6 +490,67 @@ func RebindServiceReceipt(home string) error {
 }
 
 var renameSwap = unix.RenamexNp
+
+// ServiceHoldsBrowser reports whether this home's installed job renders a
+// console Sockets entry, so launchd, not factoryd, must own that address.
+func ServiceHoldsBrowser(home string) bool {
+	receipt, present, err := readServiceReceipt(home)
+	if err != nil || !present {
+		return false
+	}
+	_, port, _ := net.SplitHostPort(cmp.Or(receipt.DevelopmentBrowserAddress, DefaultBrowserAddress))
+	return port != "0"
+}
+
+// MigrateServicePlist brings the installed job to the plist this build
+// renders and has launchd reload it, for a factoryd that launchd started
+// without the console socket. A release replaces only binaries, so this is
+// how a plist change such as Sockets reaches an installation: the plist is
+// re-rendered while its receipt still binds it, and done means activated,
+// so a boot after an interrupted reload rewrites nothing and reloads again.
+func MigrateServicePlist(ctx context.Context, home string) error {
+	_, err := withServiceMutation(ctx, home, func(*serviceHomeCapability) (ServiceStatus, error) {
+		receipt, present, err := readServiceReceipt(home)
+		if err != nil || !present {
+			return ServiceStatus{}, errors.Join(ErrServiceReceipt, err)
+		}
+		config := ServiceConfig{Label: receipt.Label, RelayOrigin: receipt.RelayOrigin, DevelopmentBrowserAddress: receipt.DevelopmentBrowserAddress, ToolPath: receipt.ToolPath, ToolchainReadRoots: receipt.ToolchainReadRoots}
+		plist, body, err := renderServiceJob(home, receipt.PlistPath, config, receipt.ProgramDigest)
+		if err != nil {
+			return ServiceStatus{}, err
+		}
+		if !bytes.Equal(body, readFileOrNil(filepath.Join(ServiceDirectoryPath(home), serviceReceiptName))) {
+			// The plist is the receipt's, or already this build's after a
+			// crash between the two writes below.
+			installed := readFileOrNil(receipt.PlistPath)
+			if digest := sha256.Sum256(installed); hex.EncodeToString(digest[:]) != receipt.PlistDigest && !bytes.Equal(installed, plist) {
+				return ServiceStatus{}, fmt.Errorf("%w: plist is not the one the receipt binds", ErrServiceForeign)
+			}
+			if err := errors.Join(replaceFile(filepath.Dir(receipt.PlistPath), filepath.Base(receipt.PlistPath), plist, 0o600), replaceFile(ServiceDirectoryPath(home), serviceReceiptName, body, 0o600)); err != nil {
+				return ServiceStatus{}, err
+			}
+		}
+		return ServiceStatus{}, reloadService("gui/"+strconv.Itoa(os.Geteuid()), receipt.Label, receipt.PlistPath)
+	})
+	return err
+}
+
+func readFileOrNil(path string) []byte {
+	body, _ := os.ReadFile(path)
+	return body
+}
+
+// reloadService has a launchctl outside this job's process group boot the
+// job out, ending this process, and bootstrap its plist again. It is a
+// package-test seam.
+var reloadService = func(domain, label, plistPath string) error {
+	reload := exec.Command("/bin/sh", "-c", `"$0" bootout "$1/$2"; exec "$0" bootstrap "$1" "$3"`, launchctlPath, domain, label, plistPath)
+	reload.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
+	if err := reload.Start(); err != nil {
+		return err
+	}
+	return reload.Process.Release()
+}
 
 func serviceStart(ctx context.Context, home string, config ServiceConfig) (ServiceStatus, error) {
 	userHome, err := AccountHome()

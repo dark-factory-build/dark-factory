@@ -12,6 +12,7 @@ import (
 
 	"github.com/dark-factory-build/dark-factory/internal/api"
 	"github.com/dark-factory-build/dark-factory/internal/browserprotocol"
+	"github.com/dark-factory-build/dark-factory/internal/install"
 	"github.com/dark-factory-build/dark-factory/internal/kernel"
 	"github.com/dark-factory-build/dark-factory/internal/relayhost"
 	"rsc.io/qr"
@@ -111,7 +112,7 @@ func (daemon *Daemon) RemotePair(ctx context.Context) (RemoteInvitation, error) 
 	if relay.relayOrigin != relayhost.DefaultRelayOrigin {
 		link += "&relay=" + relay.relayOrigin
 	}
-	if relay.browserAddress != DefaultBrowserAddress {
+	if relay.browserAddress != install.DefaultBrowserAddress {
 		link += "&host=" + relay.browserAddress
 	}
 	return RemoteInvitation{Link: link, Expires: expiry.Unix()}, nil

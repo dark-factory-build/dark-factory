@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os"
 	"sync"
 	"time"
 
@@ -36,8 +37,9 @@ type BrowserRuntime struct {
 
 // ListenBrowser starts the state-only browser-v1 surface. Address is still
 // validated by internal/browser and therefore accepts only exact IPv4
-// loopback. Terminal and HumanRequest effects are not part of this slice.
-func (daemon *Daemon) ListenBrowser(address string, allowedOrigins []string) (*BrowserRuntime, error) {
+// loopback, from socket when launchd holds it. Terminal and HumanRequest
+// effects are not part of this slice.
+func (daemon *Daemon) ListenBrowser(address string, socket *os.File, allowedOrigins []string) (*BrowserRuntime, error) {
 	if daemon == nil || daemon.store == nil {
 		return nil, fmt.Errorf("%w: invalid browser daemon", kernel.ErrInvalidValue)
 	}
@@ -58,7 +60,7 @@ func (daemon *Daemon) ListenBrowser(address string, allowedOrigins []string) (*B
 	if err != nil {
 		return nil, err
 	}
-	server, err := browser.Listen(browser.Config{Address: address, AllowedOrigins: allowedOrigins, Backend: backend, Console: console})
+	server, err := browser.Listen(browser.Config{Address: address, AllowedOrigins: allowedOrigins, Backend: backend, Console: console, Socket: socket})
 	if err != nil {
 		_ = backend.close()
 		return nil, err

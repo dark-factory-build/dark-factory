@@ -31,6 +31,16 @@ func TestMain(m *testing.M) {
 		panic("a build that panics before run")
 	case "hang":
 		time.Sleep(time.Hour)
+	case "socket":
+		// Boot opens files before it listens; the first takes the lowest free fd.
+		if _, err := os.Open(os.Args[0]); err != nil || browserSocket == nil {
+			os.Exit(3)
+		}
+		listener, err := net.FileListener(browserSocket)
+		if err != nil {
+			os.Exit(4)
+		}
+		_, _ = os.Stdout.WriteString(listener.Addr().String())
 	default:
 		main()
 	}
@@ -70,6 +80,78 @@ func stagedHome(t *testing.T, mode, target string) string {
 	selfSource = func() string { return runningSource }
 	trialLimit, trialPoll = time.Minute, 50*time.Millisecond
 	return home
+}
+
+// A trial child adopts its supervisor's console socket from fd 3 even after
+// boot has opened other files, and never mistakes one of those for it.
+func TestTrialChildAdoptsOnlyItsInheritedConsoleSocket(t *testing.T) {
+	held, err := net.Listen("tcp4", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer held.Close()
+	socket, err := held.(*net.TCPListener).File()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer socket.Close()
+	for _, inherited := range []*os.File{socket, nil} {
+		child := exec.Command(os.Args[0])
+		child.Env = append(os.Environ(), "FACTORYD_TEST_CHILD=socket", trialEnv+"=1")
+		if inherited != nil {
+			child.ExtraFiles = []*os.File{inherited}
+		}
+		output, err := child.Output()
+		if inherited != nil && (err != nil || string(output) != held.Addr().String()) {
+			t.Fatalf("inherited socket = %q, %v", output, err)
+		}
+		if exit := (*exec.ExitError)(nil); inherited == nil && (!errors.As(err, &exit) || exit.ExitCode() != 3) {
+			t.Fatalf("no inherited socket = %q, %v", output, err)
+		}
+	}
+}
+
+// installedReceipt makes home an installed service whose plist renders the
+// console Sockets at address, as ServiceInstall would record it.
+func installedReceipt(t *testing.T, home, address string) {
+	t.Helper()
+	digest := sha256.Sum256([]byte(currentProgram))
+	receipt := `{"version":1,"label":"com.dark-factory.test.console","plist_path":"/private/tmp/com.dark-factory.test.console.plist","plist_digest":"` + strings.Repeat("a", 64) + `","program_digest":"` + hex.EncodeToString(digest[:]) + `","development_browser_address":"` + address + `"}` + "\n"
+	if err := os.WriteFile(filepath.Join(install.ServiceDirectoryPath(home), "receipt"), []byte(receipt), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if !install.ServiceHoldsBrowser(home) {
+		t.Fatal("the installed receipt does not hold the console address")
+	}
+}
+
+// Across a release from a build launchd gave no console socket, the new
+// build's trial proves boot without taking the installed console address
+// (here held by another listener) and releasing it.
+func TestTrialWithoutTheConsoleSocketNeverBindsTheInstalledAddress(t *testing.T) {
+	other, err := net.Listen("tcp4", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer other.Close()
+	home := stagedHome(t, "serve", "development")
+	installedReceipt(t, home, other.Addr().String())
+	args := []string{"--home", home, "--runner", "/bin/sh", "--factoryctl", "/bin/sh", "--development-browser-address", other.Addr().String()}
+	if err := superviseTrial(home, args, install.UpgradeMarker{Target: "development"}); !errors.Is(err, errRestart) || !strings.HasSuffix(err.Error(), ": promoted development") {
+		t.Fatalf("trial = %v", err)
+	}
+}
+
+// An installed factoryd without the console socket never binds the address
+// itself: launchd did not start this one, so it refuses before opening the
+// home rather than serve the paired origin.
+func TestBootWithoutTheConsoleSocketOutsideLaunchdRefuses(t *testing.T) {
+	home := stagedHome(t, "serve", "development")
+	installedReceipt(t, home, "127.0.0.1:43123")
+	var stdout, stderr bytes.Buffer
+	if exit := run(context.Background(), childArgs(home), &stdout, &stderr); exit != exitFailure || !strings.Contains(stderr.String(), "launchd job holds the console address") || strings.Contains(stderr.String(), "startup") {
+		t.Fatalf("boot outside launchd = %d %q", exit, stderr.String())
+	}
 }
 
 func childArgs(home string, extra ...string) []string {

@@ -307,7 +307,14 @@ func TestServicePlistIsOneFiniteAllowlist(t *testing.T) {
 		!bytes.Contains(body, []byte("<key>KeepAlive</key>\n    <dict>\n        <key>SuccessfulExit</key>\n        <false/>\n    </dict>")) {
 		t.Fatalf("plist identity or required keys invalid: %s", body)
 	}
-	for _, forbidden := range []string{"EnvironmentVariables", "Sockets", "NetworkState", "StandardOutPath", "ProcessType", "--development-browser-address", "*"} {
+	for address, port := range map[string]string{"": "43123", "127.0.0.1:43124": "43124", "127.0.0.1:0": ""} {
+		body, _, err := ServicePlist(home, DefaultServiceLabel, "", address, "", "")
+		sockets := "    <key>Sockets</key>\n    <dict>\n        <key>Browser</key>\n        <dict>\n            <key>SockNodeName</key>\n            <string>127.0.0.1</string>\n            <key>SockServiceName</key>\n            <string>" + port + "</string>\n            <key>SockFamily</key>\n            <string>IPv4</string>\n        </dict>\n    </dict>\n</dict>"
+		if err != nil || bytes.Contains(body, []byte(sockets)) != (port != "") || bytes.Count(body, []byte("Sockets")) != min(len(port), 1) {
+			t.Fatalf("address %q sockets: %v %s", address, err, body)
+		}
+	}
+	for _, forbidden := range []string{"EnvironmentVariables", "NetworkState", "StandardOutPath", "ProcessType", "--development-browser-address", "*"} {
 		if bytes.Contains(body, []byte(forbidden)) {
 			t.Fatalf("plist contains forbidden %q", forbidden)
 		}
@@ -360,7 +367,9 @@ func TestServicePlistRendersOptionalArgumentsExactly(t *testing.T) {
 		t.Fatal(err)
 	}
 	developmentExtra := "\n        <string>--development-browser-address</string>\n        <string>" + address + "</string>"
-	if !bytes.Contains(developed, []byte(arguments(developmentExtra))) || len(developed) != len(plain)+len(developmentExtra) {
+	// An ephemeral address is no stable origin, so it also renders no Sockets.
+	sockets := bytes.LastIndex(plain, []byte("\n</dict>")) - bytes.Index(plain, []byte("\n    <key>Sockets</key>"))
+	if !bytes.Contains(developed, []byte(arguments(developmentExtra))) || len(developed) != len(plain)+len(developmentExtra)-sockets {
 		t.Fatalf("plist with development browser address = %s", developed)
 	}
 	// The bound is the exact origin grammar: anything that would render a job
