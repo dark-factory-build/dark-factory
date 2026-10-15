@@ -1020,12 +1020,13 @@ func (daemon *Daemon) attemptResultTail(
 	// once the authenticated runner result proves the provider has converged.
 	// A competing durable outcome wins normally: its unauthorized response is
 	// not a license to replace that outcome. Absent one, a terminate the owner
-	// itself delivered owes its cause, not a provider exit.
-	// That terminate is often factoryd stopping, so it outlives ctx as consumption does.
+	// itself ended the provider with owes its cause; that is often factoryd
+	// stopping, so it outlives ctx as consumption does.
 	pending, ok := live.pendingOutcomeSnapshot()
 	proposalCtx := ctx
-	if !ok && live.terminationCause != nil {
-		pending, ok, proposalCtx = *live.terminationCause, true, daemon.cleanupCtx
+	if exit, _ := result.Exit(); !ok {
+		pending, ok = live.owedTermination(exit)
+		proposalCtx = daemon.cleanupCtx
 	}
 	if ok {
 		if live.beforeRetainedOutcome != nil {

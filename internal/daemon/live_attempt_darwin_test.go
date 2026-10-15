@@ -835,7 +835,8 @@ func TestLiveAttemptOwnTerminateOwesItsCauseNotAProviderExit(t *testing.T) {
 		if err := <-converged; err != nil {
 			t.Fatal(err)
 		}
-		if cause := attempt.terminationCause; !attempt.terminationDelivered || cause == nil || cause.Code() != kernel.FailureTransient || !strings.Contains(cause.Detail(), "factoryd stopped") {
+		sigterm, _ := kernel.NewAttemptResultExitSignal(15)
+		if cause, owed := attempt.owedTermination(sigterm); !owed || cause.Code() != kernel.FailureTransient || !strings.Contains(cause.Detail(), "factoryd stopped") {
 			t.Fatalf("restart terminate cause = %+v", cause)
 		}
 	})
@@ -847,19 +848,41 @@ func TestLiveAttemptOwnTerminateOwesItsCauseNotAProviderExit(t *testing.T) {
 		if err := <-closed; err != nil {
 			t.Fatal(err)
 		}
-		if cause := attempt.terminationCause; cause == nil || cause.Code() != kernel.FailureProtocol || cause.Detail() != errLiveOwnerClosed.Error() {
+		sigkill, _ := kernel.NewAttemptResultExitSignal(9)
+		if cause, owed := attempt.owedTermination(sigkill); !owed || cause.Code() != kernel.FailureProtocol || cause.Detail() != errLiveOwnerClosed.Error() {
 			t.Fatalf("owner close terminate cause = %+v", cause)
 		}
 	})
 	t.Run("provider that exited first stays a provider exit", func(t *testing.T) {
+		// The provider exited on its own; the runner is still converging and has
+		// published no result when the owner's terminate frame is written.
 		attempt, peer := start(t, 11303)
-		attempt.resultReturned = true // its own result notice arrived first
 		if err := attempt.terminateController(errLiveOwnerClosed); err != nil {
 			t.Fatal(err)
 		}
 		awaitTerminate(t, peer)
-		if attempt.terminationCause != nil {
-			t.Fatalf("self-exited provider owes a terminate cause: %+v", attempt.terminationCause)
+		if !attempt.terminationDelivered || attempt.terminationCause == nil {
+			t.Fatalf("terminate delivered=%v cause=%+v", attempt.terminationDelivered, attempt.terminationCause)
+		}
+		code0, _ := kernel.NewAttemptResultExitCode(0)
+		code1, _ := kernel.NewAttemptResultExitCode(1)
+		sigsegv, _ := kernel.NewAttemptResultExitSignal(11)
+		for _, exit := range []kernel.AttemptResultExit{code0, code1, sigsegv} {
+			if cause, owed := attempt.owedTermination(exit); owed {
+				t.Fatalf("independent exit %+v replaced by terminate cause %+v", exit, cause)
+			}
+		}
+	})
+	t.Run("provider whose own result came first owes no cause", func(t *testing.T) {
+		attempt, peer := start(t, 11304)
+		attempt.resultReturned = true
+		if err := attempt.terminateController(errLiveOwnerClosed); err != nil {
+			t.Fatal(err)
+		}
+		awaitTerminate(t, peer)
+		sigterm, _ := kernel.NewAttemptResultExitSignal(15)
+		if cause, owed := attempt.owedTermination(sigterm); owed {
+			t.Fatalf("post-result terminate owes a cause: %+v", cause)
 		}
 	})
 }

@@ -440,6 +440,17 @@ func (attempt *liveAttempt) terminateController(cause error) error {
 	return nil
 }
 
+// owedTermination is the cause owed for this owner's delivered terminate, but
+// only when the provider died of it: a written terminate frame is no proof, and
+// a provider that exited on its own first keeps its own exit.
+func (attempt *liveAttempt) owedTermination(exit kernel.AttemptResultExit) (kernel.Proposal, bool) {
+	signal, signalled := exit.Signal()
+	if attempt.terminationCause == nil || !signalled || signal != int64(unix.SIGTERM) && signal != int64(unix.SIGKILL) {
+		return kernel.Proposal{}, false
+	}
+	return *attempt.terminationCause, true
+}
+
 func (attempt *liveAttempt) handleRunningCommand(command liveAttemptCommand) (bool, error) {
 	switch command.kind {
 	case liveCommandAttach:
