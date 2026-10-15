@@ -8,6 +8,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"slices"
 	"sync"
 
 	"github.com/dark-factory-build/dark-factory/internal/install"
@@ -207,8 +208,10 @@ func readRuntimeParentNames(parentFD, limit int) ([]string, error) {
 		return nil, err
 	}
 	directory := os.NewFile(uintptr(fd), "runtime-parent-census")
-	entries, readErr := directory.Readdirnames(limit)
-	return entries, errors.Join(readErr, directory.Close())
+	entries, readErr := directory.Readdirnames(limit + 1)
+	// launchd binds the local API socket here before the first lock exists.
+	entries = slices.DeleteFunc(entries, func(name string) bool { return name == install.LocalAPISocketName })
+	return entries[:min(len(entries), limit)], errors.Join(readErr, directory.Close())
 }
 
 func inspectRuntimeLock(fd int) (runner.FileIdentity, error) {
