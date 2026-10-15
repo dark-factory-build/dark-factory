@@ -379,7 +379,8 @@ func TestMigrateServicePlistBringsAPreSocketsInstallationToSockets(t *testing.T)
 func TestServicePlistReadBoundCoversFourEscapedHomePaths(t *testing.T) {
 	fixture := newManageFixture(t)
 	home := "/" + strings.Repeat(`"`, serviceMaxPathBytes-1)
-	body, _, err := ServicePlist(home, fixture.config.Label, "", "", "", "")
+	// Such a home has no socket within MaxSocketPathBytes, so no Sockets key.
+	body, _, err := ServicePlist(home, fixture.config.Label, "", "", "", "", false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -976,7 +977,7 @@ func TestServiceArgumentsSurviveInstallStatusAndUninstall(t *testing.T) {
 	installed := &recordedLaunchctl{results: append(fixture.printAbsent(), launchctlResult{status: 0}, fixture.printRunning(77))}
 	fixture.install(t, installed.run)
 
-	expected, expectedDigest, err := ServicePlist(fixture.home, fixture.config.Label, origin, address, fixture.config.ToolPath, toolchain)
+	expected, expectedDigest, err := ServicePlist(fixture.home, fixture.config.Label, origin, address, fixture.config.ToolPath, toolchain, true)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1006,7 +1007,7 @@ func TestServiceArgumentsSurviveInstallStatusAndUninstall(t *testing.T) {
 	if err != nil || status.State != ServiceRunning || status.PID != 78 {
 		t.Fatalf("changed toolchain install = %+v, %v (%q)", status, err, reconfigured.calls)
 	}
-	if expected, _, err = ServicePlist(fixture.home, fixture.config.Label, origin, address, changed.ToolPath, toolchain); err != nil {
+	if expected, _, err = ServicePlist(fixture.home, fixture.config.Label, origin, address, changed.ToolPath, toolchain, true); err != nil {
 		t.Fatal(err)
 	}
 	if body, err := os.ReadFile(fixture.plistPath()); err != nil || !bytes.Equal(body, expected) {
@@ -1057,7 +1058,7 @@ func TestServiceInstallReconfiguresAChangedRelayOriginInPlace(t *testing.T) {
 		if err != nil || status.State != ServiceRunning {
 			t.Fatalf("install %q = %+v, %v", to, status, err)
 		}
-		want, _, err := ServicePlist(fixture.home, fixture.config.Label, to, "", "", "")
+		want, _, err := ServicePlist(fixture.home, fixture.config.Label, to, "", "", "", true)
 		if err != nil {
 			t.Fatal(err)
 		}

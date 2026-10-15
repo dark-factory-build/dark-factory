@@ -299,7 +299,7 @@ func TestLaunchctlPrintRequiresExactOwnedFields(t *testing.T) {
 
 func TestServicePlistIsOneFiniteAllowlist(t *testing.T) {
 	home := "/private/tmp/factory & <operator>"
-	body, digest, err := ServicePlist(home, DefaultServiceLabel, "", "", "", "")
+	body, digest, err := ServicePlist(home, DefaultServiceLabel, "", "", "", "", true)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -308,7 +308,7 @@ func TestServicePlistIsOneFiniteAllowlist(t *testing.T) {
 		t.Fatalf("plist identity or required keys invalid: %s", body)
 	}
 	for address, port := range map[string]string{"": "43123", "127.0.0.1:43124": "43124", "127.0.0.1:0": ""} {
-		body, _, err := ServicePlist(home, DefaultServiceLabel, "", address, "", "")
+		body, _, err := ServicePlist(home, DefaultServiceLabel, "", address, "", "", true)
 		sockets := "    <key>Sockets</key>\n    <dict>\n        <key>Browser</key>\n        <dict>\n            <key>SockNodeName</key>\n            <string>127.0.0.1</string>\n            <key>SockServiceName</key>\n            <string>" + port + "</string>\n            <key>SockFamily</key>\n            <string>IPv4</string>\n        </dict>\n    </dict>\n</dict>"
 		if err != nil || bytes.Contains(body, []byte(sockets)) != (port != "") || bytes.Count(body, []byte("Sockets")) != min(len(port), 1) {
 			t.Fatalf("address %q sockets: %v %s", address, err, body)
@@ -326,11 +326,11 @@ func TestServicePlistIsOneFiniteAllowlist(t *testing.T) {
 			t.Fatalf("plist omitted %q", expected)
 		}
 	}
-	if _, _, err := ServicePlist("relative", DefaultServiceLabel, "", "", "", ""); !errors.Is(err, ErrServicePlist) {
+	if _, _, err := ServicePlist("relative", DefaultServiceLabel, "", "", "", "", true); !errors.Is(err, ErrServicePlist) {
 		t.Fatalf("relative home = %v", err)
 	}
 	for _, home := range []string{"/private/tmp/invalid-\x00", "/private/tmp/invalid-\x01", "/private/tmp/invalid-\xff"} {
-		if _, _, err := ServicePlist(home, DefaultServiceLabel, "", "", "", ""); !errors.Is(err, ErrServicePlist) {
+		if _, _, err := ServicePlist(home, DefaultServiceLabel, "", "", "", "", true); !errors.Is(err, ErrServicePlist) {
 			t.Fatalf("invalid plist path %q accepted: %v", home, err)
 		}
 	}
@@ -344,14 +344,14 @@ func TestServicePlistRendersOptionalArgumentsExactly(t *testing.T) {
 		return "    <array>\n        <string>" + serviceProgramPath(home) + "</string>\n" +
 			"        <string>--home</string>\n        <string>" + home + "</string>" + extra + "\n    </array>\n"
 	}
-	plain, _, err := ServicePlist(home, DefaultServiceLabel, "", "", "", "")
+	plain, _, err := ServicePlist(home, DefaultServiceLabel, "", "", "", "", true)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if !bytes.Contains(plain, []byte(arguments(""))) || bytes.Contains(plain, []byte("relay")) {
 		t.Fatalf("plist without the flag = %s", plain)
 	}
-	relayed, digest, err := ServicePlist(home, DefaultServiceLabel, origin, "", "", "")
+	relayed, digest, err := ServicePlist(home, DefaultServiceLabel, origin, "", "", "", true)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -362,7 +362,7 @@ func TestServicePlistRendersOptionalArgumentsExactly(t *testing.T) {
 	if sha256.Sum256(relayed) != digest || len(relayed) != len(plain)+len(extra) {
 		t.Fatal("the relay argument is not the only rendered difference")
 	}
-	developed, _, err := ServicePlist(home, DefaultServiceLabel, "", address, "", "")
+	developed, _, err := ServicePlist(home, DefaultServiceLabel, "", address, "", "", true)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -382,12 +382,12 @@ func TestServicePlistRendersOptionalArgumentsExactly(t *testing.T) {
 		"wss://relay .build", "wss://relay\nx", "wss://relay\x00",
 		"wss://" + strings.Repeat("a", MaxRelayOriginBytes),
 	} {
-		if _, _, err := ServicePlist(home, DefaultServiceLabel, bad, "", "", ""); !errors.Is(err, ErrServicePlist) {
+		if _, _, err := ServicePlist(home, DefaultServiceLabel, bad, "", "", "", true); !errors.Is(err, ErrServicePlist) {
 			t.Fatalf("invalid relay origin %q accepted: %v", bad, err)
 		}
 	}
 	for _, bad := range []string{"localhost:43123", "127.0.0.1:65536", "127.0.0.1:-1", "127.0.0.1:01"} {
-		if _, _, err := ServicePlist(home, DefaultServiceLabel, "", bad, "", ""); !errors.Is(err, ErrServicePlist) {
+		if _, _, err := ServicePlist(home, DefaultServiceLabel, "", bad, "", "", true); !errors.Is(err, ErrServicePlist) {
 			t.Fatalf("invalid development browser address %q accepted: %v", bad, err)
 		}
 	}
@@ -404,7 +404,7 @@ func TestServiceStatusRejectsDetachedLaunchAgentsDuringRead(t *testing.T) {
 	if _, err := Init(context.Background(), home); err != nil {
 		t.Fatal(err)
 	}
-	plistBody, _, err := ServicePlist(home, DefaultServiceLabel, "", "", "", "")
+	plistBody, _, err := ServicePlist(home, DefaultServiceLabel, "", "", "", "", true)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -561,7 +561,7 @@ func TestServiceStatusRefusesPlistMutationsAndPresentJobs(t *testing.T) {
 	if _, err := Init(context.Background(), home); err != nil {
 		t.Fatal(err)
 	}
-	plistBody, _, err := ServicePlist(home, DefaultServiceLabel, "", "", "", "")
+	plistBody, _, err := ServicePlist(home, DefaultServiceLabel, "", "", "", "", true)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -603,7 +603,7 @@ func TestServiceStatusRejectsPlistMetadataWithoutLaunchctl(t *testing.T) {
 	if _, err := Init(context.Background(), home); err != nil {
 		t.Fatal(err)
 	}
-	body, _, err := ServicePlist(home, DefaultServiceLabel, "", "", "", "")
+	body, _, err := ServicePlist(home, DefaultServiceLabel, "", "", "", "", true)
 	if err != nil {
 		t.Fatal(err)
 	}

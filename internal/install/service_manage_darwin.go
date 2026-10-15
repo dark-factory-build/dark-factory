@@ -146,7 +146,7 @@ func receiptMatchesInstallation(receipt serviceReceipt, home string, config Serv
 	if receipt.PlistPath != plistPath {
 		return fmt.Errorf("%w: receipt plist path", ErrServiceForeign)
 	}
-	_, digest, err := ServicePlist(home, config.Label, receipt.RelayOrigin, receipt.DevelopmentBrowserAddress, receipt.ToolPath, receipt.ToolchainReadRoots)
+	_, digest, err := ServicePlist(home, config.Label, receipt.RelayOrigin, receipt.DevelopmentBrowserAddress, receipt.ToolPath, receipt.ToolchainReadRoots, receipt.LocalAPISocket)
 	if err != nil {
 		return err
 	}
@@ -213,7 +213,7 @@ func serviceInstallLockedAt(ctx context.Context, home, userHome string, config S
 	inspection, err := inspectServiceWithCapabilityAt(ctx, home, userHome, config, launchctl, capability)
 	status := inspection.status
 	if err == nil && (status.State == ServiceInstalled || status.State == ServiceRunning) {
-		if inspection.relayOrigin == config.RelayOrigin && inspection.toolPath == config.ToolPath && inspection.toolchainReadRoots == config.ToolchainReadRoots && inspection.developmentBrowserAddress == config.DevelopmentBrowserAddress {
+		if inspection.relayOrigin == config.RelayOrigin && inspection.toolPath == config.ToolPath && inspection.toolchainReadRoots == config.ToolchainReadRoots && inspection.developmentBrowserAddress == config.DevelopmentBrowserAddress && inspection.localAPISocket {
 			return status, nil
 		}
 		// Changed settings re-render the plist and receipt in place around
@@ -325,14 +325,14 @@ func serviceInstallLockedAt(ctx context.Context, home, userHome string, config S
 // renderServiceJob renders the plist and the receipt binding it to the
 // installed program digest.
 func renderServiceJob(home, plistPath string, config ServiceConfig, programDigest string) ([]byte, []byte, error) {
-	plistBytes, plistDigest, err := ServicePlist(home, config.Label, config.RelayOrigin, config.DevelopmentBrowserAddress, config.ToolPath, config.ToolchainReadRoots)
+	plistBytes, plistDigest, err := ServicePlist(home, config.Label, config.RelayOrigin, config.DevelopmentBrowserAddress, config.ToolPath, config.ToolchainReadRoots, true)
 	if err != nil {
 		return nil, nil, err
 	}
 	body, err := encodeServiceReceipt(serviceReceipt{
 		Version: serviceReceiptVersion, Label: config.Label, PlistPath: plistPath,
 		PlistDigest: hex.EncodeToString(plistDigest[:]), ProgramDigest: programDigest,
-		RelayOrigin: config.RelayOrigin, DevelopmentBrowserAddress: config.DevelopmentBrowserAddress, ToolPath: config.ToolPath, ToolchainReadRoots: config.ToolchainReadRoots,
+		RelayOrigin: config.RelayOrigin, DevelopmentBrowserAddress: config.DevelopmentBrowserAddress, ToolPath: config.ToolPath, ToolchainReadRoots: config.ToolchainReadRoots, LocalAPISocket: true,
 	})
 	return plistBytes, body, err
 }
@@ -680,7 +680,7 @@ func serviceUninstallLockedAt(ctx context.Context, home, userHome string, config
 			}
 		}
 	} else {
-		expectedPlist, _, err = ServicePlist(home, config.Label, "", "", "", "")
+		expectedPlist, _, err = ServicePlist(home, config.Label, "", "", "", "", true)
 		if err != nil {
 			return ServiceStatus{}, err
 		}

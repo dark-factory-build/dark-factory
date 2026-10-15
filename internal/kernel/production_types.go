@@ -89,7 +89,7 @@ type ProductionDelivery struct {
 	VerifiedAt   int64    `json:"verified_at,omitempty"`
 	UpdatedAt    int64    `json:"updated_at,omitempty"`
 	// A release restart's local API outage: when the staging generation
-	// withdrew its socket and when the generation that settles it bound one.
+	// stopped serving its socket and when the one that settles it served.
 	WithdrawnAt int64  `json:"withdrawn_at,omitempty"`
 	ServedAt    int64  `json:"served_at,omitempty"`
 	Phase       string `json:"phase,omitempty"`

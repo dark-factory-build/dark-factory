@@ -42,6 +42,7 @@ type localAPIState struct {
 
 	listener         *net.UnixListener
 	socketID         identity
+	adopted          bool // the socket is activatedLocalAPI's, never unlinked
 	connections      map[*LocalAPIConnection]struct{}
 	quarantined      map[*LocalAPIConnection]struct{}
 	probeConnections []net.Conn
@@ -91,6 +92,40 @@ var localAPICloseConnection = func(connection *net.UnixConn) error { return conn
 var localAPICloseProbeConnection = func(connection net.Conn) error { return connection.Close() }
 var localAPISetListenerDeadline = func(listener *net.UnixListener, deadline time.Time) error {
 	return listener.SetDeadline(deadline)
+}
+
+// activatedLocalAPI is the canonical socket this process was handed: by
+// launchd, or by a release supervisor to its trial child as fd 3. It stays
+// open for the process's life, so a generation's withdrawal leaves the socket
+// bound and connections queue in its backlog for the next generation. Outside
+// launchd (first boot of an older plist, tests) it is nil and factoryd binds.
+var activatedLocalAPI = sync.OnceValues(func() (*os.File, error) {
+	if os.Getenv(LocalAPIInheritEnv) == "3" {
+		_ = os.Unsetenv(LocalAPIInheritEnv)
+		unix.CloseOnExec(3)
+		return os.NewFile(3, LocalAPISocketKey), nil
+	}
+	fds, err := launchActivateSocket(LocalAPISocketKey)
+	if errors.Is(err, unix.ESRCH) || errors.Is(err, unix.ENOENT) {
+		return nil, nil
+	}
+	if err == nil && len(fds) != 1 {
+		for _, fd := range fds {
+			_ = unix.Close(fd)
+		}
+		err = fmt.Errorf("launchd handed %d sockets", len(fds))
+	}
+	if err != nil {
+		return nil, fmt.Errorf("%w: activate local API socket: %v", ErrInvalidHome, err)
+	}
+	unix.CloseOnExec(fds[0])
+	return os.NewFile(uintptr(fds[0]), LocalAPISocketKey), nil
+})
+
+// ActivatedLocalAPI is the activated socket, for a release trial child.
+func ActivatedLocalAPI() *os.File {
+	file, _ := activatedLocalAPI()
+	return file
 }
 
 func (state *operationalHomeState) openLocalAPI(ctx context.Context) (*LocalAPIAuthority, error) {
@@ -189,6 +224,9 @@ func (state *localAPIState) activate(ctx context.Context) error {
 	if err := state.verifyWithoutSocket(); err != nil {
 		return err
 	}
+	if activated, err := activatedLocalAPI(); err != nil || activated != nil {
+		return errors.Join(err, state.adopt(ctx, activated))
+	}
 	if err := atLocalAPIPhase("before stale inspection"); err != nil {
 		return err
 	}
@@ -252,6 +290,32 @@ func (state *localAPIState) activate(ctx context.Context) error {
 	if err := atLocalAPIPhase("after sync"); err != nil {
 		return err
 	}
+	if err := state.verifyBindings(); err != nil {
+		return err
+	}
+	return ctx.Err()
+}
+
+// adopt serves an activated socket. Who handed it is the binding proof: a
+// nonce probe could accept a client queued in its backlog instead.
+func (state *localAPIState) adopt(ctx context.Context, activated *os.File) error {
+	if activated == nil {
+		return nil
+	}
+	listener, err := net.FileListener(activated)
+	unixListener, ok := listener.(*net.UnixListener)
+	if err != nil || !ok {
+		if listener != nil {
+			_ = listener.Close()
+		}
+		return fmt.Errorf("%w: activated local API socket is not a Unix listener", ErrInvalidHome)
+	}
+	state.listener, state.adopted = unixListener, true
+	present, current, err := localAPISocketAt(state.runtimes, true)
+	if err != nil || !present || unixListener.Addr().String() != state.locator {
+		return errors.Join(fmt.Errorf("%w: activated local API socket is not the canonical one", ErrInvalidHome), err)
+	}
+	state.socketID = current
 	if err := state.verifyBindings(); err != nil {
 		return err
 	}
@@ -795,6 +859,9 @@ func (state *localAPIState) fenceClose() {
 }
 
 func (state *localAPIState) removeOwnedSocket() error {
+	if state.adopted {
+		return nil
+	}
 	if state.socketID == (identity{}) {
 		if state.listener != nil {
 			return fmt.Errorf("local API socket identity was not recorded")

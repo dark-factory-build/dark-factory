@@ -259,8 +259,9 @@ func ServiceUninstall(ctx context.Context, home string, config ServiceConfig) (S
 
 // ServicePlist renders the one Go-v1 launchd job. Exact byte comparison is the
 // parser: accepting a plist means accepting precisely this finite allowlist.
-// Empty optional arguments render no extra factoryd flags.
-func ServicePlist(home, label, relayOrigin, developmentBrowserAddress, toolPath, toolchainReadRoots string) ([]byte, [sha256.Size]byte, error) {
+// Empty optional arguments render no extra factoryd flags. socket has launchd
+// own the canonical local API socket across factoryd generations.
+func ServicePlist(home, label, relayOrigin, developmentBrowserAddress, toolPath, toolchainReadRoots string, socket bool) ([]byte, [sha256.Size]byte, error) {
 	if !validServicePath(home) || filepath.Base(home) == string(filepath.Separator) {
 		return nil, [sha256.Size]byte{}, fmt.Errorf("%w: home path", ErrServicePlist)
 	}
@@ -318,6 +319,16 @@ func ServicePlist(home, label, relayOrigin, developmentBrowserAddress, toolPath,
 		escapeXML(&escaped, argument[1])
 		toolchain += "\n        <string>" + argument[0] + "</string>\n        <string>" + escaped.String() + "</string>"
 	}
+	sockets := ""
+	if socket {
+		var escaped bytes.Buffer
+		escapeXML(&escaped, LocalAPISocketPath(home))
+		if len(LocalAPISocketPath(home)) > MaxSocketPathBytes {
+			return nil, [sha256.Size]byte{}, fmt.Errorf("%w: socket path", ErrServicePlist)
+		}
+		sockets = "\n    <key>Sockets</key>\n    <dict>\n        <key>" + LocalAPISocketKey + "</key>\n        <dict>\n            <key>SockPathName</key>\n            <string>" +
+			escaped.String() + "</string>\n            <key>SockPathMode</key>\n            <integer>384</integer>\n        </dict>\n    </dict>"
+	}
 	body := []byte(`<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
@@ -369,6 +380,8 @@ type serviceReceipt struct {
 	DevelopmentBrowserAddress string `json:"development_browser_address,omitempty"`
 	ToolPath                  string `json:"tool_path,omitempty"`
 	ToolchainReadRoots        string `json:"toolchain_read_roots,omitempty"`
+	// LocalAPISocket says the plist has launchd own the local API socket.
+	LocalAPISocket bool `json:"local_api_socket,omitempty"`
 }
 
 const (

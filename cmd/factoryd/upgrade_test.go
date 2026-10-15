@@ -214,6 +214,43 @@ func TestStagedBuildThatAnswersAndStopsCleanlyIsPromoted(t *testing.T) {
 	bootUntilSettled(t, home)
 }
 
+// Under launchd the trial serves the canonical socket its supervisor was
+// handed: without it the trial would find that socket live, refuse to bind
+// and never answer. The trial leaves the socket in place for the next build.
+func TestStagedBuildServesTheActivatedSocketAndLeavesIt(t *testing.T) {
+	home := stagedHome(t, "serve", "development")
+	path := install.LocalAPISocketPath(home)
+	listener, err := net.ListenUnix("unix", &net.UnixAddr{Name: path, Net: "unix"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	listener.SetUnlinkOnClose(false)
+	if err := os.Chmod(path, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	activated, err := listener.File()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer activated.Close()
+	if err := listener.Close(); err != nil {
+		t.Fatal(err)
+	}
+	before, err := os.Lstat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	original := activatedLocalAPI
+	t.Cleanup(func() { activatedLocalAPI = original })
+	activatedLocalAPI = func() *os.File { return activated }
+	if err := superviseTrial(home, childArgs(home), install.UpgradeMarker{Target: "development"}); !errors.Is(err, errRestart) || !strings.HasSuffix(err.Error(), ": promoted development") {
+		t.Fatalf("trial = %v", err)
+	}
+	if after, err := os.Lstat(path); err != nil || !os.SameFile(before, after) {
+		t.Fatalf("the trial changed the activated socket: %v, %v", after, err)
+	}
+}
+
 func TestPassedTrialRecoveryRestartsAndSettlesWithoutRepeatingPromotion(t *testing.T) {
 	revision := strings.Repeat("d", 40)
 	home := stagedHome(t, "serve", "development")

@@ -72,6 +72,7 @@ var (
 	selfSource         = func() string { return buildinfo.Current().Source() }
 	promoteService     = install.PromoteService
 	releaseSettledHook = func(string, string) {}
+	activatedLocalAPI  = install.ActivatedLocalAPI
 
 	cleanStartupCancellation = errors.New("factoryd: clean startup cancellation")
 	startupPhaseHook         func(string)
@@ -343,6 +344,8 @@ func serve(ctx context.Context, configuration config) error {
 			return errors.New("invalid factoryd configuration")
 		}
 	}
+	// Claim launchd's socket, close-on-exec, before boot starts any child.
+	install.ActivatedLocalAPI()
 	// launchd owns an installed job's console address. Started without that
 	// socket (an install from before Sockets, or an interrupted reload), this
 	// process never binds the paired origin itself: it has launchd reload the
@@ -442,6 +445,11 @@ func superviseTrial(home string, args []string, marker install.UpgradeMarker) er
 	defer cancel()
 	child := exec.CommandContext(ctx, filepath.Join(install.ServiceDirectoryPath(home), "bin", "previous", "factoryd"), args...)
 	child.Env = append(os.Environ(), trialEnv+"=1")
+	// The trial serves the canonical socket this build was handed, so the
+	// socket and its queued connections outlive the handover.
+	if activated := activatedLocalAPI(); activated != nil {
+		child.ExtraFiles, child.Env = []*os.File{activated}, append(child.Env, install.LocalAPIInheritEnv+"=3")
+	}
 	child.Stderr = recoveryLog
 	if browserSocket != nil {
 		child.ExtraFiles = []*os.File{browserSocket}

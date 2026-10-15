@@ -254,7 +254,8 @@ func (daemon *Daemon) writeRelease(ctx context.Context, project kernel.ProjectID
 }
 
 // WithdrawRelease stamps a staged release, at its trial, with when this
-// generation withdrew its local API socket: the start of the restart's outage.
+// generation stopped serving its local API socket: the start of the restart's
+// outage, during which a launchd-owned socket queues connections.
 func (daemon *Daemon) WithdrawRelease(ctx context.Context, at time.Time) error {
 	project, delivery, found, err := daemon.store.LatestRelease(ctx)
 	if err != nil || !found || delivery.State != "running" || delivery.Phase != "trial" {

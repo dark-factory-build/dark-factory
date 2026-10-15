@@ -783,8 +783,9 @@ func (client client) call(ctx context.Context, method string, params, output any
 		ctx, cancel = context.WithTimeout(ctx, timeout)
 	}
 	defer cancel()
-	// An attempt outlives factoryd generations. A restart unbinds the socket
-	// and drains in-flight requests as unavailable, so the call waits the
+	// An attempt outlives factoryd generations. A restart drains in-flight
+	// requests as unavailable and either unbinds the socket or, under launchd,
+	// queues new connections for the next generation, so the call waits the
 	// restart out instead of handing the run a blocker. A mutation's
 	// unavailable reply may follow its commit, so only reads replay it. A reply
 	// lost to a restart is replayed for a read and for an outcome: a committed
