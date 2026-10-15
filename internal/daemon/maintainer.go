@@ -45,9 +45,10 @@ var overseerWriteTools = map[string]bool{
 }
 
 var workerEvidenceTools = map[string]bool{
-	"list_pull_requests":          true,
-	"observe_pull_request_checks": true,
-	"observe_pull_request_merge":  true,
+	"list_pull_requests":            true,
+	"observe_pull_request_checks":   true,
+	"observe_pull_request_comments": true,
+	"observe_pull_request_merge":    true,
 }
 
 func filterTools(response json.RawMessage, keep func(string) bool) (json.RawMessage, error) {
@@ -283,7 +284,12 @@ func (daemon *Daemon) attemptMaintainer(ctx context.Context, call api.Call) api.
 	if err != nil {
 		return failure("invalid")
 	}
-	response, err := daemon.github.MCP(ctx, encoded, repositories)
+	var response json.RawMessage
+	if daemon.githubMCP != nil {
+		response, err = daemon.githubMCP(ctx, encoded, repositories)
+	} else {
+		response, err = daemon.github.MCP(ctx, encoded, repositories)
+	}
 	if err != nil {
 		if errors.Is(err, maintainer.ErrDenied) {
 			return failure("denied")

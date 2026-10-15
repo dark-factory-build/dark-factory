@@ -79,7 +79,7 @@ func TestAuthenticatedWorkerReadsOwnReviewEvidenceAndCannotCrossScopeOrWrite(t *
 	}
 	customerMode(t, fixture)
 	fixture.daemon.githubMCP = func(_ context.Context, _ json.RawMessage, _ map[string]uint64) (json.RawMessage, error) {
-		return json.RawMessage(`{"jsonrpc":"2.0","id":1,"result":{"structuredContent":{},"isError":false}}`), nil
+		return json.RawMessage(`{"jsonrpc":"2.0","id":1,"result":{"structuredContent":{"comments":[{"body":"comment from GitHub"}]},"isError":false}}`), nil
 	}
 
 	done := fixture.serve(t)
@@ -98,8 +98,17 @@ func TestAuthenticatedWorkerReadsOwnReviewEvidenceAndCannotCrossScopeOrWrite(t *
 		}
 		return result
 	}
+	valid := call(`{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"observe_pull_request_checks","arguments":{"repository":"team/repo","pull_number":12,"head_sha":"` + head + `"}}}`)
+	if valid.State != "ok" {
+		t.Fatalf("valid worker maintainer = %+v", valid)
+	}
+	comments := call(`{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"observe_pull_request_comments","arguments":{"repository":"team/repo","pull_number":12,"head_sha":"` + head + `"}}}`)
+	if comments.State != "ok" || !strings.Contains(string(comments.Response), "comment from GitHub") {
+		t.Fatalf("worker comments = %+v", comments)
+	}
 	for _, request := range []string{
 		`{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"observe_pull_request_checks","arguments":{"repository":"other/repo","pull_number":12,"head_sha":"` + head + `"}}}`,
+		`{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"observe_pull_request_checks","arguments":{"repository":"team/repo","pull_number":13,"head_sha":"` + head + `"}}}`,
 		`{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"observe_pull_request_checks","arguments":{"repository":"team/repo","pull_number":12,"head_sha":"` + strings.Repeat("c", 40) + `"}}}`,
 		`{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"submit_pull_request_review","arguments":{"repository":"team/repo","pull_number":12,"head_sha":"` + head + `"}}}`,
 	} {
@@ -113,6 +122,12 @@ func TestAuthenticatedWorkerReadsOwnReviewEvidenceAndCannotCrossScopeOrWrite(t *
 	var remote *api.RemoteError
 	if !errors.As(err, &remote) || remote.Code() != api.RemoteForbidden {
 		t.Fatalf("cross-project report error = %v", err)
+	}
+	done = fixture.serve(t)
+	_, err = active.client.Report(ctx, api.ReportInput{TaskID: testID(199)})
+	waitDispatch(t, done)
+	if !errors.As(err, &remote) || remote.Code() != api.RemoteForbidden {
+		t.Fatalf("cross-task report error = %v", err)
 	}
 }
 
