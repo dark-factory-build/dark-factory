@@ -623,6 +623,68 @@ func TestBootFailsTheInterruptedReleaseAndTheNextPassStartsIt(t *testing.T) {
 	awaitRelease(t, next, newer, func(value kernel.ProductionDelivery) bool { return value.Phase == "trial" })
 }
 
+// A trial whose supervisor died is settled by the next boot with no reason
+// (cmd/factoryd's undecided marker). The release lane retries that head once;
+// a second interruption stays failed however often the lane ticks.
+func TestTrialInterruptedBeforePromotionIsRetriedOnceByTheLane(t *testing.T) {
+	fixture, settle, events := releaseFixture(t)
+	settle()
+	head, poll, batch := releaseHead, releasePoll, releaseBatch
+	t.Cleanup(func() { releaseHead, releasePoll, releaseBatch = head, poll, batch })
+	sha := strings.Repeat("7", 40)
+	releaseHead = func(context.Context, *Daemon, string) (string, error) { return sha, nil }
+	// The batch window never closes here: only the interruption skips it.
+	releasePoll, releaseBatch = 0, time.Hour
+	ctx := context.Background()
+	staged := func(daemon *Daemon) {
+		t.Helper()
+		for _, want := range []string{"build /self-repository", "upgrade " + sha, "exit"} {
+			if got := <-events; got != want {
+				t.Fatalf("event = %q, want %q", got, want)
+			}
+		}
+		awaitRelease(t, daemon, sha, func(value kernel.ProductionDelivery) bool { return value.Phase == "trial" })
+	}
+	// restart is the next factoryd, sharing only the store, booting over a
+	// marker its dead supervisor never decided.
+	restart := func() *Daemon {
+		t.Helper()
+		next, err := NewDaemon(fixture.store)
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { _ = next.Close() })
+		next.ConfigureHost(fixture.daemon.home, "/usr/bin:/bin", "", "")
+		if err := next.FinishRelease(ctx, sha, "failed", ""); err != nil {
+			t.Fatal(err)
+		}
+		return next
+	}
+	if _, err := fixture.daemon.Release(ctx, sha, true); err != nil {
+		t.Fatal(err)
+	}
+	staged(fixture.daemon)
+	next := restart()
+	if delivery := awaitRelease(t, next, sha, func(kernel.ProductionDelivery) bool { return true }); delivery.State != "failed" || delivery.Phase != "trial" || delivery.Reason != releaseInterrupted {
+		t.Fatalf("interrupted trial = %+v", delivery)
+	}
+	next.tickRelease(ctx)
+	staged(next)
+	last := restart()
+	for tick := 0; tick < 3; tick++ {
+		last.tickRelease(ctx)
+		time.Sleep(20 * time.Millisecond)
+	}
+	select {
+	case got := <-events:
+		t.Fatalf("a twice-interrupted trial churned: %q", got)
+	default:
+	}
+	if delivery := awaitRelease(t, last, sha, func(kernel.ProductionDelivery) bool { return true }); delivery.State != "failed" || delivery.Reason != releaseInterrupted+" again" {
+		t.Fatalf("twice-interrupted trial = %+v", delivery)
+	}
+}
+
 func TestSchedulerAdmitsNothingWhileAReleaseHoldsAdmission(t *testing.T) {
 	daemon := newSchedulerTestDaemon(t)
 	daemon.releaseHold.Store(true)

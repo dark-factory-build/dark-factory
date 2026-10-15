@@ -253,7 +253,8 @@ func (daemon *Daemon) writeRelease(ctx context.Context, project kernel.ProjectID
 	return err
 }
 
-// FinishRelease records the outcome of release:<sha> after the restart.
+// FinishRelease records the outcome of release:<sha> after the restart. A
+// failure with no reason is a trial whose supervisor died before deciding it.
 func (daemon *Daemon) FinishRelease(ctx context.Context, sha, state, reason string) error {
 	project, delivery, found, err := daemon.store.Delivery(ctx, "release:"+sha)
 	if err != nil || !found {
@@ -264,11 +265,25 @@ func (daemon *Daemon) FinishRelease(ctx context.Context, sha, state, reason stri
 	delivery.State, delivery.Phase, delivery.Reason = state, "trial", reason
 	if state == "verified" {
 		delivery.Phase = ""
+	} else if reason == "" {
+		daemon.interruptRelease(&delivery)
 	}
 	return daemon.writeRelease(ctx, project, &delivery)
 }
 
 const releaseInterrupted = "interrupted by a factoryd restart"
+
+// interruptRelease fails a release a restart cut short, which the release
+// lane then starts again at once. The record carries its predecessor's cause
+// until one verifies, so a second interruption at the same phase stays failed.
+func (daemon *Daemon) interruptRelease(delivery *kernel.ProductionDelivery) {
+	delivery.State, delivery.Reason, delivery.Group = "failed", releaseInterrupted, 0
+	if delivery.Cause == delivery.Phase+" "+releaseInterrupted {
+		delivery.Reason += " again"
+		return
+	}
+	daemon.releaseSince.Store(1)
+}
 
 // FailInterruptedRelease runs at a boot with no upgrade marker: a release
 // still running then belongs to a factoryd that died before staging it, so
@@ -286,8 +301,7 @@ func (daemon *Daemon) FailInterruptedRelease(ctx context.Context) error {
 	if delivery.Group > 0 {
 		_ = syscall.Kill(-delivery.Group, syscall.SIGKILL)
 	}
-	delivery.State, delivery.Reason, delivery.Group = "failed", releaseInterrupted, 0
-	daemon.releaseSince.Store(1)
+	daemon.interruptRelease(&delivery)
 	return daemon.writeRelease(ctx, project, &delivery)
 }
 

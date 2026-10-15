@@ -333,6 +333,107 @@ func TestOldBuildRestartedMidTrialStopsTheOrphanedChild(t *testing.T) {
 	}
 }
 
+// A supervisor killed mid-trial decided nothing: the next boot fails its
+// release as interrupted, which the release lane retries once
+// (internal/daemon's TestTrialInterruptedBeforePromotionIsRetriedOnceByTheLane),
+// and promotes nothing.
+func TestSupervisorKilledMidTrialLeavesARetryableRelease(t *testing.T) {
+	sha := strings.Repeat("7", 40)
+	home := stagedHome(t, "serve", sha)
+	ctx := context.Background()
+	self, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	supervisor := exec.Command(self, childArgs(home)...)
+	supervisor.SysProcAttr, supervisor.Stderr = &syscall.SysProcAttr{Setpgid: true}, os.Stderr
+	if err := supervisor.Start(); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = syscall.Kill(-supervisor.Process.Pid, syscall.SIGKILL) })
+	exited := make(chan error, 1)
+	go func() { exited <- supervisor.Wait() }()
+	markerUntil := func(done func(install.UpgradeMarker, bool) bool) install.UpgradeMarker {
+		t.Helper()
+		for deadline := time.Now().Add(20 * time.Second); ; time.Sleep(10 * time.Millisecond) {
+			if marker, present, err := install.ReadUpgradeMarker(home); err == nil && done(marker, present) {
+				return marker
+			}
+			select {
+			case err := <-exited:
+				t.Fatalf("the supervisor exited early: %v", err)
+			default:
+			}
+			if time.Now().After(deadline) {
+				t.Fatal("the upgrade marker never reached the expected state")
+			}
+		}
+	}
+	// Its boot settling the stale marker shows its recovery has run; then a
+	// release stages again and signals it, as release() does.
+	markerUntil(func(_ install.UpgradeMarker, present bool) bool { return !present })
+	if err := install.WriteUpgradeMarker(home, install.UpgradeMarker{Target: sha}); err != nil {
+		t.Fatal(err)
+	}
+	if err := supervisor.Process.Signal(syscall.SIGTERM); err != nil {
+		t.Fatal(err)
+	}
+	marker := markerUntil(func(marker install.UpgradeMarker, present bool) bool { return present && marker.Trial > 0 })
+	if err := syscall.Kill(-supervisor.Process.Pid, syscall.SIGKILL); err != nil {
+		t.Fatal(err)
+	}
+	<-exited
+	if marker = markerUntil(func(install.UpgradeMarker, bool) bool { return true }); marker.Reason != "" || marker.TrialPassed {
+		t.Fatalf("a killed supervisor decided its trial: %+v", marker)
+	}
+	// The boot's own orphan stop is covered above; here the orphan is stopped
+	// first so the release record of the dead process can be written.
+	_ = syscall.Kill(-marker.Trial, syscall.SIGKILL)
+	project, err := kernel.ProjectIDFromBytes(bytes.Repeat([]byte{0x33}, kernel.IDBytes))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for deadline := time.Now().Add(10 * time.Second); ; time.Sleep(20 * time.Millisecond) {
+		opened, err := install.OpenOperationalHome(ctx, home)
+		if err == nil {
+			store, storeErr := opened.OpenStore(ctx)
+			at, atErr := kernel.NewUnixMillis(time.Now().UnixMilli())
+			if err = errors.Join(storeErr, atErr); err == nil {
+				_, err = store.CreateProject(ctx, kernel.NewProject{ID: project, Name: "self", Root: filepath.Join(filepath.Dir(home), "repo")}, at)
+				if err == nil {
+					// What release() last wrote before its SIGTERM.
+					err = store.RecordDelivery(ctx, project, "dark-factory-build/dark-factory", kernel.ProductionDelivery{ID: "release:" + sha, Kind: "runtime", Destination: "factoryd", Revision: sha, State: "running", Phase: "trial", PullRequests: []uint64{}, UpdatedAt: at.Int64()}, at)
+				}
+				err = errors.Join(err, store.Close())
+			}
+			if err = errors.Join(err, opened.Close()); err != nil {
+				t.Fatal(err)
+			}
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("the orphaned trial still holds the home: %v", err)
+		}
+	}
+	bootUntilSettled(t, home)
+	if current, _ := os.ReadFile(filepath.Join(install.ServiceDirectoryPath(home), "bin", "current", "factoryd")); string(current) != currentProgram {
+		t.Fatal("an undecided trial was promoted")
+	}
+	opened, err := install.OpenOperationalHome(ctx, home)
+	if err != nil {
+		t.Fatal(err)
+	}
+	store, err := opened.OpenStore(ctx)
+	if err != nil {
+		_ = opened.Close()
+		t.Fatal(err)
+	}
+	_, delivery, found, err := store.Delivery(ctx, "release:"+sha)
+	if err = errors.Join(err, store.Close(), opened.Close()); err != nil || !found || delivery.State != "failed" || delivery.Phase != "trial" || delivery.Reason != "interrupted by a factoryd restart" {
+		t.Fatalf("settled release = %+v, %t, %v", delivery, found, err)
+	}
+}
+
 // A pid the trial child no longer owns belongs to someone else: the boot
 // kills only the process that started when the child did.
 func TestOldBuildNeverKillsAReusedTrialPid(t *testing.T) {
@@ -410,24 +511,25 @@ func TestUnreadableMarkerIsDiscardedNotCrashLooped(t *testing.T) {
 }
 
 // bootUntilSettled serves as launchd's next boot would until the release is
-// settled, then stops.
+// settled, then stops. It waits for the record, not the marker: the marker
+// goes first, and stopping then would cancel the record's write.
 func bootUntilSettled(t *testing.T, home string) {
 	t.Helper()
+	settled, hook := make(chan struct{}, 1), releaseSettledHook
+	releaseSettledHook = func(string, string) { settled <- struct{}{} }
+	defer func() { releaseSettledHook = hook }()
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan error, 1)
 	go func() { done <- serve(ctx, testConfig(home)) }()
-	for deadline := time.Now().Add(5 * time.Second); ; time.Sleep(10 * time.Millisecond) {
-		if _, present, err := install.ReadUpgradeMarker(home); !present && err == nil {
-			break
-		}
-		select {
-		case err := <-done:
-			t.Fatalf("boot = %v", err)
-		default:
-		}
-		if time.Now().After(deadline) {
-			t.Fatal("the boot never settled the release")
-		}
+	select {
+	case <-settled:
+	case err := <-done:
+		t.Fatalf("boot = %v", err)
+	case <-time.After(5 * time.Second):
+		t.Fatal("the boot never settled the release")
+	}
+	if _, present, err := install.ReadUpgradeMarker(home); present || err != nil {
+		t.Fatalf("settled release left its marker: %t, %v", present, err)
 	}
 	cancel()
 	if err := <-done; err != nil {
