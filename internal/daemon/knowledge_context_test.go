@@ -251,6 +251,57 @@ func TestKnowledgeLaunchCarriesTaskAndKnowledge(t *testing.T) {
 	}
 }
 
+// A fresh repair Change launches at its open pull request's head, so a lesson
+// pinned to the integrated revision is judged against that head, not the base.
+func TestKnowledgeLaunchJudgesFreshRepairAtItsPullRequestHead(t *testing.T) {
+	f := newDispatchFixture(t)
+	active := prepareActiveAttemptInProjectWithProvider(t, f, 84, testID(84), "worker", "codex")
+	ctx := context.Background()
+	repository, found, err := f.store.TaskRepository(ctx, active.run.TaskID)
+	if err != nil || !found {
+		t.Fatalf("repository: %v", err)
+	}
+	if state, ok, err := f.store.Change(ctx, *active.run.ChangeID); err != nil || !ok || state.Selection != nil {
+		t.Fatalf("worker Change is not fresh: %+v %v", state, err)
+	}
+	git := func(args ...string) string {
+		t.Helper()
+		out, err := exec.Command(change.TrustedGitExecutable, append([]string{"-C", repository.Root}, args...)...).CombinedOutput()
+		if err != nil {
+			t.Fatalf("git: %v %s", err, out)
+		}
+		return strings.TrimSpace(string(out))
+	}
+	base := git("rev-parse", "HEAD")
+	lesson := seedContextKnowledge(t, f, active.run.ProjectID, 204, kernel.ContentLesson, kernel.KnowledgeMetadata{Status: "current", SourceRevision: base, Evidence: []string{"review: base"}}, "The guard holds at the base.")
+	launch := func() []byte {
+		t.Helper()
+		text, _, err := f.daemon.prepareKnowledgeTask(ctx, active.run, []byte("repair the guard"), true)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return text
+	}
+	if text := launch(); !bytes.Contains(text, []byte("The guard holds at the base.")) {
+		t.Fatalf("fresh Change at the base lost its current lesson: %s", text)
+	}
+	branch := git("symbolic-ref", "--short", "HEAD")
+	git("checkout", "-q", "-b", "repair")
+	if err := os.WriteFile(filepath.Join(repository.Root, "guard.go"), []byte("package guard\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	git("add", ".")
+	git("commit", "-q", "-m", "repair changes the guard")
+	head := git("rev-parse", "HEAD")
+	git("checkout", "-q", branch)
+	if err := f.store.RecordPublication(ctx, active.run.ProjectID, active.run.TaskID, "team/repo", kernel.ProductionPullRequest{Number: 7, Title: "Repair", URL: "https://github.com/team/repo/pull/7", Head: head, Branch: "repair", Base: branch, State: "open", Review: kernel.ProductionReview{Head: head, State: "unknown"}}, mustKernelTime(t, 104)); err != nil {
+		t.Fatal(err)
+	}
+	if text := launch(); bytes.Contains(text, []byte("The guard holds at the base.")) || !bytes.Contains(text, []byte(lesson.ID.String())) || !bytes.Contains(text, []byte(`"status":"needs_revalidation"`)) {
+		t.Fatalf("repair launch judged the lesson at the base, not its pull request head: %s", text)
+	}
+}
+
 func TestKnowledgeSelectiveSourceRevalidation(t *testing.T) {
 	f := newDispatchFixture(t)
 	active := prepareActiveAttemptInProjectWithProvider(t, f, 91, testID(91), "orchestrator", "codex")
