@@ -25,10 +25,10 @@ import (
 )
 
 const (
-	// Covers a release restart the attempt client waits out, then the daemon's
-	// ten-second dispatch budget: a shorter one abandons a mutation the daemon
-	// is still allowed to finish and reports the durable write it did make as
-	// a timeout.
+	// The whole budget of one attempt call, release restarts it retries
+	// included: it outlasts the daemon's dispatch budget, as a shorter one
+	// abandons a mutation the daemon is still allowed to finish and reports
+	// the durable write it did make as a timeout.
 	attemptRequestTimeout           = api.RestartRetryWindow + 15*time.Second
 	retainedSourceRequestTimeout    = 10 * time.Minute
 	storageCompactionRequestTimeout = 10 * time.Minute

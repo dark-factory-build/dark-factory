@@ -32,10 +32,10 @@ const (
 	responsePrelude          = 1
 	outcomeReceiptBytes      = 32
 	requestTimeout           = 5 * time.Second
-	// RestartRetryWindow covers a release restart: launchd respawns factoryd
-	// at once, and the new daemon rebinds after opening and recovering its
-	// store. An attempt call retries what that daemon provably did not act on
-	// for this long before it surfaces the failure.
+	// RestartRetryWindow bounds an attempt call whose caller set no deadline
+	// and factoryd's dispatch of one. A call retries a release restart, while
+	// launchd respawns factoryd and it opens and recovers its store, until the
+	// caller's deadline rather than a separate window.
 	RestartRetryWindow   = 30 * time.Second
 	restartRetryInterval = 100 * time.Millisecond
 	attemptTokenFileEnv  = "DARK_FACTORY_ATTEMPT_TOKEN_FILE"
@@ -798,7 +798,6 @@ func (client client) call(ctx context.Context, method string, params, output any
 	// lost to a restart is replayed for a read and for an outcome: a committed
 	// outcome revoked the credential, so it is refused, not applied twice.
 	// A reply lost while the same daemon still holds the socket is its answer.
-	retryUntil := time.Now().Add(RestartRetryWindow)
 	for {
 		err := client.exchange(ctx, method, encoded, output)
 		retry := readMethod(method) && unavailable(err)
@@ -809,7 +808,7 @@ func (client client) call(ctx context.Context, method string, params, output any
 		} else if errors.As(err, &dropped) {
 			err, retry = dropped.err, readMethod(method) || outcomeMethod(method)
 		}
-		if !retry || client.domain != attemptDomain || time.Now().After(retryUntil) {
+		if !retry || client.domain != attemptDomain {
 			return err
 		}
 		select {
