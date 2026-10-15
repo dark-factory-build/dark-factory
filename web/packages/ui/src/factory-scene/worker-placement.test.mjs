@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { breakRoomNook, layoutScene, placeWorkers, standable } from "../../dist/src/factory-scene/scene.js";
+import { WORKER_SIZE, breakRoomNook, layoutScene, placeWorkers, standable } from "../../dist/src/factory-scene/scene.js";
 import { machine, sceneGraph, unit } from "../../../../fixtures/scene.mjs";
 
 // Units of six machines each, one of them a fold standing for aliases.
@@ -22,10 +22,27 @@ test("work slots belong to the observed machine, including a fold's members, and
   for (const at of placed.filter((placement) => placement.area === "work")) {
     const source = workers.find((person) => person.id === at.id), station = layout.stations.find((item) => item.entityId === at.stationId);
     assert.ok(station.entityId === source.observedBayId || station.representedIds?.includes(source.observedBayId), `${at.id} works at its own machine`);
-    assert.ok(Math.hypot(at.x - station.anchor.x, at.y - station.anchor.y) <= 36, "beside it");
+    assert.ok(Math.hypot(at.x - station.anchor.x, at.y - station.anchor.y) <= 60, "beside it");
     assert.ok(standable(layout, at), `${at.id} stands clear of every solid`);
   }
   assert.deepEqual(placed.find((placement) => placement.id === "worker-00"), { id: "worker-00", area: "work", stationId: "unit-0-0", ...layout.stations.find((item) => item.entityId === "unit-0-0").anchor });
+});
+
+test("workers sharing a machine stand far enough apart that nobody's helpers or badges cover a neighbour", () => {
+  const layout = layoutScene(units(1));
+  const crew = Array.from({ length: 6 }, (_, index) => worker(`crew-${index}`, { activity: "busy", location: "working", nodeId: "unit-0", observedBayId: "unit-0-0" }));
+  const placed = placeWorkers(layout, crew).filter((placement) => placement.area === "work" && placement.stationId === "unit-0-0");
+  assert.ok(placed.length >= 3, `${placed.length} workers share the machine`);
+  // What factory-scene.tsx draws around a worker: badges reach 32px either side and from 20px above to 2px below;
+  // the third helper stands at x=32, y=6 at 0.6 scale.
+  const half = WORKER_SIZE / 2, helper = 0.6 * half;
+  const reach = { left: 32, right: Math.max(32, 14 + 9 * 2 + helper), up: 20, down: Math.max(2, 6 + helper) };
+  for (const a of placed) for (const b of placed) {
+    if (a === b) continue;
+    const dx = b.x - a.x, dy = b.y - a.y;
+    const clear = dx >= reach.right + half || -dx >= reach.left + half || dy >= reach.down + half || -dy >= reach.up + half;
+    assert.ok(clear, `what is drawn around ${a.id} at (${a.x}, ${a.y}) covers ${b.id} at (${b.x}, ${b.y})`);
+  }
 });
 
 test("anyone not at work stands beside a machine: the one last worked at, else beside someone alone, with no cap", () => {
