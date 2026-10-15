@@ -604,7 +604,7 @@ func TestRebaseWorktreeAutostashesRetainedTrackedEdits(t *testing.T) {
 		t.Fatal(err)
 	}
 	runFixtureGit(t, fixture.git, fixture.repository, "add", "main.txt")
-	runFixtureGit(t, fixture.git, fixture.repository, "commit", "advance main")
+	runFixtureGit(t, fixture.git, fixture.repository, "commit", "-m", "advance main")
 	newer, err := SelectGit(ctx, fixture.git, fixture.repository, "HEAD", fixture.identity)
 	if err != nil {
 		t.Fatal(err)
