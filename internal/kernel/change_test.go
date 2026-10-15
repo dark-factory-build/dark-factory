@@ -159,6 +159,13 @@ func TestRecordChangeRebasedUpdatesRetainedHeadWithoutOpeningWork(t *testing.T) 
 	if _, err := store.RecordChangeRebased(ctx, current.ID, updated.Revision, *current.HeadCommit, newHead, mustTime(t, 82)); !errors.Is(err, ErrRevisionConflict) {
 		t.Fatalf("stale rebase replay = %v", err)
 	}
+	// A rebased Change later reclaimed keeps the rebase's update time and
+	// stays valid (15 Oct 2026: this halted factoryd). The SQL is
+	// ReclaimChange's own column changes, without its task-ended preconditions.
+	corruptSQL(t, store, `UPDATE changes SET phase = 'abandoned', object_format = NULL, base_commit = NULL, repository_dev = NULL, repository_inode = NULL, head_commit = NULL, prepared_at_ms = NULL, available_at_ms = NULL, revision = revision + 1 WHERE id = ?`, updated.ID.Bytes())
+	if err := store.Validate(ctx); err != nil {
+		t.Fatalf("store after rebase then reclaim = %v", err)
+	}
 }
 
 func TestChangeSchemaIsPathFreeCanonicalAndCircularlyBound(t *testing.T) {
