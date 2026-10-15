@@ -389,7 +389,7 @@ func serve(ctx context.Context, configuration config) error {
 			if marker.Target == selfSource() {
 				owner.settleRelease(ctx, configuration.home, marker.Target, "verified", "")
 			} else {
-				owner.settleRelease(ctx, configuration.home, marker.Target, "failed", cmp.Or(marker.Reason, "interrupted before promotion"))
+				owner.settleRelease(ctx, configuration.home, marker.Target, "failed", marker.Reason)
 			}
 		}
 		if resumed {

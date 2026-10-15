@@ -333,6 +333,64 @@ func TestOldBuildRestartedMidTrialStopsTheOrphanedChild(t *testing.T) {
 	}
 }
 
+// A supervisor that died mid-trial decided nothing: its release is failed as
+// interrupted, for the release lane to start again, and a second interruption
+// of the retry stays failed instead of churning trials.
+func TestTrialInterruptedBeforePromotionIsRetriedOnce(t *testing.T) {
+	sha := strings.Repeat("7", 40)
+	home := stagedHome(t, "serve", sha)
+	ctx := context.Background()
+	project, err := kernel.ProjectIDFromBytes(bytes.Repeat([]byte{0x33}, kernel.IDBytes))
+	if err != nil {
+		t.Fatal(err)
+	}
+	withStore := func(use func(*kernel.Store) error) {
+		t.Helper()
+		opened, err := install.OpenOperationalHome(ctx, home)
+		if err != nil {
+			t.Fatal(err)
+		}
+		store, err := opened.OpenStore(ctx)
+		if err == nil {
+			err = errors.Join(use(store), store.Close())
+		}
+		if err = errors.Join(err, opened.Close()); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// What Release and the staging release write before the supervisor dies.
+	trial := func(store *kernel.Store) error {
+		at, err := kernel.NewUnixMillis(time.Now().UnixMilli())
+		if err == nil {
+			err = store.RecordDelivery(ctx, project, "dark-factory-build/dark-factory", kernel.ProductionDelivery{ID: "release:" + sha, Kind: "runtime", Destination: "factoryd", Revision: sha, State: "running", Phase: "trial", PullRequests: []uint64{}, UpdatedAt: at.Int64()}, at)
+		}
+		return err
+	}
+	withStore(func(store *kernel.Store) error {
+		at, err := kernel.NewUnixMillis(time.Now().UnixMilli())
+		if err == nil {
+			_, err = store.CreateProject(ctx, kernel.NewProject{ID: project, Name: "self", Root: filepath.Join(filepath.Dir(home), "repo")}, at)
+		}
+		return errors.Join(err, trial(store))
+	})
+	for _, want := range []string{"interrupted by a factoryd restart", "interrupted by a factoryd restart again"} {
+		bootUntilSettled(t, home)
+		withStore(func(store *kernel.Store) error {
+			_, delivery, found, err := store.Delivery(ctx, "release:"+sha)
+			if err != nil || !found || delivery.State != "failed" || delivery.Phase != "trial" || delivery.Reason != want {
+				t.Fatalf("settled release = %+v, %t, %v; want reason %q", delivery, found, err, want)
+			}
+			return trial(store)
+		})
+		if current, _ := os.ReadFile(filepath.Join(install.ServiceDirectoryPath(home), "bin", "current", "factoryd")); string(current) != currentProgram {
+			t.Fatal("an undecided trial was promoted")
+		}
+		if err := install.WriteUpgradeMarker(home, install.UpgradeMarker{Target: sha}); err != nil {
+			t.Fatal(err)
+		}
+	}
+}
+
 // A pid the trial child no longer owns belongs to someone else: the boot
 // kills only the process that started when the child did.
 func TestOldBuildNeverKillsAReusedTrialPid(t *testing.T) {
