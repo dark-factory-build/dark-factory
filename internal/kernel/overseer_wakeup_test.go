@@ -702,7 +702,6 @@ func TestOverseerVerifiesMergedIntakeOnceLive(t *testing.T) {
 			}
 			release('d', live, outstanding()...)
 		case "before receipt cutover":
-			store.overseerReceiptCutover = overseerReceiptCutover
 			merge(3000)
 			release('b', live, outstanding()...)
 			if bodies := wakeBodies(t, store, live+settle); len(bodies) != 0 {

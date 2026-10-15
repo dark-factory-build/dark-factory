@@ -41,11 +41,10 @@ type Store struct {
 	held               atomic.Pointer[error]
 	productionRevision atomic.Uint64
 
-	repositoryBase         string // Boot-owned initial binding default; protected by writerGate.
-	archivePath            string // The history archive beside the database; see ArchiveHistory.
-	archiveVerified        atomic.Pointer[archiveStamp]
-	overseerStalled        map[string]overseerStalledState
-	overseerReceiptCutover int64
+	repositoryBase  string // Boot-owned initial binding default; protected by writerGate.
+	archivePath     string // The history archive beside the database; see ArchiveHistory.
+	archiveVerified atomic.Pointer[archiveStamp]
+	overseerStalled map[string]overseerStalledState
 
 	// Writer-hold diagnostics (see LogWriterHolds). The holder fields are
 	// protected by writerGate; the waiter count is read by the holder. The
@@ -94,7 +93,7 @@ func writerCaller(stack [8]uintptr) string {
 func newStore() *Store {
 	writerGate := make(chan struct{}, 1)
 	writerGate <- struct{}{}
-	return &Store{writerGate: writerGate, waitReport: time.Minute, overseerStalled: make(map[string]overseerStalledState), overseerReceiptCutover: overseerReceiptCutover}
+	return &Store{writerGate: writerGate, waitReport: time.Minute, overseerStalled: make(map[string]overseerStalledState)}
 }
 
 func openFixedPools(ctx context.Context, store *Store, path string, recheck func() error) error {

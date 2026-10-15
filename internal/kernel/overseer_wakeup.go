@@ -23,7 +23,7 @@ const (
 	OverseerRewakeAfter    = 30 * time.Minute
 	overseerWakeSettle     = time.Minute
 	overseerWakeMaxDelay   = 5 * time.Minute
-	overseerReceiptCutover = int64(1792005293000) // 2026-10-14T19:14:53Z
+	OverseerReceiptCutover = int64(1792005293000) // 2026-10-14T19:14:53Z
 )
 
 // overseerWakeItems is every work item of a project that needs its
@@ -346,8 +346,15 @@ func (store *Store) EnqueueOverseerWakeups(ctx context.Context, at UnixMillis, c
 					return nil, tx.Rollback(err)
 				}
 				store.overseerStalled[agent.ID.String()] = overseerStalledState{head: factory.Head.Int64(), nextAt: nextAt, health: string(healthBytes)}
-			} else if body, due, err = overseerWakeFromPass(ctx, tx.connection, agent, at.Int64(), pass); err != nil {
-				return nil, tx.Rollback(err)
+			} else {
+				pass, err := readOverseerPass(ctx, tx.connection, agent, at.Int64(), cutover, health)
+				if err != nil {
+					return nil, tx.Rollback(err)
+				}
+				body, due, err = overseerWakeFromPass(ctx, tx.connection, agent, at.Int64(), pass)
+				if err != nil {
+					return nil, tx.Rollback(err)
+				}
 			}
 		}
 		if !due {
