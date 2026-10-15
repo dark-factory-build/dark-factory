@@ -185,7 +185,7 @@ func (p *confinedNativeSelfCheckProcess) Close() error {
 func nativeSelfCheckPrompt(checkout, factoryctl string) string {
 	quote := func(value string) string { return "'" + strings.ReplaceAll(value, "'", "'\\''") + "'" }
 	marker := filepath.Join(checkout, selfCheckMarkerDir)
-	return fmt.Sprintf("# Run this provider self-check in the current checkout using your own shell.\nset -eu\nexport GIT_TERMINAL_PROMPT=0 GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null\ntest \"$(git rev-parse --show-toplevel)\" = %s\nmkdir -p %s\nprintf checkout > %s/checkout\ngit add --all %s\ngit -c user.name=%s -c user.email=%s commit --no-verify --allow-empty -m 'provider self-check'\nprintf commit > %s/commit\n%s attempt peer status\nprintf attempt-api > %s/attempt-api\n", quote(checkout), quote(marker), quote(marker), quote(marker), quote(gitauthor.AutomationName), quote(gitauthor.AutomationEmail), quote(marker), quote(factoryctl), quote(marker))
+	return fmt.Sprintf("# Run this provider self-check in the current checkout using your own shell.\nset -eu\nexport GIT_TERMINAL_PROMPT=0 GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null\ntest \"$(git rev-parse --show-toplevel)\" = %s\nmkdir -p %s\nprintf checkout > %s/checkout\ngit add --all %s\ngit -c user.name=%s -c user.email=%s -c commit.gpgSign=false commit --no-verify --allow-empty -m 'provider self-check'\nprintf commit > %s/commit\n%s attempt peer status\nprintf attempt-api > %s/attempt-api\n", quote(checkout), quote(marker), quote(marker), quote(marker), quote(gitauthor.AutomationName), quote(gitauthor.AutomationEmail), quote(marker), quote(factoryctl), quote(marker))
 }
 
 // RunNativeSelfCheck builds the exact native launch, starts it once in the
