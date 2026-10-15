@@ -251,6 +251,10 @@ func (daemon *Daemon) knowledgeContext(ctx context.Context, run kernel.Run, task
 		}
 		if ok && state.Selection != nil {
 			head = hex.EncodeToString(state.Selection.Commit().Bytes())
+		} else if ok {
+			// A fresh Change is selected only after its launch prompt is built;
+			// it starts at the integrated revision.
+			head, _ = daemon.repositoryRevision(ctx, repository)
 		}
 	}
 	items := make([]knowledgeContextItem, 0, len(selected))

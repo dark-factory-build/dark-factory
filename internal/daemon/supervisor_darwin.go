@@ -413,19 +413,6 @@ func (daemon *Daemon) runNext(ctx context.Context, spec SupervisorSpec) (resultR
 		return daemon.failRunBeforeRuntime(daemon.cleanupCtx, run, keys.resources.RuntimeRoot, kernel.FailureInternal, err)
 	}
 	rawProviderTask = []byte(instruction)
-	rawProviderTask, suppliedKnowledge, err := daemon.prepareKnowledgeTask(ctx, run, rawProviderTask, true)
-	if err != nil {
-		return daemon.failRunBeforeRuntime(daemon.cleanupCtx, run, keys.resources.RuntimeRoot, kernel.FailureSpawn, err)
-	}
-	if retainedConflict != nil {
-		context := retainedConflictContext(changeState, retainedConflict)
-		rawProviderTask = append(rawProviderTask, []byte(context)...)
-		daemon.retainedConflictContexts.Store(run.ID, context)
-	}
-	_, providerTask, err := provider.PrepareTask(run.Provider, rawProviderTask)
-	if err != nil {
-		return daemon.failRunBeforeRuntime(daemon.cleanupCtx, run, keys.resources.RuntimeRoot, kernel.FailureSpawn, err)
-	}
 	// A fresh Change for a task published on an open pull request (a repair,
 	// or work whose Change was reclaimed) starts at that pull request's exact
 	// observed head, never at the base it would otherwise revert to. An empty
@@ -457,6 +444,20 @@ func (daemon *Daemon) runNext(ctx context.Context, spec SupervisorSpec) (resultR
 	}
 	repositoryGitIdentity, _ = change.NewRepositoryIdentity(source.GitDevice, source.GitInode)
 	repositoryOriginDigest = source.OriginDigest
+	// Knowledge source status reads the bound source identity above.
+	rawProviderTask, suppliedKnowledge, err := daemon.prepareKnowledgeTask(ctx, run, rawProviderTask, true)
+	if err != nil {
+		return daemon.failRunBeforeRuntime(daemon.cleanupCtx, run, keys.resources.RuntimeRoot, kernel.FailureSpawn, err)
+	}
+	if retainedConflict != nil {
+		context := retainedConflictContext(changeState, retainedConflict)
+		rawProviderTask = append(rawProviderTask, []byte(context)...)
+		daemon.retainedConflictContexts.Store(run.ID, context)
+	}
+	_, providerTask, err := provider.PrepareTask(run.Provider, rawProviderTask)
+	if err != nil {
+		return daemon.failRunBeforeRuntime(daemon.cleanupCtx, run, keys.resources.RuntimeRoot, kernel.FailureSpawn, err)
+	}
 	// The repository's Git directory holds every Change worktree's refs and
 	// commits; a run that cannot resolve it has no source to work in. CI is an
 	// optional execution capability on top: an unavailable or unsafe lease
