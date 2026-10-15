@@ -219,7 +219,7 @@ func TestAttemptMCPCommandAllowlistExcludesOperatorCommands(t *testing.T) {
 		commandWebStatus, commandWebListClients, commandWebRevoke, commandRemoteStatus,
 		commandInit, commandDoctor, commandServiceStatus, commandServiceInstall,
 		commandServiceStart, commandServiceStop, commandServiceUninstall,
-		commandProjectCreate, commandProjectLimits, commandAgentCreate, commandAgentIdlePolicy, commandTaskAdd,
+		commandProjectCreate, commandAgentCreate, commandAgentIdlePolicy, commandTaskAdd,
 		commandTaskSendBack, commandDispatch, commandCapacity, commandStatus,
 		commandKind(0), commandKind(255),
 	} {
