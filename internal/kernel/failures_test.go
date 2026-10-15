@@ -105,7 +105,8 @@ func TestReportListsFailureSignaturesFromTheFirstOccurrence(t *testing.T) {
 		t.Fatal(err)
 	}
 	joined := strings.Join(report, "\n")
-	if !strings.Contains(joined, "runs=1 ") || !strings.Contains(joined, "failure new x1 ") || !strings.Contains(joined, "blocked/") || !strings.Contains(joined, " missing prerequisite: ") {
+	if !strings.Contains(joined, "runs=1 ") || !strings.Contains(joined, "failure new x1 ") || !strings.Contains(joined, "blocked/") || !strings.Contains(joined, " missing prerequisite: ") ||
+		!strings.Contains(joined, " run="+finalizing.ID.String()+" ") || strings.Contains(joined, "run="+finalizing.TaskID.String()) {
 		t.Fatalf("unscoped report = %q", report)
 	}
 	if !strings.HasPrefix(report[len(report)-1], "wal_bytes=") {
