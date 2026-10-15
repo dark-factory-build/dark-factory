@@ -1900,14 +1900,14 @@ func TestProjectionHasNoPrivateFieldsAndKeepsEmptySlices(t *testing.T) {
 	projected := projectSnapshot(kernel.DashboardSnapshot{
 		Head:     head,
 		Factory:  kernel.FactorySummary{Capacity: 2, Revision: revision},
-		Projects: []kernel.ProjectSummary{{ID: projectID, Name: "project", RunBudgetLimit: 8, RunsUsed: 3, MaxRunSeconds: 900, Revision: revision}},
+		Projects: []kernel.ProjectSummary{{ID: projectID, Name: "project", Revision: revision}},
 		Agents:   []kernel.AgentSummary{{ID: agentID, ProjectID: projectID, Name: "agent", Role: "worker", Provider: "codex", Revision: revision}},
 		Tasks:    []kernel.TaskSummary{{ID: taskID, ProjectID: projectID, AssignedAgentID: agentID, IncarnationID: incarnationID, WorkRevision: revision, Title: "title", Status: "queued", Priority: 3, Revision: revision}},
 	})
 	if projected.Head != 0 || projected.Projects == nil || projected.Agents == nil || projected.Tasks == nil {
 		t.Fatalf("projection emptiness/head = %+v", projected)
 	}
-	if projected.Projects[0].Name != "project" || projected.Agents[0].Provider != "codex" || projected.Tasks[0].Title != "title" {
+	if projected.Projects[0].Name != "project" || projected.Projects[0].TokensUsed != 0 || projected.Agents[0].Provider != "codex" || projected.Tasks[0].Title != "title" {
 		t.Fatalf("projection fields = %+v", projected)
 	}
 }
