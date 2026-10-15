@@ -2,7 +2,7 @@ import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import type { AgentItem, TaskItem } from "@dark-factory/client";
 import { type FactoryAgentSelection, type FactoryAppSnapshot, type FactoryHumanRequestView } from "./factory-app-controller.js";
 import { AgentList, FactoryFloor } from "./console-screens.js";
-import { AgentPanel, ConsoleDialog, HumanRequestPanel, WorkPanel, TaskDetail, editErrorCopy, type TaskEdit, type TaskBrief, type TaskScope, type AddTask } from "./console-sidebar.js";
+import { AgentPanel, HumanRequestPanel, WorkPanel, editErrorCopy, type TaskEdit, type TaskScope, type AddTask } from "./console-sidebar.js";
 import type { ProjectContentCall } from "./factory-app-controller.js";
 import { useProduction } from "./production-data.js";
 import { deriveProductionView, inProgressProduction } from "./production-view.js";
@@ -23,7 +23,6 @@ export type FactoryConsoleProps = FactoryAppSnapshot & {
   onProjectContent?: ProjectContentCall;
   onEditTask?: (task: TaskItem, change: TaskEdit) => Promise<boolean>;
   onAddTask?: AddTask;
-  onLoadTaskDetail?: (task: TaskItem, peerOffset?: bigint, expectedHead?: bigint) => Promise<TaskBrief>;
   onOpenTerminalForHumanRequest?: (request: FactoryHumanRequestView["request"]) => void;
   onSelectHumanRequest?: (request: FactoryHumanRequestView["request"]) => void;
   onHumanReplyChange?: (reply: string) => void;
@@ -93,7 +92,6 @@ export function FactoryConsole({
   onProjectContent,
   onEditTask,
   onAddTask,
-  onLoadTaskDetail,
   onOpenTerminalForHumanRequest,
   onSelectHumanRequest,
   onHumanReplyChange,
@@ -158,9 +156,6 @@ export function FactoryConsole({
     const timer = setInterval(() => onLoadIntake(projectId), 30_000);
     return () => clearInterval(timer);
   }, [ready, projectId, onLoadIntake !== undefined, selectedDetail === "work"]);
-  const [relatedTask, setRelatedTask] = useState<TaskItem>();
-  useEffect(() => { setRelatedTask(undefined); }, [selectedDetail, projectId]);
-  const inspectedTask = relatedTask ? state?.tasks.get(relatedTask.id) ?? relatedTask : (onDetail === undefined || selectedDetail === "work") ? selectedTask : undefined;
   const editError = edit !== undefined && state?.projects.has(edit.target) ? undefined : editErrorCopy(edit);
 
   return (
@@ -221,7 +216,6 @@ export function FactoryConsole({
                 ready={ready}
                 onEditTask={onEditTask}
                 onAddTask={onAddTask}
-                onLoadTaskDetail={onLoadTaskDetail}
                 selectedTaskId={selectedTask?.id}
                 onSelectTask={ready ? selectTask : undefined}
                 selectedHumanRequest={selectedHumanRequest}
@@ -254,10 +248,6 @@ export function FactoryConsole({
               />}
               </div>
             </div>
-            {inspectedTask === undefined ? null : <ConsoleDialog key={inspectedTask.id} label="Task details" title="Task" onClose={() => { if (relatedTask) setRelatedTask(undefined); else onSelectTask?.(undefined); }}>
-              <TaskDetail key={inspectedTask.id} task={inspectedTask} onLoadTaskDetail={onLoadTaskDetail} />
-              {relatedTask?.status === "queued" && state?.tasks.has(relatedTask.id) && selectTask ? <button type="button" disabled={!ready} onClick={() => { setRelatedTask(undefined); goTask?.(relatedTask.id); }}>Open in Work</button> : null}
-            </ConsoleDialog>}
           </aside>
         </div>
       </main>

@@ -32,9 +32,6 @@ func testEncodeHumanRequestDetailGet(id string, v browserprotocol.HumanRequestDe
 func testEncodeAgentControl(id string, v browserprotocol.AgentControl) ([]byte, error) {
 	return testProtocolEncode(browserprotocol.TypeAgentControl, id, v)
 }
-func testEncodeTaskDetailGet(id string, v browserprotocol.TaskDetailGet) ([]byte, error) {
-	return testProtocolEncode(browserprotocol.TypeTaskDetailGet, id, v)
-}
 func testEncodeTaskAttachment(id string, v browserprotocol.TaskAttachmentChunk) ([]byte, error) {
 	return testProtocolEncode(browserprotocol.TypeTaskAttachment, id, v)
 }

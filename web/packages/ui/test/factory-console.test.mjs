@@ -9,7 +9,7 @@ import { FactoryApp, FactoryConsole } from "../dist/src/index.js";
 import { layoutScene } from "../dist/src/factory-scene/scene.js";
 import { projectGraph, projectFloor, workRows } from "../dist/src/console-view.js";
 import { FactoryFloor, StageMeter } from "../dist/src/console-screens.js";
-import { AgentPanel, TaskDetail, WorkPanel } from "../dist/src/console-sidebar.js";
+import { AgentPanel, WorkPanel } from "../dist/src/console-sidebar.js";
 import { FactoryScene } from "../dist/src/factory-scene/factory-scene.js";
 import { TerminalPanel } from "../dist/src/factory-app.js";
 import { fixtureState, fixtureGraphs, fixtureGraph } from "../../../fixtures/state.mjs";
@@ -537,13 +537,7 @@ test("the two-column console keeps one mounted terminal slot", () => {
   assert.match(css, /\.dfConsoleRow\s*\{[^}]*flex-wrap: wrap;/);
   assert.match(css, /\.dfConsoleLayout\s*\{[^}]*grid-template-columns: minmax\(0, 2fr\) minmax\(0, 1fr\);/);
   assert.match(css, /\.dfFactoryConsole__instructionActions\s*\{[^}]*display: flex;[^}]*flex-wrap: wrap;/);
-  for (const rule of [/\.dfConsoleDialog \*/, /\.dfConsoleDialog button,/, /\.dfConsoleDialog button:disabled,[\s\S]*?\{/, /\.dfConsoleShell\s*\{[^}]*font-family: var\(--df-font-mono\)/, /\.dfConsoleDialog\s*\{[^}]*color: var\(--df-console-text\)/]) {
-    assert.match(css, rule);
-  }
-  // The panel scrolls, never the <dialog>: a scrollbar click on the dialog
-  // itself has event.target === the dialog and would close SETTINGS.
-  assert.match(css, /\.dfConsoleDialog \.dfConsoleSidebar__panel \{[^}]*max-height:[^}]*overflow: auto;/);
-  assert.equal(/\.dfConsoleDialog\s*\{[^}]*overflow: auto/.test(css), false);
+  assert.match(css, /\.dfConsoleShell\s*\{[^}]*font-family: var\(--df-font-mono\)/);
   assert.match(css, /:focus-visible\s*\{\s*outline: 2px solid var\(--df-console-accent\);/);
 
   const withTerminal = render({ selectedAgent: agentSelection(), terminalContent: createElement("section", { "aria-label": "Agent terminal" }) });
@@ -671,11 +665,10 @@ test("unclaimed shared work waits under its project until an eligible worker cla
   assert.doesNotMatch(markup, /df-assign-/);
 });
 
-test("a queued row uses the shared Work row and opens TaskDetail", async () => {
+test("a queued row uses the shared Work row and only selects it", async () => {
   const previousAct = globalThis.IS_REACT_ACT_ENVIRONMENT;
   globalThis.IS_REACT_ACT_ENVIRONMENT = true;
   try {
-    const detailReads = [];
     const selections = [];
     const queued = { ...fixtureState.tasks.get([...fixtureState.tasks.keys()][1]), title: "Queued task", assigned_agent_id: ids.agent };
     const props = {
@@ -684,10 +677,6 @@ test("a queued row uses the shared Work row and opens TaskDetail", async () => {
       detail: "work",
       selectedAgent: agentSelection(),
       onSelectTask: (taskId) => selections.push(taskId),
-      onLoadTaskDetail: async (task, peerOffset, expectedHead) => {
-        detailReads.push(task.id);
-        return { taskId: task.id, revision: task.revision, head: expectedHead ?? 7n, instruction: "Original brief", feedback: "", peerQuestions: [] };
-      },
     };
     let renderer;
     await act(async () => { renderer = create(createElement(FactoryConsole, props)); });
@@ -698,7 +687,7 @@ test("a queued row uses the shared Work row and opens TaskDetail", async () => {
     assert.equal(row.findAllByType("select").some((select) => select.props.id === `df-assign-${queued.id}`), false);
     await act(async () => { rowButton(row).props.onClick(); });
     assert.deepEqual(selections, [queued.id]);
-    assert.deepEqual(detailReads, []);
+    assert.equal(renderer.root.findAllByProps({ "aria-label": "Task details" }).length, 0);
     await act(async () => { renderer.unmount(); });
   } finally {
     globalThis.IS_REACT_ACT_ENVIRONMENT = previousAct;
@@ -870,92 +859,45 @@ test("archived workers stay selectable from the archived view as a readout", asy
   }
 });
 
-test("task selection and floor questions open the exact existing task detail and question route", async () => {
-  const loaded = [];
+test("task selection highlights the Work row and floor questions open the existing question route", async () => {
   const questions = [];
   const queueSelections = [];
-  const props = {
-    status: "ready", state: fixtureState, graphs: fixtureGraphs,
-    runPaths: new Map([[ids.agent, runSample(ids.agent, ["internal/kernel/state.go"])]]),
-    onLoadTaskDetail: async (task) => {
-      loaded.push(task);
-      return { taskId: task.id, revision: task.revision, head: fixtureState.head, instruction: "Observed task detail", feedback: "", peerQuestions: [] };
-    },
-  };
-  function Harness({ state = fixtureState, editable = false }) {
+  function Harness({ state = fixtureState }) {
     const [selectedTaskId, setSelectedTaskId] = useState();
     const [detail, setDetail] = useState("work");
     const [selectedHumanRequest, setSelectedHumanRequest] = useState();
     return createElement(FactoryConsole, {
-      ...props,
+      status: "ready", graphs: fixtureGraphs,
+      runPaths: new Map([[ids.agent, runSample(ids.agent, ["internal/kernel/state.go"])]]),
       state,
       detail,
       onDetail: setDetail,
       selectedTaskId,
       onSelectTask: (taskId) => { queueSelections.push(taskId); setSelectedTaskId(taskId); },
-      ...(editable ? { onEditTask: async () => true } : {}),
       selectedHumanRequest,
       onSelectHumanRequest: (request) => { questions.push(request); setSelectedHumanRequest(selectedRequest({ request, question: "Should the migration also cover the users table? The plan only names accounts." })); setDetail("work"); },
     });
   }
   let tree;
   await act(async () => { tree = create(createElement(Harness)); });
-  const task = fixtureState.tasks.get(ids.task);
-  // A running task with an open question is listed as that question; selecting the task is the console's own route.
-  const openRunning = () => act(async () => { tree.root.findByType(FactoryConsole).props.onSelectTask(task.id); });
-  await openRunning();
-  assert.equal(loaded.length, 1);
-  assert.equal(loaded[0], task);
-  assert.deepEqual(queueSelections, [task.id]);
-  assert.equal(tree.root.findByProps({ "aria-label": "Task details" }).findByType("h3").children.join(""), task.title);
-  await act(async () => { tree.root.findByProps({ "aria-label": "Task details" }).props.onClose(); });
-  const queuedTitle = tree.root.findByProps({ "aria-label": "Work" }).findAllByProps({ className: "dfConsoleItem__taskTitle dfWorkRow__title" }).find((node) => node.children.join("") === "Tighten the queue ordering");
-  await act(async () => { queuedTitle.props.onClick(); });
-  assert.deepEqual(queueSelections, [task.id, undefined, "32".repeat(16)]);
-  assert.equal(tree.root.findByProps({ "aria-label": "Task details" }).findByType("h3").children.join(""), fixtureState.tasks.get("32".repeat(16)).title);
-  await act(async () => { tree.root.findByProps({ "aria-label": "Project" }).props.onChange({ currentTarget: { value: "" } }); });
-  assert.equal(tree.root.findAllByProps({ "aria-label": "Work" }).length, 1, "queue remains one canonical panel");
-  assert.equal(tree.root.findAllByProps({ "data-floor-inbox": 1 }).length, 1, "the floor shows the pile; the panel is where it is read");
   const queuedTask = fixtureState.tasks.get("32".repeat(16));
-  await act(async () => { tree.update(createElement(Harness, { editable: true })); });
-  await openRunning();
-  // The selected running task is retried: queued work uses the same detail route.
-  const requeued = new Map(fixtureState.tasks).set(task.id, { ...task, status: "queued" });
-  await act(async () => { tree.update(createElement(Harness, { editable: true, state: { ...fixtureState, tasks: requeued } })); });
-  assert.equal(tree.root.findAllByProps({ "aria-label": "Task details" }).length, 1, "queued work opens the shared task detail");
-  await act(async () => { tree.update(createElement(Harness, { editable: true })); });
-  await act(async () => { tree.root.findByProps({ "aria-label": "Task details" }).props.onClose(); });
-  // A queued row uses the same task-selection route as every other Work row.
-  const queuedRow = tree.root.findAllByProps({ className: "dfConsoleItem dfWorkRow" }).find((row) => rowTitle(row) === queuedTask.title);
-  await act(async () => { rowButton(queuedRow).props.onClick(); });
-  const started = new Map(fixtureState.tasks).set(queuedTask.id, { ...queuedTask, status: "running" });
-  await act(async () => { tree.update(createElement(Harness, { editable: true, state: { ...fixtureState, tasks: started } })); });
-  assert.equal(tree.root.findAllByProps({ "aria-label": "Task details" }).length, 1, "a queued task remains on the shared detail route");
-  await act(async () => { tree.update(createElement(Harness, { editable: true })); });
+  const queuedRow = () => tree.root.findByProps({ "aria-label": "Work" }).findAllByProps({ className: "dfConsoleItem dfWorkRow" }).find((row) => rowTitle(row) === queuedTask.title);
+  assert.equal(rowButton(queuedRow()).props["aria-pressed"], false);
+  await act(async () => { rowButton(queuedRow()).props.onClick(); });
+  assert.deepEqual(queueSelections, [queuedTask.id]);
+  assert.equal(rowButton(queuedRow()).props["aria-pressed"], true);
+  assert.equal(tree.root.findAllByProps({ "aria-label": "Task details" }).length, 0, "selecting work opens no dialog");
   await act(async () => { tree.root.findByProps({ "data-human-request-id": ids.request }).props.onClick(); });
   assert.equal(questions[0], fixtureState.humanRequests.get(ids.request));
   assert.equal(tree.root.findByProps({ "aria-label": "Selected question" }).findByProps({ className: "dfFactoryConsole__question" }).children.join(""), "Should the migration also cover the users table? The plan only names accounts.");
-  await openRunning();
-  assert.equal(tree.root.findAllByProps({ "aria-label": "Task details" }).length, 1);
-  const tasks = new Map(fixtureState.tasks);
-  tasks.delete(task.id);
-  await act(async () => { tree.update(createElement(Harness, { state: { ...fixtureState, tasks } })); });
-  assert.equal(tree.root.findAllByProps({ "aria-label": "Task details" }).length, 0, "removed work is not retained as invented history");
   await act(async () => tree.unmount());
 });
 
-test("task detail keeps outcome and instruction without a history disclosure", async () => {
+test("Work and agent panels carry no history disclosure", () => {
   const agentMarkup = renderToStaticMarkup(createElement(AgentPanel, { agent: fixtureState.agents.get(ids.agent), state: fixtureState, ready: true }));
   const workMarkup = renderToStaticMarkup(createElement(WorkPanel, { state: fixtureState, rows: workRows(fixtureState, []), ready: true }));
-  let detail;
-  await act(async () => { detail = create(createElement(TaskDetail, { task: fixtureState.tasks.get(ids.task), onLoadTaskDetail: async () => ({ taskId: ids.task, revision: 1n, head: 1n, instruction: "kept instruction", feedback: "", outcome: "kept outcome", peerQuestions: [] }) })); });
-  const detailMarkup = JSON.stringify(detail.toJSON());
   assert.doesNotMatch(agentMarkup, /Recent work|aria-label="History"/);
   assert.doesNotMatch(workMarkup, /Recent work|aria-label="History"/);
-  assert.doesNotMatch(detailMarkup, /History/);
-  assert.match(detailMarkup, /kept outcome/);
-  assert.match(detailMarkup, /kept instruction/);
-  detail.unmount();
 });
 
 test("floor omits the global evidence essay", () => {
@@ -1101,7 +1043,7 @@ test("open Work re-reads the local intake list so issues polled later reach the 
   }
 });
 
-test("floor project changes clear task selection without restoring an old dialog", async () => {
+test("floor project changes clear task selection", async () => {
   const task = [...fixtureState.tasks.values()].find((task) => task.project_id === ids.secondProject);
   function Harness() {
     const [selectedTaskId, onSelectTask] = useState(task.id);
@@ -1109,10 +1051,9 @@ test("floor project changes clear task selection without restoring an old dialog
   }
   let tree;
   await act(async () => { tree = create(createElement(Harness)); });
-  assert.equal(tree.root.findAllByProps({ "aria-label": "Task details" }).length, 1);
+  assert.equal(tree.root.findByType(FactoryConsole).props.selectedTaskId, task.id);
   await act(async () => tree.root.findByProps({ "aria-label": "Project" }).props.onChange({ currentTarget: { value: ids.project } }));
-  assert.equal(tree.root.findAllByProps({ "aria-label": "Task details" }).length, 0);
-  await act(async () => tree.root.findByProps({ "aria-label": "Project" }).props.onChange({ currentTarget: { value: "" } }));
+  assert.equal(tree.root.findByType(FactoryConsole).props.selectedTaskId, undefined);
   assert.equal(tree.root.findAllByProps({ "aria-label": "Task details" }).length, 0);
   await act(async () => tree.unmount());
 });

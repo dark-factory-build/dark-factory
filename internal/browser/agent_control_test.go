@@ -97,15 +97,6 @@ func TestAgentControlTransportCorrelatesDurableOperation(t *testing.T) {
 			if frame.Type != browserprotocol.TypeAgentControlResult || frame.ID != "control" || frame.Body.(browserprotocol.AgentControlResult).OperationID != request.OperationID {
 				t.Fatalf("result: %+v", frame)
 			}
-			payload, err = testEncodeTaskDetailGet("detail", browserprotocol.TaskDetailGet{TaskID: request.TaskID, ExpectedRevision: request.ExpectedTaskRevision})
-			if err != nil {
-				t.Fatal(err)
-			}
-			writeClientFrame(t, connection, payload)
-			frame = readServerFrame(t, connection)
-			if frame.Type != browserprotocol.TypeTaskDetail || frame.ID != "detail" || frame.Body.(browserprotocol.TaskDetail).TaskID != request.TaskID {
-				t.Fatalf("detail: %+v", frame)
-			}
 		})
 	}
 }

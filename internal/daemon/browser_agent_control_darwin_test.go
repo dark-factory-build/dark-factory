@@ -35,90 +35,12 @@ func TestBrowserAgentReplacementPreservesProviderLimit(t *testing.T) {
 	}
 }
 
-func TestBrowserTaskDetailSeparatesEditableInstructionFromFeedback(t *testing.T) {
-	fixture := newAdapterFixture(t, kernel.BrowserCapabilityObserve|kernel.BrowserCapabilityPrivateHumanRequestDetail)
-	fixture.pair(t)
-	run := adapterRunningRun(t, fixture.store, 173)
-	task, found, err := fixture.store.Task(context.Background(), run.TaskID)
-	if err != nil || !found {
-		t.Fatal(err)
-	}
-	base := task.Body
-	detail, err := fixture.backend.TaskDetail(context.Background(), rawBrowserClient(fixture.client.ID), browserprotocol.TaskDetailGet{TaskID: task.ID.String(), ExpectedRevision: decimalRevision(task.Revision)})
-	if err != nil || detail.Instruction != base || detail.Feedback != "" || detail.Revision != decimalRevision(task.Revision) {
-		t.Fatalf("detail = %+v, %v", detail, err)
-	}
-	if _, err := fixture.backend.TaskDetail(context.Background(), rawBrowserClient(fixture.client.ID), browserprotocol.TaskDetailGet{TaskID: task.ID.String(), ExpectedRevision: decimalRevision(task.Revision) + 1}); !errors.Is(mapBrowserError(err), browser.ErrStale) {
-		t.Fatalf("stale detail = %v", err)
-	}
-}
-
-func TestBrowserTaskDetailRequiresPrivateTextCapability(t *testing.T) {
-	fixture := newAdapterFixture(t, kernel.BrowserCapabilityObserve)
-	fixture.pair(t)
-	run := adapterRunningRun(t, fixture.store, 174)
-	task, found, err := fixture.store.Task(context.Background(), run.TaskID)
-	if err != nil || !found {
-		t.Fatal(err)
-	}
-	if _, err := fixture.backend.TaskDetail(context.Background(), rawBrowserClient(fixture.client.ID), browserprotocol.TaskDetailGet{TaskID: task.ID.String(), ExpectedRevision: decimalRevision(task.Revision)}); !errors.Is(mapBrowserError(err), browser.ErrUnauthorized) {
-		t.Fatalf("private outcome detail exposed: %v", err)
-	}
-}
-
 func TestTaskDetailTextChunkPagesOutcomeWithTheExistingCursor(t *testing.T) {
 	outcome := strings.Repeat("x", 2049)
 	first, more := taskDetailTextChunk(outcome, 0)
 	second, final := taskDetailTextChunk(outcome, 2048)
 	if !more || final || first+second != outcome {
 		t.Fatalf("outcome page = %q/%q, more=%v/%v", first, second, more, final)
-	}
-}
-
-func TestBrowserTaskDetailPagesMaximumResultPastTheFormerCursorLimit(t *testing.T) {
-	fixture := newAdapterFixture(t, kernel.BrowserCapabilityObserve|kernel.BrowserCapabilityPrivateHumanRequestDetail)
-	fixture.pair(t)
-	run := adapterRunningRun(t, fixture.store, 175)
-	result := strings.Repeat("x", 131072)
-	completed := completeAdapterRun(t, fixture.store, run, result)
-	task, found, err := fixture.store.Task(context.Background(), completed.TaskID)
-	if err != nil || !found {
-		t.Fatal(err)
-	}
-	var rebuilt string
-	passedFormerLimit := false
-	for offset := 0; ; offset += 2048 {
-		encoded, err := testEncodeTaskDetailGet("detail", browserprotocol.TaskDetailGet{TaskID: task.ID.String(), ExpectedRevision: decimalRevision(task.Revision), TextOffset: browserprotocol.Decimal(offset)})
-		if err != nil {
-			t.Fatalf("page %d request = %v", offset, err)
-		}
-		frame, err := browserprotocol.DecodeClientControl(encoded)
-		if err != nil {
-			t.Fatalf("page %d decode = %v", offset, err)
-		}
-		if offset == 34816 {
-			passedFormerLimit = true
-		}
-		detail, err := fixture.backend.TaskDetail(context.Background(), rawBrowserClient(fixture.client.ID), frame.Body.(browserprotocol.TaskDetailGet))
-		if err != nil || detail.Outcome == nil {
-			t.Fatalf("page %d detail = %+v, %v", offset, detail, err)
-		}
-		rebuilt += *detail.Outcome
-		if _, err := browserprotocol.EncodeTaskDetail("detail", detail); err != nil {
-			t.Fatalf("page %d response = %v", offset, err)
-		}
-		if detail.NextTextOffset == nil {
-			break
-		}
-		if *detail.NextTextOffset != browserprotocol.Decimal(offset+2048) {
-			t.Fatalf("page %d continuation = %d", offset, *detail.NextTextOffset)
-		}
-	}
-	if rebuilt != result {
-		t.Fatalf("result reconstruction = %d bytes, want %d", len(rebuilt), len(result))
-	}
-	if !passedFormerLimit {
-		t.Fatal("never requested a page past the former 32768-rune cursor limit")
 	}
 }
 
@@ -202,43 +124,6 @@ func completeAdapterRunWithProposal(t *testing.T, store *kernel.Store, run kerne
 		t.Fatal(err)
 	}
 	return terminal
-}
-
-func TestBrowserTaskDetailRejectsEditBetweenBriefAndPeerReads(t *testing.T) {
-	ctx := context.Background()
-	fixture := newAdapterFixture(t, kernel.BrowserCapabilityObserve|kernel.BrowserCapabilityPrivateHumanRequestDetail)
-	fixture.pair(t)
-	projectID, _ := kernel.ProjectIDFromBytes(adapterID(t, 174))
-	project, err := fixture.store.CreateProject(ctx, kernel.NewProject{ID: projectID, Name: "detail-project", Root: "/detail-project"}, adapterTime(t, 200))
-	if err != nil {
-		t.Fatal(err)
-	}
-	agentID, _ := kernel.AgentIDFromBytes(adapterID(t, 175))
-	agent, err := fixture.store.CreateAgent(ctx, kernel.NewAgent{ID: agentID, ProjectID: project.ID, Name: "detail-worker", Role: kernel.RoleWorker, Provider: kernel.ProviderCodex, ToolBudgetLimit: 4}, adapterTime(t, 201))
-	if err != nil {
-		t.Fatal(err)
-	}
-	taskID, _ := kernel.TaskIDFromBytes(adapterID(t, 176))
-	incarnationID, _ := kernel.IncarnationIDFromBytes(adapterID(t, 177))
-	task, err := fixture.store.EnqueueTask(ctx, kernel.NewTask{ID: taskID, ProjectID: project.ID, AssignedAgentID: agent.ID, IncarnationID: incarnationID, Title: "detail", Body: "old brief"}, adapterTime(t, 202))
-	if err != nil {
-		t.Fatal(err)
-	}
-	// The brief is read at the edited revision, but the peer read is bound to
-	// the head the client saw before the edit: the mixed detail is stale.
-	before, err := fixture.store.Factory(ctx)
-	if err != nil {
-		t.Fatal(err)
-	}
-	body := "new brief"
-	edited, err := fixture.store.UpdateTask(ctx, task.ID, task.Revision, kernel.TaskPatch{Body: &body}, adapterTime(t, 203))
-	if err != nil {
-		t.Fatal(err)
-	}
-	head := decimalSequence(before.Head)
-	if _, err := fixture.backend.TaskDetail(ctx, rawBrowserClient(fixture.client.ID), browserprotocol.TaskDetailGet{TaskID: task.ID.String(), ExpectedRevision: decimalRevision(edited.Revision), ExpectedHead: &head}); !errors.Is(mapBrowserError(err), browser.ErrStale) {
-		t.Fatalf("mixed task detail = %v", err)
-	}
 }
 
 // Activity is invalidated by event head; the control revision remains usable
