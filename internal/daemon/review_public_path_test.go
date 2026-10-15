@@ -958,7 +958,8 @@ func TestMergeQueueEjectionWithNoHeadFailureRequeuesOnceThenSendsBack(t *testing
 	if err != nil {
 		t.Fatal(err)
 	}
-	if op.State != "enqueued" || backend.enqueues != 2 || current.WorkRevision.Int64() != 2 || !strings.Contains(kernel.TaskFeedback(current), "board and shelves open peer views") {
+	feedback := kernel.TaskFeedback(current)
+	if op.State != "enqueued" || backend.enqueues != 2 || current.WorkRevision.Int64() != 2 || !strings.Contains(feedback, "Job checks") || !strings.Contains(feedback, "board and shelves open peer views") {
 		t.Fatalf("second ejection operation=%+v enqueues=%d task revision %d", op, backend.enqueues, current.WorkRevision.Int64())
 	}
 }
