@@ -334,6 +334,7 @@ type Request struct {
 	agentID           string
 	taskIncarnationID string
 	bootstrapPrompt   string
+	providerAdoption  bool
 	// previousWorkingDirectory is set only for an orchestrator, from the
 	// same agent's most recent terminal run (see
 	// kernel.Store.LatestTerminalRuntimeRoot). See WithPreviousWorkingDirectory.
@@ -357,6 +358,12 @@ func (request Request) WithBootstrapPrompt(prompt string) (Request, error) {
 	}
 	request.bootstrapPrompt = prompt
 	return request, nil
+}
+
+// WithProviderAdoption gives the daemon-owned self-check its own completion hook.
+func (request Request) WithProviderAdoption() Request {
+	request.providerAdoption = true
+	return request
 }
 
 // WithPreviousWorkingDirectory names the working directory a previous run of
@@ -769,6 +776,9 @@ func Build(request Request) (Launch, error) {
 		// select that authorized current directory through Codex's native
 		// resume configuration before any prompt can be shown.
 		stop := "'" + strings.ReplaceAll(request.runtime.factoryctl, "'", `'\''`) + "' attempt turn-complete"
+		if request.providerAdoption {
+			stop += " --provider-adoption"
+		}
 		hooks := "hooks.Stop=[{hooks=[{type=\"command\",command=" + tomlBasicString(stop) + "}]}]"
 		argv = append(argv, "-c", hooks, "--strict-config", "--dangerously-bypass-hook-trust", "--no-alt-screen", "-c", "tui.resume_cwd=\"current\"", "-c", "check_for_update_on_startup=false", "-c", "tool_output_token_limit=32768", "-c", codexUntrustedProjectConfig(request.workingDirectory), "-c", "default_permissions="+tomlBasicString(codexPermissionName(request.runtime)), "-c", `approval_policy="never"`, "-c", permissions, "--disable", "computer_use", "--disable", "browser_use", "--disable", "plugins")
 		attemptServer := codexAttemptServerName(request.runtime)
@@ -981,6 +991,9 @@ func claudeSettings(request Request, servers []string) (string, error) {
 	// a turn that ends without an outcome is answered at once, not by the
 	// stall rule ten minutes later.
 	stop := "'" + strings.ReplaceAll(request.runtime.factoryctl, "'", `'\''`) + "' attempt turn-complete"
+	if request.providerAdoption {
+		stop += " --provider-adoption"
+	}
 	return claudeConfinement(grants, allow, map[string]any{"Stop": []any{map[string]any{"hooks": []any{map[string]any{"type": "command", "command": stop}}}}})
 }
 

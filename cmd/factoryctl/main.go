@@ -277,6 +277,7 @@ type attemptCommand struct {
 	home              string
 	idempotencyKey    string
 	text              string
+	providerAdoption  bool
 	options           []string
 	id                string
 	after             string
@@ -459,6 +460,9 @@ func runWithDependencies(ctx context.Context, args []string, getenv func(string)
 		return runOverseer(ctx, command, getenv, stdout, stderr)
 	}
 
+	if command.kind == commandTurnComplete && command.providerAdoption {
+		return 0
+	}
 	socket := getenv("DARK_FACTORY_SOCKET")
 	if socket == "" {
 		// A Codex session's shell does not receive the attempt variables; its
@@ -852,6 +856,9 @@ func parse(args []string) (attemptCommand, bool, bool) {
 	case "turn-complete":
 		if len(args) == 2 {
 			return attemptCommand{kind: commandTurnComplete}, false, true
+		}
+		if len(args) == 3 && args[2] == "--provider-adoption" {
+			return attemptCommand{kind: commandTurnComplete, providerAdoption: true}, false, true
 		}
 	case "peer":
 		if len(args) >= 3 && args[2] == "status" {

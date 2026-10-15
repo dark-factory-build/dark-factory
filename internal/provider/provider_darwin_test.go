@@ -2060,6 +2060,21 @@ func TestNativeProvidersShareTheBootstrapPrompt(t *testing.T) {
 	}
 }
 
+func TestProviderAdoptionUsesCompletionHookWithoutAssignedOutcome(t *testing.T) {
+	for _, kind := range []kernel.Provider{kernel.ProviderClaudeCode, kernel.ProviderCodex} {
+		installation, runtime, _ := nativeFixture(t, kind)
+		request := requestFor(t, kind, installation, runtime, "", "").WithProviderAdoption()
+		launch, err := Build(request)
+		if err != nil {
+			t.Fatal(err)
+		}
+		joined := strings.Join(launch.Argv(), " ")
+		if !strings.Contains(joined, "attempt turn-complete --provider-adoption") {
+			t.Fatalf("%s adoption hook missing: %q", kind, joined)
+		}
+	}
+}
+
 func TestBootstrapPromptSettlesMergedLiveObservation(t *testing.T) {
 	installation, runtime, _ := nativeFixture(t, kernel.ProviderCodex)
 	request := roleRequestFor(t, kernel.ProviderCodex, installation, runtime, "", "", kernel.RoleOrchestrator)

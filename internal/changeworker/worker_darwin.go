@@ -176,6 +176,8 @@ func runProvider(ctx context.Context) (resultErr error) {
 			_ = cwd.Close()
 			return selfCheckErr
 		}
+		selfCheckRequest = selfCheckRequest.WithProviderAdoption()
+		beforeSelfCheck := expected.Head()
 		selfCheckLaunch, selfCheckErr := provider.Build(selfCheckRequest)
 		if selfCheckErr != nil {
 			_ = cwd.Close()
@@ -191,7 +193,14 @@ func runProvider(ctx context.Context) (resultErr error) {
 			return selfCheckErr
 		}
 		if config.Role == kernel.RoleWorker {
-			expected, selfCheckErr = change.InspectWorktree(ctx, config.GitExecutable, config.RepositoryRoot, config.RepositoryIdentity, publishedPath)
+			selfCheckFacts, inspectErr := change.InspectWorktree(ctx, config.GitExecutable, config.RepositoryRoot, config.RepositoryIdentity, publishedPath)
+			selfCheckErr = inspectErr
+			if selfCheckErr == nil && (selfCheckFacts.Dirty() || selfCheckFacts.Head().Equal(beforeSelfCheck)) {
+				selfCheckErr = fmt.Errorf("provider adoption self-check did not create a clean commit")
+			}
+			if selfCheckErr == nil {
+				expected = selfCheckFacts
+			}
 			if selfCheckErr != nil {
 				_ = cwd.Close()
 				return selfCheckErr

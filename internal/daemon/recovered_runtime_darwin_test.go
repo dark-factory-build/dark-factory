@@ -407,6 +407,11 @@ func TestRecoveredRuntimeFilePolicyRejectsEveryAuthorityMutation(t *testing.T) {
 	if !validRecoveredRuntimeFile(attemptTokenName, base, 1) {
 		t.Fatal("valid token metadata rejected")
 	}
+	marker := base
+	marker.Size = 0
+	if !validRecoveredRuntimeFile(runner.ProviderAdoptionMarkerName, marker, 1) {
+		t.Fatal("valid provider adoption marker rejected")
+	}
 	for name, mutate := range mutations {
 		t.Run(name, func(t *testing.T) {
 			changed := base

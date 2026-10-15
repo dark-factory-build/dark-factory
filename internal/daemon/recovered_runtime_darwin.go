@@ -278,6 +278,7 @@ func inspectRecoveredRuntimeCensus(rootFD int, device uint64) (map[string]unix.S
 	token := hasRecoveredFile(files, attemptTokenName)
 	outer := hasRecoveredFile(files, runner.OuterActivationMarkerName)
 	inner := hasRecoveredFile(files, runner.InnerActivationMarkerName)
+	adoption := hasRecoveredFile(files, runner.ProviderAdoptionMarkerName)
 	result := hasRecoveredFile(files, runner.AttemptResultSpoolName)
 	terminal := hasRecoveredFile(files, runner.TerminalSpoolName)
 	terminalScratch := hasRecoveredFile(files, runner.TerminalScratchName)
@@ -289,11 +290,11 @@ func inspectRecoveredRuntimeCensus(rootFD int, device uint64) (map[string]unix.S
 	// synchronously, so each gate scratch is an outer/inner prefix by itself.
 	gateScratch := gateConfig || gateStdin
 	terminalResidue := terminalScratch || terminal
-	residue := outer || inner || gateScratch || terminalResidue
+	residue := outer || inner || adoption || gateScratch || terminalResidue
 	if residue && !token {
 		return nil, invalidContract(nil)
 	}
-	if inner && !outer || terminalResidue && !outer {
+	if inner && !outer || adoption && !inner || terminalResidue && !outer {
 		return nil, invalidContract(nil)
 	}
 	if terminalScratch && terminal {
@@ -302,7 +303,7 @@ func inspectRecoveredRuntimeCensus(rootFD int, device uint64) (map[string]unix.S
 	if gateConfig && gateStdin {
 		return nil, invalidContract(nil)
 	}
-	if gateScratch && inner {
+	if gateScratch && inner || adoption && gateScratch {
 		return nil, invalidContract(nil)
 	}
 	if gateScratch && terminalResidue {
@@ -350,7 +351,7 @@ func validRecoveredRuntimeFile(name string, stat unix.Stat_t, device uint64) boo
 	case attemptTokenName:
 		return stat.Size == 32
 	case runner.OuterActivationMarkerName, runner.InnerActivationMarkerName,
-		runner.GateConfigScratchName, runner.GateStdinScratchName:
+		runner.ProviderAdoptionMarkerName, runner.GateConfigScratchName, runner.GateStdinScratchName:
 		return stat.Size == 0
 	case runner.AttemptResultSpoolName:
 		// The publish contract bounds the canonical result body at 1 KiB. A
