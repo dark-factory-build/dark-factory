@@ -845,8 +845,16 @@ func (client client) exchange(ctx context.Context, method string, encoded []byte
 	payload[0] = client.domain
 	copy(payload[1:requestPrelude], client.token.bearer[:])
 	copy(payload[requestPrelude:], encoded)
+	// A request or reply cut off because its daemon generation retired is a
+	// restart, not this daemon's answer, so call may replay it.
+	restarted := func(err error) error {
+		if after, inspectErr := inspectSocket(client.socketPath); errors.Is(err, ErrTransport) && (inspectErr != nil || !after.same(before)) {
+			return lost{err}
+		}
+		return err
+	}
 	if err := writeFrame(connection, payload); err != nil {
-		return classifyTransport(ctx)
+		return restarted(classifyTransport(ctx))
 	}
 	outcomeReceipt := client.domain == attemptDomain && outcomeMethod(method)
 	unix, ok := connection.(*net.UnixConn)
@@ -862,13 +870,7 @@ func (client client) exchange(ctx context.Context, method string, encoded []byte
 	}
 	response, err := readFrame(connection)
 	if err != nil {
-		err = classifyFrameError(ctx, err)
-		// A reply lost because its daemon generation unbound the socket is a
-		// restart, not this daemon's answer, so call may replay it.
-		if after, inspectErr := inspectSocket(client.socketPath); errors.Is(err, ErrTransport) && (inspectErr != nil || !after.same(before)) {
-			return lost{err}
-		}
-		return err
+		return restarted(classifyFrameError(ctx, err))
 	}
 	if len(response) < responsePrelude || response[0] != client.domain {
 		return ErrProtocol

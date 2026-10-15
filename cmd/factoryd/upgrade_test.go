@@ -21,6 +21,7 @@ import (
 	"github.com/dark-factory-build/dark-factory/internal/api"
 	"github.com/dark-factory-build/dark-factory/internal/install"
 	"github.com/dark-factory-build/dark-factory/internal/kernel"
+	"golang.org/x/sys/unix"
 )
 
 // The trial child is this test binary, re-executed as a staged build.
@@ -261,6 +262,7 @@ func TestStagedBuildServesTheActivatedSocketAndLeavesIt(t *testing.T) {
 	answers := make(chan error, 2)
 	go func() { _, err := client.Task(ctx); answers <- err }()
 	go func() { _, err := client.Succeed(ctx, "queued across the release"); answers <- err }()
+	awaitQueued(t, activated, 2)
 	if err := superviseTrial(home, childArgs(home), install.UpgradeMarker{Target: "development"}); !errors.Is(err, errRestart) || !strings.HasSuffix(err.Error(), ": promoted development") {
 		t.Fatalf("trial = %v", err)
 	}
@@ -353,6 +355,28 @@ func TestReleaseOutageStampsTheServingTransitions(t *testing.T) {
 		}
 		return nil
 	})
+}
+
+// awaitQueued waits until n connections wait in listener's backlog: kqueue
+// reports a listening socket's pending connections as its read data.
+func awaitQueued(t *testing.T, listener *os.File, n int64) {
+	t.Helper()
+	queue, err := unix.Kqueue()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer unix.Close(queue)
+	changes := []unix.Kevent_t{{Ident: uint64(listener.Fd()), Filter: unix.EVFILT_READ, Flags: unix.EV_ADD}}
+	events := make([]unix.Kevent_t, 1)
+	for deadline := time.Now().Add(10 * time.Second); ; changes = nil {
+		count, err := unix.Kevent(queue, changes, events, &unix.Timespec{Nsec: 50e6})
+		if err == nil && count == 1 && events[0].Data >= n {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("%d connections never queued: %v", n, err)
+		}
+	}
 }
 
 func TestPassedTrialRecoveryRestartsAndSettlesWithoutRepeatingPromotion(t *testing.T) {
