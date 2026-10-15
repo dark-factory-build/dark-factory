@@ -4,11 +4,11 @@ import type { FactoryEditView, FactoryHumanRequestView } from "./factory-app-con
 import { rankLabel } from "./console-screens.js";
 import { AgentSprite } from "./factory-scene/factory-scene.js";
 import { telemetryLine } from "./factory-scene/scene.js";
-import { agentStatus, agentCurrentTask, agentActivity, isSpecialist, needsYou, specialistStatus, type WorkRow, type WorkState } from "./console-view.js";
+import { agentStatus, agentCurrentTask, agentActivity, isSpecialist, specialistStatus, type WorkRow } from "./console-view.js";
 import { productionStages } from "./production-view.js";
 import { AnswerControls } from "./console-interactions.js";
 import { IconButton } from "./icons.js";
-import { Badge, SectionHeader, Status, formatTime } from "./console-kit.js";
+import { SectionHeader, Status, formatTime } from "./console-kit.js";
 import type { PublishedRelease, RuntimeBuild } from "./production-data.js";
 
 export type TaskEdit = Readonly<{ cancel?: boolean; retry?: boolean }>;
@@ -157,9 +157,6 @@ export function TaskDetail({ task, onLoadTaskDetail }: {
   </article>;
 }
 
-export type WorkFilter = "all" | WorkState;
-const FILTERS: readonly [WorkFilter, string][] = [["all", "All"], ["needs-you", "Needs you"], ["in-review", "In review"]];
-
 /** One Work row: title, then chips, then meta, always the same shape; the title button stretches over the whole row. */
 function WorkRowShell({ title, chips, meta, onOpen, href, disabled = false, pressed, expanded, children }: { title: ReactNode; chips: ReactNode; meta: ReactNode; onOpen?: () => void; href?: string; disabled?: boolean; pressed?: boolean; expanded?: boolean; children?: ReactNode }) {
   return <li className="dfConsoleItem dfWorkRow">
@@ -176,7 +173,7 @@ export type AddTask = (agent: AgentItem, instruction: string, mode: "queue" | "a
 
 /** One list for everything open: what needs you, what is in review, running and queued. */
 export function WorkPanel({
-  state, rows, projectId, filter, onFilter, edit, ready, onEditTask, onAddTask, onLoadTaskDetail,
+  state, rows, projectId, edit, ready, onEditTask, onAddTask, onLoadTaskDetail,
   selectedTaskId, onSelectTask, selectedHumanRequest, onSelectHumanRequest, onCloseHumanRequest, requestContent, onIntakeAction, intake,
 }: {
   onIntakeAction?: (projectId: string, request: IntakeBody) => void;
@@ -187,8 +184,6 @@ export function WorkPanel({
   state: StateView | undefined;
   rows: readonly WorkRow[];
   projectId?: string;
-  filter: WorkFilter;
-  onFilter: (filter: WorkFilter) => void;
   edit?: FactoryEditView;
   ready: boolean;
   onEditTask?: (task: TaskItem, change: TaskEdit) => Promise<boolean>;
@@ -199,10 +194,9 @@ export function WorkPanel({
   onCloseHumanRequest?: () => void;
   requestContent?: ReactNode;
 }) {
-  const [overseer, setOverseer] = useState(false);
   if (state === undefined) return <section className="dfConsoleSidebar__panel" aria-label="Work"><p className="dfFactoryConsole__empty">Waiting for the latest state…</p></section>;
   const agents = [...state.agents.values()];
-  const shown = rows.filter((row) => (filter === "all" || row.state === filter || filter === "needs-you" && needsYou(row)) && (overseer || row.origin !== "overseer" && row.origin !== "specialist" || row.state === "needs-you"));
+  const shown = rows.filter((row) => row.origin !== "overseer" && row.origin !== "specialist" || row.state === "needs-you");
   const busy = selectedHumanRequest?.phase === "replying" || selectedHumanRequest?.phase === "cancelling";
   const owner = (task?: TaskItem) => task === undefined ? "" : task.assigned_agent_id === "" ? "Any eligible worker" : state.agents.get(task.assigned_agent_id)?.name ?? "Agent";
   const chips = (row: WorkRow) => <>
@@ -236,14 +230,8 @@ export function WorkPanel({
   return <section className="dfConsoleSidebar__panel" aria-label="Work">
     {state.factory.dispatch_enabled ? null : <p role="status">New work is paused. Queued tasks wait; active processes continue. An administrator can resume new work above.</p>}
     {onAddTask === undefined ? null : <NewTask agents={agents} state={state} disabled={!ready || edit?.pending === true} onAddTask={onAddTask} />}
-    <div className="dfWorkBar">
-      <div className="dfConsoleViewToggle" role="group" aria-label="Work filter">
-        {FILTERS.map(([value, label]) => <button key={value} type="button" aria-pressed={filter === value} disabled={!ready} onClick={() => onFilter(value)}>{label} {value === "needs-you" ? <Badge n={rows.filter(needsYou).length} /> : null}</button>)}
-      </div>
-      <IconButton icon="terminal" aria-label="Show overseer and specialist passes" aria-pressed={overseer} disabled={!ready} onClick={() => setOverseer(!overseer)} />
-    </div>
     {rows.some((row) => row.intake !== undefined) && (intake?.failed || !["ok", "accepted", "imported", "withdrawn", "withdrawal_pending", undefined].includes(intake?.state)) ? <p role="alert">Could not accept: {intake?.failed ? "try again" : intake?.state?.replaceAll("_", " ")}.</p> : null}
-    {shown.length === 0 ? <p className="dfFactoryConsole__empty">{filter === "all" ? "No open work" : "Nothing here"}</p> : <ul className="dfConsoleItems">{shown.map(item)}</ul>}
+    {shown.length === 0 ? <p className="dfFactoryConsole__empty">No open work</p> : <ul className="dfConsoleItems">{shown.map(item)}</ul>}
   </section>;
 }
 

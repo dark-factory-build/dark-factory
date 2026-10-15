@@ -734,9 +734,6 @@ summary.dfConsoleItem__summary { cursor: pointer; }
    console's 0.7rem micro-labels are too small for.
    ------------------------------------------------------------------------ */
 
-.dfWorkBar { display: flex; flex-wrap: wrap; gap: .25rem; align-items: center; margin-block: .6rem; overflow: visible; }
-.dfWorkBar .dfConsoleViewToggle { flex: 0 1 auto; min-width: 0; flex-wrap: wrap; }
-.dfWorkBar > button { padding-inline: .4rem; }
 .dfWorkRow__head { position: relative; padding: .7rem; overflow-wrap: anywhere; }
 .dfWorkRow__head .dfConsoleItem__meta { margin-top: .3rem; }
 .dfConsoleItem .dfWorkRow__title { text-align: left; padding: 0; }
