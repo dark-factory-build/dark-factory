@@ -17,6 +17,8 @@ before `Sockets`, or an interrupted reload) it re-renders the plist its
 receipt still binds and, before opening anything, has a detached launchctl
 boot the job out and bootstrap it again. The one unowned interval left is
 the old build's own exit at that release, which no later build can shorten.
+So run the first upgrade to a build with `Sockets` with dispatch off and no
+live runs: then no sandboxed worker exists to take the port in that interval.
 
 ```sh
 factoryctl release <commit-sha> [--start] [--wait]
