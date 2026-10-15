@@ -3,6 +3,8 @@ package daemon
 import (
 	"context"
 	"fmt"
+	"path/filepath"
+	"strings"
 
 	"github.com/dark-factory-build/dark-factory/internal/kernel"
 	"github.com/dark-factory-build/dark-factory/internal/provider"
@@ -118,6 +120,22 @@ func prepareTaskEnqueue(ctx context.Context, store *kernel.Store, task kernel.Ne
 		return nil
 	}
 	return prepareTaskText(agent.Provider, task.Title, task.Body)
+}
+
+// refusePrivateChangePath refuses an overseer task body that sends a worker to
+// another Change's private checkout or git directory: workers can read neither,
+// so every run of such a task would fail.
+func (daemon *Daemon) refusePrivateChangePath(body string) error {
+	roots := []string{"/dark-factory-changes/"}
+	if parent := daemon.changeParent.Load(); parent != nil && *parent != "" {
+		roots = append(roots, filepath.Clean(*parent)+"/")
+	}
+	for _, root := range roots {
+		if strings.Contains(body, root) {
+			return kernel.NewOutcomeRefusal(fmt.Errorf("%w: task body names private Change path %s, which workers cannot read; carry prior work as --prerequisite TASK_ID:WORK_REVISION of a succeeded task, task update --retry of the same task to reuse its retained Change, or an attached source-patch content record (--content ID:REVISION)", kernel.ErrInvalidValue, root))
+		}
+	}
+	return nil
 }
 
 func prepareTaskText(kind kernel.Provider, title, body string, attachments ...kernel.TaskAttachment) error {

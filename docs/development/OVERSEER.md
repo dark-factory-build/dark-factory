@@ -270,6 +270,13 @@ producer's pull request has merged at its exact Change head, so a fresh Change
 base already contains it. Do not reset the Change or mistake the daemon
 revision for its source.
 
+Prior work reaches a successor task only through a succeeded `--prerequisite`,
+`task update --retry` of the same task when its retained Change is intended, or
+an attached source-patch content record (`--content ID:REVISION`). Never put
+another Change's `source_path` or `git_directory` in a task body: workers cannot
+read it or call `attempt source`, and task add and update refuse a body naming
+the Changes root or `/dark-factory-changes/`.
+
 Never read the daemon SQLite database, the whole daemon home, or the Changes
 parent. As overseer, run `overseer status --task TASK_ID` for the task
 you are handling. Its `retained_change_handoffs` carry only identities (Change

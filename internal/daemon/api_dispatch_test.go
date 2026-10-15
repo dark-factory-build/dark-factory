@@ -2092,6 +2092,74 @@ func TestTaskEnqueuePreflightPreservesReplayAndOverseerAuthority(t *testing.T) {
 	}
 }
 
+func TestOverseerTaskAddAndUpdateRefusePrivateChangePaths(t *testing.T) {
+	fixture := newDispatchFixture(t)
+	active := prepareActiveAttempt(t, fixture, 201)
+	ctx := context.Background()
+	changeRoot := filepath.Join(filepath.Dir(fixture.socket), "changes")
+	fixture.daemon.RememberSupervisorAccount(changeRoot, "", "")
+	operator, err := api.NewOperatorClient(fixture.socket, fixture.operator)
+	if err != nil {
+		t.Fatal(err)
+	}
+	workerID := testID(210)
+	done := fixture.serve(t)
+	if _, err := operator.CreateAgent(ctx, api.CreateAgentInput{ID: workerID, ProjectID: active.run.ProjectID.String(), Name: "worker", Role: "worker", Provider: "codex"}); err != nil {
+		t.Fatal(err)
+	}
+	waitDispatch(t, done)
+	ordinary := "Fix internal/daemon/api_dispatch.go:2194; see docs/development/OVERSEER.md and https://github.com/o/r/pull/1."
+	done = fixture.serve(t)
+	queued, err := active.client.OverseerEnqueueTask(ctx, api.OverseerTaskCreateInput{ID: testID(211), AssignedAgentID: workerID, IncarnationID: testID(212), Title: "ordinary", Body: ordinary})
+	waitDispatch(t, done)
+	if err != nil {
+		t.Fatalf("ordinary source references refused: %v", err)
+	}
+	for i, body := range []string{
+		"Continue from " + filepath.Join(changeRoot, testID(99)) + "/payload.txt",
+		"Read git --git-dir=/repo/.git/dark-factory-changes/" + testID(99) + "/.git log",
+	} {
+		done = fixture.serve(t)
+		_, addErr := active.client.OverseerEnqueueTask(ctx, api.OverseerTaskCreateInput{ID: testID(byte(220 + i)), AssignedAgentID: workerID, IncarnationID: testID(byte(230 + i)), Title: "successor", Body: body})
+		waitDispatch(t, done)
+		done = fixture.serve(t)
+		_, updateErr := active.client.OverseerUpdateTask(ctx, api.OverseerTaskUpdateInput{TaskID: testID(211), ExpectedRevision: queued.Revision, Body: &body})
+		waitDispatch(t, done)
+		for name, err := range map[string]error{"add": addErr, "update": updateErr} {
+			var remote *api.RemoteError
+			if !errors.As(err, &remote) || remote.Code() != api.RemoteInvalidRequest || !strings.Contains(err.Error(), "--prerequisite") || !strings.Contains(err.Error(), "--retry") || !strings.Contains(err.Error(), "source-patch content record") {
+				t.Fatalf("%s %q = %v", name, body, err)
+			}
+		}
+		if _, found, err := fixture.store.Task(ctx, mustTaskID(t, testID(byte(220+i)))); err != nil || found {
+			t.Fatalf("refused add was admitted: found=%v err=%v", found, err)
+		}
+	}
+	if task, found, err := fixture.store.Task(ctx, mustTaskID(t, testID(211))); err != nil || !found || task.Body != ordinary || uint64(task.Revision.Int64()) != queued.Revision {
+		t.Fatalf("refused update changed task: %+v found=%v err=%v", task, found, err)
+	}
+}
+
+func TestRefusePrivateChangePathKeepsOrdinarySourceReferences(t *testing.T) {
+	daemon := &Daemon{}
+	if err := daemon.refusePrivateChangePath("/repo/.git/dark-factory-changes/x/.git"); !errors.Is(err, kernel.ErrInvalidValue) {
+		t.Fatalf("Changes git directory without a configured root = %v", err)
+	}
+	daemon.RememberSupervisorAccount("/home/factory/changes/", "", "")
+	for body, refused := range map[string]bool{
+		"/home/factory/changes/abc/payload.txt":             true,
+		"/repo/.git/dark-factory-changes/abc/.git":          true,
+		"/home/factory/changes-old/notes and internal/x.go": false,
+		"Fix internal/daemon/api_dispatch.go:2194":          false,
+	} {
+		err := daemon.refusePrivateChangePath(body)
+		var refusal *kernel.OutcomeRefusal
+		if refused != errors.As(err, &refusal) || refused && !strings.Contains(boundedDetail(refusal.Unwrap()), "--prerequisite TASK_ID:WORK_REVISION") {
+			t.Fatalf("%q = %v", body, err)
+		}
+	}
+}
+
 func TestOverseerEnqueuePinsContentWhileSchedulerRunsAndRejectsPostHocAttach(t *testing.T) {
 	fixture := newDispatchFixture(t)
 	active := prepareActiveAttempt(t, fixture, 230)

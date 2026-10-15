@@ -2219,6 +2219,9 @@ func (daemon *Daemon) overseerEnqueueTask(ctx context.Context, call api.Call) ap
 	if err != nil {
 		return newErrorReply(api.RemoteInvalidRequest)
 	}
+	if err := daemon.refusePrivateChangePath(input.Body); err != nil {
+		return newRefusalReply(err)
+	}
 	if err := prepareTaskEnqueue(ctx, daemon.store, spec, true); err != nil {
 		return newErrorReply(remoteErrorCode(err))
 	}
@@ -2278,6 +2281,11 @@ func (daemon *Daemon) overseerUpdateTask(ctx context.Context, call api.Call) api
 	patch := kernel.TaskPatch{Title: input.Title, Body: input.Body, Priority: input.Priority, AssignedAgentID: assignedAgentID, Cancel: input.Cancel}
 	if err := daemon.store.AuthorizeWorkerTaskForOverseer(ctx, digest, id); err != nil {
 		return newErrorReply(remoteErrorCode(err))
+	}
+	if input.Body != nil {
+		if err := daemon.refusePrivateChangePath(*input.Body); err != nil {
+			return newRefusalReply(err)
+		}
 	}
 	if err := prepareQueuedTaskPatch(ctx, daemon.store, id, expected, patch); err != nil {
 		return newErrorReply(remoteErrorCode(err))
@@ -2826,8 +2834,8 @@ func newErrorReply(code api.RemoteErrorCode) api.Reply {
 	return reply
 }
 
-// newRefusalReply answers a refused attempt outcome with the exact reason the
-// daemon computed. Only a kernel refusal qualifies: it is raised after the
+// newRefusalReply answers a refused attempt outcome or overseer task body with
+// the exact reason the daemon computed. Only a kernel refusal qualifies: it is raised after the
 // bearer matched this run, and its cause is daemon-authored text, so it says
 // what moved and what the worker must do before reporting again. Any other
 // error stays a bare code.
