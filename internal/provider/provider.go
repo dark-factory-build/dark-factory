@@ -1280,12 +1280,14 @@ func (runtime RuntimePaths) environmentForRole(kind kernel.Provider, role kernel
 			"CARGO_HOME="+filepath.Join(runtime.home, ".cargo"),
 			"RUSTUP_HOME="+filepath.Join(runtime.accountHome, ".rustup"),
 			"COREPACK_HOME="+filepath.Join(runtime.home, ".cache", "corepack"),
-			"COREPACK_ENABLE_NETWORK=0",
-			"pnpm_config_store_dir="+pnpmStorePath(runtime.accountHome),
 			"npm_config_cache="+filepath.Join(runtime.home, ".cache", "npm"),
 			"XDG_CACHE_HOME="+filepath.Join(runtime.home, ".cache"))
 		if role == kernel.RoleWorker {
-			environment = append(environment, "DF_CI_GO_MODULE_CACHE="+goModuleCachePath(runtime.accountHome))
+			environment = append(environment,
+				"COREPACK_ENABLE_NETWORK=0",
+				"COREPACK_ENV_FILE=0",
+				"pnpm_config_store_dir="+pnpmStorePath(runtime.accountHome),
+				"DF_CI_GO_MODULE_CACHE="+goModuleCachePath(runtime.accountHome))
 			// Code under test that is OTel-instrumented lights up the plant.
 			// The agent CLI's own metrics and logs carry the run id in their
 			// resource, the only thing factoryd attributes them by.
@@ -1298,6 +1300,15 @@ func (runtime RuntimePaths) environmentForRole(kind kernel.Provider, role kernel
 					"OTEL_EXPORTER_OTLP_TRACES_ENDPOINT=http://127.0.0.1:"+strconv.Itoa(int(runtime.traceReceiverPort))+"/v1/traces",
 					"OTEL_RESOURCE_ATTRIBUTES="+resource)
 			}
+		} else {
+			environment = append(environment,
+				"COREPACK_ENABLE_NETWORK=1",
+				"COREPACK_ENV_FILE=0",
+				"COREPACK_NPM_REGISTRY="+npmRegistry,
+				"npm_config_registry="+npmRegistry,
+				"pnpm_config_store_dir="+filepath.Join(runtime.home, ".cache", "pnpm-store"))
+		}
+		if role == kernel.RoleWorker {
 			// Claude Code exports only when told to. Prompt and tool content
 			// stays off: none of its OTEL_LOG_* switches can reach the runner.
 			if receiver := runtime.telemetryReceiver(); receiver != "" && kind == kernel.ProviderClaudeCode {
@@ -1419,7 +1430,7 @@ func (runtime RuntimePaths) PrepareWebDependencies(ctx context.Context, workingD
 	}
 	store := pnpmStorePath(runtime.accountHome)
 	modules := filepath.Join(web, "node_modules")
-	command := exec.CommandContext(ctx, filepath.Join(toolPath, "node"), filepath.Join(toolPath, "corepack"), "pnpm", "install", "--offline", "--frozen-lockfile", "--ignore-scripts", "--config.ignorePnpmfile=true", "--config.confirmModulesPurge=false", "--config.storeDir="+store, "--config.modulesDir="+modules, "--config.virtualStoreDir="+filepath.Join(modules, ".pnpm"), "--config.stateDir="+filepath.Join(runtime.home, ".cache", "pnpm-state"))
+	command := exec.CommandContext(ctx, filepath.Join(toolPath, "node"), filepath.Join(toolPath, "corepack"), "pnpm", "install", "--offline", "--frozen-lockfile", "--ignore-scripts", "--config.confirmModulesPurge=false", "--config.storeDir="+store, "--config.virtualStoreDir="+filepath.Join(modules, ".pnpm"), "--config.stateDir="+filepath.Join(runtime.home, ".cache", "pnpm-state"))
 	command.Dir = web
 	command.Env = runtime.environmentForRole(kernel.ProviderCodex, kernel.RoleWorker)
 	if output, err := command.CombinedOutput(); err != nil {
@@ -1440,6 +1451,9 @@ var (
 func validatePnpmSources(web string) error {
 	if _, err := os.Lstat(filepath.Join(web, ".npmrc")); !errors.Is(err, os.ErrNotExist) {
 		return fmt.Errorf("provider: project .npmrc is refused")
+	}
+	if _, err := os.Lstat(filepath.Join(web, ".pnpmfile.cjs")); !errors.Is(err, os.ErrNotExist) {
+		return fmt.Errorf("provider: project .pnpmfile.cjs is refused")
 	}
 	workspace, err := os.ReadFile(filepath.Join(web, "pnpm-workspace.yaml"))
 	if err != nil && !errors.Is(err, os.ErrNotExist) {
