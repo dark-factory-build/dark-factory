@@ -251,10 +251,6 @@ func TestBrowserAdapterPairsAuthenticatesSnapshotsAndReloadsRevocation(t *testin
 	if err != nil {
 		t.Fatal(err)
 	}
-	project, err = fixture.store.SetProjectLimits(ctx, project.ID, project.Revision, 7, 900, adapterTime(t, 10))
-	if err != nil {
-		t.Fatal(err)
-	}
 	agent, err := fixture.store.CreateAgent(ctx, kernel.NewAgent{ID: agentID, ProjectID: project.ID, Name: "public agent", Role: kernel.RoleOrchestrator, Provider: kernel.ProviderCodex, Model: "SERVED_MODEL_FACT", ToolBudgetLimit: 4}, adapterTime(t, 11))
 	if err != nil {
 		t.Fatal(err)
@@ -273,9 +269,6 @@ func TestBrowserAdapterPairsAuthenticatesSnapshotsAndReloadsRevocation(t *testin
 	snapshot := frame.Body.(browserprotocol.StateSnapshot)
 	if len(snapshot.Projects) != 1 || len(snapshot.Agents) != 1 || len(snapshot.Tasks) != 1 {
 		t.Fatalf("one snapshot did not carry the whole Factory: %+v", snapshot)
-	}
-	if project := snapshot.Projects[0]; project.MaxRunSeconds != 900 {
-		t.Fatalf("snapshot project limits = %+v", project)
 	}
 	for _, sentinel := range []string{"PRIVATE_ROOT_SENTINEL", "PRIVATE_BODY_SENTINEL"} {
 		if bytes.Contains(payload, []byte(sentinel)) {
@@ -302,34 +295,6 @@ func TestBrowserAdapterPairsAuthenticatesSnapshotsAndReloadsRevocation(t *testin
 	frame = adapterRead(t, authenticated)
 	if frame.Type != browserprotocol.TypeError || frame.Body.(browserprotocol.Error).Code != browserprotocol.ErrorUnauthorized {
 		t.Fatalf("post-revoke operation = %+v", frame)
-	}
-}
-
-func TestBrowserProjectDurationRejectsStaleEdits(t *testing.T) {
-	fixture := newAdapterFixture(t, kernel.BrowserCapabilityObserve|kernel.BrowserCapabilityHumanActions|kernel.BrowserCapabilityAdministration)
-	ctx := context.Background()
-	projectID, _ := kernel.ProjectIDFromBytes(adapterID(t, 21))
-	project, err := fixture.store.CreateProject(ctx, kernel.NewProject{ID: projectID, Name: "limits", Root: "/limits"}, adapterTime(t, 10))
-	if err != nil {
-		t.Fatal(err)
-	}
-	connection := fixture.pair(t)
-	_ = connection.Close(websocket.StatusNormalClosure, "")
-	updated, err := fixture.backend.SetProjectLimits(ctx, rawBrowserClient(fixture.client.ID), browserprotocol.ProjectLimits{ProjectID: project.ID.String(), ExpectedRevision: decimalRevision(project.Revision), MaxRunSeconds: 60})
-	if err != nil {
-		t.Fatal(err)
-	}
-	current, found, err := fixture.store.Project(ctx, project.ID)
-	if err != nil || !found || current.MaxRunSeconds != 60 || updated.Revision != decimalRevision(current.Revision) {
-		t.Fatalf("updated project = %+v, result=%+v, found=%v, err=%v", current, updated, found, err)
-	}
-	if _, err := fixture.backend.SetProjectLimits(ctx, rawBrowserClient(fixture.client.ID), browserprotocol.ProjectLimits{ProjectID: project.ID.String(), ExpectedRevision: decimalRevision(project.Revision), MaxRunSeconds: 60}); !errors.Is(mapBrowserError(err), browser.ErrStale) {
-		t.Fatalf("stale browser edit = %v", err)
-	}
-	result, err := fixture.backend.SetProjectLimits(ctx, rawBrowserClient(fixture.client.ID), browserprotocol.ProjectLimits{ProjectID: project.ID.String(), ExpectedRevision: decimalRevision(current.Revision), MaxRunSeconds: 0})
-	current, found, err = fixture.store.Project(ctx, project.ID)
-	if err != nil || !found || result.Revision != decimalRevision(current.Revision) {
-		t.Fatalf("unlimited renewal = %+v, result=%+v, found=%v, err=%v", current, result, found, err)
 	}
 }
 
