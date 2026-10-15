@@ -1430,8 +1430,8 @@ func RebaseWorktree(ctx context.Context, selection Selection, path string) (Work
 	}
 	// Use the linked worktree's .git indirection. Passing the private bare
 	// repository as --git-dir would select its unrelated HEAD and index.
-	gitArgs := []string{"-c", "core.hooksPath=/dev/null", "-c", "protocol.file.allow=always", "-C", path}
-	gitArgs = append(gitArgs, "rebase", "--autostash", "refs/remotes/origin/main")
+	gitPrefix := []string{"-c", "core.hooksPath=/dev/null", "-c", "protocol.file.allow=always", "-C", path}
+	gitArgs := append(append([]string{}, gitPrefix...), "rebase", "--autostash", "refs/remotes/origin/main")
 	result, err := authority.runWithEnvironment(ctx, maxGitSelectionOutput, []string{
 		"GIT_COMMITTER_NAME=" + gitauthor.AutomationName,
 		"GIT_COMMITTER_EMAIL=" + gitauthor.AutomationEmail,
@@ -1441,7 +1441,7 @@ func RebaseWorktree(ctx context.Context, selection Selection, path string) (Work
 	}
 	if result.exitCode != 0 {
 		paths := conflictPaths(ctx, authority, path)
-		abort := append([]string{}, gitArgs[:len(gitArgs)-2]...)
+		abort := append([]string{}, gitPrefix...)
 		abort = append(abort, "rebase", "--abort")
 		aborted, abortErr := authority.run(ctx, maxGitSelectionOutput, abort...)
 		if abortErr != nil {

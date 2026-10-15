@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"syscall"
 	"testing"
@@ -618,6 +619,44 @@ func TestRebaseWorktreeAutostashesRetainedTrackedEdits(t *testing.T) {
 	}
 	if got, err := os.ReadFile(filepath.Join(path, "README.md")); err != nil || string(got) != "retained draft\n" {
 		t.Fatalf("retained draft = %q, %v", got, err)
+	}
+}
+
+func TestRebaseWorktreeAbortsAndReportsConflict(t *testing.T) {
+	ctx := context.Background()
+	fixture := newLocalGitFixture(t, "sha1")
+	selected, err := SelectGit(ctx, fixture.git, fixture.repository, "HEAD", fixture.identity)
+	if err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(secureTempDir(t), testChangeID)
+	if _, err := AddPrivateWorktree(ctx, selected, path, BranchName(testChangeID)); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(path, "README.md"), []byte("retained change\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	runFixtureGit(t, fixture.git, path, "add", "README.md")
+	runFixtureGit(t, fixture.git, path, "commit", "-m", "retained change")
+	if err := os.WriteFile(filepath.Join(fixture.repository, "README.md"), []byte("current main\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	runFixtureGit(t, fixture.git, fixture.repository, "add", "README.md")
+	runFixtureGit(t, fixture.git, fixture.repository, "commit", "-m", "advance main")
+	newer, err := SelectGit(ctx, fixture.git, fixture.repository, "HEAD", fixture.identity)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := FetchBase(ctx, newer, path); err != nil {
+		t.Fatal(err)
+	}
+	var conflict *RebaseConflict
+	if _, err := RebaseWorktree(ctx, newer, path); !errors.As(err, &conflict) || conflict.CurrentBase != newer.Base().Hex() || !slices.Contains(conflict.Paths, "README.md") {
+		t.Fatalf("rebase conflict = %+v, %v", conflict, err)
+	}
+	facts, err := InspectWorktree(ctx, fixture.git, fixture.repository, fixture.identity, path)
+	if err != nil || facts.Dirty() || facts.Branch() != BranchName(testChangeID) {
+		t.Fatalf("aborted conflict worktree = %+v, %v", facts, err)
 	}
 }
 
