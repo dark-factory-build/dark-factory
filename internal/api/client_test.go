@@ -17,6 +17,7 @@ import (
 	"sync"
 	"syscall"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"github.com/dark-factory-build/dark-factory/internal/runner"
@@ -1523,6 +1524,28 @@ func TestAttemptRestartRetryHonorsDeadline(t *testing.T) {
 	if _, err := client.Task(ctx); !errors.Is(err, context.DeadlineExceeded) {
 		t.Fatalf("deadline during restart = %v", err)
 	}
+}
+
+// A restart whose store recovery keeps the socket absent past
+// RestartRetryWindow does not end a read early: it retries until the caller's
+// deadline, and reports that deadline. synctest's fake clock runs the outage.
+func TestAttemptReadRetriesRestartUntilCallerDeadline(t *testing.T) {
+	directory := privateTestDirectory(t)
+	token := filepath.Join(directory, "token")
+	writeTestToken(t, token, testCredential('W'))
+	t.Setenv(attemptTokenFileEnv, token)
+	synctest.Test(t, func(t *testing.T) {
+		client, err := NewAttemptClientFromEnvironment(filepath.Join(directory, "api.sock"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), 3*RestartRetryWindow)
+		defer cancel()
+		started := time.Now()
+		if _, err := client.Task(ctx); !errors.Is(err, context.DeadlineExceeded) || time.Since(started) != 3*RestartRetryWindow {
+			t.Fatalf("read across a slow restart = %v after %v", err, time.Since(started))
+		}
+	})
 }
 
 // A read or an outcome whose reply is lost to a restart is sent again to the
