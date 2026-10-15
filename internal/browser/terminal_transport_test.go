@@ -900,6 +900,25 @@ func TestTerminalTransportResetAndDetachJoinAttachment(t *testing.T) {
 	}
 }
 
+func TestTerminalTransportClosesRejectedAttachmentBeforeReset(t *testing.T) {
+	backend := newTerminalTestBackend()
+	backend.authentication.Capabilities = browserprotocol.CapabilityObserve
+	server := startTerminalServer(t, backend)
+	connection, _ := dialServer(t, server, testOrigin)
+	authenticateTerminalTest(t, connection)
+	writeClientFrame(t, connection, terminalAttachRequest(t, "attach", 0))
+	attachment := backend.currentAttachment(t)
+	sendTerminalEvent(t, backend, TerminalEvent{Kind: TerminalEventAttached, Accepted: false, Head: 1})
+
+	frame := readServerFrame(t, connection)
+	if frame.Type != browserprotocol.TypeTerminalReset || frame.ID != "attach" {
+		t.Fatalf("rejected attach reset = %+v", frame)
+	}
+	if attachment.closed.Load() != 1 || attachment.closeCalls.Load() != 1 {
+		t.Fatalf("rejected attach close=%d calls=%d", attachment.closed.Load(), attachment.closeCalls.Load())
+	}
+}
+
 func TestTerminalTransportRetainsAttachmentAfterCloseFailure(t *testing.T) {
 	backend := newTerminalTestBackend()
 	backend.authentication.Capabilities = browserprotocol.CapabilityObserve
