@@ -298,13 +298,16 @@ func (store *Store) ReclaimableChanges(ctx context.Context, at UnixMillis) ([]Re
 		return nil, err
 	}
 	defer tx.Close()
-	rows, err := tx.connection.QueryContext(ctx, `SELECT c.id, c.project_id, c.task_id, c.task_incarnation_id, c.phase,
+	rows, err := tx.connection.QueryContext(ctx, `WITH candidates AS MATERIALIZED (SELECT c.id, c.project_id, c.task_id, c.task_incarnation_id, c.phase,
 		c.object_format, c.base_commit, c.repository_dev, c.repository_inode, c.head_commit,
 		c.prepared_at_ms, c.available_at_ms, c.settled_run_id, c.revision, c.created_at_ms, c.updated_at_ms,
-		`+reclaimGivenUp+`
+		c.head_commit = c.base_commit AS same_head, `+reclaimGivenUp+` AS given_up
 		FROM changes AS c JOIN tasks AS t ON t.id = c.task_id
-		WHERE `+reclaimEnded+` AND (c.head_commit = c.base_commit OR `+reclaimGivenUp+`)
-		ORDER BY c.updated_at_ms, c.id`, reclaimCutoffs(at)...)
+		WHERE `+reclaimEnded+`)
+		SELECT id, project_id, task_id, task_incarnation_id, phase, object_format, base_commit,
+			repository_dev, repository_inode, head_commit, prepared_at_ms, available_at_ms,
+			settled_run_id, revision, created_at_ms, updated_at_ms, given_up
+		FROM candidates WHERE same_head OR given_up ORDER BY updated_at_ms, id`, reclaimCutoffs(at)...)
 	if err != nil {
 		return nil, err
 	}
