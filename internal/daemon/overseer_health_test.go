@@ -34,7 +34,7 @@ func healthWake(t *testing.T, fixture *intakePollFixture) string {
 			t.Fatal(err)
 		}
 	}
-	wakes, err := fixture.store.EnqueueOverseerWakeups(ctx, mustKernelTime(t, fixture.now.Add(time.Minute).UnixMilli()), fixture.daemon.overseerHealth()...)
+	wakes, err := fixture.store.EnqueueOverseerWakeups(ctx, mustKernelTime(t, fixture.now.Add(time.Minute).UnixMilli()), 0, fixture.daemon.overseerHealth()...)
 	if err != nil || len(wakes) > 1 {
 		t.Fatalf("wakes = %+v, %v", wakes, err)
 	}

@@ -230,7 +230,7 @@ func TestSpecialistAdmission(t *testing.T) {
 	if admission, err := store.AdmitNext(ctx, admissionKeys(t, 40, nil), mustTime(t, 10)); err != nil || !admission.Admitted() || admission.Run.TaskID != shared.ID || admission.Run.AgentID != worker.ID {
 		t.Fatalf("shared admission = %+v, %v", admission, err)
 	}
-	carriers, err := store.EnqueueOverseerWakeups(ctx, mustTime(t, 11))
+	carriers, err := store.EnqueueOverseerWakeups(ctx, mustTime(t, 11), 0)
 	if err != nil || len(carriers) != 1 {
 		t.Fatalf("carrier = %+v, %v", carriers, err)
 	}

@@ -350,9 +350,9 @@ func TestReleaseComparesWithTheLiveWorkerNotTheRunningBuild(t *testing.T) {
 func TestDeployWorkerRunsOnlyWhenTheControlPlaneChanged(t *testing.T) {
 	tree := t.TempDir()
 	git := func(args ...string) string {
-		output, err := exec.Command(change.TrustedGitExecutable, append([]string{"-C", tree, "-c", "user.name=test", "-c", "user.email=test@example.invalid", "-c", "commit.gpgsign=false"}, args...)...).Output()
+		output, err := exec.Command(change.TrustedGitExecutable, append([]string{"-C", tree, "-c", "user.name=test", "-c", "user.email=test@example.invalid", "-c", "commit.gpgsign=false", "-c", "gc.auto=0"}, args...)...).CombinedOutput()
 		if err != nil {
-			t.Fatalf("git %v: %v", args, err)
+			t.Fatalf("git %v: %v\n%s", args, err, output)
 		}
 		return strings.TrimSpace(string(output))
 	}

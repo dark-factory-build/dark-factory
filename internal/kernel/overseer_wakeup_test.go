@@ -41,9 +41,13 @@ func wakeFixture(t testing.TB) (*Store, Agent, Agent) {
 	return store, worker, overseer
 }
 
-func wakeBodies(t testing.TB, store *Store, at int64) []string {
+func wakeBodies(t testing.TB, store *Store, at int64, cutover ...int64) []string {
 	t.Helper()
-	tasks, err := store.EnqueueOverseerWakeups(context.Background(), mustTime(t, at))
+	threshold := int64(0)
+	if len(cutover) != 0 {
+		threshold = cutover[0]
+	}
+	tasks, err := store.EnqueueOverseerWakeups(context.Background(), mustTime(t, at), threshold)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -75,7 +79,7 @@ func BenchmarkOverseerItemsLiveShape(b *testing.B) {
 	for i := 0; i < 1000; i++ {
 		escalate(b, store, overseer.ProjectID, fmt.Sprintf("%d", i+1), "open", head, head, 1000+int64(i))
 	}
-	args := overseerItemArgs(overseer, 120_000, nil)
+	args := overseerItemArgs(overseer, 120_000, 0, nil)
 	connection, err := store.readerConnection(context.Background())
 	if err != nil {
 		b.Fatal(err)
@@ -123,7 +127,7 @@ func TestProductionEscalationReachesStalledCard(t *testing.T) {
 	settleCarrier(t, store, at+1, 31, NeverStartedRunDetail)
 	settleCarrier(t, store, at+20, 52, NeverStartedRunDetail)
 	at += 40 + OverseerRewakeAfter.Milliseconds()
-	tasks, err := store.EnqueueOverseerWakeups(ctx, mustTime(t, at))
+	tasks, err := store.EnqueueOverseerWakeups(ctx, mustTime(t, at), 0)
 	if err != nil || len(tasks) != 1 {
 		t.Fatalf("API escalation re-wake = %+v, %v", tasks, err)
 	}
@@ -251,7 +255,7 @@ func TestOverseerPublishFailureWake(t *testing.T) {
 		t.Fatal(err)
 	}
 	at := 80 + PublicationAttentionAfter.Milliseconds()
-	tasks, err := store.EnqueueOverseerWakeups(ctx, mustTime(t, at))
+	tasks, err := store.EnqueueOverseerWakeups(ctx, mustTime(t, at), 0)
 	if err != nil || len(tasks) != 1 || strings.Count(tasks[0].Body, "Escalated: ") != 1 || strings.Contains(tasks[0].Body, "\n- ") ||
 		!strings.Contains(tasks[0].Body, "\nEscalated: "+refusal) {
 		t.Fatalf("wake = %+v, %v", tasks, err)
@@ -578,7 +582,7 @@ func TestOverseerWakeSkipsPublishedIntakeSuccess(t *testing.T) {
 			t.Fatal(err)
 		}
 		head := hex.EncodeToString(moved.Bytes())
-		pr := ProductionPullRequest{Number: 7, Title: "Ship", URL: "https://github.com/example/factory/pull/7", Head: head, Branch: "factory/" + change.ID.String()[:12], Base: "main", State: map[bool]string{false: "open", true: "merged"}[mode == "reclaimed"], Review: ProductionReview{Head: head, State: "unknown"}}
+		pr := ProductionPullRequest{Number: 7, Title: "Ship", URL: "https://github.com/example/factory/pull/7", Head: head, Branch: "factory/" + change.ID.String()[:12], Base: "main", State: map[bool]string{false: "open", true: "merged"}[mode == "reclaimed"], MergedAt: "2026-10-14T19:14:54Z", Review: ProductionReview{Head: head, State: "unknown"}}
 		if mode != "empty" {
 			if err := store.RecordPublication(ctx, finalizing.ProjectID, finalizing.TaskID, "example/factory", pr, mustTime(t, 84)); err != nil {
 				t.Fatal(err)
@@ -608,7 +612,7 @@ func TestOverseerWakeSkipsPublishedIntakeSuccess(t *testing.T) {
 // nothing stalls into a card.
 func TestOverseerVerifiesMergedIntakeOnceLive(t *testing.T) {
 	t.Parallel()
-	for _, order := range []string{"release first", "merge first", "unshipped"} {
+	for _, order := range []string{"release first", "merge first", "unshipped", "before receipt cutover", "after receipt cutover"} {
 		ctx := context.Background()
 		succeeded, _ := NewSuccessProposal("done")
 		store, finalizing := finalizingReleasedRun(t, RoleWorker, succeeded)
@@ -652,7 +656,11 @@ func TestOverseerVerifiesMergedIntakeOnceLive(t *testing.T) {
 			settleCarrier(t, store, at+1, seed, "ran")
 		}
 		head := hex.EncodeToString(moved.Bytes())
-		pr := ProductionPullRequest{Number: 7, Title: "Ship", URL: "https://github.com/dark-factory-build/dark-factory/pull/7", Head: head, Branch: "factory/" + change.ID.String()[:12], Base: "main", State: "open", Review: ProductionReview{Head: head, State: "allow"}}
+		mergedAt := "2026-10-14T19:14:54Z"
+		if order == "before receipt cutover" {
+			mergedAt = "2026-10-14T19:14:52Z"
+		}
+		pr := ProductionPullRequest{Number: 7, Title: "Ship", URL: "https://github.com/dark-factory-build/dark-factory/pull/7", Head: head, Branch: "factory/" + change.ID.String()[:12], Base: "main", State: "open", MergedAt: mergedAt, Review: ProductionReview{Head: head, State: "allow"}}
 		if err := store.RecordPublication(ctx, finalizing.ProjectID, finalizing.TaskID, "dark-factory-build/dark-factory", pr, mustTime(t, 90)); err != nil {
 			t.Fatal(err)
 		}
@@ -677,6 +685,7 @@ func TestOverseerVerifiesMergedIntakeOnceLive(t *testing.T) {
 		settle := overseerWakeSettle.Milliseconds()
 		release('f', 500) // recorded before releases named what they ship
 		live := int64(5000)
+		wakeCutover := int64(0)
 		switch order {
 		case "release first":
 			// The release shipped it before refresh observed the merge.
@@ -697,8 +706,20 @@ func TestOverseerVerifiesMergedIntakeOnceLive(t *testing.T) {
 				t.Fatalf("a merge after the listing release woke before one shipped it = %q", bodies)
 			}
 			release('d', live, outstanding()...)
+		case "before receipt cutover":
+			merge(OverseerReceiptCutover - 1)
+			release('b', OverseerReceiptCutover+1, outstanding()...)
+			if bodies := wakeBodies(t, store, OverseerReceiptCutover+1+settle, OverseerReceiptCutover); len(bodies) != 0 {
+				t.Fatalf("pre-cutover merge woke = %q", bodies)
+			}
+			continue
+		case "after receipt cutover":
+			wakeCutover = OverseerReceiptCutover
+			live = OverseerReceiptCutover + 2
+			merge(live - 1)
+			release('b', live, outstanding()...)
 		}
-		bodies := wakeBodies(t, store, live+settle)
+		bodies := wakeBodies(t, store, live+settle, wakeCutover)
 		if len(bodies) != 1 || !strings.Contains(bodies[0], finalizing.TaskID.String()+` "verify" succeeded`) || !strings.Contains(bodies[0], "PR #7 merged/allow") {
 			t.Fatalf("%s: live merge wake = %q", order, bodies)
 		}
@@ -712,7 +733,7 @@ func TestOverseerVerifiesMergedIntakeOnceLive(t *testing.T) {
 		if requests, err := store.OperatorHumanRequests(ctx); err != nil || len(requests) != 0 {
 			t.Fatalf("a verified merge stalled into a card: %+v %v", requests, err)
 		}
-		if items, err := store.OverseerItems(ctx, finalizing.ProjectID, mustTime(t, 1<<40)); err != nil || len(items) != 0 {
+		if items, err := store.OverseerItems(ctx, finalizing.ProjectID, mustTime(t, 1<<40), 0); err != nil || len(items) != 0 {
 			t.Fatalf("a verified merge is still an item: %+v %v", items, err)
 		}
 	}
@@ -731,7 +752,7 @@ func TestOverseerRewakesCountPerItem(t *testing.T) {
 		seed := byte(10)
 		for index := range 5 {
 			if index == 0 {
-				tasks, err := store.EnqueueOverseerWakeups(ctx, mustTime(t, at))
+				tasks, err := store.EnqueueOverseerWakeups(ctx, mustTime(t, at), 0)
 				if err != nil || len(tasks) != 1 || !strings.Contains(tasks[0].Body, "Escalated: stuck 7") {
 					t.Fatalf("first wake = %+v, %v", tasks, err)
 				}
@@ -793,7 +814,7 @@ func TestOverseerNeverStartedWakeLeavesItemDue(t *testing.T) {
 			t.Fatal(err)
 		}
 		var wakes int
-		if err := read.connection.QueryRowContext(ctx, overseerItems+`SELECT wakes FROM counted WHERE item_key = '[reviewer:op7]' AND ?6 + ?7 + ?8 >= 0`, overseerItemArgs(agent, 2+overseerWakeSettle.Milliseconds(), nil)...).Scan(&wakes); err != nil {
+		if err := read.connection.QueryRowContext(ctx, overseerItems+`SELECT wakes FROM counted WHERE item_key = '[reviewer:op7]' AND ?6 + ?7 + ?8 >= 0`, overseerItemArgs(agent, 2+overseerWakeSettle.Milliseconds(), 0, nil)...).Scan(&wakes); err != nil {
 			t.Fatal(err)
 		}
 		read.Close()
@@ -954,7 +975,7 @@ func TestStalledCardRipensWithAQuietStore(t *testing.T) {
 	settleCarrier(t, store, at+1, next(), NeverStartedRunDetail)
 	settleCarrier(t, store, at+20, next(), NeverStartedRunDetail)
 	at += 40 + OverseerRewakeAfter.Milliseconds()
-	tasks, err := store.EnqueueOverseerWakeups(context.Background(), mustTime(t, at))
+	tasks, err := store.EnqueueOverseerWakeups(context.Background(), mustTime(t, at), 0)
 	if err != nil || len(tasks) != 1 {
 		t.Fatalf("started wake = %+v, %v", tasks, err)
 	}
@@ -1022,7 +1043,7 @@ func stalledCard(t *testing.T) (*Store, Agent, Task, OperatorHumanRequest, int64
 		t.Fatalf("never-started wake re-woke at once = %q", bodies)
 	}
 	at += rewake
-	tasks, err := store.EnqueueOverseerWakeups(context.Background(), mustTime(t, at))
+	tasks, err := store.EnqueueOverseerWakeups(context.Background(), mustTime(t, at), 0)
 	if err != nil || len(tasks) != 1 || !strings.Contains(tasks[0].Body, "Escalated: stuck 7") {
 		t.Fatalf("started wake = %+v, %v", tasks, err)
 	}
@@ -1057,11 +1078,11 @@ func TestOverseerHealthWake(t *testing.T) {
 	health := []OverseerHealth{{Key: "github-quota", Detail: "GitHub quota 12/5000", Since: mustTime(t, 1000)},
 		{Project: projectID(t, 9), Key: "intake:x", Detail: "another project's intake", Since: mustTime(t, 1000)}}
 	at, seed := 1000+overseerWakeSettle.Milliseconds(), byte(10)
-	if tasks, err := store.EnqueueOverseerWakeups(ctx, mustTime(t, at-1), health...); err != nil || len(tasks) != 0 {
+	if tasks, err := store.EnqueueOverseerWakeups(ctx, mustTime(t, at-1), 0, health...); err != nil || len(tasks) != 0 {
 		t.Fatalf("unsettled wake = %+v, %v", tasks, err)
 	}
 	for wake := 0; wake <= 3; wake++ {
-		tasks, err := store.EnqueueOverseerWakeups(ctx, mustTime(t, at), health...)
+		tasks, err := store.EnqueueOverseerWakeups(ctx, mustTime(t, at), 0, health...)
 		if err != nil || len(tasks) != 1 || !strings.Contains(tasks[0].Body, "\nHealth since 1970-01-01T00:00:01Z: GitHub quota 12/5000 [health:github-quota]") || strings.Contains(tasks[0].Body, "another project") {
 			t.Fatalf("wake %d = %+v, %v", wake, tasks, err)
 		}
@@ -1069,7 +1090,7 @@ func TestOverseerHealthWake(t *testing.T) {
 		settleCarrier(t, store, at+1, seed, "ran")
 		at += OverseerRewakeAfter.Milliseconds()
 	}
-	if tasks, err := store.EnqueueOverseerWakeups(ctx, mustTime(t, at), health...); err != nil || len(tasks) != 0 {
+	if tasks, err := store.EnqueueOverseerWakeups(ctx, mustTime(t, at), 0, health...); err != nil || len(tasks) != 0 {
 		t.Fatalf("stalled condition woke again = %+v, %v", tasks, err)
 	}
 	if requests, err := store.OperatorHumanRequests(ctx); err != nil || len(requests) != 1 || !strings.Contains(requests[0].QuestionText, "GitHub quota 12/5000 [health:github-quota]") {
@@ -1089,7 +1110,7 @@ func TestOverseerItemsShowStalledAndDue(t *testing.T) {
 	store, worker, last, _, at, _ := stalledCard(t)
 	head := strings.Repeat("a", 40)
 	escalate(t, store, worker.ProjectID, "30", "open", head, head, at)
-	items, err := store.OverseerItems(context.Background(), worker.ProjectID, mustTime(t, at+overseerWakeMaxDelay.Milliseconds()))
+	items, err := store.OverseerItems(context.Background(), worker.ProjectID, mustTime(t, at+overseerWakeMaxDelay.Milliseconds()), 0)
 	if err != nil || len(items) != 2 || !items[0].Due || items[0].Line != "Escalated: stuck 30 [reviewer:op30]" {
 		t.Fatalf("items = %+v, %v", items, err)
 	}

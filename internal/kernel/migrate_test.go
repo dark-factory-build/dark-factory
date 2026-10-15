@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"reflect"
+	"sort"
 	"strings"
 	"testing"
 )
@@ -204,7 +205,7 @@ func snapshotRows(t *testing.T, ctx context.Context, connection *sql.Conn) map[s
 		if object.kind != "table" {
 			continue
 		}
-		rows, err := connection.QueryContext(ctx, "SELECT * FROM "+name+" ORDER BY 1")
+		rows, err := connection.QueryContext(ctx, "SELECT * FROM "+name)
 		if err != nil {
 			t.Fatalf("read %s: %v", name, err)
 		}
@@ -227,6 +228,7 @@ func snapshotRows(t *testing.T, ctx context.Context, connection *sql.Conn) map[s
 		if err := errors.Join(rows.Err(), rows.Close()); err != nil {
 			t.Fatalf("read %s: %v", name, err)
 		}
+		sort.Strings(result[name])
 	}
 	return result
 }

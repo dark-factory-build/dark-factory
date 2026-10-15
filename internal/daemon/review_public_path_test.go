@@ -340,7 +340,7 @@ func TestReconciliationPersistsMergeGroupFailureForReport(t *testing.T) {
 	if _, err := fixture.store.UpdateAgent(context.Background(), overseer.ID, overseer.Revision, kernel.AgentPatch{IdlePolicy: &policy, IdleAfterSeconds: &after, IdleInstruction: &instruction, IdleWakeOn: &wakeOn}, mustKernelTime(t, 3002)); err != nil {
 		t.Fatal(err)
 	}
-	wakes, err := fixture.store.EnqueueOverseerWakeups(context.Background(), mustKernelTime(t, 3003))
+	wakes, err := fixture.store.EnqueueOverseerWakeups(context.Background(), mustKernelTime(t, 3003), 0)
 	if err != nil || len(wakes) != 1 {
 		t.Fatalf("reconciled merge-group wake = %+v, %v", wakes, err)
 	}
@@ -994,7 +994,7 @@ func TestRefusedEnqueueBecomesAnOverseerItem(t *testing.T) {
 	if _, err := fixture.store.UpdateAgent(ctx, overseer.ID, overseer.Revision, kernel.AgentPatch{IdlePolicy: &policy, IdleAfterSeconds: &after, IdleInstruction: &instruction}, mustKernelTime(t, 1002)); err != nil {
 		t.Fatal(err)
 	}
-	wakes, err := fixture.store.EnqueueOverseerWakeups(ctx, mustKernelTime(t, fixture.daemon.now().Add(time.Minute).UnixMilli()))
+	wakes, err := fixture.store.EnqueueOverseerWakeups(ctx, mustKernelTime(t, fixture.daemon.now().Add(time.Minute).UnixMilli()), 0)
 	if err != nil || len(wakes) != 1 || !strings.Contains(wakes[0].Body, "Escalated: factoryd cannot advance team/repo#12") {
 		t.Fatalf("escalation wake = %+v, %v", wakes, err)
 	}
