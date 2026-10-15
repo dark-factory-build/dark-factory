@@ -763,7 +763,7 @@ func Build(request Request) (Launch, error) {
 				"-c", "otel.log_user_prompt=false")
 		}
 		if request.role == kernel.RoleOrchestrator && request.runtime.customerMaintainer {
-			argv = append(argv, "-c", "mcp_servers.dark_factory_maintainer={command="+tomlBasicString(request.runtime.factoryctl)+`,args=["attempt","maintainer-mcp"],env_vars=["DARK_FACTORY_SOCKET","DARK_FACTORY_ATTEMPT_TOKEN_FILE"],enabled=true,required=true,default_tools_approval_mode="approve"}`)
+			argv = append(argv, "-c", "mcp_servers.dark_factory_maintainer={command="+tomlBasicString(request.runtime.factoryctl)+`,args=["attempt","maintainer-mcp"],env_vars=["DARK_FACTORY_SOCKET","DARK_FACTORY_ATTEMPT_TOKEN_FILE"],enabled=true,required=false,default_tools_approval_mode="approve"}`)
 		}
 		argv = append(argv, bootstrapPromptFor(request, codexAttemptServerName(request.runtime), resume))
 		return Launch{

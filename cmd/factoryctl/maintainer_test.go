@@ -37,3 +37,29 @@ func TestInstalledMaintainerBridgeUsesExactAttempt(t *testing.T) {
 		t.Fatalf("bridge response=%s", output.String())
 	}
 }
+
+func TestInstalledMaintainerBridgeReportsUnavailable(t *testing.T) {
+	fixture := newAPIFixture(t)
+	defer fixture.close(t)
+	t.Setenv("DARK_FACTORY_ATTEMPT_TOKEN_FILE", fixture.attemptPath)
+	request := `{"jsonrpc":"2.0","id":8,"method":"initialize","params":{}}`
+	done := serveOne(fixture.listener, func(call api.Call) api.Reply {
+		return api.NewContentReply(api.MaintainerResult{State: "unavailable"})
+	})
+	var output bytes.Buffer
+	if runMaintainerMCP(context.Background(), strings.NewReader(request+"\n"), &output, func(string) string { return fixture.socket }) != 0 {
+		t.Fatal("bridge failed")
+	}
+	awaitServer(t, done)
+	var response struct {
+		Error struct {
+			Message string `json:"message"`
+		} `json:"error"`
+	}
+	if err := json.Unmarshal(bytes.TrimSpace(output.Bytes()), &response); err != nil {
+		t.Fatal(err)
+	}
+	if response.Error.Message != "Maintainer unavailable; observe any ambiguous operation before retrying" {
+		t.Fatalf("unavailable response = %q", response.Error.Message)
+	}
+}
