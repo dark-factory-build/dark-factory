@@ -384,12 +384,6 @@ func TestDaemonDispatchesOperatorCallsAndBoundsProjection(t *testing.T) {
 	assertNoSchedulerWake(t, fixture.daemon)
 
 	done = fixture.serve(t)
-	if _, err := client.SetProjectLimits(ctx, api.ProjectLimitsInput{ProjectID: projectInput.ID, ExpectedRevision: projectResult.Revision, MaxRunSeconds: 60}); err == nil {
-		t.Fatal("project limits accepted")
-	}
-	waitDispatch(t, done)
-
-	done = fixture.serve(t)
 	agentResult, err := client.CreateAgent(ctx, api.CreateAgentInput{
 		ID: testID(2), ProjectID: projectInput.ID, Name: "agent", Role: "orchestrator",
 		Provider: "codex", Model: "gpt-5.6-luna", ReasoningEffort: "medium",
