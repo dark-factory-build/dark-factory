@@ -27,6 +27,7 @@ const (
 	v42UserVersion = 42
 	v43UserVersion = 43
 	v44UserVersion = 44
+	v45UserVersion = 45
 )
 
 var browserSecurityEventStatements = []string{
@@ -70,7 +71,7 @@ var v40Continuations = []string{
 
 func legacySchemaStatements(version int) []string {
 	statements := slices.DeleteFunc(slices.Clone(schemaStatements), func(statement string) bool {
-		return statement == archivedTasksTable && version < v44UserVersion || statement == archiveBatchesTable && version < v42UserVersion
+		return statement == providerAdoptionsTable && version < userVersion || statement == archivedTasksTable && version < v44UserVersion || statement == archiveBatchesTable && version < v42UserVersion
 	})
 	restoreProjectCeilings := func() {
 		for index, statement := range statements {
@@ -82,7 +83,7 @@ func legacySchemaStatements(version int) []string {
 			}
 		}
 	}
-	if version == v44UserVersion {
+	if version == v45UserVersion || version == v44UserVersion {
 		restoreProjectCeilings()
 		return statements
 	}
@@ -169,7 +170,7 @@ func (store *Store) migrateLegacy(ctx context.Context, path string, recheck func
 	switch version {
 	case userVersion:
 		return connection.Close()
-	case v37UserVersion, v38UserVersion, v39UserVersion, v40UserVersion, v41UserVersion, v42UserVersion, v43UserVersion, v44UserVersion:
+	case v37UserVersion, v38UserVersion, v39UserVersion, v40UserVersion, v41UserVersion, v42UserVersion, v43UserVersion, v44UserVersion, v45UserVersion:
 	default:
 		cause := ErrForeignDatabase
 		if appID == applicationID && version > userVersion {
@@ -246,6 +247,9 @@ func migrateFrom(ctx context.Context, connection *sql.Conn, version int) error {
 		}
 	}
 	statements := []string{fmt.Sprintf("PRAGMA user_version = %d", userVersion)}
+	if version < userVersion {
+		statements = append([]string{providerAdoptionsTable}, statements...)
+	}
 	if version < v44UserVersion {
 		statements = append([]string{archivedTasksTable}, statements...)
 	}

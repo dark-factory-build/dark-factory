@@ -9,7 +9,7 @@ import (
 
 const (
 	applicationID = 0x4446474f
-	userVersion   = 45
+	userVersion   = 46
 
 	// SQLite reserves the exact lower-case "sqlite_" prefix. Use a literal,
 	// binary prefix test: LIKE would treat '_' as a wildcard and hide names
@@ -84,6 +84,7 @@ var schemaStatements = []string{
     priority INTEGER NOT NULL CHECK (priority BETWEEN -1000000 AND 1000000),
     PRIMARY KEY (source_id, label)
 ) STRICT, WITHOUT ROWID`,
+	providerAdoptionsTable,
 
 	// This slice deliberately creates only the kernel authority tables.
 	// Final-v1 agent-message, verification-effect, removal, and checkpoint state
@@ -607,6 +608,25 @@ var schemaStatements = []string{
 	archiveBatchesTable,
 	archivedTasksTable,
 }
+
+// providerAdoptionsTable is deliberately one row per native provider. The
+// active commitment is what launches use; a discovered candidate is retained
+// separately until its confined self-check has completed. Empty candidate
+// state is also durable, so a failed check cannot turn into an implicit retry
+// on the next daemon restart.
+const providerAdoptionsTable = `CREATE TABLE provider_adoptions (
+    provider TEXT PRIMARY KEY CHECK (provider IN ('claude_code', 'codex')),
+    active_path TEXT NOT NULL CHECK (length(CAST(active_path AS BLOB)) BETWEEN 1 AND 4096 AND substr(active_path, 1, 1) = '/'),
+    active_commitment BLOB NOT NULL CHECK (length(active_commitment) = 32),
+    candidate_path TEXT NOT NULL DEFAULT '' CHECK (candidate_path = '' OR length(CAST(candidate_path AS BLOB)) BETWEEN 1 AND 4096 AND substr(candidate_path, 1, 1) = '/'),
+    candidate_commitment BLOB NOT NULL DEFAULT (zeroblob(0)) CHECK (length(candidate_commitment) IN (0, 32)),
+    candidate_state TEXT NOT NULL DEFAULT 'none' CHECK (candidate_state IN ('none', 'pending', 'failed')),
+    diagnostic TEXT NOT NULL DEFAULT '' CHECK (length(CAST(diagnostic AS BLOB)) <= 4096),
+    revision INTEGER NOT NULL CHECK (revision >= 1),
+    updated_at_ms INTEGER NOT NULL CHECK (updated_at_ms >= 0),
+    CHECK ((candidate_state = 'none' AND candidate_path = '' AND length(candidate_commitment) = 0 AND diagnostic = '') OR
+           (candidate_state IN ('pending', 'failed') AND candidate_path <> '' AND length(candidate_commitment) = 32))
+) STRICT, WITHOUT ROWID`
 
 // archivedTasksTable is v44's hot index of the task trees ArchiveHistory moved
 // out, by generation: intake reads it so an archived intake task is never

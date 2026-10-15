@@ -234,6 +234,13 @@ func (commitment ExecutableCommitment) Verify() error {
 	return nil
 }
 
+// Digest is the stable, non-secret identity of the committed executable. It
+// lets a supervisor persist an adoption decision without persisting a live
+// descriptor or treating a pathname as authority.
+func (commitment ExecutableCommitment) Digest() [sha256.Size]byte {
+	return sha256.Sum256([]byte(fmt.Sprintf("%s\x00%d\x00%d\x00%d\x00%d\x00%d", commitment.executable.Path, commitment.executable.Device, commitment.executable.Inode, commitment.executable.UID, commitment.executable.GID, commitment.executable.Mode)))
+}
+
 func commitExecutable(path string) (fileCommitment, error) {
 	path, err := canonical(path)
 	if err != nil {
