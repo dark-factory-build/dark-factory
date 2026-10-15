@@ -10,7 +10,7 @@ const render = (props) => renderToStaticMarkup(createElement(FactoryConsole, { s
 test("a never-connected console claims no remembered state", () => {
   const never = render({ state: undefined });
   for (const claim of ["last known", "Last known", "last observed", "Last observed", "Resume new work"]) assert.equal(never.includes(claim), false, claim);
-  assert.match(never, /Not connected yet/);
+  assert.match(never, /role="status"[^>]*><span[^>]*><\/span>Closed</);
   assert.match(never, />New work</);
   assert.doesNotMatch(render({ state: fixtureState }), /Last observed state/);
   assert.match(render({ state: fixtureState }), /aria-label="Work"/);

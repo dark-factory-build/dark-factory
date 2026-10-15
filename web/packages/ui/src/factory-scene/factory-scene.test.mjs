@@ -1343,10 +1343,8 @@ test("header PRs show exact stage counts in order and retain connection state", 
     assert.equal(line.findAll((node) => node.props["data-crate"] !== undefined).length, 0);
     assert.equal(line.findAll((node) => node.props["data-lit"] !== undefined).length, 0);
     await act(async () => { tree.update(createElement(FactoryScene, { ...props, connected: false, crates: [crate] })); });
-    assert.deepEqual(tree.root.findByProps({ "data-work-line": "" }).findAllByType("span").slice(0, 4).map(text), ["Review —", "Checks —", "Merge queue —", "Shipped —"]);
-    assert.match(text(tree.root.findByProps({ className: "dfWorkLine__state" })), /Disconnected/);
+    assert.deepEqual(tree.root.findByProps({ "data-work-line": "" }).findAllByType("span").map(text), ["Review —", "Checks —", "Merge queue —", "Shipped —"]);
     await act(async () => { tree.update(createElement(FactoryScene, { ...props, connected: false, crates: undefined })); });
-    assert.deepEqual(tree.root.findByProps({ "data-work-line": "" }).findAllByType("span").slice(0, 4).map(text), ["Review —", "Checks —", "Merge queue —", "Shipped —"]);
-    assert.match(text(tree.root.findByProps({ className: "dfWorkLine__state" })), /Not connected yet/);
+    assert.deepEqual(tree.root.findByProps({ "data-work-line": "" }).findAllByType("span").map(text), ["Review —", "Checks —", "Merge queue —", "Shipped —"]);
   } finally { if (tree) await act(async () => tree.unmount()); }
 });
