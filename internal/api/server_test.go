@@ -1006,6 +1006,83 @@ func TestServerRechecksOperatorTokenAndKeepsPublicValuesPrivate(t *testing.T) {
 	os.Exit(0)
 }
 
+// A retiring generation (a shutdown, or a trial that serves nothing) may keep
+// a launchd-owned socket bound, so its inode cannot mark the restart. Once
+// retired, the authority marks the socket before it drops any connection, so
+// an attempt read and outcome dropped unanswered replay on the next answer.
+func TestRetiredListenerDropsAttemptCallsTheClientReplays(t *testing.T) {
+	listener, socketPath := newAPITestListener(t, testCredential('O'))
+	token := filepath.Join(privateTestDirectory(t), "token")
+	writeTestToken(t, token, testCredential('R'))
+	t.Setenv(attemptTokenFileEnv, token)
+	client, err := NewAttemptClientFromEnvironment(socketPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	listener.Retire()
+	for name, call := range map[string]func() error{
+		"read":    func() error { _, err := client.Task(t.Context()); return err },
+		"outcome": func() error { _, err := client.Succeed(t.Context(), "replayed"); return err },
+	} {
+		done := make(chan error, 1)
+		go func() {
+			if dropped := <-startServerReceive(t, listener, nil); dropped.err != nil {
+				done <- dropped.err
+				return
+			}
+			done <- (<-startServerReceive(t, listener, replyForCall)).err
+		}()
+		if err := call(); err != nil {
+			t.Fatalf("%s dropped by a retired generation = %v", name, err)
+		}
+		if err := <-done; err != nil {
+			t.Fatal(err)
+		}
+	}
+}
+
+// A generation that retires while a request is still being written cuts
+// the client's send, not its read: an outcome far larger than the socket
+// buffers is accepted, partly read, then dropped by the retiring authority,
+// and the client replays it on the next answer instead of failing as
+// transport.
+func TestRetiringListenerCutsAnAttemptWriteTheClientReplays(t *testing.T) {
+	listener, socketPath := newAPITestListener(t, testCredential('O'))
+	token := filepath.Join(privateTestDirectory(t), "token")
+	writeTestToken(t, token, testCredential('W'))
+	t.Setenv(attemptTokenFileEnv, token)
+	client, err := NewAttemptClientFromEnvironment(socketPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	done := make(chan error, 1)
+	go func() {
+		connection, err := listener.Accept()
+		if err != nil {
+			done <- err
+			return
+		}
+		// The header and the start of the body prove the write is underway;
+		// the rest cannot fit in the socket buffers until this side reads.
+		if _, err := io.ReadFull(connection.connection, make([]byte, 4096)); err != nil {
+			done <- errors.Join(err, connection.Close())
+			return
+		}
+		listener.Retire()
+		if err := connection.Close(); err != nil {
+			done <- err
+			return
+		}
+		done <- (<-startServerReceive(t, listener, replyForCall)).err
+	}()
+	if _, err := client.Succeed(t.Context(), strings.Repeat("r", 131072)); err != nil {
+		t.Fatalf("outcome cut off mid-write by a retiring generation = %v", err)
+	}
+	if err := <-done; err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestListenerClaimsAuthorityExactlyOnce(t *testing.T) {
 	listener, _ := newAPITestListener(t, testCredential('Q'))
 	if second, err := Listen(listener.authority); second != nil || !errors.Is(err, ErrInvalidListener) {

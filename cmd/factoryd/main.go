@@ -72,6 +72,7 @@ var (
 	selfSource         = func() string { return buildinfo.Current().Source() }
 	promoteService     = install.PromoteService
 	releaseSettledHook = func(string, string) {}
+	activatedLocalAPI  = install.ActivatedLocalAPI
 
 	cleanStartupCancellation = errors.New("factoryd: clean startup cancellation")
 	startupPhaseHook         func(string)
@@ -119,6 +120,7 @@ type process struct {
 	daemon        *daemon.Daemon
 	apiAuthority  *install.LocalAPIAuthority
 	listener      *api.Listener
+	served        time.Time // when the local API socket was bound
 	browser       *daemon.BrowserRuntime
 	relay         *daemon.RelayRuntime
 	// supervisorSpec is derived and committed at boot; the scheduler
@@ -342,11 +344,14 @@ func serve(ctx context.Context, configuration config) error {
 			return errors.New("invalid factoryd configuration")
 		}
 	}
-	// launchd owns an installed job's console address. Started without that
-	// socket (an install from before Sockets, or an interrupted reload), this
-	// process never binds the paired origin itself: it has launchd reload the
-	// job with the socket, before anything else, and waits to be booted out.
-	if browserSocket == nil && os.Getenv(trialEnv) == "" && install.ServiceHoldsBrowser(configuration.home) {
+	// Claim launchd's socket, close-on-exec, before boot starts any child.
+	install.ActivatedLocalAPI()
+	// launchd owns an installed job's console address and local API socket.
+	// Started without either (an install from before them, or an interrupted
+	// reload), this process never binds them itself: it has launchd reload
+	// the job with its sockets, before anything else, and waits to be booted
+	// out.
+	if (browserSocket == nil || install.ActivatedLocalAPI() == nil) && os.Getenv(trialEnv) == "" && install.ServiceHoldsBrowser(configuration.home) {
 		if os.Getppid() != 1 {
 			return errors.New("factoryd: the installed service's launchd job holds the console address; use factoryctl service start")
 		}
@@ -442,8 +447,12 @@ func superviseTrial(home string, args []string, marker install.UpgradeMarker) er
 	child := exec.CommandContext(ctx, filepath.Join(install.ServiceDirectoryPath(home), "bin", "previous", "factoryd"), args...)
 	child.Env = append(os.Environ(), trialEnv+"=1")
 	child.Stderr = recoveryLog
-	if browserSocket != nil {
-		child.ExtraFiles = []*os.File{browserSocket}
+	// The trial serves the sockets launchd handed this build, the console at
+	// fd 3 and the local API at fd 4, so they and the local API's queued
+	// connections outlive the handover.
+	child.ExtraFiles = []*os.File{browserSocket, activatedLocalAPI()}
+	if child.ExtraFiles[1] != nil {
+		child.Env = append(child.Env, install.LocalAPIInheritEnv+"=4")
 	}
 	// Its own process group, recorded in the marker: launchd does not end a
 	// child whose supervisor died, so the next boot does.
@@ -511,7 +520,7 @@ func (owner *process) settleRelease(ctx context.Context, home, target, state, re
 		daemon.LogFactoryd(recoveryLog, "factoryd: forgetting release %s failed: %v\n", target, errors.Join(err, readErr))
 		return
 	}
-	if err = errors.Join(err, owner.daemon.FinishRelease(ctx, target, state, reason)); err != nil {
+	if err = errors.Join(err, owner.daemon.FinishRelease(ctx, target, state, reason, owner.served)); err != nil {
 		daemon.LogFactoryd(recoveryLog, "factoryd: recording release %s %s failed: %v\n", target, state, err)
 	} else {
 		releaseSettledHook(target, state)
@@ -647,6 +656,9 @@ func openProcess(ctx context.Context, configuration config) (_ *process, resultE
 		if err := owner.browser.Close(); err != nil {
 			return nil, err
 		}
+		// It refuses every call but web_status by dropping it, which a client
+		// replays on the build that serves next.
+		owner.listener.Retire()
 		owner.apiStart = true
 		go owner.accept(ownedContext, owner.listener)
 		startupPhase("trial")
@@ -663,7 +675,7 @@ func openProcess(ctx context.Context, configuration config) (_ *process, resultE
 		}
 		startupPhase("relay")
 	}
-	owner.apiStart = true
+	owner.apiStart, owner.served = true, time.Now()
 	go owner.accept(ownedContext, owner.listener)
 	owner.cleanupRuns = make(map[kernel.RunID]struct{})
 	owner.supervisorSpec.UnsettledCompletion = func(id kernel.RunID, err error) {
@@ -811,6 +823,18 @@ func (owner *process) close() error {
 }
 
 func (owner *process) shutdown() error {
+	// A staged release's outage starts as this generation stops serving; a
+	// trial acts on nothing.
+	if owner.listener != nil && owner.daemon != nil && os.Getenv(trialEnv) == "" {
+		stamp, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		if err := owner.daemon.WithdrawRelease(stamp, time.Now()); err != nil {
+			daemon.LogFactoryd(recoveryLog, "factoryd: recording the release socket withdrawal: %v\n", err)
+		}
+		cancel()
+		startupPhase("withdrawn")
+	}
+	// Before cancelling any request: a reply dropped from here on replays.
+	owner.listener.Retire()
 	if owner.cancel != nil {
 		owner.cancel()
 	}

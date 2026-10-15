@@ -7,6 +7,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"errors"
+	"io"
 	"net"
 	"os"
 	"path/filepath"
@@ -1767,5 +1768,162 @@ func TestLocalAPICloseDuringAcceptPollIsCertain(t *testing.T) {
 	}
 	if err := home.Close(); err != nil {
 		t.Fatal(err)
+	}
+}
+
+// Outside launchd there is no activated socket, so factoryd binds its own:
+// first install, an older plist, and every test that does not stand in for
+// launchd.
+func TestLaunchActivateSocketOutsideLaunchdReportsNoJob(t *testing.T) {
+	if os.Getenv("XPC_SERVICE_NAME") != "" && os.Getenv("XPC_SERVICE_NAME") != "0" {
+		t.Skip("running as a launchd job")
+	}
+	if fds, err := LaunchActivateSocket(LocalAPISocketKey); len(fds) != 0 || !errors.Is(err, unix.ESRCH) && !errors.Is(err, unix.ENOENT) {
+		t.Fatalf("launch_activate_socket = %v, %v", fds, err)
+	}
+}
+
+// activatedSocket stands in for launchd: it binds the canonical socket 0600
+// and keeps only its descriptor, which outlives every generation.
+func activatedSocket(t *testing.T, path string) *os.File {
+	t.Helper()
+	listener, err := net.ListenUnix("unix", &net.UnixAddr{Name: path, Net: "unix"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	listener.SetUnlinkOnClose(false)
+	if err := os.Chmod(path, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	file, err := listener.File()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := listener.Close(); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = file.Close(); _ = os.Remove(path) })
+	original := activatedLocalAPI
+	activatedLocalAPI = func() (*os.File, error) { return file, nil }
+	t.Cleanup(func() { activatedLocalAPI = original })
+	return file
+}
+
+// A launchd-owned socket stays at the canonical path through a handover: a
+// client that connects while no generation serves (a slow store open or
+// recovery sweep) queues in the backlog, the retiring generation leaves the
+// exact socket in place, and the next generation accepts the queued request.
+func TestLocalAPIAuthorityServesActivatedSocketAcrossGenerations(t *testing.T) {
+	parent := installTempDir(t)
+	homePath := filepath.Join(parent, "home")
+	if _, err := Init(context.Background(), homePath); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(homePath, tokenName), bytes.Repeat([]byte{'A'}, localAPITokenBytes), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	socketPath := LocalAPISocketPath(homePath)
+	activatedSocket(t, socketPath)
+	before, err := os.Lstat(socketPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	generation := func() (*OperationalHome, *LocalAPIProtocol) {
+		home, err := OpenOperationalHome(context.Background(), homePath)
+		if err != nil {
+			t.Fatal(err)
+		}
+		authority, err := home.OpenLocalAPI(context.Background())
+		if err != nil {
+			_ = home.Close()
+			t.Fatal(err)
+		}
+		protocol, err := authority.ClaimProtocol()
+		if err != nil || !protocol.CheckOperator(bytes.Repeat([]byte{'A'}, localAPITokenBytes)) {
+			_ = home.Close()
+			t.Fatalf("activated protocol = %v", err)
+		}
+		return home, protocol
+	}
+	retiring, retiringProtocol := generation()
+	inFlight, err := net.DialUnix("unix", nil, &net.UnixAddr{Name: socketPath, Net: "unix"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer inFlight.Close()
+	accepted, err := retiringProtocol.Accept()
+	if err != nil {
+		t.Fatal(err)
+	}
+	closed := make(chan error, 1)
+	go func() { closed <- retiring.Close() }()
+	// The retiring generation dropped the in-flight connection only after it
+	// marked the socket, so the client that saw the drop sees the mark.
+	if err := inFlight.SetReadDeadline(time.Now().Add(time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := inFlight.Read(make([]byte, 1)); !errors.Is(err, io.EOF) {
+		t.Fatalf("in-flight connection after retirement = %v", err)
+	}
+	marked, err := os.Lstat(socketPath)
+	if err != nil || marked.ModTime().Equal(before.ModTime()) {
+		t.Fatalf("a dropped connection saw an unmarked socket: %v, %v", marked, err)
+	}
+	if err := accepted.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := <-closed; err != nil {
+		t.Fatal(err)
+	}
+	after, err := os.Lstat(socketPath)
+	if err != nil || !os.SameFile(before, after) || after.Mode().Perm() != 0o600 {
+		t.Fatalf("retiring generation changed the activated socket: %v, %v", after, err)
+	}
+	client, err := net.DialUnix("unix", nil, &net.UnixAddr{Name: socketPath, Net: "unix"})
+	if err != nil {
+		t.Fatalf("canonical socket refused a client between generations: %v", err)
+	}
+	defer client.Close()
+	if _, err := client.Write([]byte("queued")); err != nil {
+		t.Fatal(err)
+	}
+	successor, protocol := generation()
+	defer successor.Close()
+	connection, err := protocol.Accept()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer connection.Close()
+	request := make([]byte, len("queued"))
+	if err := connection.SetDeadline(time.Now().Add(time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := io.ReadFull(connection, request); err != nil || string(request) != "queued" {
+		t.Fatalf("successor read %q, %v", request, err)
+	}
+}
+
+// An activated socket bound anywhere but the canonical path is refused, and
+// refusing it never unlinks what is there.
+func TestLocalAPIAuthorityRefusesForeignActivatedSocket(t *testing.T) {
+	parent := installTempDir(t)
+	homePath := filepath.Join(parent, "home")
+	if _, err := Init(context.Background(), homePath); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(homePath, tokenName), bytes.Repeat([]byte{'A'}, localAPITokenBytes), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	activatedSocket(t, filepath.Join(parent, "elsewhere.sock"))
+	home, err := OpenOperationalHome(context.Background(), homePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer home.Close()
+	if authority, err := home.OpenLocalAPI(context.Background()); authority != nil || !errors.Is(err, ErrInvalidHome) {
+		t.Fatalf("foreign activated socket = %v, %v", authority, err)
+	}
+	if _, err := os.Lstat(filepath.Join(parent, "elsewhere.sock")); err != nil {
+		t.Fatalf("refusal removed the activated socket: %v", err)
 	}
 }

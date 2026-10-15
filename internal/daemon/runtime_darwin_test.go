@@ -170,10 +170,30 @@ func TestRuntimeRejectsExistingAndUnsafeAuthoritiesWithoutMutation(t *testing.T)
 	}
 }
 
+// launchd binds the local API socket before factoryd's first boot creates
+// the lock, so that one name never makes the parent populated.
+func TestRuntimeParentMissingLockAcceptsOnlyTheLocalAPISocket(t *testing.T) {
+	home, _, capability, parentPath := newOperationalRuntimeCapability(t)
+	defer home.Close()
+	if err := os.WriteFile(filepath.Join(parentPath, install.LocalAPISocketName), nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	parent, err := OpenRuntimeParent(context.Background(), capability, parentPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := parent.Close(); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestRuntimeParentMissingLockRejectsPopulatedParentUnchanged(t *testing.T) {
 	home, _, capability, parentPath := newOperationalRuntimeCapability(t)
 	defer home.Close()
-	sentinel := filepath.Join(parentPath, install.LocalAPISocketName)
+	if err := os.WriteFile(filepath.Join(parentPath, install.LocalAPISocketName), nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	sentinel := filepath.Join(parentPath, "foreign")
 	contents := []byte("foreign")
 	if err := os.WriteFile(sentinel, contents, 0o600); err != nil {
 		t.Fatal(err)

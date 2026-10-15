@@ -127,6 +127,29 @@ func (store *Store) Report(ctx context.Context, project *ProjectID, since, bucke
 		lines = append(lines, fmt.Sprintf("failure %s x%d last=%s %s: repository=%s run=%s %s", age, entry.count, time.UnixMilli(entry.last).UTC().Format("2006-01-02T15:04Z"), entry.signature, entry.repository, entry.url, entry.example))
 	}
 	lines = append(lines, fmt.Sprintf("lessons=%d reads=%d citations=%d stale=%d", lessons, reads, citations, stale))
+	// Each release restart a generation served after: its local API outage
+	// runs from the staging generation's socket withdrawal to that bind, and is
+	// unknown when the staging generation recorded no withdrawal.
+	rows, err = read.connection.QueryContext(ctx, `SELECT identity, json_extract(document, '$.state'), json_extract(document, '$.served_at'), COALESCE(json_extract(document, '$.withdrawn_at'), 0)
+		FROM `+archived.table("production_records")+` WHERE (?1 IS NULL OR project_id = ?1) AND kind = 'delivery' AND identity LIKE 'release:%' AND json_extract(document, '$.served_at') >= ?2 ORDER BY 3`, scope, since)
+	if err != nil {
+		return nil, err
+	}
+	for rows.Next() {
+		var release, state string
+		var served, withdrawn int64
+		if err := rows.Scan(&release, &state, &served, &withdrawn); err != nil {
+			return nil, errors.Join(err, rows.Close())
+		}
+		outage := "unknown"
+		if withdrawn > 0 && served >= withdrawn {
+			outage = (time.Duration(served-withdrawn) * time.Millisecond).String()
+		}
+		lines = append(lines, fmt.Sprintf("restart %s %s served=%s outage=%s", release[:min(len(release), 20)], state, time.UnixMilli(served).UTC().Format("2006-01-02T15:04Z"), outage))
+	}
+	if err := errors.Join(rows.Err(), rows.Close()); err != nil {
+		return nil, err
+	}
 	lines = append(lines, "factoryd since="+store.opened.UTC().Format("2006-01-02T15:04Z"), fmt.Sprintf("wal_bytes=%d", walBytes))
 	return lines, nil
 }

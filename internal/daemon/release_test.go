@@ -212,11 +212,21 @@ func TestReleaseBuildsDrainsBacksUpAndSwapsThenRestarts(t *testing.T) {
 	if delivery.State != "running" || !fixture.daemon.releaseHold.Load() {
 		t.Fatalf("restarting release = %+v, hold %t", delivery, fixture.daemon.releaseHold.Load())
 	}
-	// The restarted build records the outcome.
-	if err := fixture.daemon.FinishRelease(context.Background(), sha, "verified", ""); err != nil {
+	// The staging build stamps its socket withdrawal; the restarted build
+	// records the outcome and its bind, which bound the restart's outage.
+	withdrawn := time.Now()
+	if err := fixture.daemon.WithdrawRelease(context.Background(), withdrawn); err != nil {
 		t.Fatal(err)
 	}
-	if delivery, err = fixture.daemon.Release(context.Background(), sha, false); err != nil || delivery.State != "verified" || delivery.VerifiedAt == 0 || delivery.Phase != "" {
+	if err := fixture.daemon.FinishRelease(context.Background(), sha, "verified", "", withdrawn.Add(1500*time.Millisecond)); err != nil {
+		t.Fatal(err)
+	}
+	// A settled release is no longer staged, so a later shutdown stamps nothing.
+	if err := fixture.daemon.WithdrawRelease(context.Background(), withdrawn.Add(time.Hour)); err != nil {
+		t.Fatal(err)
+	}
+	if delivery, err = fixture.daemon.Release(context.Background(), sha, false); err != nil || delivery.State != "verified" || delivery.VerifiedAt == 0 || delivery.Phase != "" ||
+		delivery.WithdrawnAt != withdrawn.UnixMilli() || delivery.ServedAt-delivery.WithdrawnAt != 1500 {
 		t.Fatalf("verified release = %+v, %v", delivery, err)
 	}
 }
@@ -322,7 +332,7 @@ func TestReleaseComparesWithTheLiveWorkerNotTheRunningBuild(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := fixture.daemon.FinishRelease(ctx, failed, "failed", "trial"); err != nil {
+	if err := fixture.daemon.FinishRelease(ctx, failed, "failed", "trial", time.Now()); err != nil {
 		t.Fatal(err)
 	}
 	if delivery, err := fixture.daemon.Release(ctx, failed, false); err != nil || delivery.State != "failed" || delivery.Phase != "trial" {
@@ -497,7 +507,7 @@ func TestTickReleasesEachNewBaseTipOnce(t *testing.T) {
 	<-events
 	<-events
 	awaitRelease(t, fixture.daemon, moved, func(value kernel.ProductionDelivery) bool { return value.Phase == "trial" })
-	if err := fixture.daemon.FinishRelease(context.Background(), moved, "verified", ""); err != nil {
+	if err := fixture.daemon.FinishRelease(context.Background(), moved, "verified", "", time.Now()); err != nil {
 		t.Fatal(err)
 	}
 	fixture.daemon.releaseHold.Store(false)
@@ -655,7 +665,7 @@ func TestTrialInterruptedBeforePromotionIsRetriedOnceByTheLane(t *testing.T) {
 		}
 		t.Cleanup(func() { _ = next.Close() })
 		next.ConfigureHost(fixture.daemon.home, "/usr/bin:/bin", "", "")
-		if err := next.FinishRelease(ctx, sha, "failed", ""); err != nil {
+		if err := next.FinishRelease(ctx, sha, "failed", "", time.Now()); err != nil {
 			t.Fatal(err)
 		}
 		return next

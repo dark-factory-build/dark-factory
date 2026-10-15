@@ -166,6 +166,40 @@ func TestReportIncludesFailedMergeGroupCheck(t *testing.T) {
 	}
 }
 
+// Every release restart a generation served after reports its local API
+// outage; one whose staging generation recorded no withdrawal (an older build,
+// or one that died) reports unknown, and one not yet served is not listed.
+func TestReportNamesEachReleaseRestartOutage(t *testing.T) {
+	t.Parallel()
+	store, _, project, _ := newAdmissionStore(t, RoleOrchestrator, 1)
+	defer store.Close()
+	for _, release := range []ProductionDelivery{
+		{Revision: strings.Repeat("a", 40), State: "verified", WithdrawnAt: 1_000, ServedAt: 2_000},
+		{Revision: strings.Repeat("b", 40), State: "verified", WithdrawnAt: 10_000, ServedAt: 22_500},
+		{Revision: strings.Repeat("c", 40), State: "failed", Phase: "trial", Reason: "trial", ServedAt: 40_000},
+		{Revision: strings.Repeat("d", 40), State: "running", Phase: "trial", WithdrawnAt: 50_000},
+	} {
+		release.ID, release.Kind, release.Destination, release.PullRequests = "release:"+release.Revision, "runtime", "factoryd", []uint64{}
+		if err := store.RecordDelivery(context.Background(), project.ID, "example/factory", release, mustTime(t, max(release.ServedAt, release.WithdrawnAt))); err != nil {
+			t.Fatal(err)
+		}
+	}
+	lines, err := store.Report(context.Background(), &project.ID, 5_000, 1)
+	var restarts []string
+	for _, line := range lines {
+		if strings.HasPrefix(line, "restart ") {
+			restarts = append(restarts, line)
+		}
+	}
+	want := []string{
+		"restart release:bbbbbbbbbbbb verified served=1970-01-01T00:00Z outage=12.5s",
+		"restart release:cccccccccccc failed served=1970-01-01T00:00Z outage=unknown",
+	}
+	if err != nil || !slices.Equal(restarts, want) {
+		t.Fatalf("restarts = %q, %v", restarts, err)
+	}
+}
+
 func TestFailureLedgerKeepsDistinctMergeGroupTestsDistinct(t *testing.T) {
 	t.Parallel()
 	store, _, project, _ := newAdmissionStore(t, RoleOrchestrator, 1)
