@@ -41,8 +41,8 @@ func (client *AttemptClient) OutcomeList(ctx context.Context, input OutcomeListI
 	return listOutcome(client.client, ctx, "attempt_outcome_list", input)
 }
 
-// Report reads factoryctl report or why; an attempt reader reads its own
-// project's.
+// Report reads factoryctl report or why; an attempt reader may read only its
+// own task-linked why evidence.
 func (client *OperatorClient) Report(ctx context.Context, input ReportInput) (Report, error) {
 	if !validReportInput(input) {
 		return Report{}, ErrInvalidInput

@@ -86,9 +86,8 @@ func NewAttemptClientFromEnvironment(socketPath string) (*AttemptClient, error) 
 	return &AttemptClient{client: base}, nil
 }
 
-// NewAttemptReaderFromEnvironment sends the operator client's read views
-// (snapshot, human requests, task read, intake list) with the attempt
-// credential. factoryd answers them for a specialist's review run only.
+// NewAttemptReaderFromEnvironment sends the operator client's bounded read
+// views with the attempt credential. factoryd binds them to the task and role.
 func NewAttemptReaderFromEnvironment(socketPath string) (*OperatorClient, error) {
 	attempt, err := NewAttemptClientFromEnvironment(socketPath)
 	if err != nil {

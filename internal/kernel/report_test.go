@@ -107,6 +107,33 @@ func TestReportAndWhyReadTheReconcilersState(t *testing.T) {
 	}
 }
 
+func TestWhyRendersStoredCheckAnnotationsAndReviewFindings(t *testing.T) {
+	t.Parallel()
+	store, _, project, _ := newAdmissionStore(t, RoleOrchestrator, 1)
+	defer store.Close()
+	ctx := context.Background()
+	head := strings.Repeat("e", 40)
+	if err := store.RecordProductionObservation(ctx, project.ID, ProductionObservation{
+		Repository: "example/factory",
+		ObservedAt: 10,
+		PullRequests: []ProductionPullRequest{{
+			Number: 7, Title: "Exact head", URL: "https://github.com/example/factory/pull/7", Head: head, BaseSHA: strings.Repeat("f", 40),
+			Branch: "feature/exact", Base: "main", State: "open", Review: ProductionReview{Head: head, URL: "https://github.com/example/factory/pull/7#review", State: "block", Findings: "review found an exact-head regression"},
+		}},
+		Checks: []ProductionCheck{{
+			ID: "ci:7", Name: "ci", Revision: head, Scope: "head", State: "completed", Conclusion: "failure", Required: true,
+			PullRequests: []uint64{7}, Jobs: []ProductionJob{{Name: "go", State: "completed", Conclusion: "failure", Annotations: []string{"--- FAIL: TestExactHead (1s)"}}},
+		}},
+	}, mustTime(t, 10)); err != nil {
+		t.Fatal(err)
+	}
+	lines, err := store.Why(ctx, &project.ID, 7, TaskID{})
+	joined := strings.Join(lines, "\n")
+	if err != nil || !strings.Contains(joined, "check failure details:") || !strings.Contains(joined, "TestExactHead") || !strings.Contains(joined, "review findings: review found an exact-head regression") {
+		t.Fatalf("why evidence = %q, %v", lines, err)
+	}
+}
+
 func TestStatusIsBoundedAndCountsHistory(t *testing.T) {
 	store, _, project, agent := newAdmissionStore(t, RoleWorker, 1)
 	defer store.Close()
