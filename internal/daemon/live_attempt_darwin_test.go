@@ -835,8 +835,7 @@ func TestLiveAttemptOwnTerminateOwesItsCauseNotAProviderExit(t *testing.T) {
 		if err := <-converged; err != nil {
 			t.Fatal(err)
 		}
-		sigterm, _ := kernel.NewAttemptResultExitSignal(15)
-		if cause, owed := attempt.owedTermination(sigterm); !owed || cause.Code() != kernel.FailureTransient || !strings.Contains(cause.Detail(), "factoryd stopped") {
+		if cause, owed := attempt.owedTermination(true); !owed || cause.Code() != kernel.FailureTransient || !strings.Contains(cause.Detail(), "factoryd stopped") {
 			t.Fatalf("restart terminate cause = %+v", cause)
 		}
 	})
@@ -848,8 +847,7 @@ func TestLiveAttemptOwnTerminateOwesItsCauseNotAProviderExit(t *testing.T) {
 		if err := <-closed; err != nil {
 			t.Fatal(err)
 		}
-		sigkill, _ := kernel.NewAttemptResultExitSignal(9)
-		if cause, owed := attempt.owedTermination(sigkill); !owed || cause.Code() != kernel.FailureProtocol || cause.Detail() != errLiveOwnerClosed.Error() {
+		if cause, owed := attempt.owedTermination(true); !owed || cause.Code() != kernel.FailureProtocol || cause.Detail() != errLiveOwnerClosed.Error() {
 			t.Fatalf("owner close terminate cause = %+v", cause)
 		}
 	})
@@ -864,13 +862,10 @@ func TestLiveAttemptOwnTerminateOwesItsCauseNotAProviderExit(t *testing.T) {
 		if !attempt.terminationDelivered || attempt.terminationCause == nil {
 			t.Fatalf("terminate delivered=%v cause=%+v", attempt.terminationDelivered, attempt.terminationCause)
 		}
-		code0, _ := kernel.NewAttemptResultExitCode(0)
-		code1, _ := kernel.NewAttemptResultExitCode(1)
-		sigsegv, _ := kernel.NewAttemptResultExitSignal(11)
-		for _, exit := range []kernel.AttemptResultExit{code0, code1, sigsegv} {
-			if cause, owed := attempt.owedTermination(exit); owed {
-				t.Fatalf("independent exit %+v replaced by terminate cause %+v", exit, cause)
-			}
+		// Its runner's result is not aborted: OwnedChild.Terminate saw the exit
+		// first (TestTerminateMarksOnlyAnExitItCausedAborted).
+		if cause, owed := attempt.owedTermination(false); owed {
+			t.Fatalf("independent exit replaced by terminate cause %+v", cause)
 		}
 	})
 	t.Run("provider whose own result came first owes no cause", func(t *testing.T) {
@@ -880,8 +875,7 @@ func TestLiveAttemptOwnTerminateOwesItsCauseNotAProviderExit(t *testing.T) {
 			t.Fatal(err)
 		}
 		awaitTerminate(t, peer)
-		sigterm, _ := kernel.NewAttemptResultExitSignal(15)
-		if cause, owed := attempt.owedTermination(sigterm); owed {
+		if cause, owed := attempt.owedTermination(true); owed {
 			t.Fatalf("post-result terminate owes a cause: %+v", cause)
 		}
 	})

@@ -77,7 +77,7 @@ func TestTerminateConvergesQueuedNaturalExit(t *testing.T) {
 	waitOwnedGroupWithoutLiveMembers(t, child.Identity())
 
 	exit, err := child.Terminate(time.Second)
-	if err != nil || exit.Code != 23 || exit.Signal != 0 {
+	if err != nil || exit.Code != 23 || exit.Signal != 0 || exit.Aborted {
 		t.Fatalf("queued natural exit=%+v err=%v", exit, err)
 	}
 	assertWaitedAndAbsent(t, child)
@@ -561,4 +561,36 @@ func assertWaitedAndAbsent(t *testing.T, child *OwnedChild) {
 		t.Fatalf("child not solely waited: state=%d process_state=%v", child.state, child.cmd.ProcessState)
 	}
 	waitExactAbsence(t, child.Identity())
+}
+
+// Only an exit this Terminate caused is Aborted. A provider that already died
+// on its own, even by TERM or KILL, keeps an unaborted exit although its
+// owner's cleanup has not yet observed it.
+func TestTerminateMarksOnlyAnExitItCausedAborted(t *testing.T) {
+	for _, tc := range []struct {
+		name, script   string
+		signal         int
+		aborted, alive bool
+	}{
+		{name: "running provider", script: "exec sleep 30", signal: int(unix.SIGTERM), aborted: true, alive: true},
+		{name: "provider that sent itself TERM", script: "kill -TERM $$", signal: int(unix.SIGTERM)},
+		{name: "provider that sent itself KILL", script: "kill -KILL $$", signal: int(unix.SIGKILL)},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newFixture(t)
+			child := f.start("/bin/sh", []string{"-c", tc.script}, nil, outputFile(t, filepath.Join(f.root, "out")))
+			if _, err := child.Activate(); err != nil {
+				t.Fatal(err)
+			}
+			installOwnedChildSafetyCleanup(t, child)
+			if !tc.alive {
+				waitOwnedGroupWithoutLiveMembers(t, child.Identity())
+			}
+			exit, err := child.Terminate(time.Second)
+			if err != nil || exit.Signal != tc.signal || exit.Aborted != tc.aborted {
+				t.Fatalf("exit=%+v err=%v, want signal %d aborted %v", exit, err, tc.signal, tc.aborted)
+			}
+			assertWaitedAndAbsent(t, child)
+		})
+	}
 }

@@ -1024,8 +1024,8 @@ func (daemon *Daemon) attemptResultTail(
 	// stopping, so it outlives ctx as consumption does.
 	pending, ok := live.pendingOutcomeSnapshot()
 	proposalCtx := ctx
-	if exit, _ := result.Exit(); !ok {
-		pending, ok = live.owedTermination(exit)
+	if !ok {
+		pending, ok = live.owedTermination(record.Result().Aborted())
 		proposalCtx = daemon.cleanupCtx
 	}
 	if ok {

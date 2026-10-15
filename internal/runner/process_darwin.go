@@ -885,6 +885,9 @@ func (c *OwnedChild) Terminate(timeout time.Duration) (Exit, error) {
 		timeout = defaultStopTimeout
 	}
 	var signalFailure error
+	// Aborted means this signal ended the provider: an exit already queued is
+	// the provider's own, however it died.
+	aborted := c.refreshExit() == nil && !c.exitObserved
 	if !c.exitObserved {
 		if err := c.signalGroup(unix.SIGTERM); err != nil {
 			// The exact child can exit between signalOwnedGroup's census and
@@ -933,6 +936,7 @@ func (c *OwnedChild) Terminate(timeout time.Duration) (Exit, error) {
 	if c.state != stateWaited {
 		return Exit{}, withSignalFailure(waitErr)
 	}
+	c.exit.Aborted = aborted
 	return c.exit, nil
 }
 
