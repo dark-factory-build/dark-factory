@@ -1440,6 +1440,13 @@ func RebaseWorktree(ctx context.Context, selection Selection, path string) (Work
 		return WorktreeFacts{}, err
 	}
 	paths := conflictPaths(ctx, authority, path)
+	untrackedObstruction := result.exitCode != 0 && len(paths) == 0 && strings.Contains(strings.ToLower(string(result.stderr)), "untracked")
+	if untrackedObstruction {
+		paths = untrackedPaths(ctx, authority, path)
+		if len(paths) > 0 {
+			return WorktreeFacts{}, &RebaseConflict{Paths: paths, CurrentBase: selection.base.Hex()}
+		}
+	}
 	if result.exitCode != 0 || len(paths) > 0 {
 		abort := append([]string{}, gitPrefix...)
 		abort = append(abort, "rebase", "--abort")
@@ -1484,6 +1491,23 @@ func RebaseWorktree(ctx context.Context, selection Selection, path string) (Work
 		return WorktreeFacts{}, newGitError(gitFailureProcess)
 	}
 	return authority.inspectWorktree(ctx, path)
+}
+
+func untrackedPaths(ctx context.Context, authority *gitAuthority, path string) []string {
+	result, err := authority.run(ctx, maxGitSelectionOutput, "-C", path, "ls-files", "--others", "--exclude-standard", "-z")
+	if err != nil || result.exitCode != 0 {
+		return nil
+	}
+	var paths []string
+	for _, value := range strings.Split(string(result.output), "\x00") {
+		if value != "" && validateContentPath(value) == nil {
+			paths = append(paths, value)
+		}
+		if len(paths) == 32 {
+			break
+		}
+	}
+	return paths
 }
 
 func conflictPaths(ctx context.Context, authority *gitAuthority, path string) []string {

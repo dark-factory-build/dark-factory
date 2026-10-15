@@ -1084,6 +1084,52 @@ func TestSupervisorRetainedRetryDeliversAutostashConflictContext(t *testing.T) {
 	}
 }
 
+func TestSupervisorRetainedRetryDeliversUntrackedConflictContext(t *testing.T) {
+	executable := quoteShell(supervisorTestExecutable(t))
+	program := "set -eu\nif [ ! -s __WITNESS__ ]; then printf retained > new.txt; else " + executable + " --supervisor-attempt-task \"$(dirname __WITNESS__)/untracked-task.txt\"; fi\nprintf x >> __WITNESS__\nexit 1\n"
+	fixture := newSupervisorFixture(t, program)
+	first, err := fixture.daemon.RunNext(context.Background(), fixture.spec)
+	if err != nil {
+		t.Fatalf("first RunNext: %v", err)
+	}
+	fixture.assertTerminal(t, first, kernel.OutcomeFailed)
+	repository := filepath.Join(fixture.root, "repository")
+	supervisorGit(t, supervisorNativeGit(t), "-C", repository, "switch", "main")
+	if err := os.WriteFile(filepath.Join(repository, "new.txt"), []byte("current main\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	supervisorGit(t, supervisorNativeGit(t), "-C", repository, "add", "new.txt")
+	supervisorGit(t, supervisorNativeGit(t), "-C", repository, "commit", "-q", "-m", "add main file")
+	mainHead := strings.TrimSpace(supervisorGitOutput(t, supervisorNativeGit(t), "-C", repository, "rev-parse", "HEAD"))
+	binding, found, err := fixture.store.TaskRepository(context.Background(), first.TaskID)
+	if err != nil || !found {
+		t.Fatalf("task repository binding: %v, found=%v", err, found)
+	}
+	registered, found, err := fixture.store.ProjectRepository(context.Background(), binding.ID)
+	if err != nil || !found {
+		t.Fatalf("registered repository: %v, found=%v", err, found)
+	}
+	if _, err := fixture.store.UpdateProjectRepositoryBase(context.Background(), registered.ID, registered.Revision, "refs/heads/main", supervisorTime()); err != nil {
+		t.Fatalf("advance registered repository base: %v", err)
+	}
+	queueSupervisorRetry(t, fixture, first)
+	second, err := fixture.daemon.RunNext(context.Background(), fixture.spec)
+	if err != nil {
+		t.Fatalf("untracked retained RunNext: %v", err)
+	}
+	fixture.assertTerminal(t, second, kernel.OutcomeFailed)
+	observed, err := os.ReadFile(filepath.Join(fixture.root, "untracked-task.txt"))
+	if err != nil {
+		t.Fatalf("provider task receipt: %v", err)
+	}
+	text := string(observed)
+	for _, want := range []string{"Retained Change rebase context (bounded):", "current-main=" + mainHead, "base=" + fixture.base, "conflicting-paths=new.txt"} {
+		if !strings.Contains(text, want) {
+			t.Fatalf("provider task missing %q: %s", want, text)
+		}
+	}
+}
+
 func TestSupervisorRetainedRetryFailsClosedOnDurableAuthorityMismatch(t *testing.T) {
 	for _, test := range []struct {
 		name   string
