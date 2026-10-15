@@ -885,6 +885,9 @@ func TestTickChangeReclaimRechecksAtTheDeadlineWithoutAStoreWrite(t *testing.T) 
 		}
 		time.Sleep(time.Millisecond)
 	}
+	for time.Now().Before(waitUntil) && fixture.daemon.reclaimBusy.Load() {
+		time.Sleep(time.Millisecond)
+	}
 	if fixture.daemon.reclaimNext.Load() != deadline {
 		t.Fatalf("reclaim deadline = %d, want %d", fixture.daemon.reclaimNext.Load(), deadline)
 	}

@@ -34,7 +34,8 @@ type Store struct {
 	closeErr    error
 	// held is the corruption the last whole-store validation found. Validated
 	// writes and snapshot reads refuse while it is set (see Validate).
-	held atomic.Pointer[error]
+	held               atomic.Pointer[error]
+	productionRevision atomic.Uint64
 
 	repositoryBase  string // Boot-owned initial binding default; protected by writerGate.
 	archivePath     string // The history archive beside the database; see ArchiveHistory.

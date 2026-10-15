@@ -346,24 +346,6 @@ func (store *Store) NextChangeReclaimAt(ctx context.Context, at UnixMillis) (Uni
 	return deadline, true, nil
 }
 
-// LatestProductionObservationAt returns the newest production observation
-// watermark so reclaim revisits retained Changes when live state changes.
-func (store *Store) LatestProductionObservationAt(ctx context.Context) (UnixMillis, error) {
-	read, err := store.beginRead(ctx)
-	if err != nil {
-		return UnixMillis{}, err
-	}
-	defer read.Close()
-	var latest sql.NullInt64
-	if err := read.connection.QueryRowContext(ctx, `SELECT MAX(observed_at_ms) FROM production_records`).Scan(&latest); err != nil {
-		return UnixMillis{}, err
-	}
-	if !latest.Valid {
-		return UnixMillis{}, nil
-	}
-	return NewUnixMillis(latest.Int64)
-}
-
 // scanWith scans one more column after the ones its caller asks for.
 type scanWith struct {
 	rows  *sql.Rows
