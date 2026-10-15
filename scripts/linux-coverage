@@ -99,6 +99,7 @@ test internal/linear/host_darwin_test.go shared L08
 test internal/maintainer/host_darwin_test.go shared L08
 test internal/provider/account_darwin_test.go shared L09
 test internal/provider/provider_darwin_test.go linux-equivalent L09
+test internal/provider/selfcheck_darwin_test.go linux-equivalent L09
 test internal/runner/attempt_control_eof_darwin_test.go shared L06
 test internal/runner/attempt_darwin_test.go shared L06
 test internal/runner/attempt_handover_darwin_test.go shared L06
