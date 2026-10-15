@@ -475,10 +475,8 @@ func sendBackTask(ctx context.Context, connection *sql.Conn, task Task, head, no
 	if err := requireOneRow(result, err); err != nil {
 		return Task{}, err
 	}
-	if task.Status != TaskSucceeded {
-		if err := carryPrerequisites(ctx, connection, task, next); err != nil {
-			return Task{}, err
-		}
+	if err := carryPrerequisites(ctx, connection, task, next); err != nil {
+		return Task{}, err
 	}
 	if err := appendInvalidations(ctx, connection, at, []pendingInvalidation{{kind: EntityTask, id: task.ID.Bytes(), revision: task.Revision.Int64() + 1}}); err != nil {
 		return Task{}, err
@@ -493,9 +491,10 @@ func sendBackTask(ctx context.Context, connection *sql.Conn, task Task, head, no
 	return updated, nil
 }
 
-// carryPrerequisites moves consumers still waiting on a producer revision that
-// ended without success to the producer's next revision. Only a success can be
-// superseded, so a requeue, retry or send-back never strands a consumer.
+// carryPrerequisites moves consumers still waiting on a producer revision to
+// the producer's next revision, so a requeue, retry or send-back never strands
+// a consumer: a succeeded producer sent back before its work merged is awaited
+// at its replacement head.
 // taskEndedAutomatically holds while task t's current end is automatic: a
 // failure, a run-limit cancel of the run at its work revision, or a blocked
 // expiry recorded at its row revision. Retries and overseer wakes share it.

@@ -146,7 +146,7 @@ func TestCancelledProducerCancelsItsQueuedConsumers(t *testing.T) {
 	if cancelled, err := store.CancelOrphanedTasks(ctx, mustTime(t, 8)); err != nil || len(cancelled) != 0 {
 		t.Fatalf("cancelled before the producer ended = %v, %v", cancelled, err)
 	}
-	if lines, err := store.Why(ctx, nil, 0, consumer.ID); err != nil || lines[len(lines)-1] != "waits on: prerequisite: task "+producer.ID.String()+" is queued at work revision 1; it needs revision 1 to succeed" {
+	if lines, err := store.Why(ctx, nil, 0, consumer.ID); err != nil || lines[len(lines)-1] != "waits on: prerequisite: task "+producer.ID.String()+" is queued at work revision 1; it needs revision 1 to succeed and merge" {
 		t.Fatalf("why = %q, %v", lines, err)
 	}
 	if _, err := store.UpdateTaskForOperator(ctx, producer.ID, producer.Revision, TaskPatch{Cancel: true}, mustTime(t, 9)); err != nil {
@@ -213,6 +213,91 @@ func TestWhySharedTaskNamesItsPausedWorker(t *testing.T) {
 	pauseAgent(t, store, worker, false, 7)
 	if lines, err := store.Why(ctx, nil, 0, shared.ID); err != nil || lines[len(lines)-1] != "waits on: worker: its task is queued for the next admission" {
 		t.Fatalf("why = %q, %v", lines, err)
+	}
+}
+
+// A succeeded producer's repository-bound work releases its consumer only once
+// a pull request published for it merged at its exact Change head, so the
+// consumer's fresh base contains it. A producer without a Change needs no merge.
+func TestPrerequisiteWaitsForItsProducerToMergeAtItsExactHead(t *testing.T) {
+	t.Parallel()
+	bound := []string{`UPDATE changes SET head_commit = randomblob(20)`}
+	publish := func(state, head string) string {
+		return `INSERT INTO publication_tasks (project_id, repository, pull_number, task_id, change_id, created_at_ms) SELECT project_id, 'o/r', 7, task_id, id, 61 FROM changes;
+			INSERT INTO production_records (project_id, repository, kind, identity, visual_id, document, observed_at_ms) SELECT project_id, 'o/r', 'pull_request', '7', '', json_object('state', '` + state + `', 'head', ` + head + `), 61 FROM changes`
+	}
+	for _, test := range []struct {
+		name     string
+		setup    []string
+		role     AgentRole
+		sendBack bool
+		admitted bool
+	}{
+		{name: "bound Change changing nothing", admitted: true},
+		{name: "producer without a Change", role: RoleOrchestrator, admitted: true},
+		{name: "bound work unpublished", setup: bound},
+		{name: "open or failing pull request", setup: append(bound, publish("open", `lower(hex(head_commit))`))},
+		{name: "closed unmerged pull request", setup: append(bound, publish("closed", `lower(hex(head_commit))`))},
+		{name: "merged at another head", setup: append(bound, publish("merged", `'00'`))},
+		{name: "merged at its exact head", setup: append(bound, publish("merged", `upper(hex(head_commit))`)), admitted: true},
+		{name: "sent back after its merge", setup: append(bound, publish("merged", `lower(hex(head_commit))`)), sendBack: true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+			ctx := context.Background()
+			proposal, _ := NewSuccessProposal("producer result")
+			role := RoleWorker
+			if test.role != 0 {
+				role = test.role
+			}
+			store, finalizing := finalizingReleasedRun(t, role, proposal)
+			defer store.Close()
+			producer, err := finalizeTestRun(t, store, finalizing, 60)
+			if err != nil {
+				t.Fatal(err)
+			}
+			for _, statement := range test.setup {
+				corruptSQL(t, store, statement)
+			}
+			consumerAgent, err := store.CreateAgent(ctx, NewAgent{ID: agentID(t, 225), ProjectID: producer.ProjectID, Name: "consumer", Role: RoleOrchestrator, Provider: ProviderCodex, ToolBudgetLimit: 5}, mustTime(t, 62))
+			if err != nil {
+				t.Fatal(err)
+			}
+			consumer, err := store.EnqueueTask(ctx, NewTask{ID: taskID(t, 229), ProjectID: producer.ProjectID, AssignedAgentID: consumerAgent.ID, IncarnationID: incarnationID(t, 230), Title: "consumer", Priority: 10, Prerequisites: []TaskPrerequisite{{TaskID: producer.TaskID, WorkRevision: mustRevision(t, 1)}}}, mustTime(t, 63))
+			if err != nil {
+				t.Fatal(err)
+			}
+			want := "waits on: prerequisite: task " + producer.TaskID.String() + " is succeeded at work revision 1; it needs revision 1 to succeed and merge"
+			if test.sendBack {
+				producerTask, _, err := store.Task(ctx, producer.TaskID)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if _, err := store.SendBackTask(ctx, nil, producer.TaskID, producerTask.Revision, changeHead(t, store, producer.TaskID), "correct producer", mustTime(t, 64)); err != nil {
+					t.Fatal(err)
+				}
+				want = "waits on: prerequisite: task " + producer.TaskID.String() + " is queued at work revision 2; it needs revision 2 to succeed and merge"
+			}
+			if test.admitted {
+				result, err := store.AdmitNext(ctx, admissionKeys(t, 231, nil), mustTime(t, 65))
+				if err != nil || !result.Admitted() || result.Run.TaskID != consumer.ID {
+					t.Fatalf("consumer admission = %+v, %v", result, err)
+				}
+			} else if lines, err := store.Why(ctx, nil, 0, consumer.ID); err != nil || lines[len(lines)-1] != want {
+				t.Fatalf("why = %q, %v", lines, err)
+			}
+			var revision int64
+			var consumed []byte
+			if err := store.readers.QueryRow(`SELECT upstream_work_revision, consumed_run_id FROM task_prerequisites WHERE task_id = ?`, consumer.ID.Bytes()).Scan(&revision, &consumed); err != nil {
+				t.Fatal(err)
+			}
+			if wantRevision := map[bool]int64{false: 1, true: 2}[test.sendBack]; revision != wantRevision || test.admitted != (string(consumed) == string(producer.ID.Bytes())) || !test.admitted && consumed != nil {
+				t.Fatalf("prerequisite = revision %d consumed %x", revision, consumed)
+			}
+			if err := store.Validate(ctx); err != nil {
+				t.Fatal(err)
+			}
+		})
 	}
 }
 
