@@ -1,5 +1,5 @@
 import { useLayoutEffect, useEffect, useMemo, useRef, useState, type MouseEvent, type FocusEvent, type PointerEvent, type KeyboardEvent, type ReactNode, type RefObject } from "react";
-import { GRAPH_OBSERVATIONS, type PeerQuestionItem } from "@dark-factory/client";
+import type { PeerQuestionItem } from "@dark-factory/client";
 import type { SceneTask } from "../console-view.js";
 import {
   PADDING,
@@ -42,7 +42,6 @@ export type FactorySceneProps = Readonly<{
   /** Change requests in the header; selecting one uses `proposals.onSelect`. Undefined until read on this connection. */
   crates?: readonly SceneCrate[];
   tools?: ReactNode;
-  /** Read one machine's evidence when its inspector opens. */
   /** Queue an investigation of a machine as an ordinary task. */
   onInvestigate?: (machine: SceneMachine, unit?: SceneUnit) => void;
   onSelectEntity?: (entityId: string | undefined) => void;
@@ -635,7 +634,6 @@ export function FactoryScene({ proposals, crates, tools, onInvestigate, onSelect
         <label>Find machine <input type="search" value={search} onChange={(event) => setSearch(event.target.value)} placeholder="Route, unit, store or party" /></label>
         {search === "" ? null : <div className="dfFactoryEntityTools__results">{searchable.filter((machine) => `${machine.label} ${machine.kind}`.toLowerCase().includes(search.toLowerCase())).slice(0, 30).map((machine) => <button type="button" key={machine.id} onClick={(event) => { focusEntity(machine.id); event.currentTarget.closest("details")?.removeAttribute("open"); }}>{machine.label} · {machine.kind}</button>)}</div>}
       </div></details>
-      {graph.summary === undefined ? null : <details className="dfFloorMenu" name="floor-tools"><summary>Telemetry</summary><div className="dfFloorMenu__body"><Coverage summary={graph.summary} /></div></details>}
       {tools}
       {proposals?.selected && proposals.items.some((item) => item.id === proposals.selected) ? <button type="button" title={proposals.items.find((item) => item.id === proposals.selected)?.title} onClick={() => proposals.onSelect("")}>Clear PR ×</button> : null}
     </div>
@@ -828,13 +826,6 @@ function machineInfo(machine: SceneMachine, unit?: SceneUnit) {
   const activity = reading.state === "unknown" ? "" : reading.state === "idle" ? " · idle" : ` · ${reading.state} · ${rate(reading.ratePerHour)}${reading.errorPermille > 0 ? ` · ${reading.errorPermille / 10}% errors` : ""}${reading.latencyMs > 0 ? ` · p95 ${reading.latencyMs} ms` : ""}`;
   const routes = machine.routes === undefined ? "" : `\n${machine.routes.map((route) => middleLabel(route, 24)).join("\n")}`;
   return `${machine.label}${routes}\n${kindText(machine, unit)}${unit !== undefined && unit.id !== machine.id ? ` in ${unit.label}` : machine.owner ? ` from ${machine.owner}` : ""}\n${OBSERVATION_TEXT[reading.observation]}${activity}\n${EVIDENCE_TEXT[reading.evidence]}${deployed}`;
-}
-
-function Coverage({ summary }: { summary: NonNullable<SceneGraph["summary"]> }) {
-  return <p className="dfPlantCoverage" role="status" aria-label="Observation coverage">
-    {GRAPH_OBSERVATIONS.map((key, index) => <span key={key}>{index === 0 ? "" : " · "}<strong className={`dfPlantCoverage--${key}`}>{summary[key]}</strong> {OBSERVATION_TEXT[key].split(":")[0]!.toLowerCase()}</span>)}
-    <small>{summary.runtime_only > 0 ? ` · ${summary.runtime_only} runtime-only` : ""}{summary.contradicted > 0 ? ` · ${summary.contradicted} contradicted` : ""}{summary.unobserved > 0 ? " · grey machines have no telemetry: unknown, not idle" : ""}</small>
-  </p>;
 }
 
 /** One machine, pictured by its kind; its observation and state are its paint, lamp and motion. */

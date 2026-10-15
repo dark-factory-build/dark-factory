@@ -1,4 +1,4 @@
-import type { GraphNode, GraphReading, GraphSummary, GraphSource, RunTelemetry, SpriteAppearance } from "@dark-factory/client";
+import type { GraphNode, GraphReading, GraphSource, RunTelemetry, SpriteAppearance } from "@dark-factory/client";
 
 /** A node's runtime reading, as the floor shows it. Static evidence never sets state. */
 export type SceneReading = Readonly<{
@@ -53,7 +53,6 @@ export type SceneGraph = Readonly<{
   /** Runtime activity no static node explains. */
   quarantine: readonly SceneMachine[];
   flows: readonly SceneFlow[];
-  summary?: GraphSummary;
   sources?: readonly GraphSource[];
   /** When the daemon read the runtime state shown. */
   observedAt?: number;

@@ -244,7 +244,7 @@ export function projectGraph(graphs: ReadonlyMap<string, OperationalGraphView> |
     digest: `${digests.join(" ")}:${quarantine.map((machine) => machine.id).join(",")}`,
     units, shared, parties, quarantine, flows: [...flows.values()],
     observedAt: Math.max(0, ...projects.map((id) => graphs?.get(id)?.observed_at ?? 0)),
-    ...(projects.length === 1 && graphs?.get(projects[0]!) !== undefined ? { summary: graphs.get(projects[0]!)!.summary, sources: graphs.get(projects[0]!)!.sources } : {}),
+    ...(projects.length === 1 && graphs?.get(projects[0]!) !== undefined ? { sources: graphs.get(projects[0]!)!.sources } : {}),
   };
   /**
    * Which machine a changed path belongs to: the machine built from that
