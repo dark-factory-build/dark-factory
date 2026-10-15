@@ -176,8 +176,8 @@ export type AddTask = (agent: AgentItem, instruction: string, mode: "queue" | "a
 
 /** One list for everything open: what needs you, what is in review, running and queued. */
 export function WorkPanel({
-  state, rows, projectId, filter, onFilter, byMission, onByMission, missions, edit, ready, onEditTask, onAddTask, onLoadTaskDetail,
-  selectedTaskId, onSelectTask, selectedHumanRequest, onSelectHumanRequest, onCloseHumanRequest, requestContent, onMission, onIntakeAction, intake,
+  state, rows, projectId, filter, onFilter, edit, ready, onEditTask, onAddTask, onLoadTaskDetail,
+  selectedTaskId, onSelectTask, selectedHumanRequest, onSelectHumanRequest, onCloseHumanRequest, requestContent, onIntakeAction, intake,
 }: {
   onIntakeAction?: (projectId: string, request: IntakeBody) => void;
   /** The shown project's last intake outcome. */
@@ -189,10 +189,6 @@ export function WorkPanel({
   projectId?: string;
   filter: WorkFilter;
   onFilter: (filter: WorkFilter) => void;
-  byMission: boolean;
-  onByMission: () => void;
-  /** The mission list and detail, shown in place of the rows. */
-  missions: ReactNode;
   edit?: FactoryEditView;
   ready: boolean;
   onEditTask?: (task: TaskItem, change: TaskEdit) => Promise<boolean>;
@@ -202,7 +198,6 @@ export function WorkPanel({
   onSelectHumanRequest?: (request: HumanRequestItem) => void;
   onCloseHumanRequest?: () => void;
   requestContent?: ReactNode;
-  onMission: (task: TaskItem) => void;
 }) {
   const [overseer, setOverseer] = useState(false);
   if (state === undefined) return <section className="dfConsoleSidebar__panel" aria-label="Work"><p className="dfFactoryConsole__empty">Waiting for the latest state…</p></section>;
@@ -212,7 +207,7 @@ export function WorkPanel({
   const owner = (task?: TaskItem) => task === undefined ? "" : task.assigned_agent_id === "" ? "Any eligible worker" : state.agents.get(task.assigned_agent_id)?.name ?? "Agent";
   const chips = (row: WorkRow) => <>
     <Status stage={row.state} />{row.request === undefined || row.request.status === "open" ? null : <Status stage={row.request.status} />}
-    {row.origin === "mission" && row.task ? <button type="button" onClick={() => onMission(row.task!)}>mission</button> : row.origin === undefined ? null : <span className="dfConsoleItem__meta">{row.origin}</span>}
+    {row.origin === undefined ? null : <span className="dfConsoleItem__meta">{row.origin}</span>}
     {row.pr?.pullRequest ? <><a href={row.pr.pullRequest.url || `https://github.com/${row.pr.repository}/pull/${row.pr.pullRequest.number}`} target="_blank" rel="noreferrer">PR #{row.pr.pullRequest.number}</a>{productionStages(row.pr).map((stage) => <Status stage={stage} key={stage} />)}</> : null}
   </>;
   const item = (row: WorkRow) => {
@@ -243,16 +238,12 @@ export function WorkPanel({
     {onAddTask === undefined ? null : <NewTask agents={agents} state={state} disabled={!ready || edit?.pending === true} onAddTask={onAddTask} />}
     <div className="dfWorkBar">
       <div className="dfConsoleViewToggle" role="group" aria-label="Work filter">
-        {FILTERS.map(([value, label]) => <button key={value} type="button" aria-pressed={!byMission && filter === value} disabled={!ready} onClick={() => onFilter(value)}>{label} {value === "needs-you" ? <Badge n={rows.filter(needsYou).length} /> : null}</button>)}
-        <button type="button" aria-pressed={byMission} disabled={!ready} onClick={onByMission}>By mission</button>
+        {FILTERS.map(([value, label]) => <button key={value} type="button" aria-pressed={filter === value} disabled={!ready} onClick={() => onFilter(value)}>{label} {value === "needs-you" ? <Badge n={rows.filter(needsYou).length} /> : null}</button>)}
       </div>
-      {byMission ? null : <IconButton icon="terminal" aria-label="Show overseer and specialist passes" aria-pressed={overseer} disabled={!ready} onClick={() => setOverseer(!overseer)} />}
+      <IconButton icon="terminal" aria-label="Show overseer and specialist passes" aria-pressed={overseer} disabled={!ready} onClick={() => setOverseer(!overseer)} />
     </div>
-    <div hidden={byMission}>
-      {rows.some((row) => row.intake !== undefined) && (intake?.failed || !["ok", "accepted", "imported", "withdrawn", "withdrawal_pending", undefined].includes(intake?.state)) ? <p role="alert">Could not accept: {intake?.failed ? "try again" : intake?.state?.replaceAll("_", " ")}.</p> : null}
-      {shown.length === 0 ? <p className="dfFactoryConsole__empty">{filter === "all" ? "No open work" : "Nothing here"}</p> : <ul className="dfConsoleItems">{shown.map(item)}</ul>}
-    </div>
-    <div hidden={!byMission}>{missions}</div>
+    {rows.some((row) => row.intake !== undefined) && (intake?.failed || !["ok", "accepted", "imported", "withdrawn", "withdrawal_pending", undefined].includes(intake?.state)) ? <p role="alert">Could not accept: {intake?.failed ? "try again" : intake?.state?.replaceAll("_", " ")}.</p> : null}
+    {shown.length === 0 ? <p className="dfFactoryConsole__empty">{filter === "all" ? "No open work" : "Nothing here"}</p> : <ul className="dfConsoleItems">{shown.map(item)}</ul>}
   </section>;
 }
 

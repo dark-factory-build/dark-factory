@@ -728,19 +728,7 @@ summary.dfConsoleItem__summary { cursor: pointer; }
 .dfFactoryScene__target:focus { outline: none; }
 .dfFactoryTooltip { position: fixed; z-index: 1000; width: max-content; max-width: min(256px, calc(100vw - 16px)); box-sizing: border-box; padding: 8px 10px; border: 1px solid #637575; border-radius: 4px; background: #142126; color: #e0e3d6; font: 12px/1.5 system-ui, sans-serif; white-space: pre-line; overflow-wrap: anywhere; display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 8; max-height: 50vh; overflow: hidden; box-shadow: 0 3px 12px #0008; pointer-events: none; }
 
-/* Objective records share the existing sidebar, including on narrow screens. */
-.dfMissions { display: grid; gap: 0.75rem; overflow-wrap: anywhere; font-size: var(--df-text-sm); line-height: 1.5; }
-.dfMissions article { display: grid; gap: 0.65rem; margin-top: 0; padding-top: .65rem; }
-.dfMissions :where(p, ul) { margin: 0; }
 .dfTaskConversation li { display: grid; gap: .35rem; overflow-wrap: anywhere; margin-bottom: .75rem; }
-.dfMissions article h3 { margin: 0; color: var(--df-console-text); font-size: var(--df-text-md); letter-spacing: 0.02em; }
-.dfMissions h4 { margin: 0.5rem 0 0; color: var(--df-console-muted); font-size: var(--df-text-xs); }
-.dfMissions article > button { justify-self: start; }
-.dfMissions__list { list-style: none; padding: 0; display: grid; gap: 0.5rem; }
-.dfMissions__list button { width: 100%; text-align: left; }
-.dfMissions__list span { display: block; color: var(--df-console-muted); margin-top: 0.25rem; }
-.dfMissions__text { white-space: pre-wrap; }
-.dfMissions textarea { display: block; width: 100%; min-height: 6rem; padding: 0.65rem; resize: vertical; color: var(--df-console-text); background: var(--df-console-background); border: 1px solid var(--df-console-rule); font: inherit; }
 
 /* One floor: source search, projection controls and proposal selection stay reachable. */
 .dfFactoryEntityTools { position: relative; display: flex; flex: none; flex-wrap: wrap; align-items: center; gap: .6rem; min-height: 2.75rem; padding: .35rem .6rem; overflow: visible; white-space: normal; font-size: var(--df-text-xs); background: #122027; border-bottom: 1px solid #3c5051; }

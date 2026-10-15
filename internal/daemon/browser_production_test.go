@@ -86,7 +86,7 @@ func TestBrowserProductionWithoutProjectReportsOnlyTheFactoryBuild(t *testing.T)
 	if output.Runtime != currentDaemonBuild() || output.Total != 0 || len(output.Records) != 0 {
 		t.Fatalf("projectless read = %+v", output)
 	}
-	for _, operation := range []string{"task_read", "mission_tasks"} {
+	for _, operation := range []string{"task_read"} {
 		if _, err := f.backend.ProjectContent(ctx, rawBrowserClient(f.client.ID), browserprotocol.ProjectContent{Operation: operation, Input: input}); err == nil {
 			t.Fatalf("%s accepted no project", operation)
 		}
