@@ -196,14 +196,14 @@ func TestProductionObservationKeepsSameRevisionHeadAndMainChecks(t *testing.T) {
 func TestReadMaintainerMainChecksKeepsPerRevisionUnfinishedRuns(t *testing.T) {
 	current, previous := strings.Repeat("a", 40), strings.Repeat("b", 40)
 	call := func(_ context.Context, _ json.RawMessage, _ map[string]uint64) (json.RawMessage, error) {
-		return json.RawMessage(`{"jsonrpc":"2.0","id":1,"result":{"structuredContent":{"revision":"` + current + `","checks":[{"revision":"` + previous + `","name":"build","status":"in_progress","conclusion":null,"url":"https://github.com/o/r/actions/runs/1","required":false},{"revision":"` + previous + `","name":"build","status":"completed","conclusion":"failure","url":"https://github.com/o/r/actions/runs/2","required":false,"annotations":["token=main-secret"]}]}}}`), nil
+		return json.RawMessage(`{"jsonrpc":"2.0","id":1,"result":{"structuredContent":{"revision":"` + current + `","checks":[{"revision":"` + previous + `","name":"build","status":"in_progress","conclusion":null,"url":"https://github.com/o/r/actions/runs/1","required":false},{"revision":"` + previous + `","name":"build","status":"completed","conclusion":"failure","url":"https://github.com/o/r/actions/runs/2","required":false,"annotations":["--- FAIL: TestX","token=main-secret"]}]}}}`), nil
 	}
 	checks, err := readMaintainerMainChecks(context.Background(), call, "o/r", 1)
 	if err != nil || len(checks) != 2 || checks[0].Revision != previous || checks[0].Status != "in_progress" || checks[1].Revision != previous {
 		t.Fatalf("main checks = %+v, %v", checks, err)
 	}
 	converted := mainChecksToProduction(checks)
-	if len(converted) != 1 || converted[0].Revision != previous || converted[0].Conclusion != "failure" || strings.Contains(strings.Join(converted[0].Jobs[0].Annotations, "\n"), "main-secret") {
+	if len(converted) != 1 || converted[0].Revision != previous || converted[0].Conclusion != "failure" || !strings.Contains(strings.Join(converted[0].Jobs[0].Annotations, "\n"), "TestX") || strings.Contains(strings.Join(converted[0].Jobs[0].Annotations, "\n"), "main-secret") {
 		t.Fatalf("converted main checks = %+v", converted)
 	}
 }

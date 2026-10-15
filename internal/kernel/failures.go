@@ -130,8 +130,12 @@ func failureSignature(kind, code string, exit, signal, runner sql.NullInt64, det
 	}
 	head, _, _ := strings.Cut(detail, ":")
 	var words []string
-	for _, word := range strings.Fields(strings.ToLower(head)) {
-		if word = strings.TrimFunc(word, func(r rune) bool { return !unicode.IsLetter(r) }); word != "" && !strings.ContainsFunc(word, unicode.IsDigit) && len(words) < 6 {
+	for _, raw := range strings.Fields(strings.ToLower(head)) {
+		if strings.ContainsFunc(raw, unicode.IsDigit) {
+			continue
+		}
+		word := strings.TrimFunc(raw, func(r rune) bool { return !unicode.IsLetter(r) })
+		if word != "" && len(words) < 6 {
 			words = append(words, word)
 		}
 	}

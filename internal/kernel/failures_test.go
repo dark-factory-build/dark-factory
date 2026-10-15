@@ -77,6 +77,14 @@ func TestFailureSignatureKeepsNodeAndTAPTestsDistinct(t *testing.T) {
 	}
 }
 
+func TestFailureSignatureIgnoresPRHeadSHAFragmentsAndNamesFailingTest(t *testing.T) {
+	first := failureSignature("check", "", sql.NullInt64{}, sql.NullInt64{}, sql.NullInt64{}, `pull request at bf (#1997 610397bf) ["--- FAIL: TestX"]`)
+	second := failureSignature("check", "", sql.NullInt64{}, sql.NullInt64{}, sql.NullInt64{}, `pull request at bf (#2032 9b0fffae) ["--- FAIL: TestX"]`)
+	if first != second || failureCause("", `pull request at bf (#1997 610397bf) ["--- FAIL: TestX"]`) != "real_test_failure" || !strings.Contains(first, "test testx") {
+		t.Fatalf("PR check signatures = %q / %q", first, second)
+	}
+}
+
 // One failure is enough: the first run of a signature is reported as new, an
 // unscoped report covers every project, and a window after it reports nothing.
 func TestReportListsFailureSignaturesFromTheFirstOccurrence(t *testing.T) {
