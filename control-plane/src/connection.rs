@@ -159,6 +159,7 @@ fn tool_write(name: &str) -> Option<bool> {
         | "list_issues"
         | "list_pull_requests"
         | "observe_pull_request_checks"
+        | "observe_pull_request_comments"
         | "observe_repository_checks"
         | "list_deployments"
         | "observe_pull_request_merge" => Some(false),
@@ -1162,5 +1163,10 @@ mod tests {
         assert_eq!(tool_write("publish_commit"), Some(true));
         assert_eq!(tool_write("observe_repository_checks"), Some(false));
         assert_eq!(tool_write("unknown"), None);
+    }
+
+    #[test]
+    fn pull_request_comments_are_read_only() {
+        assert_eq!(tool_write("observe_pull_request_comments"), Some(false));
     }
 }

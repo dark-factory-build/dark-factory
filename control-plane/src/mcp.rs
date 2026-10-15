@@ -12,9 +12,9 @@ use crate::{
     github_app::{
         AppAuthority, CreateIssue, CreatePullRequest, EnqueuePullRequest, ListDeployments,
         ListIssues, ListPullRequests, ObserveFile, ObserveIssue, ObservePullRequestChecks,
-        ObservePullRequestMerge, ObserveRef, ObserveRepository, ObserveRepositoryChecks,
-        ObserveTree, OperationError, PublishCommit, PublishPack, SubmitPullRequestReview,
-        UpdateIssue, UpdatePullRequestBody, canonical_operation_id,
+        ObservePullRequestComments, ObservePullRequestMerge, ObserveRef, ObserveRepository,
+        ObserveRepositoryChecks, ObserveTree, OperationError, PublishCommit, PublishPack,
+        SubmitPullRequestReview, UpdateIssue, UpdatePullRequestBody, canonical_operation_id,
     },
     journal::DeliveryJournal,
 };
@@ -629,6 +629,37 @@ fn tools() -> Value {
         },
         "annotations": {"readOnlyHint": true, "destructiveHint": false, "openWorldHint": true}
     }, {
+        "name": "observe_pull_request_comments",
+        "title": "Observe pull request comments",
+        "description": "Read the bounded issue-comment page for one exact pull request head.",
+        "inputSchema": {
+            "type": "object", "additionalProperties": false,
+            "properties": {
+                "repository": {"type": "string", "pattern": "^[A-Za-z0-9-]{1,39}/[A-Za-z0-9._-]{1,100}$"},
+                "pull_number": {"type": "integer", "minimum": 1},
+                "head_sha": {"type": "string", "pattern": "^[0-9a-f]{40}$"}
+            },
+            "required": ["repository", "pull_number", "head_sha"]
+        },
+        "outputSchema": {
+            "type": "object", "additionalProperties": false,
+            "required": ["pull_number", "head_sha", "comments"],
+            "properties": {
+                "pull_number": {"type": "integer"}, "head_sha": {"type": "string"},
+                "comments": {"type": "array", "maxItems": 100, "items": {
+                    "type": "object", "additionalProperties": false,
+                    "required": ["id", "author", "body", "created_at", "updated_at"],
+                    "properties": {
+                        "id": {"type": "integer"},
+                        "author": {"type": "object", "additionalProperties": false, "required": ["login"], "properties": {"login": {"type": "string"}}},
+                        "body": {"type": "string", "maxLength": 65536},
+                        "created_at": {"type": "string"}, "updated_at": {"type": "string"}
+                    }
+                }}
+            }
+        },
+        "annotations": {"readOnlyHint": true, "destructiveHint": false, "openWorldHint": true}
+    }, {
         "name": "observe_pull_request_merge",
         "title": "Observe an exact-head merge outcome",
         "description": "Return whether that exact pull request head is in its default-branch merge queue, merged, or not queued. NOT_QUEUED on an open pull request carries the newest completed merge-group run that built the head, when one is readable.",
@@ -1055,6 +1086,18 @@ async fn call_tool(id: Value, request: &Map<String, Value>, mcp: &McpState) -> R
                 Err(error) => operation_error(id, error),
             }
         }
+        Some("observe_pull_request_comments") => {
+            let Ok(arguments) = serde_json::from_value::<ObservePullRequestComments>(arguments)
+            else {
+                return json_rpc_error(id, -32602, "Invalid params");
+            };
+            match mcp.app.observe_pull_request_comments(arguments).await {
+                Ok(result) => {
+                    serialized_tool_result(id, &result, "Pull request comments were observed.")
+                }
+                Err(error) => operation_error(id, error),
+            }
+        }
         _ => json_rpc_error(id, -32602, "Invalid params"),
     }
 }
@@ -1244,5 +1287,12 @@ mod tests {
             json!(["login", "type"])
         );
         assert_eq!(issue["required"].as_array().unwrap().len(), 10);
+        assert!(
+            surface["tools"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|tool| tool["name"] == "observe_pull_request_comments")
+        );
     }
 }
