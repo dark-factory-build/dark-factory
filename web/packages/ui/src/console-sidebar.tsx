@@ -1,5 +1,5 @@
-import { useEffect, useRef, useState, type ReactNode } from "react";
-import { MAX_TASK_ATTACHMENTS, MAX_TASK_ATTACHMENT_BYTES, type IntakeView, type IntakeBody, type DiscoveredAccount, type AgentItem, type GitHubConnectionBody, type GitHubDelegationBody, type HumanRequestItem, type ProjectItem, type RunTelemetry, type RepositoryView, type StateView, type TaskItem, type TaskPeerQuestion } from "@dark-factory/client";
+import { useEffect, useState, type ReactNode } from "react";
+import { MAX_TASK_ATTACHMENTS, MAX_TASK_ATTACHMENT_BYTES, type IntakeView, type IntakeBody, type DiscoveredAccount, type AgentItem, type GitHubConnectionBody, type GitHubDelegationBody, type HumanRequestItem, type ProjectItem, type RunTelemetry, type RepositoryView, type StateView, type TaskItem } from "@dark-factory/client";
 import type { FactoryEditView, FactoryHumanRequestView } from "./factory-app-controller.js";
 import { rankLabel } from "./console-screens.js";
 import { AgentSprite } from "./factory-scene/factory-scene.js";
@@ -12,15 +12,9 @@ import { SectionHeader, Status, formatTime } from "./console-kit.js";
 import type { PublishedRelease, RuntimeBuild } from "./production-data.js";
 
 export type TaskEdit = Readonly<{ cancel?: boolean; retry?: boolean }>;
-export type TaskBrief = Readonly<{ taskId: string; revision: bigint; head: bigint; instruction: string; feedback: string; outcome?: string; peerQuestions: readonly TaskPeerQuestion[]; nextPeerOffset?: bigint }>;
 export type TaskScope = { agent_id: string } | { project_id: string };
 type TaskCursor = { beforeUpdatedAtMs?: bigint; beforeTaskId?: string };
 
-/** One private peer-conversation page, shared by queued and completed work. */
-export function TaskConversation({ brief, onOlder, pending = false }: { brief: TaskBrief; onOlder?: () => void; pending?: boolean }) {
-  const waiting = brief.peerQuestions.filter((question) => question.answer === undefined || question.answer === "").length;
-  return <section className="dfTaskConversation" aria-label={`Task conversation${waiting === 0 ? "" : ` · ${waiting} awaiting answer`}`}><h3>Conversation {waiting === 0 ? null : <span aria-label={`${waiting} unanswered peer questions`}>· {waiting} awaiting answer</span>}</h3>{brief.peerQuestions.length === 0 ? <p>No peer questions</p> : <ol>{brief.peerQuestions.map((question) => <li key={question.id}><strong>Question · {question.source_task_id} → {question.target_task_id}</strong><span>{question.question}</span>{question.answer === undefined || question.answer === "" ? null : <span>Answer · {question.answer}</span>}</li>)}</ol>}{brief.nextPeerOffset === undefined || onOlder === undefined ? null : <button type="button" disabled={pending} onClick={onOlder}>Older conversation</button>}</section>;
-}
 const EDIT_ERRORS = new Map<string, string>([
   ["stale", "Someone else changed this. Reopen it and try again."],
   ["invalid_request", "The factory refused this edit."],
@@ -96,67 +90,6 @@ function SpecialistSummary({ agent, state }: {
   </>;
 }
 
-function pullRequests(value: string): readonly Readonly<{ href: string; label: string }>[] {
-  const found = new Map<string, string>();
-  for (const match of value.matchAll(/https:\/\/github\.com\/([A-Za-z0-9](?:[A-Za-z0-9-]{0,37}[A-Za-z0-9])?)\/([A-Za-z0-9_.-]+)\/pull\/([1-9][0-9]*)\b/g)) {
-    const [, owner, repository, number] = match;
-    const href = `https://github.com/${owner}/${repository}/pull/${number}`;
-    found.set(href, `${owner}/${repository}#${number}`);
-  }
-  return [...found].map(([href, label]) => ({ href, label }));
-}
-
-/**
- * The one modal shell: <dialog> owns ESC, the backdrop, the focus trap and
- * focus return, so every exit goes through close().
- */
-export function ConsoleDialog({ label, title, className = "", onClose, children }: { label: string; title: string; className?: string; onClose?: () => void; children: ReactNode }) {
-  const dialog = useRef<HTMLDialogElement>(null);
-  useEffect(() => { if (!dialog.current?.open) dialog.current?.showModal(); }, []);
-  const close = () => dialog.current?.close();
-  return <dialog ref={dialog} className={`dfConsoleDialog ${className}`.trim()} aria-label={label} onClose={onClose} onClick={(event) => { if (event.target === dialog.current) close(); }}>
-    <div className="dfConsoleSidebar__panel">
-      <SectionHeader as="h2" title={title} actions={onClose === undefined ? null : <IconButton icon="close" aria-label="Close" onClick={close} />} />
-      {children}
-    </div>
-  </dialog>;
-}
-
-export function TaskDetail({ task, onLoadTaskDetail }: {
-  task: TaskItem;
-  onLoadTaskDetail?: (task: TaskItem, peerOffset?: bigint, expectedHead?: bigint) => Promise<TaskBrief>;
-}) {
-  const detailLoader = useRef(onLoadTaskDetail);
-  detailLoader.current = onLoadTaskDetail;
-  const [brief, setBrief] = useState<TaskBrief>();
-  const [detailError, setDetailError] = useState(false);
-  const [olderPending, setOlderPending] = useState(false);
-  useEffect(() => {
-    let live = true;
-    setDetailError(false);
-    void detailLoader.current?.(task).then((loaded) => { if (live) { setBrief(loaded); setDetailError(false); } }).catch(() => { if (live) setDetailError(true); });
-    return () => { live = false; };
-  }, [task.id, task.revision]);
-  const taskDate = formatTime(task.updated_at_ms);
-  const links = brief === undefined ? [] : pullRequests(`${brief.outcome ?? ""}\n${brief.feedback}`);
-  return <article className="dfRecentWorkDetail" aria-label="Work details">
-    <h3>{task.title}</h3>
-    <p><Status stage={task.status} />{taskDate === "" ? null : <> · <time>{taskDate}</time></>}</p>
-    {detailError || onLoadTaskDetail === undefined ? <p role="alert">Detail unavailable</p> : brief === undefined ? <p>Loading details</p> : <>
-      {brief.outcome ? <><h4>Outcome</h4><p className="dfRecentWorkText">{brief.outcome}</p></> : ["running", "queued"].includes(task.status) ? null : <p>No recorded outcome.</p>}
-      {links.length === 0 ? null : <p>{links.map((link) => <a key={link.href} href={link.href} target="_blank" rel="noreferrer">PR · {link.label}</a>)}</p>}
-      {brief.instruction === "" ? null : <details><summary>Instruction</summary><p className="dfRecentWorkText">{brief.instruction}</p></details>}
-      {brief.feedback === "" ? null : <details><summary>Review feedback</summary><p className="dfRecentWorkText">{brief.feedback}</p></details>}
-      {brief.peerQuestions.length === 0 && brief.nextPeerOffset === undefined ? null : <TaskConversation brief={brief} pending={olderPending} onOlder={brief.nextPeerOffset === undefined ? undefined : () => {
-        const load = detailLoader.current;
-        if (load === undefined) return;
-        setOlderPending(true);
-        void load(task, brief.nextPeerOffset, brief.head).then((loaded) => { setBrief(loaded); setDetailError(false); }).catch(() => setDetailError(true)).finally(() => setOlderPending(false));
-      }} />}
-    </>}
-  </article>;
-}
-
 /** One Work row: title, then chips, then meta, always the same shape; the title button stretches over the whole row. */
 function WorkRowShell({ title, chips, meta, onOpen, href, disabled = false, pressed, expanded, children }: { title: ReactNode; chips: ReactNode; meta: ReactNode; onOpen?: () => void; href?: string; disabled?: boolean; pressed?: boolean; expanded?: boolean; children?: ReactNode }) {
   return <li className="dfConsoleItem dfWorkRow">
@@ -173,7 +106,7 @@ export type AddTask = (agent: AgentItem, instruction: string, mode: "queue" | "a
 
 /** One list for everything open: what needs you, what is in review, running and queued. */
 export function WorkPanel({
-  state, rows, projectId, edit, ready, onEditTask, onAddTask, onLoadTaskDetail,
+  state, rows, projectId, edit, ready, onEditTask, onAddTask,
   selectedTaskId, onSelectTask, selectedHumanRequest, onSelectHumanRequest, onCloseHumanRequest, requestContent, onIntakeAction, intake,
 }: {
   onIntakeAction?: (projectId: string, request: IntakeBody) => void;
@@ -188,7 +121,6 @@ export function WorkPanel({
   ready: boolean;
   onEditTask?: (task: TaskItem, change: TaskEdit) => Promise<boolean>;
   onAddTask?: AddTask;
-  onLoadTaskDetail?: (task: TaskItem, peerOffset?: bigint, expectedHead?: bigint) => Promise<TaskBrief>;
   selectedHumanRequest?: FactoryHumanRequestView;
   onSelectHumanRequest?: (request: HumanRequestItem) => void;
   onCloseHumanRequest?: () => void;

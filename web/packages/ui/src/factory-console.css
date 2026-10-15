@@ -38,10 +38,6 @@
 .dfFactoryConsole__terminalPanel *,
 .dfFactoryConsole__terminalPanel *::before,
 .dfFactoryConsole__terminalPanel *::after,
-.dfConsoleDialog,
-.dfConsoleDialog *,
-.dfConsoleDialog *::before,
-.dfConsoleDialog *::after,
 .dfConsoleSidebar,
 .dfConsoleSidebar *,
 .dfConsoleSidebar *::before,
@@ -81,7 +77,6 @@
 .dfFactoryConsole__card p,
 .dfFactoryConsole__card small,
 .dfFactoryConsole__status,
-.dfConsoleDialog a,
 .dfConsoleSidebar a { color: var(--df-console-accent); }
 
 .dfFactoryConsole__reply label { font-size: var(--df-text-sm); letter-spacing: 0.02em; }
@@ -139,7 +134,6 @@
 
 .dfFactoryConsole button,
 .dfFactoryConsole__terminalPanel button,
-.dfConsoleDialog button,
 .dfConsoleSidebar button {
   display: inline-flex; align-items: center; justify-content: center; gap: 0.4rem;
   min-height: var(--df-control-height); padding: 0.4rem 0.75rem;
@@ -160,13 +154,11 @@
 
 .dfFactoryConsole button:hover:not(:disabled),
 .dfFactoryConsole__terminalPanel button:hover:not(:disabled),
-.dfConsoleDialog button:hover:not(:disabled),
 .dfConsoleSidebar button:hover:not(:disabled) { border-color: var(--df-console-accent); }
 .dfFactoryConsole button:focus-visible,
 .dfFactoryConsole textarea:focus-visible,
 .dfFactoryConsole__terminalPanel button:focus-visible,
 .dfFactoryConsole__terminalPanel textarea:focus-visible,
-.dfConsoleDialog :where(a, button, textarea, input, select):focus-visible,
 .dfConsoleSidebar :where(a, button, textarea, input, select):focus-visible {
   outline: 2px solid var(--df-console-accent);
   outline-offset: 3px;
@@ -174,7 +166,6 @@
 
 .dfFactoryConsole button:disabled,
 .dfFactoryConsole__terminalPanel button:disabled,
-.dfConsoleDialog button:disabled,
 .dfConsoleSidebar button:disabled { cursor: default; opacity: 0.5; }
 
 .dfFactoryConsole__error {
@@ -470,7 +461,6 @@
 
 .dfFactoryConsole__header { flex-wrap: wrap; }
 
-
 .dfConsoleBar__actions {
   display: flex;
   flex: 0 0 auto;
@@ -544,8 +534,7 @@
 .dfConsoleSidebar__inherit { color: var(--df-console-muted); font-size: var(--df-text-xs); overflow-wrap: anywhere; }
 
 .dfFactoryConsole__header select,
-.dfConsoleSidebar :where(input[type="text"], input:not([type]), select),
-.dfConsoleDialog :where(input[type="text"], input:not([type]), select) {
+.dfConsoleSidebar :where(input[type="text"], input:not([type]), select) {
   width: 100%;
   padding: 0.6rem;
   color: var(--df-console-text);
@@ -627,23 +616,6 @@ summary.dfConsoleItem__summary { cursor: pointer; }
   .dfConsoleSidebar .dfConsoleSidebar__terminalSlot .dfFactoryConsole__terminal { flex: 1 1 auto; height: auto; min-height: 16rem; }
 }
 
-/* SETTINGS is a modal over the console, not a panel that squeezes it. */
-.dfConsoleDialog {
-  width: min(34rem, 100%);
-  padding: 0;
-  color: var(--df-console-text);
-  background: transparent;
-  border: 0;
-}
-
-/* The panel scrolls, not the dialog: a scrollbar drag or a selection that
-   ends outside the panel must not read as a backdrop click. */
-.dfConsoleDialog .dfConsoleSidebar__panel { max-height: calc(100svh - 4rem); overflow: auto; }
-.dfConsoleDialog::backdrop { background: color-mix(in srgb, var(--df-console-background) 80%, transparent); }
-.dfConsoleDialog :where(h1, h2, h3, p, dl, ul) { margin: 0; }
-.dfConsoleDialog .dfFactoryConsole__section { margin: 0; }
-
-
 .dfAgentList { display: grid; gap: 1.5rem; }
 .dfAgentList__row { width: 100%; border: 1px solid var(--df-console-rule); }
 .dfAgentList__provider,
@@ -680,12 +652,6 @@ summary.dfConsoleItem__summary { cursor: pointer; }
 .dfPlantMap__worker--needs { fill: #f2c94c; }
 .dfPlantMap__view { fill: rgba(128, 221, 255, .08); stroke: #80ddff; stroke-width: 6; pointer-events: none; }
 
-.dfRecentWorkDetail { display: grid; align-content: start; gap: .75rem; line-height: 1.5; overflow-wrap: anywhere; font-size: var(--df-text-sm); }
-.dfRecentWorkDetail h3, .dfRecentWorkDetail h4 { margin: 0; color: var(--df-console-text); font-size: var(--df-text-md); letter-spacing: normal; }
-.dfRecentWorkText { white-space: pre-wrap; }
-.dfRecentWorkDetail a { display: block; color: var(--df-console-accent); }
-.dfRecentWorkDetail summary { cursor: pointer; }
-
 .dfAgentSprite { flex: 0 0 auto; width: 2rem; height: 2rem; image-rendering: pixelated; }
 .dfConsoleSidebar__heading > .dfAgentSprite { width: 4rem; height: 4rem; }
 
@@ -696,8 +662,6 @@ summary.dfConsoleItem__summary { cursor: pointer; }
 .dfFactoryScene__target:focus-visible > .dfFactoryScene__focus { stroke: var(--df-console-accent); stroke-width: 2; }
 .dfFactoryScene__target:focus { outline: none; }
 .dfFactoryTooltip { position: fixed; z-index: 1000; width: max-content; max-width: min(256px, calc(100vw - 16px)); box-sizing: border-box; padding: 8px 10px; border: 1px solid #637575; border-radius: 4px; background: #142126; color: #e0e3d6; font: 12px/1.5 system-ui, sans-serif; white-space: pre-line; overflow-wrap: anywhere; display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 8; max-height: 50vh; overflow: hidden; box-shadow: 0 3px 12px #0008; pointer-events: none; }
-
-.dfTaskConversation li { display: grid; gap: .35rem; overflow-wrap: anywhere; margin-bottom: .75rem; }
 
 /* One floor: projection controls and proposal selection stay reachable. */
 .dfFactoryEntityTools { position: relative; display: flex; flex: none; flex-wrap: wrap; align-items: center; gap: .6rem; min-height: 2.75rem; padding: .35rem .6rem; overflow: visible; white-space: normal; font-size: var(--df-text-xs); background: #122027; border-bottom: 1px solid #3c5051; }
@@ -1009,7 +973,6 @@ summary.dfConsoleItem__summary { cursor: pointer; }
   .dfRemote__factories { grid-template-columns: repeat(2, minmax(0, 1fr)); }
 }
 
-
 .dfConsoleSidebar__panel > h3 { margin: .75rem 0; font-size: var(--df-text-sm); }
 
 .dfConsoleViewToggle[aria-label="Console views"] { margin-bottom: 1rem; }
@@ -1026,9 +989,6 @@ summary.dfConsoleItem__summary { cursor: pointer; }
 .dfStatus[data-stage$="passed"], .dfStatus[data-stage="succeeded"], .dfStatus[data-stage="working"], .dfStatus[data-stage="ready"], .dfStatus[data-stage="Delivered"], .dfStatus[data-stage="accepted"], .dfStatus[data-stage$="running"], .dfStatus[data-stage="Construction"], .dfStatus[data-stage="Deploying"], .dfStatus[data-stage="Merge"], .dfStatus[data-stage="Merge queued"] { color: var(--df-console-accent); }
 .dfStatus[data-stage="Blocked"], .dfStatus[data-stage="blocked"], .dfStatus[data-stage="needs-you"], .dfStatus[data-stage="inbox"], .dfStatus[data-stage="open"], .dfStatus[data-stage="paused"], .dfStatus[data-stage="Delivery blocked"], .dfStatus[data-stage="Correction"], .dfStatus[data-stage="reopened"] { color: var(--df-console-warning); }
 .dfStatus[data-stage="Failed"], .dfStatus[data-stage="cancelled"], .dfStatus[data-stage$="failed"] { color: var(--df-console-alert); }
-
-
-
 
 /* The operational plant. Paint is observation, the andon lamp is state, and
    material only moves where a flow was observed. A blueprint has no telemetry

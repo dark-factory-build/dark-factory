@@ -119,10 +119,6 @@ func encodeDecoded(frame ControlFrame) ([]byte, error) {
 		return EncodeAgentControl(frame.ID, value)
 	case AgentControlResult:
 		return EncodeAgentControlResult(frame.ID, value)
-	case TaskDetailGet:
-		return EncodeTaskDetailGet(frame.ID, value)
-	case TaskDetail:
-		return EncodeTaskDetail(frame.ID, value)
 	case ProjectContent:
 		return EncodeProjectContent(frame.ID, value)
 	case ProjectContentResult:
@@ -625,7 +621,7 @@ func TestManifestMatchesImplementedRegistry(t *testing.T) {
 	}
 	// The manifest carries a stable name, not a generation: the contract is
 	// unversioned by owner decision on 4 September 2026.
-	if manifest.Name != "dark-factory/browser" || len(manifest.Control) != 75 || len(manifest.Terminal.Opcodes) != 2 {
+	if manifest.Name != "dark-factory/browser" || len(manifest.Control) != 73 || len(manifest.Terminal.Opcodes) != 2 {
 		t.Fatalf("manifest registry incomplete: %+v", manifest)
 	}
 	capabilityNames := []string{"observe", "private_human_request_detail", "human_actions", "terminal_input", "administration"}
@@ -757,45 +753,6 @@ func TestManifestMatchesImplementedRegistry(t *testing.T) {
 		if len(fixtureBytes(t, name+".json")) == 0 {
 			t.Fatal("empty fixture")
 		}
-	}
-}
-
-func TestTaskDetailEscapedPageFitsControlBound(t *testing.T) {
-	escaped := strings.Repeat("\x00", 2048)
-	answer, outcome := escaped, escaped
-	page := TaskDetail{
-		TaskID:      strings.Repeat("02", 16),
-		Revision:    3,
-		Head:        4,
-		Instruction: escaped,
-		Feedback:    escaped,
-		Outcome:     &outcome,
-		PeerQuestions: []TaskPeerQuestion{{
-			ID: strings.Repeat("03", 16), SourceTaskID: strings.Repeat("04", 16), TargetTaskID: strings.Repeat("02", 16), Question: answer, Answer: &answer,
-			RecipientDeliveryState: "delivered", AnswerDeliveryState: "delivered", Revision: 1, CreatedAtMillis: 1, UpdatedAtMillis: 1,
-		}},
-	}
-	encoded, err := EncodeTaskDetail("detail", page)
-	if err != nil || len(encoded) > MaxControlBytes {
-		t.Fatalf("escaped task detail = %d bytes, %v", len(encoded), err)
-	}
-}
-
-func TestTaskDetailPeerContinuationCarriesHead(t *testing.T) {
-	head := Decimal(9)
-	encoded, err := EncodeTaskDetailGet("detail", TaskDetailGet{TaskID: strings.Repeat("02", 16), ExpectedRevision: 3, PeerOffset: 1, ExpectedHead: &head})
-	if err != nil {
-		t.Fatal(err)
-	}
-	frame, err := DecodeClientControl(encoded)
-	if err != nil || frame.Body.(TaskDetailGet).ExpectedHead == nil || *frame.Body.(TaskDetailGet).ExpectedHead != head {
-		t.Fatalf("continuation = %+v, %v", frame, err)
-	}
-	if _, err := EncodeTaskDetailGet("detail", TaskDetailGet{TaskID: strings.Repeat("02", 16), ExpectedRevision: 3, PeerOffset: 1}); err == nil {
-		t.Fatal("continuation without head was accepted")
-	}
-	if _, err := EncodeTaskDetail("detail", TaskDetail{TaskID: strings.Repeat("02", 16), Revision: 3, PeerQuestions: []TaskPeerQuestion{}}); err == nil {
-		t.Fatal("detail without head was accepted")
 	}
 }
 

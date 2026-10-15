@@ -429,22 +429,6 @@ func (current *connection) dispatch(frame browserprotocol.ControlFrame) bool {
 			current.sendError(frame.ID, browserprotocol.ErrorInternal, false)
 			return false
 		}
-	case browserprotocol.TaskDetailGet:
-		backend, ok := current.server.backend.(AgentControlBackend)
-		if !ok {
-			err = ErrUnauthorized
-			break
-		}
-		result, backendErr := backend.TaskDetail(ctx, current.principal.ClientID, body)
-		if backendErr != nil {
-			err = backendErr
-			break
-		}
-		if result.TaskID != body.TaskID || result.Revision != body.ExpectedRevision {
-			current.sendError(frame.ID, browserprotocol.ErrorInternal, false)
-			return false
-		}
-		payload, err = browserprotocol.EncodeTaskDetail(frame.ID, result)
 	case browserprotocol.AttachmentRetention:
 		backend, ok := current.server.backend.(interface {
 			AttachmentRetention(context.Context, [browserprotocol.ClientIDSize]byte, browserprotocol.AttachmentRetention) (browserprotocol.AttachmentRetentionResult, error)

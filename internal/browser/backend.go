@@ -249,7 +249,6 @@ type TerminalBackend interface {
 type AgentControlBackend interface {
 	Backend
 	ControlAgent(context.Context, Principal, browserprotocol.AgentControl) (browserprotocol.AgentControlResult, error)
-	TaskDetail(context.Context, [browserprotocol.ClientIDSize]byte, browserprotocol.TaskDetailGet) (browserprotocol.TaskDetail, error)
 }
 
 // ContentBackend serves the optional project library through one finite,

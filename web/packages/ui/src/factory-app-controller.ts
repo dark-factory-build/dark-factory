@@ -14,7 +14,6 @@ import {
   type BrowserSessionOptions,
   type AgentItem,
   type AgentControlAction,
-  type TaskDetailView,
   type HumanRequestItem,
   type SessionErrorCode,
   type SessionStatus,
@@ -133,7 +132,7 @@ export type FactoryAppStatus =
 
 type HumanSession = Pick<BrowserSession, "getHumanRequestDetail" | "replyHumanRequest" | "cancelHumanRequest">;
 type TerminalSession = Pick<BrowserSession, "resolveAgentTerminal" | "openTerminal" | "close">;
-type AgentTaskSession = Pick<BrowserSession, "enqueueAgentTaskWithFiles" | "enqueueAgentTask" | "controlAgent" | "getTaskDetail" | "resolveAgentTerminal">;
+type AgentTaskSession = Pick<BrowserSession, "enqueueAgentTaskWithFiles" | "enqueueAgentTask" | "controlAgent" | "resolveAgentTerminal">;
 type ConsoleSession = Pick<BrowserSession, "createProject" | "getRepositories" | "intake" | "updateTask" | "getOperationalGraph" | "getRunPaths" | "discoverAccounts" | "linkAccount" | "listBrowserClients" | "revokeBrowserClient" | "githubConnection" | "clientId">;
 type RemoteInviteSession = Pick<BrowserSession, "inviteRemote" | "capabilities">;
 type ControlledClient = Pick<BrowserClient, "connect" | "close"> & { readonly session?: HumanSession & TerminalSession & AgentTaskSession & ConsoleSession & RemoteInviteSession & Partial<Pick<BrowserSession, "projectContent" | "setDispatch">> };
@@ -513,13 +512,6 @@ export class FactoryAppController {
       this.#publish();
       return false;
     }
-  }
-
-  /** Load private task text only when an operator opens its brief. */
-  taskDetail(task: Pick<TaskItem, "id" | "revision">, peerOffset = 0n, expectedHead?: bigint): Promise<TaskDetailView> {
-    const session = this.#client?.session;
-    if (this.#closed || this.#status !== "ready" || session === undefined) return Promise.reject(new SessionError("closed"));
-    return this.#readTaskDetail(session, task.id, task.revision, peerOffset, expectedHead);
   }
 
   clearAgentTerminal(): void {
@@ -1031,38 +1023,6 @@ export class FactoryAppController {
 
   #dropPendingTerminalInput(): void {
     this.#pendingTerminalInput = new Uint8Array(0);
-  }
-
-  async #readTaskDetail(session: AgentTaskSession, taskID: string, revision: bigint, peerOffset: bigint, expectedHead?: bigint): Promise<TaskDetailView> {
-    let textOffset = 0n;
-    let instruction = "";
-    let feedback = "";
-    let outcome = "";
-    let hasOutcome = false;
-    let peerQuestions: TaskDetailView["peerQuestions"] = [];
-    let nextPeerOffset: bigint | undefined;
-    let head = expectedHead;
-    // Task bodies and results are limited to 128 KiB; pages are 2,048 runes,
-    // so 64 pages cover valid text without treating conversation pagination as
-    // an unbounded background load.
-    for (let page = 0; page < 64; page += 1) {
-      const detail = await session.getTaskDetail(taskID, revision, { textOffset, peerOffset, ...(head === undefined ? {} : { expectedHead: head }) });
-      if (head !== undefined && detail.head !== head) throw new ProtocolError("malformed");
-      head = detail.head;
-      instruction += detail.instruction;
-      feedback += detail.feedback;
-      if (detail.outcome !== undefined) {
-        outcome += detail.outcome;
-        hasOutcome = true;
-      }
-      if (page === 0) {
-        peerQuestions = detail.peerQuestions;
-        nextPeerOffset = detail.nextPeerOffset;
-      }
-      if (detail.nextTextOffset === undefined) return Object.freeze({ taskId: taskID, revision, head, instruction, feedback, ...(hasOutcome ? { outcome } : {}), peerQuestions, ...(nextPeerOffset === undefined ? {} : { nextPeerOffset }) });
-      textOffset = detail.nextTextOffset;
-    }
-    throw new ProtocolError("malformed");
   }
 
   #refreshTerminalTask(selected: AgentTerminalSelection, state: StateView): void {

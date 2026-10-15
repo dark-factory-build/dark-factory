@@ -132,9 +132,6 @@ func (backend *fakeBackend) HumanRequestDetail(_ context.Context, client [16]byt
 	return backend.detail, backend.detailErr
 }
 
-func (*fakeBackend) TaskDetail(_ context.Context, _ [browserprotocol.ClientIDSize]byte, request browserprotocol.TaskDetailGet) (browserprotocol.TaskDetail, error) {
-	return browserprotocol.TaskDetail{TaskID: request.TaskID, Revision: request.ExpectedRevision, Head: 7, PeerQuestions: []browserprotocol.TaskPeerQuestion{}}, nil
-}
 func (backend *fakeBackend) TerminalTarget(ctx context.Context, client [16]byte, _ browserprotocol.TerminalTargetGet) (browserprotocol.TerminalTarget, error) {
 	backend.mu.Lock()
 	backend.targetCalls++

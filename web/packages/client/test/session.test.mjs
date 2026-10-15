@@ -18,7 +18,7 @@ import {
   encodeServerControl,
 } from "../dist/src/index.js";
 import { settle } from "./remote-fake.mjs";
-import { encodeAgentControlResult, encodeAuthResult, encodeHello, encodeHumanRequestCancelRunResult, encodeHumanRequestDetail, encodeHumanRequestReplyResult, encodePairResult, encodeProjectCreateResult, encodeRemoteInviteResult, encodeRepositories, encodeServerError, encodeStateChanged, encodeStateSnapshot, encodeTaskDetail, encodeTaskEnqueueResult, encodeTerminalAttached, encodeTerminalExit, encodeTerminalReset, encodeTerminalTarget } from "./server-frames.mjs";
+import { encodeAgentControlResult, encodeAuthResult, encodeHello, encodeHumanRequestCancelRunResult, encodeHumanRequestDetail, encodeHumanRequestReplyResult, encodePairResult, encodeProjectCreateResult, encodeRemoteInviteResult, encodeRepositories, encodeServerError, encodeStateChanged, encodeStateSnapshot, encodeTaskEnqueueResult, encodeTerminalAttached, encodeTerminalExit, encodeTerminalReset, encodeTerminalTarget } from "./server-frames.mjs";
 
 const challenge = "11".repeat(32);
 const daemonID = "22".repeat(16);
@@ -375,52 +375,7 @@ test("agent controls and private task history keep exact task and run identities
   socket.reply(encodeAgentControlResult(control.id, { operation_id: operationId, task_id: taskId, run_id: runID, status: "delivered", successor_task_id: "" }));
   assert.deepEqual(await controlled, { operationId, taskId, runId: runID, status: "delivered", successorTaskId: "" });
 
-  const taskDetail = session.getTaskDetail(taskId, 2n, { peerOffset: 1n, expectedHead: 9n });
-  const taskDetailGet = decodeClientControl(socket.sent.at(-1));
-  assert.deepEqual(taskDetailGet.body, { task_id: taskId, expected_revision: 2n, peer_offset: 1n, expected_head: 9n });
-  socket.reply(encodeTaskDetail(taskDetailGet.id, { task_id: taskId, revision: 2n, head: 9n, instruction: "", feedback: "", outcome: "completed", peer_questions: [] }));
-  assert.deepEqual(await taskDetail, { taskId, revision: 2n, head: 9n, instruction: "", feedback: "", outcome: "completed", peerQuestions: [] });
-  await assert.rejects(session.getTaskDetail(taskId, 2n, { peerOffset: 1n }), (error) => error instanceof ProtocolError && error.code === "malformed");
   session.close();
-});
-
-test("ordinary private task reads retain correlation, authority and shared pending cleanup", async (t) => {
-  const taskId = "7a".repeat(16);
-  const reads = [
-    { name: "detail", request: (session, id = taskId) => session.getTaskDetail(id, 2n), reply: (id, changes = {}) => encodeTaskDetail(id, { task_id: taskId, revision: 2n, head: 9n, instruction: "", feedback: "", peer_questions: [], ...changes }) },
-  ];
-  for (const read of reads) {
-    for (const fault of ["identity", ...(read.name === "detail" ? ["revision"] : [])]) {
-      await t.test(`${read.name}: wrong ${fault} closes and rejects`, async () => {
-        const { session, socket } = await openHumanSession();
-        const pending = read.request(session);
-        const rejected = assert.rejects(pending, { code: "malformed" });
-        const id = decodeClientControl(socket.sent.at(-1)).id;
-        socket.reply(read.reply(id, fault === "identity" ? { task_id: "7b".repeat(16) } : { revision: 3n }));
-        await rejected;
-        assert.equal(socket.readyState, 3);
-      });
-    }
-    await t.test(`${read.name}: private authority and bounds before send`, async () => {
-      const unauthorized = await openHumanSession(undefined, CAPABILITIES.observe | CAPABILITIES.human_actions);
-      const before = unauthorized.socket.sent.length;
-      await assert.rejects(read.request(unauthorized.session), { code: "unauthorized" });
-      assert.equal(unauthorized.socket.sent.length, before);
-      unauthorized.session.close();
-      const { session, socket } = await openHumanSession(undefined, CAPABILITIES.observe | CAPABILITIES.private_human_request_detail);
-      const sent = socket.sent.length;
-      await assert.rejects(read.request(session, "invalid"), { code: "invalid_request" });
-      if (read.name === "detail") {
-        await assert.rejects(session.getTaskDetail(taskId, 0n), { code: "invalid_request" });
-        await assert.rejects(session.getTaskDetail(taskId, 2n, { peerOffset: 1n }), { code: "malformed" });
-      }
-      assert.equal(socket.sent.length, sent);
-      const pending = read.request(session);
-      socket.reply(read.reply(decodeClientControl(socket.sent.at(-1)).id));
-      assert.equal((await pending).taskId, taskId);
-      session.close();
-    });
-  }
 });
 
 test("console edits and topology carry exact bodies and correlate their results", async () => {

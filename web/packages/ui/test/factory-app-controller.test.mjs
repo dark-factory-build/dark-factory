@@ -52,7 +52,6 @@ function harness(overrides = {}) {
     replyHumanRequest: overrides.reply ?? (async () => ({ status: "resolved" })),
     cancelHumanRequest: overrides.cancel ?? (async () => ({ request_id: request.id })),
     updateTask: overrides.updateTask ?? (async () => { throw new SessionError("not_found"); }),
-    getTaskDetail: overrides.getTaskDetail ?? (async () => { throw new SessionError("not_found"); }),
     getOperationalGraph: overrides.getOperationalGraph ?? (async () => { throw new SessionError("not_found"); }),
     getRunPaths: overrides.getRunPaths ?? (async () => { throw new SessionError("not_found"); }),
     discoverAccounts: overrides.discoverAccounts ?? (async () => []),
@@ -223,46 +222,6 @@ test("status changes are deduplicated without affecting snapshot updates", () =>
   assert.equal(context.snapshots.length, 3);
 });
 
-test("task-detail pages cover a maximum outcome with one head and peer continuation", async () => {
-  const outcome = "x".repeat(131_072);
-  const task = [...fixtureState.tasks.values()][0];
-  const calls = [];
-  const context = harness({
-    getTaskDetail: async (taskID, revision, offsets) => {
-      calls.push([taskID, revision, offsets]);
-      if (offsets.peerOffset === 1n) {
-        assert.equal(offsets.expectedHead, 9n);
-        return { taskId: taskID, revision, head: 9n, instruction: "", feedback: "", peerQuestions: [], nextPeerOffset: undefined };
-      }
-      const offset = Number(offsets.textOffset);
-      assert.equal(offsets.expectedHead, offset === 0 ? undefined : 9n);
-      return {
-        taskId: taskID, revision, head: 9n,
-        instruction: offset === 0 ? "first" : offset === 2048 ? "second" : "",
-        feedback: offset === 0 ? "review " : offset === 2048 ? "feedback" : "",
-        outcome: outcome.slice(offset, offset + 2048), peerQuestions: [],
-        ...(offset + 2048 < outcome.length ? { nextTextOffset: BigInt(offset + 2048) } : {}),
-        ...(offset === 0 ? { nextPeerOffset: 1n } : {}),
-      };
-    },
-  });
-  context.controller.start();
-  context.emitStatus("ready");
-
-  const first = await context.controller.taskDetail(task);
-  assert.equal(first.head, 9n);
-  assert.equal(first.instruction, "firstsecond");
-  assert.equal(first.feedback, "review feedback");
-  assert.equal(first.outcome, outcome, "all 128 KiB survive the 64-page boundary");
-  assert.deepEqual(calls, Array.from({ length: 64 }, (_, index) => [
-    task.id, task.revision,
-    { textOffset: BigInt(index * 2048), peerOffset: 0n, ...(index === 0 ? {} : { expectedHead: 9n }) },
-  ]));
-
-  await context.controller.taskDetail(task, first.nextPeerOffset, first.head);
-  assert.deepEqual(calls.at(-1), [task.id, task.revision, { textOffset: 0n, peerOffset: 1n, expectedHead: 9n }]);
-  context.controller.close();
-});
 test("a failed fragment scrub creates no client or browser effect", () => {
   let clients = 0;
   const snapshots = [];

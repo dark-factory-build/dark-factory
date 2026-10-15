@@ -13,7 +13,6 @@ export function encodeTaskEnqueueResult(id, body) { return encodeServerControl({
 export function encodeProjectCreateResult(id, body) { return encodeServerControl({ type: "PROJECT_CREATE_RESULT", id, body }); }
 export function encodeRepositories(id, body) { return encodeServerControl({ type: "REPOSITORIES", id, body }); }
 export function encodeAgentControlResult(id, body) { return encodeServerControl({ type: "AGENT_CONTROL_RESULT", id, body }); }
-export function encodeTaskDetail(id, body) { return encodeServerControl({ type: "TASK_DETAIL", id, body }); }
 export function encodeTerminalTarget(id, body) { return encodeServerControl({ type: "TERMINAL_TARGET", id, body }); }
 export function encodeTerminalAttached(id, body) { return encodeServerControl({ type: "TERMINAL_ATTACHED", id, body }); }
 export function encodeTerminalLeaseResult(id, body) { return encodeServerControl({ type: "TERMINAL_LEASE_RESULT", id, body }); }
