@@ -571,14 +571,15 @@ func TestDaemonDispatchesContentCreateWithoutScheduling(t *testing.T) {
 	}
 }
 
-// TestAttemptCallsShareTheClientRetryWindow holds each daemon's first clock
-// read inside dispatch past the default budget but within the attempt client's
-// RestartRetryWindow: an attempt mutation and attempt task complete once, and
-// an operator call is still cut off at the default.
+// TestAttemptCallsShareTheClientRetryWindow holds real dispatch work past the
+// default budget but within the attempt client's RestartRetryWindow: content
+// create waits on the live-attempt operation gate, and attempt task on its
+// live issue observation. Both attempt calls complete once; an operator
+// content create behind the same gate is still cut off at the default.
 func TestAttemptCallsShareTheClientRetryWindow(t *testing.T) {
 	ctx := context.Background()
 	project := testID(110)
-	setup := func(seed byte) (*dispatchFixture, activeAttempt) {
+	withProject := func() *dispatchFixture {
 		fixture := newDispatchFixture(t)
 		operator, err := api.NewOperatorClient(fixture.socket, fixture.operator)
 		if err != nil {
@@ -589,36 +590,51 @@ func TestAttemptCallsShareTheClientRetryWindow(t *testing.T) {
 			t.Fatal(err)
 		}
 		waitDispatch(t, done)
-		active := prepareActiveAttemptInProject(t, fixture, seed, project, "worker")
-		var slept atomic.Bool
-		now := fixture.daemon.now
-		fixture.daemon.now = func() time.Time {
-			if slept.CompareAndSwap(false, true) {
-				time.Sleep(defaultDispatchTimeout + time.Second)
-			}
-			return now()
-		}
-		return fixture, active
+		return fixture
 	}
-	contentFixture, contentAttempt := setup(111)
-	taskFixture, taskAttempt := setup(121)
-	operatorFixture, _ := setup(131)
+	contentFixture := withProject()
+	contentAttempt := prepareActiveAttemptInProject(t, contentFixture, 111, project, "worker")
+	operatorFixture := withProject()
 	operator, err := api.NewOperatorClient(operatorFixture.socket, operatorFixture.operator)
 	if err != nil {
 		t.Fatal(err)
 	}
+	taskFixture := newDispatchFixture(t)
+	issue := maintainer.Issue{ID: 81, NodeID: "I_slow", Number: 9, Title: "Slow scope", State: "open", URL: "https://github.com/team/issues/issues/9"}
+	issue.Author.Login, issue.Author.Type = "outsider", "User"
+	taskAttempt, _ := prepareCustomerIntakeAttempt(t, taskFixture, &issue)
+	release := make(chan struct{})
+	live := taskFixture.daemon.githubMCP
+	taskFixture.daemon.githubMCP = func(ctx context.Context, request json.RawMessage, repositories map[string]uint64) (json.RawMessage, error) {
+		select {
+		case <-release:
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		}
+		return live(ctx, request, repositories)
+	}
+	contentFixture.daemon.operationMu.Lock()
+	operatorFixture.daemon.operationMu.Lock()
 	contentInput := api.ContentInput{ID: testID(141), ProjectID: project, Kind: "custom", Title: "lesson", Body: "slow write"}
 
-	started := time.Now()
 	var wg sync.WaitGroup
 	var contentErr, taskErr, operatorErr error
+	var contentTook, taskTook time.Duration
 	var created api.Content
 	for _, call := range []struct {
 		fixture *dispatchFixture
 		send    func()
 	}{
-		{contentFixture, func() { created, contentErr = contentAttempt.client.ContentCreate(ctx, contentInput) }},
-		{taskFixture, func() { _, taskErr = taskAttempt.client.Task(ctx) }},
+		{contentFixture, func() {
+			started := time.Now()
+			created, contentErr = contentAttempt.client.ContentCreate(ctx, contentInput)
+			contentTook = time.Since(started)
+		}},
+		{taskFixture, func() {
+			started := time.Now()
+			_, taskErr = taskAttempt.client.Task(ctx)
+			taskTook = time.Since(started)
+		}},
 		{operatorFixture, func() {
 			bounded, cancel := context.WithTimeout(ctx, api.RestartRetryWindow)
 			defer cancel()
@@ -633,15 +649,16 @@ func TestAttemptCallsShareTheClientRetryWindow(t *testing.T) {
 			<-done
 		}()
 	}
+	time.Sleep(defaultDispatchTimeout + time.Second)
+	contentFixture.daemon.operationMu.Unlock()
+	operatorFixture.daemon.operationMu.Unlock()
+	close(release)
 	wg.Wait()
-	if elapsed := time.Since(started); elapsed <= defaultDispatchTimeout || elapsed >= api.RestartRetryWindow {
-		t.Fatalf("calls took %v, want between %v and %v", elapsed, defaultDispatchTimeout, api.RestartRetryWindow)
+	if contentErr != nil || created.Revision != 1 || contentTook <= defaultDispatchTimeout || contentTook >= api.RestartRetryWindow {
+		t.Fatalf("attempt content create = %+v, %v after %v", created, contentErr, contentTook)
 	}
-	if contentErr != nil || created.Revision != 1 {
-		t.Fatalf("attempt content create = %+v, %v", created, contentErr)
-	}
-	if taskErr != nil {
-		t.Fatalf("attempt task = %v", taskErr)
+	if taskErr != nil || taskTook <= defaultDispatchTimeout || taskTook >= api.RestartRetryWindow {
+		t.Fatalf("attempt task = %v after %v", taskErr, taskTook)
 	}
 	if operatorErr == nil {
 		t.Fatal("operator call outlived the default dispatch budget")
@@ -1273,6 +1290,31 @@ func TestDaemonServesCurrentWorkerAssignmentReceipt(t *testing.T) {
 func TestAttemptTaskUsesCurrentAcceptedIssueBody(t *testing.T) {
 	fixture := newDispatchFixture(t)
 	ctx := context.Background()
+	issue := maintainer.Issue{ID: 81, NodeID: "I_attempt", Number: 9, Title: "Original scope", Body: "", State: "open", URL: "https://github.com/team/issues/issues/9"}
+	issue.Author.Login, issue.Author.Type = "outsider", "User"
+	active, queued := prepareCustomerIntakeAttempt(t, fixture, &issue)
+	issue.Body = "Edited scope"
+	liveShell, err := fixture.daemon.currentTaskText(ctx, kernel.ProviderShell, queued)
+	if err != nil || !strings.Contains(liveShell, "Original scope") || !strings.Contains(liveShell, "Issue edited since acceptance: re-accept to apply") || strings.Contains(liveShell, "Edited scope") {
+		t.Fatalf("shell task text = %q, err=%v", liveShell, err)
+	}
+	done := fixture.serve(t)
+	assignment, err := active.client.Task(ctx)
+	waitDispatch(t, done)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(assignment.Task, "Original scope") || !strings.Contains(assignment.Task, "Issue edited since acceptance: re-accept to apply") || strings.Contains(assignment.Task, "Edited scope") {
+		t.Fatalf("attempt task = %q", assignment.Task)
+	}
+}
+
+// prepareCustomerIntakeAttempt accepts and imports issue in customer mode and
+// gives its task to a live orchestrator attempt; the task fetch observes the
+// live issue through githubMCP, which serves *issue as it is at that call.
+func prepareCustomerIntakeAttempt(t *testing.T, fixture *dispatchFixture, issue *maintainer.Issue) (activeAttempt, kernel.Task) {
+	t.Helper()
+	ctx := context.Background()
 	project := mustProjectID(t, testID(220))
 	agent := mustAgentID(t, testID(221))
 	if _, err := fixture.store.CreateProject(ctx, kernel.NewProject{ID: project, Name: "intake", Root: "/intake/220"}, mustKernelTime(t, 100)); err != nil {
@@ -1292,12 +1334,10 @@ func TestAttemptTaskUsesCurrentAcceptedIssueBody(t *testing.T) {
 	if _, err := fixture.store.SetIntakeSourceEnabled(ctx, source.ID, source.Revision, true, mustKernelTime(t, 103)); err != nil {
 		t.Fatal(err)
 	}
-	issue := maintainer.Issue{ID: 81, NodeID: "I_attempt", Number: 9, Title: "Original scope", Body: "", State: "open", URL: "https://github.com/team/issues/issues/9"}
-	issue.Author.Login, issue.Author.Type = "outsider", "User"
 	fixture.daemon.intakeIssues = func(_ context.Context, repository string, repositoryID uint64, page uint32, label string, number uint64) (maintainer.IssuePage, error) {
-		return maintainer.IssuePage{RepositoryID: repositoryID, Issues: []maintainer.Issue{issue}}, nil
+		return maintainer.IssuePage{RepositoryID: repositoryID, Issues: []maintainer.Issue{*issue}}, nil
 	}
-	snapshot := intakeSnapshot(source, issue)
+	snapshot := intakeSnapshot(source, *issue)
 	hash := snapshot.ContentHash()
 	preview := fixture.daemon.Intake(ctx, api.IntakeInput{Action: "preview", SourceID: source.ID.String(), Page: 1})
 	if preview.State != "ok" || len(preview.Candidates) != 1 {
@@ -1310,7 +1350,6 @@ func TestAttemptTaskUsesCurrentAcceptedIssueBody(t *testing.T) {
 	if imported := fixture.daemon.Intake(ctx, api.IntakeInput{Action: "tick", SourceID: source.ID.String(), Page: 1}); imported.State != "ok" || len(imported.ImportedTasks) != 1 {
 		t.Fatalf("import = %+v", imported)
 	}
-	issue.Body = "Edited scope"
 	fixture.daemon.githubMCP = func(_ context.Context, request json.RawMessage, repositories map[string]uint64) (json.RawMessage, error) {
 		var call struct {
 			Params struct {
@@ -1341,20 +1380,7 @@ func TestAttemptTaskUsesCurrentAcceptedIssueBody(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	liveShell, err := fixture.daemon.currentTaskText(ctx, kernel.ProviderShell, queued)
-	if err != nil || !strings.Contains(liveShell, "Original scope") || !strings.Contains(liveShell, "Issue edited since acceptance: re-accept to apply") || strings.Contains(liveShell, "Edited scope") {
-		t.Fatalf("shell task text = %q, err=%v", liveShell, err)
-	}
-	active := prepareActiveAttemptInProjectWithProviderAndTask(t, fixture, 220, project.String(), "orchestrator", "shell", receipt.TaskID, func() {})
-	done := fixture.serve(t)
-	assignment, err := active.client.Task(ctx)
-	waitDispatch(t, done)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !strings.Contains(assignment.Task, "Original scope") || !strings.Contains(assignment.Task, "Issue edited since acceptance: re-accept to apply") || strings.Contains(assignment.Task, "Edited scope") {
-		t.Fatalf("attempt task = %q", assignment.Task)
-	}
+	return prepareActiveAttemptInProjectWithProviderAndTask(t, fixture, 220, project.String(), "orchestrator", "shell", receipt.TaskID, func() {}), queued
 }
 
 func TestDaemonOverseerTaskUpdateAuthorizesBeforeProviderPreflight(t *testing.T) {
