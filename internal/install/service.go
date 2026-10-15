@@ -2,6 +2,7 @@ package install
 
 import (
 	"bytes"
+	"cmp"
 	"context"
 	"crypto/sha256"
 	"encoding/json"
@@ -288,6 +289,26 @@ func ServicePlist(home, label, relayOrigin, developmentBrowserAddress, toolPath,
 	if developmentBrowserAddress != "" {
 		address = "\n        <string>--development-browser-address</string>\n        <string>" + developmentBrowserAddress + "</string>"
 	}
+	// launchd binds the console address for as long as the job is loaded and
+	// hands factoryd the socket, so across a restart or crash no other local
+	// process can serve the paired console origin. An ephemeral port is no
+	// stable origin, and factoryd binds it itself.
+	sockets := ""
+	if host, port, _ := net.SplitHostPort(cmp.Or(developmentBrowserAddress, DefaultBrowserAddress)); port != "0" {
+		sockets = `
+    <key>Sockets</key>
+    <dict>
+        <key>Browser</key>
+        <dict>
+            <key>SockNodeName</key>
+            <string>` + host + `</string>
+            <key>SockServiceName</key>
+            <string>` + port + `</string>
+            <key>SockFamily</key>
+            <string>IPv4</string>
+        </dict>
+    </dict>`
+	}
 	toolchain := ""
 	for _, argument := range [][2]string{{"--tool-path", toolPath}, {"--toolchain-read-roots", toolchainReadRoots}} {
 		if argument[1] == "" {
@@ -323,7 +344,7 @@ func ServicePlist(home, label, relayOrigin, developmentBrowserAddress, toolPath,
     <key>AbandonProcessGroup</key>
     <true/>
     <key>Umask</key>
-    <integer>63</integer>
+    <integer>63</integer>` + sockets + `
 </dict>
 </plist>
 `)
@@ -418,6 +439,11 @@ func ValidRelayOrigin(value string) bool {
 // validServiceRelayOrigin additionally accepts the empty origin, which renders
 // a job with no relay argument at all.
 func validServiceRelayOrigin(value string) bool { return value == "" || ValidRelayOrigin(value) }
+
+// DefaultBrowserAddress is the loopback console address factoryd listens on
+// unless the operator names another. A remote invitation omits the address
+// when it is this one, which is most of the time and several QR modules.
+const DefaultBrowserAddress = "127.0.0.1:43123"
 
 // ValidDevelopmentBrowserAddress accepts factoryd's exact development-only
 // loopback listener grammar, including port zero for an ephemeral listener.

@@ -18,6 +18,7 @@ import (
 	"github.com/dark-factory-build/dark-factory/internal/api"
 	"github.com/dark-factory-build/dark-factory/internal/browser"
 	"github.com/dark-factory-build/dark-factory/internal/browserprotocol"
+	"github.com/dark-factory-build/dark-factory/internal/install"
 	"github.com/dark-factory-build/dark-factory/internal/kernel"
 	"github.com/dark-factory-build/dark-factory/internal/relayhost"
 	"rsc.io/qr"
@@ -121,7 +122,7 @@ func TestRemotePairOmitsTheDefaultRelayAndBrowserAddress(t *testing.T) {
 	// factory runs on the production defaults is enough to prove omission
 	// without binding a test to port 43123 or dialing the real relay.
 	runtime.relayOrigin = relayhost.DefaultRelayOrigin
-	runtime.browserAddress = DefaultBrowserAddress
+	runtime.browserAddress = install.DefaultBrowserAddress
 
 	invitation, err := fixture.daemon.RemotePair(context.Background())
 	if err != nil {

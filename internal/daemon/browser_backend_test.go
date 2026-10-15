@@ -50,7 +50,7 @@ func newAdapterFixture(t *testing.T, capabilities kernel.BrowserCapabilityMask) 
 		_ = store.Close()
 		t.Fatal(err)
 	}
-	runtime, err := daemon.ListenBrowser("127.0.0.1:0", []string{adapterOrigin})
+	runtime, err := daemon.ListenBrowser("127.0.0.1:0", nil, []string{adapterOrigin})
 	if err != nil {
 		_ = store.Close()
 		t.Fatal(err)
@@ -678,7 +678,7 @@ func TestDaemonCloseJoinsHijackedBrowserConnectionsBeforeStoreClose(t *testing.T
 	if err != nil {
 		t.Fatal(err)
 	}
-	runtime, err := daemon.ListenBrowser("127.0.0.1:0", []string{adapterOrigin})
+	runtime, err := daemon.ListenBrowser("127.0.0.1:0", nil, []string{adapterOrigin})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -704,7 +704,7 @@ func TestDaemonCloseJoinsHijackedBrowserConnectionsBeforeStoreClose(t *testing.T
 	if _, err := store.Factory(context.Background()); err != nil {
 		t.Fatalf("browser close prematurely closed Store: %v", err)
 	}
-	if _, err := daemon.ListenBrowser("127.0.0.1:0", []string{adapterOrigin}); !errors.Is(mapBrowserError(err), browser.ErrUnauthorized) {
+	if _, err := daemon.ListenBrowser("127.0.0.1:0", nil, []string{adapterOrigin}); !errors.Is(mapBrowserError(err), browser.ErrUnauthorized) {
 		t.Fatalf("browser listener after daemon close = %v", err)
 	}
 }
@@ -730,7 +730,7 @@ func TestBrowserCloseLinearizesOpenAndClearsChallenges(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	runtime, err := daemon.ListenBrowser("127.0.0.1:0", []string{adapterOrigin})
+	runtime, err := daemon.ListenBrowser("127.0.0.1:0", nil, []string{adapterOrigin})
 	if err != nil {
 		t.Fatal(err)
 	}

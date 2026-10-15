@@ -33,7 +33,7 @@ import (
 )
 
 const (
-	defaultBrowserAddress = daemon.DefaultBrowserAddress
+	defaultBrowserAddress = install.DefaultBrowserAddress
 	defaultBrowserOrigin  = "https://app.darkfactory.build"
 	defaultGitExecutable  = change.TrustedGitExecutable
 	defaultToolPath       = "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin"
@@ -424,6 +424,9 @@ func superviseTrial(home string, args []string, marker install.UpgradeMarker) er
 	child := exec.CommandContext(ctx, filepath.Join(install.ServiceDirectoryPath(home), "bin", "previous", "factoryd"), args...)
 	child.Env = append(os.Environ(), trialEnv+"=1")
 	child.Stderr = recoveryLog
+	if socket := browserSocket(); socket != nil {
+		child.ExtraFiles = []*os.File{socket}
+	}
 	// Its own process group, recorded in the marker: launchd does not end a
 	// child whose supervisor died, so the next boot does.
 	child.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
@@ -613,7 +616,7 @@ func openProcess(ctx context.Context, configuration config) (_ *process, resultE
 		return nil, err
 	}
 	startupPhase("listener")
-	owner.browser, err = owner.daemon.ListenBrowser(configuration.browserAddress, configuration.browserOrigins)
+	owner.browser, err = owner.daemon.ListenBrowser(configuration.browserAddress, browserSocket(), configuration.browserOrigins)
 	if err != nil {
 		return nil, err
 	}

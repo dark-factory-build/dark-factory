@@ -7,7 +7,13 @@ factoryd (`internal/browser/console`). The desktop console is factoryd's own
 page at `http://127.0.0.1:43123/`, so the browser asks no loopback permission;
 the site's remote page gets the same bundle through the relay, signed by the
 node key. So a daemon release ships its own console, and no change here waits
-on a site deploy.
+on a site deploy. launchd binds that port for as long as the job is loaded
+(the plist's `Sockets`) and hands factoryd the socket, so while factoryd
+restarts or after it crashes no other local process, such as a sandboxed
+worker allowed to bind loopback, can serve the paired console origin. An
+installation whose plist predates `Sockets` gains it only through `factoryctl
+service uninstall` and `service install` with the existing settings; until
+then factoryd binds the port itself.
 
 ```sh
 factoryctl release <commit-sha> [--start] [--wait]

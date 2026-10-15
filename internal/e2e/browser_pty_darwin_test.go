@@ -282,7 +282,7 @@ func newFixture(t *testing.T, seed byte, test scenario, factoryctl, runnerExecut
 		}
 	}()
 
-	browserRuntime, err := result.daemon.ListenBrowser("127.0.0.1:0", []string{e2eOrigin})
+	browserRuntime, err := result.daemon.ListenBrowser("127.0.0.1:0", nil, []string{e2eOrigin})
 	if err != nil {
 		t.Fatal(err)
 	}

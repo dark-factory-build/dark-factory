@@ -46,11 +46,6 @@ type RelayRuntime struct {
 	closeErr  error
 }
 
-// DefaultBrowserAddress is the loopback endpoint factoryd listens on unless
-// the operator names another. A remote invitation omits the address when it is
-// this one, which is most of the time and several QR modules.
-const DefaultBrowserAddress = "127.0.0.1:43123"
-
 // ingestKeyFileName is the home file holding the ingest secret's digest.
 const ingestKeyFileName = "ingest.sha256"
 
