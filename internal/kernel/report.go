@@ -12,6 +12,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/dark-factory-build/dark-factory/internal/buildinfo"
 	"github.com/dark-factory-build/dark-factory/internal/review"
 )
 
@@ -150,7 +151,7 @@ func (store *Store) Report(ctx context.Context, project *ProjectID, since, bucke
 	if err := errors.Join(rows.Err(), rows.Close()); err != nil {
 		return nil, err
 	}
-	lines = append(lines, "factoryd since="+store.opened.UTC().Format("2006-01-02T15:04Z"), fmt.Sprintf("wal_bytes=%d", walBytes))
+	lines = append(lines, "factoryd since="+store.opened.UTC().Format("2006-01-02T15:04Z")+" source="+buildinfo.Current().Source(), fmt.Sprintf("wal_bytes=%d", walBytes))
 	return lines, nil
 }
 
