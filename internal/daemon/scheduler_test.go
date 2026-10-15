@@ -708,6 +708,65 @@ func TestSchedulerPreservesAdmittedRunWhenAttemptCompletionIsUnknown(t *testing.
 	}
 }
 
+func TestSchedulerCancellationAfterAdmissionHandsOffCleanly(t *testing.T) {
+	daemon := newSchedulerTestDaemon(t)
+	projectID := schedulerProjectID(t, 20)
+	agentID := schedulerAgentID(t, 21)
+	taskID := schedulerTaskID(t, 22)
+	incarnationID := schedulerIncarnationID(t, 23)
+	at := schedulerTime(t, 10)
+	if _, err := daemon.store.CreateProject(context.Background(), kernel.NewProject{ID: projectID, Name: "scheduler", Root: t.TempDir()}, at); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := daemon.store.CreateAgent(context.Background(), kernel.NewAgent{ID: agentID, ProjectID: projectID, Name: "worker", Role: kernel.RoleWorker, Provider: kernel.ProviderShell, ToolBudgetLimit: 1}, schedulerTime(t, 11)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := daemon.store.EnqueueTask(context.Background(), kernel.NewTask{ID: taskID, ProjectID: projectID, AssignedAgentID: agentID, IncarnationID: incarnationID, Title: "queued"}, schedulerTime(t, 12)); err != nil {
+		t.Fatal(err)
+	}
+	keys := schedulerAdmissionKeys(t, 30)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	admitted := make(chan kernel.Run, 1)
+	done := make(chan error, 1)
+	var probes atomic.Int64
+	spec := SupervisorSpec{
+		scheduledAttempt: func(ctx context.Context, spec SupervisorSpec) (kernel.Run, error) {
+			if probes.Add(1) > 1 {
+				spec.admissionObserved(false)
+				return kernel.Run{}, fmt.Errorf("%w: no admission", kernel.ErrConflict)
+			}
+			admission, err := daemon.store.AdmitNext(context.Background(), keys, schedulerTime(t, 13))
+			if err != nil {
+				spec.admissionObserved(false)
+				return kernel.Run{}, err
+			}
+			if !admission.Admitted() || admission.Run == nil {
+				spec.admissionObserved(false)
+				return kernel.Run{}, fmt.Errorf("%w: expected admission", kernel.ErrConflict)
+			}
+			spec.admissionObserved(true)
+			admitted <- *admission.Run
+			<-ctx.Done()
+			return *admission.Run, nil
+		},
+	}
+	go func() { done <- daemon.RunScheduler(ctx, spec) }()
+	select {
+	case run := <-admitted:
+		cancel()
+		if err := waitSchedulerDone(t, done); err != nil {
+			t.Fatalf("scheduler shutdown = %v", err)
+		}
+		current, found, err := daemon.store.Run(context.Background(), run.ID)
+		if err != nil || !found || current.Phase != kernel.RunAdmitted {
+			t.Fatalf("handed-off run = %+v, found=%v, err=%v", current, found, err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("scheduler did not admit before cancellation")
+	}
+}
+
 // A tick failure that repeats on the same data is logged once per backoff
 // window and retried; the scheduler never ends factoryd, which keeps serving.
 func TestSchedulerRetriesARepeatingTickFailureWithBackoff(t *testing.T) {
