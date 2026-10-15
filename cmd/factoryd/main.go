@@ -119,6 +119,7 @@ type process struct {
 	daemon        *daemon.Daemon
 	apiAuthority  *install.LocalAPIAuthority
 	listener      *api.Listener
+	served        time.Time // when the local API socket was bound
 	browser       *daemon.BrowserRuntime
 	relay         *daemon.RelayRuntime
 	// supervisorSpec is derived and committed at boot; the scheduler
@@ -511,7 +512,7 @@ func (owner *process) settleRelease(ctx context.Context, home, target, state, re
 		daemon.LogFactoryd(recoveryLog, "factoryd: forgetting release %s failed: %v\n", target, errors.Join(err, readErr))
 		return
 	}
-	if err = errors.Join(err, owner.daemon.FinishRelease(ctx, target, state, reason)); err != nil {
+	if err = errors.Join(err, owner.daemon.FinishRelease(ctx, target, state, reason, owner.served)); err != nil {
 		daemon.LogFactoryd(recoveryLog, "factoryd: recording release %s %s failed: %v\n", target, state, err)
 	} else {
 		releaseSettledHook(target, state)
@@ -633,6 +634,7 @@ func openProcess(ctx context.Context, configuration config) (_ *process, resultE
 	if err != nil {
 		return nil, err
 	}
+	owner.served = time.Now()
 	startupPhase("listener")
 	// A trial under a supervisor without the console socket proves no bind:
 	// it would only take the paired origin and release it again.
@@ -826,6 +828,14 @@ func (owner *process) shutdown() error {
 		owner.listener = nil
 		owner.apiAuthority = nil
 		owner.lifecycleMu.Unlock()
+		// A staged release's outage starts here; a trial acts on nothing.
+		if listener != nil && owner.daemon != nil && os.Getenv(trialEnv) == "" {
+			stamp, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			if err := owner.daemon.WithdrawRelease(stamp, time.Now()); err != nil {
+				daemon.LogFactoryd(recoveryLog, "factoryd: recording the release socket withdrawal: %v\n", err)
+			}
+			cancel()
+		}
 	}
 	if owner.apiStart {
 		<-owner.apiDone
