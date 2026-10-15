@@ -600,7 +600,7 @@ func TestAttemptCallsShareTheClientRetryWindow(t *testing.T) {
 		t.Fatal(err)
 	}
 	taskFixture := newDispatchFixture(t)
-	issue := maintainer.Issue{ID: 81, NodeID: "I_slow", Number: 9, Title: "Slow scope", State: "open", URL: "https://github.com/team/issues/issues/9"}
+	issue := maintainer.Issue{ID: 81, NodeID: "I_slow", Number: 9, Title: "Slow scope", Body: "Slow body", State: "open", URL: "https://github.com/team/issues/issues/9"}
 	issue.Author.Login, issue.Author.Type = "outsider", "User"
 	taskAttempt, _ := prepareCustomerIntakeAttempt(t, taskFixture, &issue)
 	release := make(chan struct{})
