@@ -58,7 +58,10 @@ type Config struct {
 	RuntimePath              string
 	RuntimeIdentity          runner.FileIdentity
 	GitExecutable            string
+	RunnerExecutable         string
 	FactoryctlExecutable     string
+	ProviderExecutable       string
+	ProviderAdoption         bool
 	ToolPath                 string
 	ToolchainReadRoots       string
 	LocalCILeaseDir          string
@@ -134,6 +137,7 @@ type configWire struct {
 	RuntimePath              string             `json:"runtime_path"`
 	RuntimeIdentity          identityWire       `json:"runtime_identity"`
 	GitExecutable            string             `json:"git_executable"`
+	RunnerExecutable         string             `json:"runner_executable"`
 	FactoryctlExecutable     string             `json:"factoryctl_executable"`
 	ToolPath                 string             `json:"tool_path"`
 	ToolchainReadRoots       string             `json:"toolchain_read_roots,omitempty"`
@@ -154,6 +158,8 @@ type configWire struct {
 	AttemptSocket            string             `json:"attempt_socket"`
 	Retained                 *resultWire        `json:"retained,omitempty"`
 	ProviderTask             []byte             `json:"provider_task"`
+	ProviderExecutable       string             `json:"provider_executable,omitempty"`
+	ProviderAdoption         bool               `json:"provider_adoption,omitempty"`
 }
 
 func EncodeConfig(config Config) ([]byte, error) {
@@ -164,11 +170,11 @@ func EncodeConfig(config Config) ([]byte, error) {
 		Provider: config.Provider.String(), Role: config.Role.String(), Model: config.Model, ReasoningEffort: config.ReasoningEffort,
 		AgentID: config.AgentID, TaskIncarnationID: config.TaskIncarnationID, PreviousWorkingDirectory: config.PreviousWorkingDirectory,
 		RuntimePath: config.RuntimePath, RuntimeIdentity: identityWire{Device: config.RuntimeIdentity.Device, Inode: config.RuntimeIdentity.Inode},
-		GitExecutable: config.GitExecutable, FactoryctlExecutable: config.FactoryctlExecutable, ToolPath: config.ToolPath, ToolchainReadRoots: config.ToolchainReadRoots, LocalCILeaseDir: config.LocalCILeaseDir, TraceReceiverPort: config.TraceReceiverPort, RunID: config.RunID, AccountHome: config.AccountHome, AccountConfigDir: config.AccountConfigDir,
+		GitExecutable: config.GitExecutable, RunnerExecutable: config.RunnerExecutable, FactoryctlExecutable: config.FactoryctlExecutable, ToolPath: config.ToolPath, ToolchainReadRoots: config.ToolchainReadRoots, LocalCILeaseDir: config.LocalCILeaseDir, TraceReceiverPort: config.TraceReceiverPort, RunID: config.RunID, AccountHome: config.AccountHome, AccountConfigDir: config.AccountConfigDir,
 		RepositoryGitIdentity: identityWire{Device: config.RepositoryGitIdentity.Device(), Inode: config.RepositoryGitIdentity.Inode()}, RepositoryOriginDigest: config.RepositoryOriginDigest,
 		RepositoryRoot: config.RepositoryRoot, RepositoryIdentity: identityWire{Device: config.RepositoryIdentity.Device(), Inode: config.RepositoryIdentity.Inode()}, GitCommonDir: config.GitCommonDir, ProjectGitDirs: config.ProjectGitDirs, Revision: config.Revision,
 		ChangeParent: config.ChangeParent, FinalName: config.FinalName,
-		AttemptSocket: config.AttemptSocket, ProviderTask: bytes.Clone(config.ProviderTask),
+		AttemptSocket: config.AttemptSocket, ProviderTask: bytes.Clone(config.ProviderTask), ProviderExecutable: config.ProviderExecutable, ProviderAdoption: config.ProviderAdoption,
 	}
 	if config.Retained != nil {
 		retained := resultToWire(*config.Retained)
@@ -207,11 +213,11 @@ func DecodeConfig(encoded []byte) (Config, error) {
 		Provider: providerKind, Role: role, Model: wire.Model, ReasoningEffort: wire.ReasoningEffort,
 		AgentID: wire.AgentID, TaskIncarnationID: wire.TaskIncarnationID, PreviousWorkingDirectory: wire.PreviousWorkingDirectory,
 		RuntimePath: wire.RuntimePath, RuntimeIdentity: runner.FileIdentity{Device: wire.RuntimeIdentity.Device, Inode: wire.RuntimeIdentity.Inode},
-		GitExecutable: wire.GitExecutable, FactoryctlExecutable: wire.FactoryctlExecutable, ToolPath: wire.ToolPath, ToolchainReadRoots: wire.ToolchainReadRoots, LocalCILeaseDir: wire.LocalCILeaseDir, TraceReceiverPort: wire.TraceReceiverPort, RunID: wire.RunID, AccountHome: wire.AccountHome, AccountConfigDir: wire.AccountConfigDir,
+		GitExecutable: wire.GitExecutable, RunnerExecutable: wire.RunnerExecutable, FactoryctlExecutable: wire.FactoryctlExecutable, ToolPath: wire.ToolPath, ToolchainReadRoots: wire.ToolchainReadRoots, LocalCILeaseDir: wire.LocalCILeaseDir, TraceReceiverPort: wire.TraceReceiverPort, RunID: wire.RunID, AccountHome: wire.AccountHome, AccountConfigDir: wire.AccountConfigDir,
 		RepositoryGitIdentity: repositoryGitIdentity, RepositoryOriginDigest: wire.RepositoryOriginDigest,
 		RepositoryRoot: wire.RepositoryRoot, RepositoryIdentity: repositoryIdentity, GitCommonDir: wire.GitCommonDir, ProjectGitDirs: wire.ProjectGitDirs, Revision: wire.Revision,
 		ChangeParent: wire.ChangeParent, FinalName: wire.FinalName,
-		AttemptSocket: wire.AttemptSocket, Retained: retained, ProviderTask: bytes.Clone(wire.ProviderTask),
+		AttemptSocket: wire.AttemptSocket, Retained: retained, ProviderTask: bytes.Clone(wire.ProviderTask), ProviderExecutable: wire.ProviderExecutable, ProviderAdoption: wire.ProviderAdoption,
 	}
 	if err := validateConfig(config); err != nil {
 		return Config{}, err
@@ -228,6 +234,9 @@ func validateConfig(config Config) error {
 		if !validAbsolute(path, maximumLocatorBytes) {
 			return invalidContract(nil)
 		}
+	}
+	if config.RunnerExecutable != "" && !validAbsolute(config.RunnerExecutable, maximumLocatorBytes) {
+		return invalidContract(nil)
 	}
 	if filepath.Base(config.GitCommonDir) != ".git" || filepath.Dir(config.GitCommonDir) != config.RepositoryRoot {
 		return invalidContract(nil)
@@ -253,6 +262,9 @@ func validateConfig(config Config) error {
 		kernel.ValidateProviderLaunchControls(config.Provider, config.Model, config.ReasoningEffort) != nil || provider.ValidateToolPath(config.ToolPath) != nil || !install.ToolchainReadRootsAllowed(config.ToolchainReadRoots, config.AccountHome, config.AccountConfigDir, config.RuntimePath, config.RepositoryRoot, config.ChangeParent) ||
 		!validText(config.Revision, maximumRevisionBytes) || config.Role.String() == "" ||
 		!validText(config.AgentID, maximumSessionKeyPartBytes) || !validText(config.TaskIncarnationID, maximumSessionKeyPartBytes) {
+		return invalidContract(nil)
+	}
+	if config.ProviderAdoption && (config.Provider == kernel.ProviderShell || config.ProviderExecutable == "" || config.RunnerExecutable == "") || config.ProviderExecutable != "" && !validAbsolute(config.ProviderExecutable, maximumLocatorBytes) {
 		return invalidContract(nil)
 	}
 	if config.Role == kernel.RoleOrchestrator {

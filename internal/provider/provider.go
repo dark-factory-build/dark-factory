@@ -56,6 +56,25 @@ type Installation struct {
 	executable runner.ExecutableCommitment
 }
 
+// ResolveCommittedInstallation binds an already selected executable path to a
+// provider. The daemon supplies this only after it has selected the active or
+// candidate commitment from durable adoption state.
+func ResolveCommittedInstallation(kind kernel.Provider, executable string) (Installation, error) {
+	if !validAbsolute(executable, maxPathBytes) || (kind != kernel.ProviderClaudeCode && kind != kernel.ProviderCodex) {
+		return Installation{}, ErrInvalid
+	}
+	committed, err := runner.CommitExecutableLocator(executable)
+	if err != nil {
+		return Installation{}, unavailable(kind)
+	}
+	return Installation{provider: kind, executable: committed}, nil
+}
+
+func (installation Installation) Executable() runner.ExecutableCommitment {
+	return installation.executable
+}
+func (installation Installation) Digest() [sha256.Size]byte { return installation.executable.Digest() }
+
 // ResolveInstallation selects one executable from the daemon's fixed tool
 // path. Native tool locators may be symlinks, but the returned commitment is
 // always to the resolved direct Mach-O target; no symlink is trusted again at
@@ -307,6 +326,7 @@ type Request struct {
 	role              kernel.AgentRole
 	agentID           string
 	taskIncarnationID string
+	bootstrapPrompt   string
 	// previousWorkingDirectory is set only for an orchestrator, from the
 	// same agent's most recent terminal run (see
 	// kernel.Store.LatestTerminalRuntimeRoot). See WithPreviousWorkingDirectory.
@@ -320,6 +340,16 @@ type Request struct {
 func (request Request) WithTask(task []byte) Request {
 	request.task = string(task)
 	return request
+}
+
+// WithBootstrapPrompt supplies a narrowly scoped provider prompt, used only
+// for the daemon-owned adoption self-check.
+func (request Request) WithBootstrapPrompt(prompt string) (Request, error) {
+	if prompt == "" || len(prompt) > runner.MaxArgumentBytes || !utf8.ValidString(prompt) {
+		return Request{}, ErrInvalid
+	}
+	request.bootstrapPrompt = prompt
+	return request, nil
 }
 
 // WithPreviousWorkingDirectory names the working directory a previous run of
@@ -784,7 +814,11 @@ func bootstrapPromptFor(request Request, server string, resumed bool) string {
 	if marker := strings.Index(task, "\n\nFactory causal wake:"); resumed && request.role == kernel.RoleOrchestrator && marker >= 0 {
 		task = task[marker+2:]
 	}
-	prompt := strings.ReplaceAll(bootstrapPrompt, "mcp__factory_attempt__factory", "mcp__"+server+"__factory")
+	prompt := request.bootstrapPrompt
+	if prompt == "" {
+		prompt = bootstrapPrompt
+	}
+	prompt = strings.ReplaceAll(prompt, "mcp__factory_attempt__factory", "mcp__"+server+"__factory")
 	if request.role == kernel.RoleOrchestrator {
 		publication := "inspect the exact retained Change and publish it through your Maintainer App, except accepted GitHub intake whose issue is in the destination repository and that you delegated to exactly one worker task: factoryd publishes that itself, its pull request and every correction, and escalates once if it cannot. factoryd reviews and enqueues every published head, merges and releases it, and sends findings back to the worker; never submit a verdict or enqueue yourself, never create review tasks for workers; act on a published pull request only when an Escalated: wake names it, or it is superseded. Close a superseded pull request with update_pull_request_body close true and a body naming its successor, then cancel its task. A BLOCK of record stands at its exact head: no fresh review clears it, only a new head does. Use attempt review only for a head with no verdict of record, such as one whose review failed or never ran; a BLOCK you have checked against the source and found wrong goes back once with that evidence, for a change that moves the head. After a second BLOCK on the same task, close its pull request and re-scope the work, split or rewritten as new tasks, instead of sending it back again."
 		prompt += " You are the project overseer. If no causal context is supplied, perform full reconciliation. On a causal wake, act on the summarized items; use overseer status --task only when a line is insufficient, then use the returned current head for subsequent pages; reconcile every fixed-head page only at startup, recovery, omissions, or an event that cannot be resolved narrowly. For a settled worker Change, request attempt source --task TASK_ID and verify its exact task/work/Change receipt; its branch and head_commit are the work, read from git_directory with git, and source_path is that branch's worktree; never reconstruct private paths. Prior work reaches a successor only through a succeeded --prerequisite, task update --retry of the same task when its retained Change is intended, or an attached source-patch content record; never instruct a worker to open another Change's source_path or git_directory. Follow next_offset with --offset and --head; use --task and next_text_offset for complete text. Delegate with overseer task add; supervise with task update, agent pause/resume, worker message, worker interrupt, worker stop, worker replace and human reply. Keep enduring acceptance criteria, prerequisites and owner authority in the complete base instruction using overseer task update --body while the task is queued; preserve the original acceptance criteria. Send-back replaces previous feedback, so use it only for current findings or pointers, not durable requirements. Use the factory tool description for exact flags. Routine supported task routing needs no checkout. Use the registered repository and its configured base for edits and checks; " + publication + " When you publish intake work, carry its source: for GitHub intake the fully qualified source repository and issue number, always with close_on_merge false and Refs #N until the steward records the installed live acceptance signal; for Linear intake its source_url as external_source_url with issue_number 0 and close_on_merge false. Never look up or create a GitHub issue for intake work, and never publish private source details into a public result. A successful Maintainer response's structuredContent is its result: do not repeat the identical read or write after its content acknowledgement; observe an ambiguous write instead. Respect direct operator interventions. A capability refusal is not actionable work: do not retry it until role, capability, or runtime state changes. If the only next event is external — including a pending check, merge queue or merge, configured deployment or release receipt, or human/external owner event — record the concrete pending gate and its exact identity in the durable result, call attempt succeed, and end this task immediately; do not wait or keep the overseer lane occupied, without idle polling; the factory cancels any overseer run " + fmt.Sprint(kernel.MaxOverseerRunSeconds/60) + " minutes after admission. Events remain pending for the next supervision task and existing wake tasks resume observation from that checkpoint. Continue actionable supervision and delivery in this session only while useful in-session work remains. Use attempt request-human only for operator decisions; non-shell overseers yield and release their lane, while shell overseers remain live for the answer."

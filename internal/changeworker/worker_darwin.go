@@ -68,6 +68,7 @@ func runProvider(ctx context.Context) (resultErr error) {
 
 	home := filepath.Join(config.RuntimePath, HomeName)
 	var cwd *os.File
+	var expected change.WorktreeFacts
 	gitDirectory := config.GitCommonDir
 	publishedPath := filepath.Join(config.ChangeParent, config.FinalName)
 	if config.Role == kernel.RoleOrchestrator {
@@ -80,13 +81,10 @@ func runProvider(ctx context.Context) (resultErr error) {
 		if err := reportPopulation(control); err != nil {
 			return err
 		}
-		if err := control.AwaitProvider(); err != nil {
-			return err
-		}
 		publishedPath = home
 		cwd, err = authority.openHome(ctx, runtimeDir)
 	} else {
-		cwd, gitDirectory, err = openChangeDirectory(ctx, control, config, authority)
+		cwd, gitDirectory, expected, err = openChangeDirectory(ctx, control, config, authority)
 	}
 	if err != nil {
 		return err
@@ -139,7 +137,12 @@ func runProvider(ctx context.Context) (resultErr error) {
 		_ = cwd.Close()
 		return err
 	}
-	installation, err := provider.ResolveInstallation(config.Provider, config.ToolPath)
+	var installation provider.Installation
+	if config.ProviderExecutable != "" {
+		installation, err = provider.ResolveCommittedInstallation(config.Provider, config.ProviderExecutable)
+	} else {
+		installation, err = provider.ResolveInstallation(config.Provider, config.ToolPath)
+	}
 	if err != nil {
 		_ = cwd.Close()
 		return err
@@ -162,6 +165,58 @@ func runProvider(ctx context.Context) (resultErr error) {
 	if err != nil {
 		_ = cwd.Close()
 		return err
+	}
+	if err := control.AwaitProviderAdoption(); err != nil {
+		_ = cwd.Close()
+		return err
+	}
+	if config.ProviderAdoption {
+		selfCheckRequest, selfCheckErr := request.WithBootstrapPrompt(`Use the mcp__factory_attempt__factory tool with argv ["attempt","task"] before doing anything else. Then inspect this real Change, create one empty Git commit named "provider adoption self-check", and call attempt succeed with result "provider adoption self-check passed". Do not implement the assigned task.`)
+		if selfCheckErr != nil {
+			_ = cwd.Close()
+			return selfCheckErr
+		}
+		selfCheckLaunch, selfCheckErr := provider.Build(selfCheckRequest)
+		if selfCheckErr != nil {
+			_ = cwd.Close()
+			return selfCheckErr
+		}
+		selfCheckSpec, selfCheckErr := runner.PrepareCommittedExecSpec(selfCheckLaunch.Executable(), selfCheckLaunch.Argv(), selfCheckLaunch.Environment(), publishedPath)
+		if selfCheckErr != nil {
+			_ = cwd.Close()
+			return selfCheckErr
+		}
+		if selfCheckErr = control.RunProviderAdoptionSelfCheck(config.RunnerExecutable, selfCheckSpec); selfCheckErr != nil {
+			_ = cwd.Close()
+			return selfCheckErr
+		}
+		if config.Role == kernel.RoleWorker {
+			expected, selfCheckErr = change.InspectWorktree(ctx, config.GitExecutable, config.RepositoryRoot, config.RepositoryIdentity, publishedPath)
+			if selfCheckErr != nil {
+				_ = cwd.Close()
+				return selfCheckErr
+			}
+		}
+		if selfCheckErr = control.ReportProviderAdoption(nil); selfCheckErr != nil {
+			_ = cwd.Close()
+			return selfCheckErr
+		}
+	}
+	if !config.ProviderAdoption {
+		if err := control.ReportProviderAdoption(nil); err != nil {
+			_ = cwd.Close()
+			return err
+		}
+	}
+	if err := control.AwaitProvider(); err != nil {
+		_ = cwd.Close()
+		return err
+	}
+	if config.Role == kernel.RoleWorker {
+		if err := verifyChangeBeforeProvider(ctx, config, authority, expected); err != nil {
+			_ = cwd.Close()
+			return err
+		}
 	}
 	if delivery == provider.TaskDeliveryPrompt {
 		request = request.WithTask(program)
@@ -240,7 +295,7 @@ func shouldPrepareGoModuleCache(role kernel.AgentRole, provider kernel.Provider)
 
 // openChangeDirectory makes or reopens the run's Change worktree and returns
 // its directory and verified Git administration.
-func openChangeDirectory(ctx context.Context, control *runner.WorkerControl, config Config, authority *runtimeAuthority) (*os.File, string, error) {
+func openChangeDirectory(ctx context.Context, control *runner.WorkerControl, config Config, authority *runtimeAuthority) (*os.File, string, change.WorktreeFacts, error) {
 	var expected change.WorktreeFacts
 	var err error
 	if config.Retained == nil {
@@ -249,29 +304,44 @@ func openChangeDirectory(ctx context.Context, control *runner.WorkerControl, con
 		expected, err = openRetainedChange(ctx, control, config)
 	}
 	if err != nil {
-		return nil, "", err
+		return nil, "", change.WorktreeFacts{}, err
 	}
 	if err := authority.verify(ctx); err != nil {
-		return nil, "", fmt.Errorf("runtime authority verification: %w", err)
+		return nil, "", change.WorktreeFacts{}, fmt.Errorf("runtime authority verification: %w", err)
 	}
 	path := filepath.Join(config.ChangeParent, config.FinalName)
 	// The provider has not run: the branch must still be where it was left.
 	facts, err := change.InspectWorktree(ctx, config.GitExecutable, config.RepositoryRoot, config.RepositoryIdentity, path)
 	if err != nil {
-		return nil, "", err
+		return nil, "", change.WorktreeFacts{}, err
 	}
 	if facts.Branch() != expected.Branch() || !facts.Head().Equal(expected.Head()) || facts.GitDirectory() != expected.GitDirectory() {
-		return nil, "", errors.Join(ErrWorker, errors.New("Change worktree moved before the provider ran"))
+		return nil, "", change.WorktreeFacts{}, errors.Join(ErrWorker, errors.New("Change worktree moved before the provider ran"))
 	}
 	cwd, err := openWorktreeDirectory(path)
 	if err != nil {
-		return nil, "", err
+		return nil, "", change.WorktreeFacts{}, err
 	}
 	if err := authority.verify(ctx); err != nil {
 		_ = cwd.Close()
-		return nil, "", fmt.Errorf("runtime authority verification: %w", err)
+		return nil, "", change.WorktreeFacts{}, fmt.Errorf("runtime authority verification: %w", err)
 	}
-	return cwd, facts.GitDirectory(), nil
+	return cwd, facts.GitDirectory(), expected, nil
+}
+
+func verifyChangeBeforeProvider(ctx context.Context, config Config, authority *runtimeAuthority, expected change.WorktreeFacts) error {
+	if err := authority.verify(ctx); err != nil {
+		return fmt.Errorf("runtime authority verification: %w", err)
+	}
+	path := filepath.Join(config.ChangeParent, config.FinalName)
+	facts, err := change.InspectWorktree(ctx, config.GitExecutable, config.RepositoryRoot, config.RepositoryIdentity, path)
+	if err != nil {
+		return err
+	}
+	if facts.Branch() != expected.Branch() || !facts.Head().Equal(expected.Head()) || facts.GitDirectory() != expected.GitDirectory() {
+		return errors.Join(ErrWorker, errors.New("Change worktree moved before the provider ran"))
+	}
+	return nil
 }
 
 // openWorktreeDirectory opens the worktree root as the provider's working
@@ -433,9 +503,6 @@ func prepareFreshChange(ctx context.Context, control *runner.WorkerControl, conf
 	if err := reportPopulation(control); err != nil {
 		return change.WorktreeFacts{}, err
 	}
-	if err := control.AwaitProvider(); err != nil {
-		return change.WorktreeFacts{}, err
-	}
 	return facts, nil
 }
 
@@ -487,9 +554,6 @@ func openRetainedChange(ctx context.Context, control *runner.WorkerControl, conf
 		return change.WorktreeFacts{}, ErrWorker
 	}
 	if err := reportPopulation(control); err != nil {
-		return change.WorktreeFacts{}, err
-	}
-	if err := control.AwaitProvider(); err != nil {
 		return change.WorktreeFacts{}, err
 	}
 	return facts, nil

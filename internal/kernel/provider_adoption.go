@@ -24,6 +24,29 @@ type ProviderAdoption struct {
 	UpdatedAt           UnixMillis
 }
 
+// InitializeProviderAdoption records the first executable as the trusted
+// active installation. Initial discovery is not an update and therefore does
+// not require a self-check.
+func (store *Store) InitializeProviderAdoption(ctx context.Context, provider Provider, activePath string, activeCommitment []byte, at UnixMillis) (ProviderAdoption, error) {
+	if provider != ProviderClaudeCode && provider != ProviderCodex || activePath == "" || len(activeCommitment) != DigestBytes {
+		return ProviderAdoption{}, fmt.Errorf("%w: invalid provider adoption initialization", ErrInvalidValue)
+	}
+	tx, err := store.beginValidatedWrite(ctx)
+	if err != nil {
+		return ProviderAdoption{}, err
+	}
+	defer tx.Close()
+	_, err = tx.connection.ExecContext(ctx, `INSERT INTO provider_adoptions(provider, active_path, active_commitment, candidate_path, candidate_commitment, candidate_state, diagnostic, revision, updated_at_ms) VALUES(?, ?, ?, '', zeroblob(0), 'none', '', 1, ?) ON CONFLICT(provider) DO NOTHING`, provider.String(), activePath, activeCommitment, at.Int64())
+	if err != nil {
+		return ProviderAdoption{}, tx.Rollback(err)
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return ProviderAdoption{}, err
+	}
+	value, _, err := store.ProviderAdoption(ctx, provider)
+	return value, err
+}
+
 func scanProviderAdoption(row rowScanner) (ProviderAdoption, error) {
 	var provider, activePath, candidatePath, state, diagnostic string
 	var active, candidate []byte

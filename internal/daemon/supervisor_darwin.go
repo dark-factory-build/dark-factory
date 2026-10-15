@@ -346,6 +346,37 @@ func (daemon *Daemon) runNext(ctx context.Context, spec SupervisorSpec) (resultR
 	if err != nil {
 		return daemon.failRunBeforeRuntime(daemon.cleanupCtx, run, keys.resources.RuntimeRoot, kernel.FailureSpawn, err)
 	}
+	var providerExecutable string
+	var providerAdoptionPending bool
+	var providerCandidateCommitment []byte
+	if run.Provider != kernel.ProviderShell {
+		discovered, resolveErr := provider.ResolveInstallation(run.Provider, spec.ToolPath)
+		if resolveErr != nil {
+			return daemon.failRunBeforeRuntime(daemon.cleanupCtx, run, keys.resources.RuntimeRoot, kernel.FailureSpawn, resolveErr)
+		}
+		digest := discovered.Digest()
+		digestBytes := append([]byte(nil), digest[:]...)
+		adoption, found, adoptionErr := daemon.store.ProviderAdoption(ctx, run.Provider)
+		if adoptionErr != nil {
+			return daemon.failRunBeforeRuntime(daemon.cleanupCtx, run, keys.resources.RuntimeRoot, kernel.FailureInternal, adoptionErr)
+		}
+		if !found {
+			adoption, adoptionErr = daemon.store.InitializeProviderAdoption(ctx, run.Provider, discovered.Executable().Path(), digestBytes, at)
+			if adoptionErr != nil {
+				return daemon.failRunBeforeRuntime(daemon.cleanupCtx, run, keys.resources.RuntimeRoot, kernel.FailureInternal, adoptionErr)
+			}
+		}
+		providerExecutable = adoption.ActivePath
+		if !bytes.Equal(adoption.ActiveCommitment, digestBytes) && !(adoption.CandidateState == "failed" && bytes.Equal(adoption.CandidateCommitment, digestBytes)) {
+			adoption, adoptionErr = daemon.store.ObserveProviderCandidate(ctx, run.Provider, adoption.ActivePath, adoption.ActiveCommitment, digestBytes, discovered.Executable().Path(), at)
+			if adoptionErr != nil {
+				return daemon.failRunBeforeRuntime(daemon.cleanupCtx, run, keys.resources.RuntimeRoot, kernel.FailureInternal, adoptionErr)
+			}
+			providerExecutable = adoption.CandidatePath
+			providerAdoptionPending = adoption.CandidateState == "pending" && bytes.Equal(adoption.CandidateCommitment, digestBytes)
+			providerCandidateCommitment = append([]byte(nil), adoption.CandidateCommitment...)
+		}
+	}
 	repositoryIdentity, err := inspectRepositoryIdentity(repository.Root)
 	if err != nil {
 		return daemon.failRunBeforeRuntime(daemon.cleanupCtx, run, keys.resources.RuntimeRoot, kernel.FailureSource, err)
@@ -542,7 +573,7 @@ func (daemon *Daemon) runNext(ctx context.Context, spec SupervisorSpec) (resultR
 		GitAuthor: daemon.gitAuthor(ctx), CustomerMaintainer: customerMaintainer, Provider: run.Provider, Role: run.Role, Model: run.Model, ReasoningEffort: run.ReasoningEffort,
 		AgentID: run.AgentID.String(), TaskIncarnationID: run.TaskIncarnationID.String(), PreviousWorkingDirectory: previousWorkingDirectory,
 		RuntimePath: gotRuntimePath, RuntimeIdentity: runtimeFileIdentity,
-		GitExecutable: spec.GitExecutable, FactoryctlExecutable: factoryctl.Path(), ToolPath: spec.ToolPath, ToolchainReadRoots: spec.ToolchainReadRoots, LocalCILeaseDir: localCILeaseDir, TraceReceiverPort: traceReceiverPort, RunID: telemetryRunID, AccountHome: spec.AccountHome, AccountConfigDir: accountConfigDir, RepositoryRoot: repository.Root, RepositoryIdentity: repositoryIdentity, RepositoryGitIdentity: repositoryGitIdentity, RepositoryOriginDigest: repositoryOriginDigest, GitCommonDir: gitCommonDir, ProjectGitDirs: projectGitDirs,
+		GitExecutable: spec.GitExecutable, RunnerExecutable: spec.RunnerExecutable, FactoryctlExecutable: factoryctl.Path(), ProviderExecutable: providerExecutable, ProviderAdoption: providerAdoptionPending, ToolPath: spec.ToolPath, ToolchainReadRoots: spec.ToolchainReadRoots, LocalCILeaseDir: localCILeaseDir, TraceReceiverPort: traceReceiverPort, RunID: telemetryRunID, AccountHome: spec.AccountHome, AccountConfigDir: accountConfigDir, RepositoryRoot: repository.Root, RepositoryIdentity: repositoryIdentity, RepositoryGitIdentity: repositoryGitIdentity, RepositoryOriginDigest: repositoryOriginDigest, GitCommonDir: gitCommonDir, ProjectGitDirs: projectGitDirs,
 		Revision: revision, ChangeParent: spec.ChangeParent, FinalName: finalName,
 		AttemptSocket: spec.AttemptSocket, Retained: retained, ProviderTask: providerTask,
 	}
@@ -867,6 +898,21 @@ func (daemon *Daemon) runNext(ctx context.Context, spec SupervisorSpec) (resultR
 	// The controller write is the irreversible effect immediately following the
 	// cancellation decision. Test-only acknowledgement loss is injected only
 	// after this write, so a hook cannot stand in for or delay provider release.
+	if err := live.releaseProviderAdoption(ctx); err != nil {
+		if providerAdoptionPending {
+			diagnostic := err.Error()
+			if len(diagnostic) > 4096 {
+				diagnostic = diagnostic[:4096]
+			}
+			_, _, _ = daemon.store.CompleteProviderAdoptionForAttempt(ctx, digest, run.Provider, providerCandidateCommitment, diagnostic, at)
+		}
+		return daemon.failRun(run, kernel.FailureProtocol, err)
+	}
+	if providerAdoptionPending {
+		if _, err := daemon.store.CompleteProviderAdoption(ctx, run.Provider, providerCandidateCommitment, true, "", at); err != nil {
+			return daemon.failRun(run, kernel.FailureInternal, err)
+		}
+	}
 	if err := live.releaseProvider(ctx); err != nil {
 		return daemon.failRun(run, kernel.FailureProtocol, err)
 	}

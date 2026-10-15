@@ -178,7 +178,7 @@ func newWorkerConfigFixture(t *testing.T) (*WorkerControl, *os.File) {
 func TestWorkerAwaitsSlowReleaseWithoutDeadline(t *testing.T) {
 	shortenWait(t, &attemptControlTimeout)
 	worker, peer := newWorkerConfigFixture(t)
-	worker.state = workerPopulationReported
+	worker.state = workerProviderAdoptionReported
 	delay := 2 * attemptControlTimeout
 	written := make(chan error, 1)
 	time.AfterFunc(delay, func() {
@@ -664,6 +664,7 @@ func (f *attemptFixture) advanceToProvider() {
 		{StageSelection, StageSelection, "selection"},
 		{StagePreparation, StagePreparation, "preparation"},
 		{StagePopulation, StagePopulation, "population"},
+		{StageProviderAdoption, StageProviderAdoption, "provider-adoption"},
 	}
 	for _, step := range steps {
 		if err := f.controller.Release(step.release); err != nil {

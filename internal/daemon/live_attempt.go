@@ -221,7 +221,8 @@ func (daemon *Daemon) AttachTerminal(ctx context.Context, runID kernel.RunID, se
 type liveAttemptCommandKind uint8
 
 const (
-	liveCommandReleaseProvider liveAttemptCommandKind = iota + 1
+	liveCommandReleaseProviderAdoption liveAttemptCommandKind = iota + 1
+	liveCommandReleaseProvider
 	liveCommandAttach
 	liveCommandDetach
 	liveCommandEffect
@@ -711,6 +712,10 @@ func (attempt *liveAttempt) submit(ctx context.Context, command liveAttemptComma
 
 func (attempt *liveAttempt) releaseProvider(ctx context.Context) error {
 	return attempt.submit(ctx, liveAttemptCommand{kind: liveCommandReleaseProvider})
+}
+
+func (attempt *liveAttempt) releaseProviderAdoption(ctx context.Context) error {
+	return attempt.submit(ctx, liveAttemptCommand{kind: liveCommandReleaseProviderAdoption})
 }
 
 // submitEffect is separate from submit so the established error-only

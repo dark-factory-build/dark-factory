@@ -11,10 +11,11 @@ import (
 type AttemptStage string
 
 const (
-	StageSelection   AttemptStage = "selection"
-	StagePreparation AttemptStage = "preparation"
-	StagePopulation  AttemptStage = "population"
-	StageProvider    AttemptStage = "provider"
+	StageSelection        AttemptStage = "selection"
+	StagePreparation      AttemptStage = "preparation"
+	StagePopulation       AttemptStage = "population"
+	StageProviderAdoption AttemptStage = "provider-adoption"
+	StageProvider         AttemptStage = "provider"
 )
 
 // AttemptSpec freezes the source wrapper launch before the attempt runner is
