@@ -616,7 +616,7 @@ export function stationOf(layout: SceneLayout, id: string | undefined) {
 /** A worker stands in front of the machine it works on; more stand beside them where the floor is clear. */
 export function workPositions(layout: SceneLayout, station: SceneStation): readonly ScenePoint[] {
   const { x, y } = station.anchor;
-  return [[0, 0], [-24, 0], [24, 0], [0, 24], [-24, 24], [24, 24]].map(([dx, dy]) => ({ x: x + dx!, y: y + dy! })).filter((point, index) => index === 0 || standable(layout, point));
+  return [[0, 0], [-50, 0], [50, 0], [0, 32], [-50, 32], [50, 32]].map(([dx, dy]) => ({ x: x + dx!, y: y + dy! })).filter((point, index) => index === 0 || standable(layout, point));
 }
 
 export function placeWorkers(layout: SceneLayout, workers: readonly SceneWorker[]): readonly SceneWorkerPlacement[] {
