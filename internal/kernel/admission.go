@@ -14,14 +14,13 @@ const taskQueueOrder = `priority DESC, created_at_ms ASC, id ASC`
 // prerequisiteSourceRun selects the producer run that satisfies prerequisite:
 // its succeeded run at the awaited work revision, whose Change, unless it kept
 // its base, is installed: a pull request published for it merged at its exact
-// head, so the consumer's fresh base contains it. A reclaimed Change has lost
-// its head, so only a merge after it last changed (reclaimGivenUp's) counts. A
-// run without a Change (an overseer's) has no merge to wait for.
+// head, so the consumer's fresh base contains it. A Change is not reclaimed,
+// losing those facts, while a queued task awaits it (reclaimEnded). A run
+// without a Change (an overseer's) has no merge to wait for.
 const prerequisiteSourceRun = `SELECT source_run.id FROM tasks AS upstream JOIN runs AS source_run ON source_run.task_id = upstream.id AND source_run.project_id = upstream.project_id AND source_run.task_incarnation_id = upstream.incarnation_id AND source_run.admitted_task_work_revision = prerequisite.upstream_work_revision AND source_run.phase = 'terminal' AND source_run.terminal_kind = 'succeeded'
 	WHERE upstream.id = prerequisite.upstream_task_id AND upstream.status = 'succeeded' AND upstream.work_revision = prerequisite.upstream_work_revision
 	  AND NOT EXISTS (SELECT 1 FROM changes AS c WHERE c.settled_run_id = source_run.id AND (c.head_commit IS NULL OR c.head_commit <> c.base_commit)
-	    AND NOT EXISTS (SELECT 1 FROM ` + changePullRequests + ` AND json_extract(r.document, '$.state') = 'merged' AND (lower(json_extract(r.document, '$.head')) = lower(hex(c.head_commit))
-	      OR c.head_commit IS NULL AND COALESCE(unixepoch(json_extract(r.document, '$.merged_at')) * 1000, r.observed_at_ms) >= c.updated_at_ms)))`
+	    AND NOT EXISTS (SELECT 1 FROM ` + changePullRequests + ` AND json_extract(r.document, '$.state') = 'merged' AND lower(json_extract(r.document, '$.head')) = lower(hex(c.head_commit))))`
 
 func (store *Store) AdmitNext(ctx context.Context, keys AdmissionKeys, at UnixMillis) (AdmissionResult, error) {
 	if !keys.valid() {

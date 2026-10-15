@@ -296,6 +296,13 @@ func insertTaskOnConnection(ctx context.Context, connection *sql.Conn, spec NewT
 		if !found || upstream.ProjectID != spec.ProjectID {
 			return Task{}, ErrConflict
 		}
+		var reclaimed bool
+		if err := connection.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM changes AS c JOIN runs AS r ON r.id = c.settled_run_id WHERE c.task_id = ? AND c.head_commit IS NULL AND r.admitted_task_work_revision = ?)`, upstream.ID.Bytes(), prerequisite.WorkRevision.Int64()).Scan(&reclaimed); err != nil {
+			return Task{}, err
+		}
+		if reclaimed {
+			return Task{}, fmt.Errorf("%w: prerequisite task %s's Change at work revision %d is gone, so its work cannot be shown installed", ErrConflict, upstream.ID, prerequisite.WorkRevision.Int64())
+		}
 		if _, err := connection.ExecContext(ctx, `INSERT INTO task_prerequisites(task_id, upstream_task_id, upstream_work_revision, consumed_run_id) VALUES(?, ?, ?, NULL)`, spec.ID.Bytes(), prerequisite.TaskID.Bytes(), prerequisite.WorkRevision.Int64()); err != nil {
 			return Task{}, err
 		}

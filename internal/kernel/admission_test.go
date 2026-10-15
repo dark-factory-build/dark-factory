@@ -220,9 +220,10 @@ func TestWhySharedTaskNamesItsPausedWorker(t *testing.T) {
 
 // A succeeded producer's Change releases its consumer only once a pull request
 // published for it merged at its exact head, so the consumer's fresh base
-// contains it; a reclaimed Change only after such a merge. Each case tries
-// admission before and after its steps. TestAdmissionConsumesExactSuccessful-
-// ProducerRevision covers a producer without a Change.
+// contains it. Its Change is not reclaimed while the consumer waits, and is
+// once it was admitted. Each case tries admission before and after its steps.
+// TestAdmissionConsumesExactSuccessfulProducerRevision covers a producer
+// without a Change.
 func TestPrerequisiteWaitsForItsProducerToMergeAtItsExactHead(t *testing.T) {
 	t.Parallel()
 	const day = 24 * 60 * 60 * 1000
@@ -233,15 +234,14 @@ func TestPrerequisiteWaitsForItsProducerToMergeAtItsExactHead(t *testing.T) {
 		revision int64
 		admitted bool
 	}{
-		{name: "Change that kept its base", unmoved: true, admitted: true},
+		{name: "Change that kept its base", unmoved: true, steps: []string{"reclaim"}, admitted: true},
 		{name: "unpublished", revision: 1},
 		{name: "open or failing pull request", steps: []string{"open"}, revision: 1},
 		{name: "closed unmerged pull request", steps: []string{"closed"}, revision: 1},
-		{name: "merged at another head", steps: []string{"merged other"}, revision: 1},
-		{name: "merged at its exact head", steps: []string{"open", "merged"}, revision: 1, admitted: true},
+		{name: "merged at another head", steps: []string{"merged other", "reclaim"}, revision: 1},
+		{name: "merged at its exact head", steps: []string{"open", "merged", "reclaim"}, revision: 1, admitted: true},
 		{name: "sent back, then merged at the replaced head", steps: []string{"open", "send back", "merged"}, revision: 2},
-		{name: "reclaimed unpublished", steps: []string{"reclaim"}, revision: 1},
-		{name: "reclaimed after its merge", steps: []string{"merged", "reclaim"}, revision: 1, admitted: true},
+		{name: "unpublished past its reclaim deadline", steps: []string{"reclaim"}, revision: 1},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			t.Parallel()
@@ -270,6 +270,15 @@ func TestPrerequisiteWaitsForItsProducerToMergeAtItsExactHead(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
+			reclaim := func(at int64) error {
+				t.Helper()
+				current, _, err := store.Change(ctx, change.ID)
+				if err != nil {
+					t.Fatal(err)
+				}
+				_, err = store.ReclaimChange(ctx, change.ID, current.Revision, !test.unmoved, mustTime(t, at))
+				return err
+			}
 			admit := func(seed byte, at int64) bool {
 				t.Helper()
 				result, err := store.AdmitNext(ctx, admissionKeys(t, seed, nil), mustTime(t, at))
@@ -295,13 +304,8 @@ func TestPrerequisiteWaitsForItsProducerToMergeAtItsExactHead(t *testing.T) {
 							t.Fatal(err)
 						}
 					case "reclaim":
-						at += 30 * day
-						current, _, err := store.Change(ctx, change.ID)
-						if err != nil {
-							t.Fatal(err)
-						}
-						if _, err := store.ReclaimChange(ctx, change.ID, current.Revision, true, mustTime(t, at)); err != nil {
-							t.Fatal(err)
+						if at += 30 * day; reclaim(at) == nil {
+							t.Fatal("Change reclaimed while its consumer waits on it")
 						}
 					default:
 						if !published {
@@ -322,6 +326,11 @@ func TestPrerequisiteWaitsForItsProducerToMergeAtItsExactHead(t *testing.T) {
 				}
 				if got := admit(110, at+1); got != test.admitted {
 					t.Fatalf("consumer admitted = %t, want %t", got, test.admitted)
+				}
+				if test.admitted {
+					if err := reclaim(at + 31*day); err != nil {
+						t.Fatalf("reclaim after admission: %v", err)
+					}
 				}
 			} else {
 				t.Fatal("consumer admitted before its producer's work merged")
@@ -344,6 +353,31 @@ func TestPrerequisiteWaitsForItsProducerToMergeAtItsExactHead(t *testing.T) {
 				t.Fatal(err)
 			}
 		})
+	}
+}
+
+// A Change reclaimed before its consumer was added has lost the head and base
+// its prerequisite is judged by, so the prerequisite is refused, not stranded.
+func TestPrerequisiteOnAReclaimedProducerChangeIsRefused(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	proposal, _ := NewSuccessProposal("producer result")
+	store, finalizing := finalizingReleasedRun(t, RoleWorker, proposal)
+	defer store.Close()
+	producer, err := finalizeTestRun(t, store, finalizing, 60)
+	if err != nil {
+		t.Fatal(err)
+	}
+	change, _, err := store.Change(ctx, *producer.ChangeID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.ReclaimChange(ctx, change.ID, change.Revision, false, mustTime(t, 61)); err != nil {
+		t.Fatal(err)
+	}
+	_, err = store.EnqueueTask(ctx, NewTask{ID: taskID(t, 229), ProjectID: producer.ProjectID, IncarnationID: incarnationID(t, 230), Title: "consumer", Prerequisites: []TaskPrerequisite{{TaskID: producer.TaskID, WorkRevision: mustRevision(t, 1)}}}, mustTime(t, 62))
+	if !errors.Is(err, ErrConflict) || !strings.Contains(err.Error(), "cannot be shown installed") {
+		t.Fatalf("enqueue on a reclaimed producer = %v", err)
 	}
 }
 
