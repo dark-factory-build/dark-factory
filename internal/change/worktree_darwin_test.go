@@ -622,6 +622,46 @@ func TestRebaseWorktreeAutostashesRetainedTrackedEdits(t *testing.T) {
 	}
 }
 
+func TestRebaseWorktreeReportsAutostashConflict(t *testing.T) {
+	ctx := context.Background()
+	fixture := newLocalGitFixture(t, "sha1")
+	selected, err := SelectGit(ctx, fixture.git, fixture.repository, "HEAD", fixture.identity)
+	if err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(secureTempDir(t), testChangeID)
+	branch := BranchName(testChangeID)
+	if _, err := AddPrivateWorktree(ctx, selected, path, branch); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(path, "README.md"), []byte("retained draft\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(fixture.repository, "README.md"), []byte("current main\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	runFixtureGit(t, fixture.git, fixture.repository, "add", "README.md")
+	runFixtureGit(t, fixture.git, fixture.repository, "commit", "-m", "advance main")
+	newer, err := SelectGit(ctx, fixture.git, fixture.repository, "HEAD", fixture.identity)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := FetchBase(ctx, newer, path); err != nil {
+		t.Fatal(err)
+	}
+	var conflict *RebaseConflict
+	if _, err := RebaseWorktree(ctx, newer, path); !errors.As(err, &conflict) || !slices.Contains(conflict.Paths, "README.md") {
+		t.Fatalf("autostash conflict = %+v, %v", conflict, err)
+	}
+	facts, err := InspectWorktree(ctx, fixture.git, fixture.repository, fixture.identity, path)
+	if err != nil || !facts.Dirty() || facts.Branch() != branch {
+		t.Fatalf("aborted autostash conflict worktree = %+v, %v", facts, err)
+	}
+	if got, err := os.ReadFile(filepath.Join(path, "README.md")); err != nil || string(got) != "retained draft\n" {
+		t.Fatalf("retained draft after autostash conflict = %q, %v", got, err)
+	}
+}
+
 func TestRebaseWorktreeAbortsAndReportsConflict(t *testing.T) {
 	ctx := context.Background()
 	fixture := newLocalGitFixture(t, "sha1")

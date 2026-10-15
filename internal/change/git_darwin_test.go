@@ -599,12 +599,9 @@ func TestGitExecutableMustBeActualNativeGitForHost(t *testing.T) {
 	wrongArchitecture := filepath.Join(secureTempDir(t), "git")
 	architecture := "x86_64"
 	if runtime.GOARCH == "amd64" {
-		architecture = "arm64e"
+		architecture = "arm64"
 	}
-	// The registered Git is not guaranteed to be a fat binary. Use the
-	// system Git shim only as a universal Mach-O source for the opposite slice;
-	// the resulting fixture is inspected, never executed.
-	command := exec.Command("/Library/Developer/CommandLineTools/usr/bin/lipo", "/usr/bin/git", "-thin", architecture, "-output", wrongArchitecture)
+	command := exec.Command("/usr/bin/lipo", actual, "-thin", architecture, "-output", wrongArchitecture)
 	command.Env = []string{"HOME=/dev/null", "TMPDIR=" + os.Getenv("TMPDIR"), "LC_ALL=C", "LANG=C"}
 	if output, err := command.CombinedOutput(); err != nil {
 		t.Fatalf("create wrong-architecture Git fixture: %v: %s", err, output)

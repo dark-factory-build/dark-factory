@@ -1411,8 +1411,8 @@ func FetchBase(ctx context.Context, selection Selection, path string) error {
 // RebaseWorktree rebases a retained Change onto the selected current base.
 // The caller must have fetched selection.base to refs/remotes/origin/main
 // first. A clean rebase leaves the Change branch at its new head; a textual
-// conflict is reported only after a successful abort, while operational Git
-// failures remain retryable by the caller.
+// conflict, including an autostash conflict reported after a successful
+// rebase, is reported only after a successful abort.
 func RebaseWorktree(ctx context.Context, selection Selection, path string) (WorktreeFacts, error) {
 	if !selection.valid() {
 		return WorktreeFacts{}, &ValidationError{Reason: "worktree selection is invalid"}
@@ -1439,8 +1439,8 @@ func RebaseWorktree(ctx context.Context, selection Selection, path string) (Work
 	if err != nil {
 		return WorktreeFacts{}, err
 	}
-	if result.exitCode != 0 {
-		paths := conflictPaths(ctx, authority, path)
+	paths := conflictPaths(ctx, authority, path)
+	if result.exitCode != 0 || len(paths) > 0 {
 		abort := append([]string{}, gitPrefix...)
 		abort = append(abort, "rebase", "--abort")
 		aborted, abortErr := authority.run(ctx, maxGitSelectionOutput, abort...)
