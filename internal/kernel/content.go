@@ -210,7 +210,7 @@ func createSpecialistPeerQuestionTx(ctx context.Context, tx *writeTx, source Tas
 		if parseErr != nil {
 			return nil
 		}
-		if err := tx.connection.QueryRowContext(ctx, `SELECT task_id FROM intake_acceptances WHERE project_id=? AND issue_number=? ORDER BY created_at_ms DESC, id DESC LIMIT 1`, spec.ProjectID.Bytes(), issue).Scan(&rawTarget); err != nil {
+		if err := tx.connection.QueryRowContext(ctx, `SELECT b.task_id FROM intake_acceptances AS a JOIN intake_task_bindings AS b ON b.acceptance_id=a.id JOIN tasks AS t ON t.id=b.task_id WHERE a.project_id=? AND a.issue_number=? ORDER BY a.created_at_ms DESC, a.id DESC LIMIT 1`, spec.ProjectID.Bytes(), issue).Scan(&rawTarget); err != nil {
 			return nil
 		}
 	}
