@@ -751,7 +751,7 @@ func (w *WorkerControl) RunProviderAdoptionSelfCheck(gateExecutable string, spec
 	if w == nil || w.file == nil || w.dir == nil || w.lifetime == nil || w.state != workerProviderAdoption || spec == nil || gateExecutable == "" {
 		return ErrState
 	}
-	lease, _, err := CreateGateLease(w.dir, w.lifetime, InnerActivationMarkerName)
+	lease, _, err := CreateGateLease(w.dir, w.lifetime, ProviderAdoptionMarkerName)
 	if err != nil {
 		return err
 	}

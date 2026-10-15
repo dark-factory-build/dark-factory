@@ -349,6 +349,7 @@ func (daemon *Daemon) runNext(ctx context.Context, spec SupervisorSpec) (resultR
 	var providerExecutable string
 	var providerAdoptionPending bool
 	var providerCandidateCommitment []byte
+	var providerCommitment [32]byte
 	var providerUnavailable error
 	if run.Provider != kernel.ProviderShell {
 		discovered, resolveErr := provider.ResolveInstallation(run.Provider, spec.ToolPath)
@@ -371,12 +372,14 @@ func (daemon *Daemon) runNext(ctx context.Context, spec SupervisorSpec) (resultR
 				}
 			}
 			providerExecutable = adoption.ActivePath
+			copy(providerCommitment[:], adoption.ActiveCommitment)
 			if !bytes.Equal(adoption.ActiveCommitment, digestBytes) && !(adoption.CandidateState == "failed" && bytes.Equal(adoption.CandidateCommitment, digestBytes)) {
 				adoption, adoptionErr = daemon.store.ObserveProviderCandidate(ctx, run.Provider, adoption.ActivePath, adoption.ActiveCommitment, digestBytes, discovered.Executable().Path(), at)
 				if adoptionErr != nil {
 					return daemon.failRunBeforeRuntime(daemon.cleanupCtx, run, keys.resources.RuntimeRoot, kernel.FailureInternal, adoptionErr)
 				}
 				providerExecutable = adoption.CandidatePath
+				copy(providerCommitment[:], adoption.CandidateCommitment)
 				providerAdoptionPending = adoption.CandidateState == "pending" && bytes.Equal(adoption.CandidateCommitment, digestBytes)
 				providerCandidateCommitment = append([]byte(nil), adoption.CandidateCommitment...)
 			}
@@ -585,7 +588,7 @@ func (daemon *Daemon) runNext(ctx context.Context, spec SupervisorSpec) (resultR
 		GitAuthor: daemon.gitAuthor(ctx), CustomerMaintainer: customerMaintainer, Provider: run.Provider, Role: run.Role, Model: run.Model, ReasoningEffort: run.ReasoningEffort,
 		AgentID: run.AgentID.String(), TaskIncarnationID: run.TaskIncarnationID.String(), PreviousWorkingDirectory: previousWorkingDirectory,
 		RuntimePath: gotRuntimePath, RuntimeIdentity: runtimeFileIdentity,
-		GitExecutable: spec.GitExecutable, RunnerExecutable: spec.RunnerExecutable, FactoryctlExecutable: factoryctl.Path(), ProviderExecutable: providerExecutable, ProviderAdoption: providerAdoptionPending, ToolPath: spec.ToolPath, ToolchainReadRoots: spec.ToolchainReadRoots, LocalCILeaseDir: localCILeaseDir, TraceReceiverPort: traceReceiverPort, RunID: telemetryRunID, AccountHome: spec.AccountHome, AccountConfigDir: accountConfigDir, RepositoryRoot: repository.Root, RepositoryIdentity: repositoryIdentity, RepositoryGitIdentity: repositoryGitIdentity, RepositoryOriginDigest: repositoryOriginDigest, GitCommonDir: gitCommonDir, ProjectGitDirs: projectGitDirs,
+		GitExecutable: spec.GitExecutable, RunnerExecutable: spec.RunnerExecutable, FactoryctlExecutable: factoryctl.Path(), ProviderExecutable: providerExecutable, ProviderCommitment: providerCommitment, ProviderAdoption: providerAdoptionPending, ToolPath: spec.ToolPath, ToolchainReadRoots: spec.ToolchainReadRoots, LocalCILeaseDir: localCILeaseDir, TraceReceiverPort: traceReceiverPort, RunID: telemetryRunID, AccountHome: spec.AccountHome, AccountConfigDir: accountConfigDir, RepositoryRoot: repository.Root, RepositoryIdentity: repositoryIdentity, RepositoryGitIdentity: repositoryGitIdentity, RepositoryOriginDigest: repositoryOriginDigest, GitCommonDir: gitCommonDir, ProjectGitDirs: projectGitDirs,
 		Revision: revision, ChangeParent: spec.ChangeParent, FinalName: finalName,
 		AttemptSocket: spec.AttemptSocket, Retained: retained, ProviderTask: providerTask,
 	}

@@ -83,7 +83,7 @@ func testHomeOpensWithEveryRow(t *testing.T, version int) {
 func downgradeHome(t *testing.T, store *Store, version int, extra ...string) {
 	t.Helper()
 	var statements []string
-	if version < userVersion {
+	if version < userVersion && version != v45UserVersion {
 		statements = []string{
 			"ALTER TABLE projects ADD COLUMN run_budget_limit INTEGER NOT NULL DEFAULT 0 CHECK (run_budget_limit >= 0)",
 			"ALTER TABLE projects ADD COLUMN runs_used INTEGER NOT NULL DEFAULT 0 CHECK (runs_used >= 0)",
@@ -100,6 +100,9 @@ func downgradeHome(t *testing.T, store *Store, version int, extra ...string) {
 		if version < v42UserVersion {
 			statements = append([]string{"DROP TABLE archive_batches"}, statements...)
 		}
+	}
+	if version == v45UserVersion {
+		statements = []string{fmt.Sprintf("PRAGMA user_version = %d", version)}
 	}
 	if version < userVersion {
 		statements = append([]string{"DROP TABLE provider_adoptions"}, statements...)

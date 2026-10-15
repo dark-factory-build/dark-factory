@@ -139,7 +139,7 @@ func runProvider(ctx context.Context) (resultErr error) {
 	}
 	var installation provider.Installation
 	if config.ProviderExecutable != "" {
-		installation, err = provider.ResolveCommittedInstallation(config.Provider, config.ProviderExecutable)
+		installation, err = provider.ResolveCommittedInstallationWithDigest(config.Provider, config.ProviderExecutable, config.ProviderCommitment)
 	} else {
 		installation, err = provider.ResolveInstallation(config.Provider, config.ToolPath)
 	}
@@ -171,7 +171,7 @@ func runProvider(ctx context.Context) (resultErr error) {
 		return err
 	}
 	if config.ProviderAdoption {
-		selfCheckRequest, selfCheckErr := request.WithBootstrapPrompt(`Use the mcp__factory_attempt__factory tool with argv ["attempt","task"] before doing anything else. Then inspect this real Change, create one empty Git commit named "provider adoption self-check", and call attempt succeed with result "provider adoption self-check passed". Do not implement the assigned task.`)
+		selfCheckRequest, selfCheckErr := request.WithBootstrapPrompt(`Use the mcp__factory_attempt__factory tool with argv ["attempt","task"] before doing anything else. Then inspect this real Change, create one empty Git commit named "provider adoption self-check", and finish successfully. Do not call attempt succeed or implement the assigned task.`)
 		if selfCheckErr != nil {
 			_ = cwd.Close()
 			return selfCheckErr

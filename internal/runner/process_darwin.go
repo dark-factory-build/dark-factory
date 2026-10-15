@@ -27,7 +27,7 @@ type GateLease struct {
 }
 
 func CreateGateLease(dir, lifetime *os.File, basename string) (*GateLease, FileIdentity, error) {
-	if dir == nil || lifetime == nil || basename != OuterActivationMarkerName && basename != InnerActivationMarkerName {
+	if dir == nil || lifetime == nil || basename != OuterActivationMarkerName && basename != InnerActivationMarkerName && basename != ProviderAdoptionMarkerName {
 		return nil, FileIdentity{}, fmt.Errorf("runner: invalid marker name")
 	}
 	dup, err := unix.FcntlInt(dir.Fd(), unix.F_DUPFD_CLOEXEC, 0)

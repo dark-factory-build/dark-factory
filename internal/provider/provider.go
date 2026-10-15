@@ -60,11 +60,18 @@ type Installation struct {
 // provider. The daemon supplies this only after it has selected the active or
 // candidate commitment from durable adoption state.
 func ResolveCommittedInstallation(kind kernel.Provider, executable string) (Installation, error) {
+	return ResolveCommittedInstallationWithDigest(kind, executable, [sha256.Size]byte{})
+}
+
+func ResolveCommittedInstallationWithDigest(kind kernel.Provider, executable string, expected [sha256.Size]byte) (Installation, error) {
 	if !validAbsolute(executable, maxPathBytes) || (kind != kernel.ProviderClaudeCode && kind != kernel.ProviderCodex) {
 		return Installation{}, ErrInvalid
 	}
 	committed, err := runner.CommitExecutableLocator(executable)
 	if err != nil {
+		return Installation{}, unavailable(kind)
+	}
+	if expected != ([sha256.Size]byte{}) && committed.Digest() != expected {
 		return Installation{}, unavailable(kind)
 	}
 	return Installation{provider: kind, executable: committed}, nil

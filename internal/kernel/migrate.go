@@ -83,7 +83,10 @@ func legacySchemaStatements(version int) []string {
 			}
 		}
 	}
-	if version == v45UserVersion || version == v44UserVersion {
+	if version == v45UserVersion {
+		return statements
+	}
+	if version == v44UserVersion {
 		restoreProjectCeilings()
 		return statements
 	}
@@ -199,7 +202,7 @@ func migrateFrom(ctx context.Context, connection *sql.Conn, version int) error {
 	if err := validateSchemaVersion(ctx, connection, version, legacySchemaStatements(version)); err != nil {
 		return err
 	}
-	if version < userVersion {
+	if version < v45UserVersion {
 		for _, statement := range []string{
 			"ALTER TABLE projects DROP COLUMN run_budget_limit",
 			"ALTER TABLE projects DROP COLUMN runs_used",

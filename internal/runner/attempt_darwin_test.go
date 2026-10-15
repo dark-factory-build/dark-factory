@@ -666,6 +666,18 @@ func (f *attemptFixture) activateOuter() Identity {
 	return event.Identity
 }
 
+func TestProviderAdoptionMarkerCanCoexistWithActivatedWorker(t *testing.T) {
+	f := newAttemptFixture(t, "shell", "")
+	f.activateOuter()
+	lease, _, err := CreateGateLease(f.dir, f.lifetime, ProviderAdoptionMarkerName)
+	if err != nil {
+		t.Fatalf("provider adoption marker: %v", err)
+	}
+	if err := lease.Close(); err != nil {
+		t.Fatalf("close provider adoption marker: %v", err)
+	}
+}
+
 func (f *attemptFixture) advanceToProvider() {
 	f.t.Helper()
 	steps := []struct {

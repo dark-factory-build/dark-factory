@@ -61,6 +61,7 @@ type Config struct {
 	RunnerExecutable         string
 	FactoryctlExecutable     string
 	ProviderExecutable       string
+	ProviderCommitment       [32]byte
 	ProviderAdoption         bool
 	ToolPath                 string
 	ToolchainReadRoots       string
@@ -159,6 +160,7 @@ type configWire struct {
 	Retained                 *resultWire        `json:"retained,omitempty"`
 	ProviderTask             []byte             `json:"provider_task"`
 	ProviderExecutable       string             `json:"provider_executable,omitempty"`
+	ProviderCommitment       [32]byte           `json:"provider_commitment,omitempty"`
 	ProviderAdoption         bool               `json:"provider_adoption,omitempty"`
 }
 
@@ -174,7 +176,7 @@ func EncodeConfig(config Config) ([]byte, error) {
 		RepositoryGitIdentity: identityWire{Device: config.RepositoryGitIdentity.Device(), Inode: config.RepositoryGitIdentity.Inode()}, RepositoryOriginDigest: config.RepositoryOriginDigest,
 		RepositoryRoot: config.RepositoryRoot, RepositoryIdentity: identityWire{Device: config.RepositoryIdentity.Device(), Inode: config.RepositoryIdentity.Inode()}, GitCommonDir: config.GitCommonDir, ProjectGitDirs: config.ProjectGitDirs, Revision: config.Revision,
 		ChangeParent: config.ChangeParent, FinalName: config.FinalName,
-		AttemptSocket: config.AttemptSocket, ProviderTask: bytes.Clone(config.ProviderTask), ProviderExecutable: config.ProviderExecutable, ProviderAdoption: config.ProviderAdoption,
+		AttemptSocket: config.AttemptSocket, ProviderTask: bytes.Clone(config.ProviderTask), ProviderExecutable: config.ProviderExecutable, ProviderCommitment: config.ProviderCommitment, ProviderAdoption: config.ProviderAdoption,
 	}
 	if config.Retained != nil {
 		retained := resultToWire(*config.Retained)
@@ -217,7 +219,7 @@ func DecodeConfig(encoded []byte) (Config, error) {
 		RepositoryGitIdentity: repositoryGitIdentity, RepositoryOriginDigest: wire.RepositoryOriginDigest,
 		RepositoryRoot: wire.RepositoryRoot, RepositoryIdentity: repositoryIdentity, GitCommonDir: wire.GitCommonDir, ProjectGitDirs: wire.ProjectGitDirs, Revision: wire.Revision,
 		ChangeParent: wire.ChangeParent, FinalName: wire.FinalName,
-		AttemptSocket: wire.AttemptSocket, Retained: retained, ProviderTask: bytes.Clone(wire.ProviderTask), ProviderExecutable: wire.ProviderExecutable, ProviderAdoption: wire.ProviderAdoption,
+		AttemptSocket: wire.AttemptSocket, Retained: retained, ProviderTask: bytes.Clone(wire.ProviderTask), ProviderExecutable: wire.ProviderExecutable, ProviderCommitment: wire.ProviderCommitment, ProviderAdoption: wire.ProviderAdoption,
 	}
 	if err := validateConfig(config); err != nil {
 		return Config{}, err

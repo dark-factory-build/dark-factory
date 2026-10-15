@@ -51,13 +51,14 @@ const (
 // The daemon cleanup contract consumes the same constants; no caller may
 // choose an alternate marker, spool, or scratch residue name.
 const (
-	OuterActivationMarkerName = "outer.activate"
-	InnerActivationMarkerName = "inner.activate"
-	TerminalSpoolName         = "terminal.json"
-	GateConfigScratchName     = ".runner-gate.config"
-	GateStdinScratchName      = ".runner-gate.stdin"
-	TerminalScratchName       = ".runner-terminal.tmp"
-	RuntimeLifetimeLeaseName  = ".runner-runtime.lifetime"
+	OuterActivationMarkerName  = "outer.activate"
+	InnerActivationMarkerName  = "inner.activate"
+	ProviderAdoptionMarkerName = "provider.adoption"
+	TerminalSpoolName          = "terminal.json"
+	GateConfigScratchName      = ".runner-gate.config"
+	GateStdinScratchName       = ".runner-gate.stdin"
+	TerminalScratchName        = ".runner-terminal.tmp"
+	RuntimeLifetimeLeaseName   = ".runner-runtime.lifetime"
 )
 
 var (
