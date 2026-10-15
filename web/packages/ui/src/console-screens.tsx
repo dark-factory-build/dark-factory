@@ -142,7 +142,6 @@ export function FactoryFloor({
         </div></details>}
       </>}
       onInvestigate={investigate}
-      proposals={{ items: proposed.proposals }}
       crates={crates}
       selectedWorkerId={selectedAgentId}
       selectedTaskId={selectedTaskId}

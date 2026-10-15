@@ -704,8 +704,6 @@ summary.dfConsoleItem__summary { cursor: pointer; }
 .dfFactoryEntityTools > * { flex: none; }
 .dfWorkLine { display: flex; align-items: center; gap: .6rem; }
 .dfWorkLine strong { color: #edba6b; font-variant-numeric: tabular-nums; }
-.dfWorkLine__crate { display: inline-block; width: .65rem; height: .5rem; margin-right: .5rem; background: #d98a3a; border: 1px solid #f5bf73; }
-.dfWorkLine [data-fault] .dfWorkLine__crate { border-color: #f77b70; }
 :is(.dfFloorMenu) > summary { cursor: pointer; }
 :is(.dfFloorMenu)[open] > summary { color: var(--df-console-accent); }
 .dfFactoryEntityTools .dfFloorMenu__body { position: absolute; z-index: 10; top: 100%; left: .5rem; right: .5rem; max-height: min(24rem, 55svh); overflow: auto; padding: .75rem; white-space: normal; background: #122027; border: 1px solid #3c5051; box-shadow: 0 6px 16px #0008; }

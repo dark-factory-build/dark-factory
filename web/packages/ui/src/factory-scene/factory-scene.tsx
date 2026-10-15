@@ -19,7 +19,6 @@ import {
   type SceneMachinery,
   type SceneMachine,
   type ScenePoint,
-  type SceneProposal,
   type SceneReading,
   type SceneStation,
   type SceneUnit,
@@ -37,8 +36,7 @@ import { spriteAtlas, spriteSheet, spriteSheetSize } from "./sprites/sprites.gen
 
 
 export type FactorySceneProps = Readonly<{
-  proposals?: { items: readonly SceneProposal[] };
-  /** Change requests used only to light affected machines while hovering the Work line. */
+  /** Change requests represented by the public stage counts. */
   crates?: readonly SceneCrate[];
   tools?: ReactNode;
   /** Queue an investigation of a machine as an ordinary task. */
@@ -473,11 +471,8 @@ export function offeredFixtures({ appearance = DEFAULT_SCENE_APPEARANCE, onOpenT
 }
 
 /** A disposable SVG projection of the operational world and current factory state. */
-export function FactoryScene({ proposals, crates, tools, onInvestigate, onSelectEntity, graph, workers, appearance = DEFAULT_SCENE_APPEARANCE, selectedWorkerId, onSelectWorker, tasks = [], peerQuestions = NO_QUESTIONS, selectedTaskId, onSelectTask, onOpenTasks, onSelectHumanRequest, projectId, connected = true, reading = false, unavailable }: FactorySceneProps) {
+export function FactoryScene({ crates, tools, onInvestigate, onSelectEntity, graph, workers, appearance = DEFAULT_SCENE_APPEARANCE, selectedWorkerId, onSelectWorker, tasks = [], peerQuestions = NO_QUESTIONS, selectedTaskId, onSelectTask, onOpenTasks, onSelectHumanRequest, projectId, connected = true, reading = false, unavailable }: FactorySceneProps) {
   const [selectedId, setSelectedId] = useState<string>();
-  // The crate pointed at or focused: the machines its change touches are lit.
-  const [lit, setLit] = useState<string>();
-  const litIds = new Set(proposals?.items.find((proposal) => proposal.id === lit)?.operations.map((operation) => operation.entityId));
   const mapElement = useRef<HTMLDivElement>(null);
   const floorElement = useRef<SVGSVGElement>(null);
   // Scene pixels per scene unit; undefined fits the whole floor to its pane.
@@ -624,7 +619,7 @@ export function FactoryScene({ proposals, crates, tools, onInvestigate, onSelect
   return (
     <div className="dfFactoryFloor__scene">
     <div className="dfFactoryEntityTools">
-      <WorkLine crates={crates} connected={connected} onLight={setLit} />
+      <WorkLine crates={crates} connected={connected} />
       {tools}
     </div>
     <div className="dfFactoryFloor__viewport">
@@ -686,7 +681,6 @@ export function FactoryScene({ proposals, crates, tools, onInvestigate, onSelect
           {/* A recent deploy is a quiet tag on the machine, not a warning. */}
           {deployed === undefined || observedAt - deployed > DAY ? null : <text data-changeover={deployed} x={station.x + 4} y={station.y + 10} className="dfPlant__small" fontSize="7">deployed</text>}
           {members.has(station.entityId) && station.entityId !== litUnit ? <rect data-unit-member={litUnit} className="dfFactoryScene__selection" x={station.x - 4} y={station.y - 4} width={station.width + 8} height={station.height + 8} /> : null}
-          {litIds.has(station.entityId) ? <rect data-lit="" className="dfFactoryScene__selection" x={station.x - 6} y={station.y - 6} width={station.width + 12} height={station.height + 12} /> : null}
         </g>;
       })}
 
@@ -729,25 +723,15 @@ const MAX_ZOOM = 4;
 const OVERVIEW_KEY = "dfFloorOverview";
 
 /** The same durable PR stages, available without zooming into the floor. */
-function WorkLine({ crates, connected, onLight }: {
+function WorkLine({ crates, connected }: {
   crates: readonly SceneCrate[] | undefined; connected: boolean;
-  onLight: (id: string | undefined) => void;
 }) {
+  const state = connected ? crates === undefined ? "Reading changes…" : undefined : crates === undefined ? "Not connected yet" : "Disconnected · showing last known changes";
   return <nav className="dfWorkLine" aria-label="Pull request progress" data-work-line="">
     {LINE_STATIONS.map((label, index) => {
-      const members = (crates ?? []).filter((crate) => crate.station === index).sort((a, b) => b.number - a.number || a.id.localeCompare(b.id));
-      return <details key={label} className="dfFloorMenu" name="floor-tools">
-        <summary>{label} <strong>{!connected || crates === undefined ? "—" : members.length}</strong></summary>
-        <div className="dfFloorMenu__body">
-          {!connected ? <p>{crates === undefined ? "Not connected yet" : "Disconnected · showing last known changes"}</p> : crates === undefined ? <p>Reading changes…</p> : members.length === 0 ? <p>No changes</p> : null}
-          {members.map((crate) => <span key={crate.id} data-crate={crate.id} data-crate-station={crate.station} data-fault={crate.fault ? "" : undefined} tabIndex={0}
-            aria-label={crate.number > 0 ? `PR #${crate.number} ${crate.title}: ${crate.stage || label}` : `A change request: ${label}${crate.fault ? ", needs correction" : ""}`}
-            onPointerEnter={() => onLight(crate.id)} onPointerLeave={() => onLight(undefined)} onFocus={() => onLight(crate.id)} onBlur={() => onLight(undefined)}>
-            <span aria-hidden="true" className="dfWorkLine__crate" />{crate.number > 0 ? `#${crate.number} ${crate.title}` : "Change request"}{crate.fault ? " · needs correction" : ""}
-          </span>)}
-        </div>
-      </details>;
-    })}
+      const members = (crates ?? []).filter((crate) => crate.station === index);
+      return <span key={label}>{label} <strong>{!connected || crates === undefined ? "—" : members.length}</strong></span>;
+    })}{state === undefined ? null : <span className="dfWorkLine__state" role="status">{state}</span>}
   </nav>;
 }
 
