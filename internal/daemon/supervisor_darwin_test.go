@@ -544,7 +544,8 @@ func TestSupervisorRunsOrchestratorInItsPrivateHomeWithoutAChange(t *testing.T) 
 // runSupervisorClaudeFixture stands in for the Claude CLI: it starts from
 // the prompt, the last argv element after "--", with nothing typed into its
 // terminal, and reads its task there without calling attempt task. Its
-// result counts the long task's sentence in that prompt.
+// result counts the long task's sentence in that prompt, which it records in
+// HOME/prompt-progress before its first attempt API call.
 func runSupervisorClaudeFixture() error {
 	_, task, found := strings.Cut(os.Args[len(os.Args)-1], "\n\nTask:\n")
 	if len(os.Args) < 2 || os.Args[len(os.Args)-2] != "--" || !found {
@@ -554,9 +555,12 @@ func runSupervisorClaudeFixture() error {
 	if err != nil {
 		return err
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 	result := fmt.Sprint(strings.Count(task, "Codify the operator scripts and the deploy order. "))
+	if err := os.WriteFile(filepath.Join(os.Getenv("HOME"), "prompt-progress"), []byte(result), 0o600); err != nil {
+		return err
+	}
 	// Stand in for the real CLI's own transcript write, so a later launch's
 	// on-disk check (provider.claudeSessionSelection) can observe this exact
 	// session the same way it would against the real tool. The escaping here
@@ -600,6 +604,59 @@ func TestSupervisorClaudeReceivesALongTaskInItsPrompt(t *testing.T) {
 		t.Fatalf("Claude receipt = %+v", run.Proposal)
 	}
 	fixture.assertReleased(t, run)
+}
+
+// An ordinary launch does not wait for the attempt API: with the API
+// withheld, Claude starts through the real runner, worker and PTY and makes
+// progress from its prompt task; the run completes once the API returns.
+func TestSupervisorClaudeStartsWhileTheAttemptAPIIsWithheld(t *testing.T) {
+	fixture := newSupervisorFixture(t, "unused shell task")
+	if err := replaceSupervisorAgentLaunchControls(fixture.storePath, fixture.agentID, kernel.ProviderClaudeCode, "", ""); err != nil {
+		t.Fatal(err)
+	}
+	execSupervisorSQL(t, fixture.storePath, `UPDATE tasks SET title = ?, body = ? WHERE id = ?`, "withheld API", strings.Repeat("Codify the operator scripts and the deploy order. ", 3), fixture.taskID.Bytes())
+	tools := filepath.Join(fixture.root, "tools")
+	if err := os.Mkdir(tools, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	copySupervisorExecutable(t, supervisorTestExecutable(t), filepath.Join(tools, "claude"))
+	fixture.spec.ToolPath = tools + ":" + fixture.spec.ToolPath
+	fixture.apiGate.Lock()
+	var release sync.Once
+	t.Cleanup(func() { release.Do(fixture.apiGate.Unlock) })
+	type outcome struct {
+		run kernel.Run
+		err error
+	}
+	done := make(chan outcome, 1)
+	go func() {
+		run, err := fixture.daemon.RunNext(context.Background(), fixture.spec)
+		done <- outcome{run, err}
+	}()
+	progress := filepath.Join(fixture.spec.AccountHome, "prompt-progress")
+	for deadline := time.Now().Add(time.Minute); ; {
+		if body, err := os.ReadFile(progress); err == nil && string(body) == "3" {
+			break
+		}
+		select {
+		case result := <-done:
+			t.Fatalf("run ended while the attempt API was withheld: %+v, %v", result.run, result.err)
+		case <-time.After(20 * time.Millisecond):
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("provider made no prompt-driven progress while the attempt API was withheld")
+		}
+	}
+	release.Do(fixture.apiGate.Unlock)
+	result := <-done
+	if result.err != nil {
+		t.Fatalf("RunNext: %v", result.err)
+	}
+	fixture.assertTerminal(t, result.run, kernel.OutcomeSucceeded)
+	if result.run.Proposal == nil || result.run.Proposal.Result() != "3" {
+		t.Fatalf("Claude receipt = %+v", result.run.Proposal)
+	}
+	fixture.assertReleased(t, result.run)
 }
 
 // A send-back retry re-queues the same task incarnation and reuses the same
@@ -2394,6 +2451,8 @@ func TestReleaseResourceRejectsForeignRunEvenWhenAlreadyReleased(t *testing.T) {
 }
 
 type supervisorFixture struct {
+	// apiGate withholds the local API while a test holds it for writing.
+	apiGate                                      sync.RWMutex
 	root, witness, childReceipt, continueReceipt string
 	base, changeParent, runtimeParentPath        string
 	storePath                                    string
@@ -2550,6 +2609,8 @@ func newSupervisorRoleFixture(t *testing.T, program string, role kernel.AgentRol
 				fixture.serverDone <- acceptErr
 				return
 			}
+			fixture.apiGate.RLock()
+			fixture.apiGate.RUnlock()
 			if handleErr := daemon.HandleConnection(context.Background(), connection); handleErr != nil {
 				fixture.serverDone <- handleErr
 				return
