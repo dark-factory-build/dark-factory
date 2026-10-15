@@ -104,7 +104,7 @@ test("the pure scene model feeds a deterministic SVG renderer", () => {
   assert.equal(first.includes(">STAGED</text>"), false);
   assert.match(first, /data-entity-id="src"/);
   assert.doesNotMatch(first, /data-room-id|data-corridor|data-fence|data-room-walls/, "no rooms, corridors, walls or fence");
-  assert.match(first, /Find machine/);
+  assert.doesNotMatch(first, /Find machine|type="search"/);
   assert.doesNotMatch(first, /Inspect room|<select/);
   assert.match(first, /&lt;Shared &amp; Library/);
   assert.equal(first.includes("�"), false);

@@ -965,7 +965,7 @@ test("floor omits the global evidence essay", () => {
   assert.doesNotMatch(markup, /Floor evidence|Rooms describe a repository snapshot/);
   assert.doesNotMatch(markup, /Scroll the floor to explore/);
   assert.doesNotMatch(markup, /Floor detail|Topology detail|Social furniture|one connected floor/);
-  assert.match(markup, /Find machine/);
+  assert.doesNotMatch(markup, /Find machine/);
 });
 
 

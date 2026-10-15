@@ -480,7 +480,6 @@ export function FactoryScene({ proposals, crates, tools, onInvestigate, onSelect
   // The crate pointed at or focused: the machines its change touches are lit.
   const [lit, setLit] = useState<string>();
   const litIds = new Set(proposals?.items.find((proposal) => proposal.id === lit)?.operations.map((operation) => operation.entityId));
-  const [search, setSearch] = useState("");
   const mapElement = useRef<HTMLDivElement>(null);
   const floorElement = useRef<SVGSVGElement>(null);
   // Scene pixels per scene unit; undefined fits the whole floor to its pane.
@@ -624,16 +623,11 @@ export function FactoryScene({ proposals, crates, tools, onInvestigate, onSelect
     map.addEventListener?.("wheel", wheel, { passive: false });
     return () => map.removeEventListener?.("wheel", wheel);
   }, []);
-  const searchable = [...machines.values()];
 
   return (
     <div className="dfFactoryFloor__scene">
     <div className="dfFactoryEntityTools">
       <WorkLine crates={crates} connected={connected} onLight={setLit} onSelect={proposals?.onSelect} />
-      <details className="dfFloorMenu dfFloorSearch" name="floor-tools"><summary>Search</summary><div className="dfFloorMenu__body">
-        <label>Find machine <input type="search" value={search} onChange={(event) => setSearch(event.target.value)} placeholder="Route, unit, store or party" /></label>
-        {search === "" ? null : <div className="dfFactoryEntityTools__results">{searchable.filter((machine) => `${machine.label} ${machine.kind}`.toLowerCase().includes(search.toLowerCase())).slice(0, 30).map((machine) => <button type="button" key={machine.id} onClick={(event) => { focusEntity(machine.id); event.currentTarget.closest("details")?.removeAttribute("open"); }}>{machine.label} · {machine.kind}</button>)}</div>}
-      </div></details>
       {tools}
       {proposals?.selected && proposals.items.some((item) => item.id === proposals.selected) ? <button type="button" title={proposals.items.find((item) => item.id === proposals.selected)?.title} onClick={() => proposals.onSelect("")}>Clear PR ×</button> : null}
     </div>
