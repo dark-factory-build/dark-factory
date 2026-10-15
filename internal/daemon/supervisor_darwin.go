@@ -1021,9 +1021,11 @@ func (daemon *Daemon) attemptResultTail(
 	// A competing durable outcome wins normally: its unauthorized response is
 	// not a license to replace that outcome. Absent one, a terminate the owner
 	// itself delivered owes its cause, not a provider exit.
+	// That terminate is often factoryd stopping, so it outlives ctx as consumption does.
 	pending, ok := live.pendingOutcomeSnapshot()
+	proposalCtx := ctx
 	if !ok && live.terminationCause != nil {
-		pending, ok = *live.terminationCause, true
+		pending, ok, proposalCtx = *live.terminationCause, true, daemon.cleanupCtx
 	}
 	if ok {
 		if live.beforeRetainedOutcome != nil {
@@ -1033,7 +1035,7 @@ func (daemon *Daemon) attemptResultTail(
 		if proposalErr != nil {
 			return kernel.Run{}, proposalErr
 		}
-		proposalRun, proposeErr := daemon.store.ProposeAttemptOutcome(ctx, live.attemptDigest, pending, at)
+		proposalRun, proposeErr := daemon.store.ProposeAttemptOutcome(proposalCtx, live.attemptDigest, pending, at)
 		if proposeErr == nil {
 			run = proposalRun
 		} else if !errors.Is(proposeErr, kernel.ErrUnauthorized) {

@@ -2060,11 +2060,14 @@ func TestSupervisorCancellationStillJoinsAndCleansOwnedProcesses(t *testing.T) {
 	if !errors.Is(err, context.Canceled) {
 		t.Fatalf("RunNext cancellation = %v", err)
 	}
-	fixture.assertTerminal(t, run, kernel.OutcomeFailed)
 	// factoryd's own terminate of a running provider is a transient stop, not
-	// the provider exiting before an outcome.
-	if run.Proposal == nil || run.Proposal.Code() != kernel.FailureTransient || !strings.Contains(run.Proposal.Detail(), "factoryd stopped") {
-		t.Fatalf("runner-terminated run proposal = %+v", run.Proposal)
+	// the provider exiting before an outcome, so its task is queued again.
+	fixture.trackRun(run.ID)
+	if run.Phase != kernel.RunTerminal || run.Terminal == nil || run.Terminal.Kind() != kernel.OutcomeFailed || run.Proposal == nil || run.Proposal.Code() != kernel.FailureTransient || !strings.Contains(run.Proposal.Detail(), "factoryd stopped") {
+		t.Fatalf("runner-terminated run = %+v", run)
+	}
+	if task, found, err := fixture.store.Task(context.Background(), run.TaskID); err != nil || !found || task.Status != kernel.TaskQueued {
+		t.Fatalf("runner-terminated task = %+v, found=%v, err=%v", task, found, err)
 	}
 	fixture.assertOneWitness(t)
 	fixture.assertReleased(t, run)
