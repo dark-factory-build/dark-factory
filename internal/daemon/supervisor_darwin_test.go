@@ -963,12 +963,24 @@ func TestSupervisorRetainedRetryReopensTheSameWorktree(t *testing.T) {
 		t.Fatalf("settled base moved: %x", firstChange.Selection.Commit().Bytes())
 	}
 	repository := filepath.Join(fixture.root, "repository")
+	supervisorGit(t, supervisorNativeGit(t), "-C", repository, "switch", "main")
 	if err := os.WriteFile(filepath.Join(repository, "main-fix.txt"), []byte("main fix\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	supervisorGit(t, supervisorNativeGit(t), "-C", repository, "add", "main-fix.txt")
 	supervisorGit(t, supervisorNativeGit(t), "-C", repository, "commit", "-q", "-m", "advance main")
 	mainHead := strings.TrimSpace(supervisorGitOutput(t, supervisorNativeGit(t), "-C", repository, "rev-parse", "HEAD"))
+	binding, found, err := fixture.store.TaskRepository(context.Background(), first.TaskID)
+	if err != nil || !found {
+		t.Fatalf("task repository binding: %v, found=%v", err, found)
+	}
+	registered, found, err := fixture.store.ProjectRepository(context.Background(), binding.ID)
+	if err != nil || !found {
+		t.Fatalf("registered repository: %v, found=%v", err, found)
+	}
+	if _, err := fixture.store.UpdateProjectRepositoryBase(context.Background(), registered.ID, registered.Revision, "refs/heads/main", supervisorTime()); err != nil {
+		t.Fatalf("advance registered repository base: %v", err)
+	}
 	queueSupervisorRetry(t, fixture, first)
 	// A retained retry must not resolve a selector again; preparation uses the
 	// registered repository and refreshes the existing Change in place.
@@ -2318,6 +2330,7 @@ func newSupervisorRoleFixture(t *testing.T, program string, role kernel.AgentRol
 	}
 	supervisorGit(t, git, "-C", repository, "add", "payload.txt")
 	supervisorGit(t, git, "-C", repository, "commit", "-m", "base")
+	supervisorGit(t, git, "-C", repository, "branch", "main")
 	base := strings.TrimSpace(supervisorGitOutput(t, git, "-C", repository, "rev-parse", "HEAD"))
 	fixture.base = base
 

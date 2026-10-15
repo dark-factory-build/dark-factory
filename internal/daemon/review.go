@@ -537,6 +537,13 @@ func (daemon *Daemon) prepareRetainedChange(ctx context.Context, state kernel.Ch
 	if err != nil {
 		return state, nil, err
 	}
+	registered, found, err := daemon.store.ProjectRepository(ctx, repository.ID)
+	if err != nil || !found {
+		if err == nil {
+			err = kernel.ErrCorruptState
+		}
+		return state, nil, err
+	}
 	source, verified, err := daemon.store.RepositorySourceIdentity(ctx, repository.ID)
 	if err != nil || !verified {
 		return state, nil, errors.Join(err, kernel.ErrConflict)
@@ -549,7 +556,7 @@ func (daemon *Daemon) prepareRetainedChange(ctx context.Context, state kernel.Ch
 	if err != nil {
 		return state, nil, err
 	}
-	selection, err := change.SelectRegisteredGit(ctx, *git, repository.Root, repository.BaseRef, change.RepositorySourceIdentity{Root: root, Git: gitIdentity, OriginDigest: source.OriginDigest})
+	selection, err := change.SelectRegisteredGit(ctx, *git, registered.Root, registered.BaseRef, change.RepositorySourceIdentity{Root: root, Git: gitIdentity, OriginDigest: source.OriginDigest})
 	if err != nil {
 		return state, nil, err
 	}
