@@ -570,7 +570,7 @@ func (daemon *Daemon) prepareRetainedChange(ctx context.Context, state kernel.Ch
 	if err != nil {
 		return state, nil, err
 	}
-	if facts.Dirty() || facts.Branch() != change.BranchName(state.ID.String()) {
+	if facts.Branch() != change.BranchName(state.ID.String()) {
 		return state, nil, errors.New("rebased Change worktree failed verification")
 	}
 	newHead, err := kernelCommit(facts.Head())
@@ -586,10 +586,6 @@ func (daemon *Daemon) prepareRetainedChange(ctx context.Context, state kernel.Ch
 	}
 	updated, err := daemon.store.RecordChangeRebased(ctx, state.ID, state.Revision, *state.HeadCommit, newHead, at)
 	return updated, nil, err
-}
-
-func appendRetainedConflictContext(task []byte, state kernel.Change, conflict *change.RebaseConflict) []byte {
-	return append(task, []byte(retainedConflictContext(state, conflict))...)
 }
 
 func retainedConflictContext(state kernel.Change, conflict *change.RebaseConflict) string {

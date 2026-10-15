@@ -585,6 +585,42 @@ func TestFetchBaseGivesAPrivateChangeTheCurrentMainTip(t *testing.T) {
 	}
 }
 
+func TestRebaseWorktreeAutostashesRetainedTrackedEdits(t *testing.T) {
+	ctx := context.Background()
+	fixture := newLocalGitFixture(t, "sha1")
+	selected, err := SelectGit(ctx, fixture.git, fixture.repository, "HEAD", fixture.identity)
+	if err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(secureTempDir(t), testChangeID)
+	branch := BranchName(testChangeID)
+	if _, err := AddPrivateWorktree(ctx, selected, path, branch); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(path, "README.md"), []byte("retained draft\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(fixture.repository, "main.txt"), []byte("main fix\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	runFixtureGit(t, fixture.git, fixture.repository, "add", "main.txt")
+	runFixtureGit(t, fixture.git, fixture.repository, "commit", "advance main")
+	newer, err := SelectGit(ctx, fixture.git, fixture.repository, "HEAD", fixture.identity)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := FetchBase(ctx, newer, path); err != nil {
+		t.Fatal(err)
+	}
+	facts, err := RebaseWorktree(ctx, newer, path)
+	if err != nil || !facts.Head().equal(newer.Base()) || facts.Branch() != branch || !facts.Dirty() {
+		t.Fatalf("rebased retained worktree = %+v, %v", facts, err)
+	}
+	if got, err := os.ReadFile(filepath.Join(path, "README.md")); err != nil || string(got) != "retained draft\n" {
+		t.Fatalf("retained draft = %q, %v", got, err)
+	}
+}
+
 // Reclaiming removes only a clean private Change at its recorded head,
 // ignored build output included, converges after a crash part way, and
 // leaves the branch free for a fresh worktree at a newer base.

@@ -418,8 +418,9 @@ func (daemon *Daemon) runNext(ctx context.Context, spec SupervisorSpec) (resultR
 		return daemon.failRunBeforeRuntime(daemon.cleanupCtx, run, keys.resources.RuntimeRoot, kernel.FailureSpawn, err)
 	}
 	if retainedConflict != nil {
-		rawProviderTask = appendRetainedConflictContext(rawProviderTask, changeState, retainedConflict)
-		daemon.retainedConflictContexts.Store(run.ID, retainedConflictContext(changeState, retainedConflict))
+		context := retainedConflictContext(changeState, retainedConflict)
+		rawProviderTask = append(rawProviderTask, []byte(context)...)
+		daemon.retainedConflictContexts.Store(run.ID, context)
 	}
 	delivery, preparedTask, err := provider.PrepareTask(run.Provider, rawProviderTask)
 	if err != nil {
