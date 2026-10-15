@@ -158,7 +158,7 @@ function navigate(solids: readonly SceneRect[], radius: number, width: number, h
 }
 
 // Belts run on their own grid, square: every crossing is a right angle, and two belts never share a run.
-const BELT_CELL = 8, BEND = 3, CROSSING = 14, SLACK = 12, PER_RUN = 200;
+const BELT_CELL = 8, BEND = 3, CROSSING = 14, SLACK = 12, PER_RUN = 80;
 // Nothing crosses this close to a label, a port, a junction or a machine.
 export const CROSSING_CLEARANCE = 10;
 const H = 1, V = 2;
@@ -232,7 +232,7 @@ export function beltRoutes(layout: Floor, pairs: readonly Readonly<{ key: string
     return order.filter((side) => !(side === 0 && station.shape === "gate"));
   };
   let spent = 0, linked = 0, generation = 0, cost = new Float64Array(0), from = new Int32Array(0), stamp = new Uint32Array(0), done = new Uint32Array(0);
-  const budget = 150_000 + PER_RUN * pairs.length;
+  const budget = 100_000 + PER_RUN * pairs.length;
   /**
    * One run, searched only in a window round its ends. Modes: 0 keeps every belt rule; 1 may also run along a laid belt's
    * straight run as a trunk; 2 is an overhead link, which keeps off machines and labels and nothing else.
