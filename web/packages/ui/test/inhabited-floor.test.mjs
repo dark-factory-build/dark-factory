@@ -209,8 +209,7 @@ test("thirty proposals draw no floor selection controls", async () => {
     assert.equal(header().findAllByProps({ type: "search" }).length, 0);
     assert.deepEqual(header().findAllByType("button").map(text), []);
     const line = header().findByProps({ "data-work-line": "" });
-    assert.deepEqual(line.findAllByType("span").slice(0, 4).map((node) => text(node)), ["Review —", "Checks —", "Merge queue —", "Shipped —"]);
-    assert.match(text(line.findByProps({ className: "dfWorkLine__state" })), /Reading changes…/);
+    assert.deepEqual(line.findAllByType("span").map((node) => text(node)), ["Review —", "Checks —", "Merge queue —", "Shipped —"]);
     assert.equal(line.findAllByType("details").length, 0);
     assert.equal(line.findAll((node) => node.props["data-crate"] !== undefined || node.props["data-lit"] !== undefined).length, 0);
     assert.equal(header().findAllByType("button").length, 0);

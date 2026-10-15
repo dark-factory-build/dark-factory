@@ -726,12 +726,11 @@ const OVERVIEW_KEY = "dfFloorOverview";
 function WorkLine({ crates, connected }: {
   crates: readonly SceneCrate[] | undefined; connected: boolean;
 }) {
-  const state = connected ? crates === undefined ? "Reading changes…" : undefined : crates === undefined ? "Not connected yet" : "Disconnected · showing last known changes";
   return <nav className="dfWorkLine" aria-label="Pull request progress" data-work-line="">
     {LINE_STATIONS.map((label, index) => {
       const members = (crates ?? []).filter((crate) => crate.station === index);
       return <span key={label}>{label} <strong>{!connected || crates === undefined ? "—" : members.length}</strong></span>;
-    })}{state === undefined ? null : <span className="dfWorkLine__state" role="status">{state}</span>}
+    })}
   </nav>;
 }
 
