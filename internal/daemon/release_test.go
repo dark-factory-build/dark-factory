@@ -760,8 +760,13 @@ func TestReleaseRefusesACommitOlderThanTheRunningBuild(t *testing.T) {
 func TestReleasedPullsNameTheOutstandingMergesTheCommitShips(t *testing.T) {
 	tree := t.TempDir()
 	git := func(args ...string) string {
-		output, err := exec.Command(change.TrustedGitExecutable, append([]string{"-C", tree, "-c", "user.name=test", "-c", "user.email=test@example.invalid", "-c", "commit.gpgsign=false"}, args...)...).Output()
+		// No background gc or maintenance may race the 300 commits below for a lock.
+		output, err := exec.Command(change.TrustedGitExecutable, append([]string{"-C", tree, "-c", "user.name=test", "-c", "user.email=test@example.invalid", "-c", "commit.gpgsign=false", "-c", "gc.auto=0", "-c", "maintenance.auto=false"}, args...)...).Output()
 		if err != nil {
+			var exit *exec.ExitError
+			if errors.As(err, &exit) {
+				err = fmt.Errorf("%w: %s", err, exit.Stderr)
+			}
 			t.Fatalf("git %v: %v", args, err)
 		}
 		return strings.TrimSpace(string(output))
