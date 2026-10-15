@@ -196,11 +196,11 @@ test("one reviewer run does not multiply per affected path", () => {
 });
 
 
-test("thirty proposals draw no floor Changes button or Help", async () => {
+test("thirty proposals draw no floor selection controls", async () => {
   globalThis.IS_REACT_ACT_ENVIRONMENT = true;
   const records = Array.from({ length: 30 }, (_, i) => record(String(i + 1), [{ status: "modified", path: "internal/alpha/movement.go" }]));
-  const changes = items(records), selected = [];
-  const props = { state: { projects, agents: new Map(), tasks: new Map(), humanRequests: new Map() }, graphs: new Map([[project.id, graphWith(base(2))]]), changes, onSelectChange: (id) => selected.push(id) };
+  const changes = items(records);
+  const props = { state: { projects, agents: new Map(), tasks: new Map(), humanRequests: new Map() }, graphs: new Map([[project.id, graphWith(base(2))]]), changes };
   const text = (value) => typeof value === "string" ? value : (value.children ?? []).map(text).join("");
   let tree;
   try {
@@ -209,11 +209,8 @@ test("thirty proposals draw no floor Changes button or Help", async () => {
     assert.equal(header().findAllByProps({ type: "search" }).length, 0);
     assert.deepEqual(header().findAllByType("button").map(text), []);
     assert.ok(header().findAllByType("details").length >= 4, "PR stages have compact menus");
-    await act(async () => tree.update(createElement(FactoryFloor, { ...props, selectedChange: productionKey(changes[29]) })));
-    assert.equal(header().findByProps({ title: "Change 30" }).props.children, "Clear PR ×");
-    assert.deepEqual(header().findAllByType("button").map(text), ["Clear PR ×"]);
-    await act(async () => header().findAllByType("button").find((button) => text(button) === "Clear PR ×").props.onClick());
-    assert.deepEqual(selected, [""]);
+    assert.equal(header().findAllByType("button").length, 0);
+    assert.equal(JSON.stringify(tree.toJSON()).includes("Clear PR"), false);
   } finally { if (tree) await act(async () => tree.unmount()); }
 });
 

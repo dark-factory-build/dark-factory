@@ -11,7 +11,6 @@ import {
   placeWorkers,
   placeErrands,
   breakRoomNook,
-  proposalsForEntity,
   stationOf,
   LINE_STATIONS,
   type SceneCrate,
@@ -38,8 +37,8 @@ import { spriteAtlas, spriteSheet, spriteSheetSize } from "./sprites/sprites.gen
 
 
 export type FactorySceneProps = Readonly<{
-  proposals?: { items: readonly SceneProposal[]; selected?: string; onSelect: (id: string) => void };
-  /** Change requests in the header; selecting one uses `proposals.onSelect`. Undefined until read on this connection. */
+  proposals?: { items: readonly SceneProposal[] };
+  /** Change requests used only to light affected machines while hovering the Work line. */
   crates?: readonly SceneCrate[];
   tools?: ReactNode;
   /** Queue an investigation of a machine as an ordinary task. */
@@ -279,8 +278,7 @@ function useSceneMotion(layout: SceneLayout, seated: ReturnType<typeof placeWork
 }
 
 /** The animation clock updates worker elements without rerendering the floor or atlas. */
-function SceneWorkers({ nook, errands, peerQuestions, layout, placements: seated, labels, workers, tasks, connected, animate, selectedWorkerId, onSelectWorker, onSelectTask, onSelectHumanRequest, onSelectProposal }: Pick<FactorySceneProps, "workers" | "selectedWorkerId" | "onSelectWorker" | "onSelectTask" | "onSelectHumanRequest"> & {
-  onSelectProposal?: (id: string) => void;
+function SceneWorkers({ nook, errands, peerQuestions, layout, placements: seated, labels, workers, tasks, connected, animate, selectedWorkerId, onSelectWorker, onSelectTask, onSelectHumanRequest }: Pick<FactorySceneProps, "workers" | "selectedWorkerId" | "onSelectWorker" | "onSelectTask" | "onSelectHumanRequest"> & {
   layout: SceneLayout;
   placements: ReturnType<typeof placeWorkers>;
   labels: ReadonlyMap<string, string>;
@@ -426,7 +424,7 @@ function SceneWorkers({ nook, errands, peerQuestions, layout, placements: seated
                 {workerFrames(helper, { action: "interacting", frame: position.motion.frame, ...(position.motion.at === undefined ? {} : { at: position.motion.at }) }).map((frame) => <Frame key={frame} name={frame} x={-8} y={-8} />)}
               </g>;
             })}
-            <g role="img" className="dfFactoryScene__target" data-tooltip={`${worker.name} · ${worker.specialist === undefined ? worker.activity : `${worker.specialist.title} · ${worker.specialist.text}${worker.specialist.next === "" ? "" : `\n${worker.specialist.next}`}`}${worker.review ? `\nReview assignment: ${worker.review.scope}; representative visit, not exact file inspection` : ""}\n${placement.area === "work" ? `Working at ${worker.locationLabel ?? at ?? "observed changes"}` : placement.errand !== undefined ? `${placement.errandKey?.startsWith("use ") ? "Recorded use" : "Taking a break"} · at the ${IMPLEMENT_NAMES[placement.errand]}` : placement.area === "resting" ? `${offDuty(worker) === "asleep" ? "Asleep in the break room until its next review" : offDuty(worker) === "off shift" ? "Off shift" : worker.paused ? "Paused · taking a break" : "Taking a break"}${stroking === undefined ? "" : " · fussing the cat"}${said}` : worker.location === "unobserved" ? "Planning · location not yet observed" : "Planning · work outside the machines shown"}${worker.telemetry === undefined ? "" : recordedEffort(worker.telemetry)}${[...new Set(asking)].join("")}`} aria-label={`${worker.name}, ${worker.review ? "reviewer" : worker.specialist?.title ?? worker.role}, ${worker.specialist?.text ?? worker.activity}, ${worker.review?.scope ?? location}`} {...sceneAction(worker.review && onSelectProposal ? () => onSelectProposal(worker.review!.proposalId) : onSelectWorker === undefined ? undefined : () => onSelectWorker(worker.id))}>
+            <g role="img" className="dfFactoryScene__target" data-tooltip={`${worker.name} · ${worker.specialist === undefined ? worker.activity : `${worker.specialist.title} · ${worker.specialist.text}${worker.specialist.next === "" ? "" : `\n${worker.specialist.next}`}`}${worker.review ? `\nReview assignment: ${worker.review.scope}; representative visit, not exact file inspection` : ""}\n${placement.area === "work" ? `Working at ${worker.locationLabel ?? at ?? "observed changes"}` : placement.errand !== undefined ? `${placement.errandKey?.startsWith("use ") ? "Recorded use" : "Taking a break"} · at the ${IMPLEMENT_NAMES[placement.errand]}` : placement.area === "resting" ? `${offDuty(worker) === "asleep" ? "Asleep in the break room until its next review" : offDuty(worker) === "off shift" ? "Off shift" : worker.paused ? "Paused · taking a break" : "Taking a break"}${stroking === undefined ? "" : " · fussing the cat"}${said}` : worker.location === "unobserved" ? "Planning · location not yet observed" : "Planning · work outside the machines shown"}${worker.telemetry === undefined ? "" : recordedEffort(worker.telemetry)}${[...new Set(asking)].join("")}`} aria-label={`${worker.name}, ${worker.review ? "reviewer" : worker.specialist?.title ?? worker.role}, ${worker.specialist?.text ?? worker.activity}, ${worker.review?.scope ?? location}`} {...sceneAction(worker.review === undefined && onSelectWorker !== undefined ? () => onSelectWorker(worker.id) : undefined)}>
                 <rect className="dfFactoryScene__focus" x={-12} y={-12} width="24" height="24" rx="3" fill="transparent" />
             </g>
             {worker.review === undefined ? null : <g aria-hidden="true"><rect x="7" y="1" width="10" height="13" fill="#e1d1aa" stroke="#5c787b" /><text x="12" y="10" textAnchor="middle" fill="#203d46" fontSize="8">R</text></g>}
@@ -626,9 +624,8 @@ export function FactoryScene({ proposals, crates, tools, onInvestigate, onSelect
   return (
     <div className="dfFactoryFloor__scene">
     <div className="dfFactoryEntityTools">
-      <WorkLine crates={crates} connected={connected} onLight={setLit} onSelect={proposals?.onSelect} />
+      <WorkLine crates={crates} connected={connected} onLight={setLit} />
       {tools}
-      {proposals?.selected && proposals.items.some((item) => item.id === proposals.selected) ? <button type="button" title={proposals.items.find((item) => item.id === proposals.selected)?.title} onClick={() => proposals.onSelect("")}>Clear PR ×</button> : null}
     </div>
     <div className="dfFactoryFloor__viewport">
     <div ref={mapElement} className="dfFactoryFloor__map" onClick={inspect} onPointerOver={inspect} onFocus={inspect} onPointerLeave={retainFocusedTooltip} onBlur={() => setTooltip(undefined)} onScroll={() => { retainFocusedTooltip(); measure(); }} onKeyDown={(event) => { if (event.key === "Escape") setTooltip(undefined); }} role="region" aria-label="Scrollable factory floor" tabIndex={0} style={zoom === undefined ? { overflow: "hidden" } : undefined}>
@@ -709,7 +706,7 @@ export function FactoryScene({ proposals, crates, tools, onInvestigate, onSelect
       {layout.stations.length === 0 ? <text x={PADDING} y={floorBottom + PADDING} fill="#9db1be" fontFamily="ui-monospace, monospace" fontSize="10">{unavailable !== undefined ? `PLANT UNAVAILABLE · ${unavailable}` : reading ? "READING THE PLANT…" : "NO OPERATIONAL STRUCTURE INFERRED YET"}</text> : null}
 
       {placements.filter((placement) => placement.area !== "work").map((seat) => <g key={seat.id} data-nearby-rest={seat.stationId} aria-hidden="true"><rect x={seat.x - 12} y={seat.y + 5} width="24" height="7" fill="#655948" stroke="#9b8b6b" /><path d={`M${seat.x - 8} ${seat.y + 12}v5m16-5v5`} stroke="#74664e" strokeWidth="3" /></g>)}
-      <SceneWorkers nook={implementsShown} errands={appearance.scenery !== "off"} peerQuestions={peerQuestions} layout={layout} placements={placements} labels={labels} workers={workers} tasks={tasks} connected={connected} animate={appearance.animation !== "off"} selectedWorkerId={selectedWorkerId} onSelectWorker={onSelectWorker} onSelectTask={onSelectTask} onSelectHumanRequest={onSelectHumanRequest} onSelectProposal={proposals?.onSelect} />
+      <SceneWorkers nook={implementsShown} errands={appearance.scenery !== "off"} peerQuestions={peerQuestions} layout={layout} placements={placements} labels={labels} workers={workers} tasks={tasks} connected={connected} animate={appearance.animation !== "off"} selectedWorkerId={selectedWorkerId} onSelectWorker={onSelectWorker} onSelectTask={onSelectTask} onSelectHumanRequest={onSelectHumanRequest} />
     </svg>
     {tooltip === undefined ? null : <div ref={tooltipElement} className="dfFactoryTooltip" role="tooltip" style={{ left: tooltip.x, top: tooltip.y, maxHeight: tooltip.room }}>{tooltip.text}</div>}
     </div>
@@ -723,9 +720,7 @@ export function FactoryScene({ proposals, crates, tools, onInvestigate, onSelect
       {zoom === undefined || mapHidden ? null : <PlantMap layout={layout} width={sceneWidth} height={sceneHeight} machines={machines} graph={graph} placements={placements} workers={workers} viewElement={viewElement} onCentre={centreOn} pane={pane} />}
     </div>}
     </div>
-    {selected === undefined ? null : <MachineInspector key={selectedId} machine={selected} unit={unitOf.get(selected.id)} onInvestigate={onInvestigate}
-      proposals={proposals === undefined ? [] : proposalsForEntity(proposals.items, selected.id)} onSelectProposal={proposals?.onSelect}
-      onClose={() => selectEntity(undefined)} />}
+    {selected === undefined ? null : <MachineInspector key={selectedId} machine={selected} unit={unitOf.get(selected.id)} onInvestigate={onInvestigate} onClose={() => selectEntity(undefined)} />}
     </div>
   );
 }
@@ -734,9 +729,9 @@ const MAX_ZOOM = 4;
 const OVERVIEW_KEY = "dfFloorOverview";
 
 /** The same durable PR stages, available without zooming into the floor. */
-function WorkLine({ crates, connected, onLight, onSelect }: {
+function WorkLine({ crates, connected, onLight }: {
   crates: readonly SceneCrate[] | undefined; connected: boolean;
-  onLight: (id: string | undefined) => void; onSelect?: (id: string) => void;
+  onLight: (id: string | undefined) => void;
 }) {
   return <nav className="dfWorkLine" aria-label="Pull request progress" data-work-line="">
     {LINE_STATIONS.map((label, index) => {
@@ -745,12 +740,11 @@ function WorkLine({ crates, connected, onLight, onSelect }: {
         <summary>{label} <strong>{!connected || crates === undefined ? "—" : members.length}</strong></summary>
         <div className="dfFloorMenu__body">
           {!connected ? <p>{crates === undefined ? "Not connected yet" : "Disconnected · showing last known changes"}</p> : crates === undefined ? <p>Reading changes…</p> : members.length === 0 ? <p>No changes</p> : null}
-          {members.map((crate) => <button type="button" key={crate.id} data-crate={crate.id} data-crate-station={crate.station} data-fault={crate.fault ? "" : undefined}
+          {members.map((crate) => <span key={crate.id} data-crate={crate.id} data-crate-station={crate.station} data-fault={crate.fault ? "" : undefined} tabIndex={0}
             aria-label={crate.number > 0 ? `PR #${crate.number} ${crate.title}: ${crate.stage || label}` : `A change request: ${label}${crate.fault ? ", needs correction" : ""}`}
-            disabled={!connected || onSelect === undefined} onClick={(event) => { onSelect?.(crate.id); event.currentTarget.closest("details")?.removeAttribute("open"); }}
             onPointerEnter={() => onLight(crate.id)} onPointerLeave={() => onLight(undefined)} onFocus={() => onLight(crate.id)} onBlur={() => onLight(undefined)}>
             <span aria-hidden="true" className="dfWorkLine__crate" />{crate.number > 0 ? `#${crate.number} ${crate.title}` : "Change request"}{crate.fault ? " · needs correction" : ""}
-          </button>)}
+          </span>)}
         </div>
       </details>;
     })}
@@ -939,9 +933,9 @@ function kindText(machine: SceneMachine, unit?: SceneUnit) {
 }
 
 /** The inspector reads the machine as the floor shows it; a fold lists its members by name. */
-function MachineInspector({ machine, unit, onInvestigate, proposals, onSelectProposal, onClose }: {
+function MachineInspector({ machine, unit, onInvestigate, onClose }: {
   machine: SceneMachine; unit?: SceneUnit; onInvestigate?: (machine: SceneMachine, unit?: SceneUnit) => void;
-  proposals: readonly SceneProposal[]; onSelectProposal?: (id: string) => void; onClose: () => void;
+  onClose: () => void;
 }) {
   const [asked, setAsked] = useState(false);
   const reading = machine.reading;
@@ -953,7 +947,6 @@ function MachineInspector({ machine, unit, onInvestigate, proposals, onSelectPro
     <p>{EVIDENCE_TEXT[reading.evidence]}</p>
     {onInvestigate && worth ? <button type="button" disabled={asked} onClick={() => { setAsked(true); onInvestigate(machine, unit); }}>{asked ? "Investigation queued" : "Investigate"}</button> : null}
     <button type="button" onClick={onClose}>Close</button>
-    {proposals.length === 0 ? null : <div aria-label="Changes affecting this machine">{proposals.map((proposal) => <button type="button" key={proposal.id} onClick={() => onSelectProposal?.(proposal.id)}>{proposal.title}</button>)}</div>}
     {machine.represented === undefined ? null : <ul className="dfMachineInspector__members" aria-label="Folded routes">{machine.represented.map((id, index) => <li key={id}>{machine.routes?.[index] ?? id}</li>)}</ul>}
   </section>;
 }

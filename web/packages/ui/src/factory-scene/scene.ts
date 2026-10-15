@@ -63,12 +63,6 @@ export type SceneProposal = Readonly<{
   operations: readonly Readonly<{ entityId?: string; unitId?: string; path: string; previousPath?: string; kind: "addition" | "modification" | "removal" | "move" }>[];
 }>;
 
-/** The changes touching one machine or unit. */
-export function proposalsForEntity(proposals: readonly SceneProposal[], id?: string): readonly SceneProposal[] {
-  if (id === undefined) return [];
-  return proposals.filter((proposal) => proposal.operations.some((operation) => operation.entityId === id || operation.unitId === id));
-}
-
 export type SceneWorker = Readonly<{
   id: string;
   name: string;

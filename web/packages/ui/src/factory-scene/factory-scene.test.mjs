@@ -1013,16 +1013,16 @@ test("stationary active workers animate while idle, reduced, hidden and disconne
 });
 
 
-test("a reviewer of a proposal uses the same actor system", async () => {
+test("a reviewer uses its tooltip without a proposal-selection control", async () => {
   const operations = ["addition", "modification", "removal", "move"].map((kind) => ({ entityId: "lib-in", unitId: "lib", path: `internal/lib/${kind}.go`, kind }));
   const items = [{ id: "first", title: "First change", state: "active", operations }, { id: "second", title: "Second change", state: "stale", operations: [operations[1]] }];
-  const inspected = [], actors = [{ ...workers[0], id: "review-run", nodeId: "lib", observedBayId: "lib-in", review: { proposalId: "first", scope: "Assigned changed paths; file inspection unavailable" } }];
+  const actors = [{ ...workers[0], id: "review-run", nodeId: "lib", observedBayId: "lib-in", review: { proposalId: "first", scope: "Assigned changed paths; file inspection unavailable" } }];
   let tree;
-  await act(async () => { tree = create(createElement(FactoryScene, { graph, appearance: scenic, workers: actors, proposals: { items, selected: "second", onSelect: (id) => inspected.push(id) } })); });
+  await act(async () => { tree = create(createElement(FactoryScene, { graph, appearance: scenic, workers: actors, proposals: { items } })); });
   const reviewer = tree.root.findByProps({ "data-reviewer-id": "review-run" });
   assert.equal(tree.root.findAllByProps({ "data-worker-id": "review-run" }).length, 1);
-  await act(async () => reviewer.findAll((node) => node.props.role === "button")[0].props.onKeyDown({ key: "Enter", preventDefault() {} }));
-  assert.deepEqual(inspected, ["first"]);
+  assert.equal(reviewer.findAll((node) => node.props.role === "button").length, 0);
+  assert.match(reviewer.find((node) => node.props["data-tooltip"] !== undefined).props["data-tooltip"], /Review assignment/);
   await act(async () => tree.unmount());
 });
 
@@ -1335,21 +1335,19 @@ test("the public floor puts crates on the line by station, with a number and tit
 
 test("header PRs follow recorded stages, light affected machines and open Work", async () => {
   const changedGraph = sceneGraph([unit("a")]);
-  const selected = [];
   const crate = { id: "k1", number: 1, title: "Fix", station: 0, stage: "Review", fault: false, taskIds: [] };
-  const props = { graph: changedGraph, workers: [], connected: true, proposals: { items: [{ id: "k1", title: "Fix", state: "open", operations: [{ entityId: "a", kind: "modify" }] }], onSelect: (id) => selected.push(id) } };
+  const props = { graph: changedGraph, workers: [], connected: true, proposals: { items: [{ id: "k1", title: "Fix", state: "open", operations: [{ entityId: "a", kind: "modify" }] }] } };
   let tree;
   try {
     await act(async () => { tree = create(createElement(FactoryScene, { ...props, crates: [crate] })); });
     const target = () => tree.root.findByProps({ "data-crate": "k1" });
-    await act(async () => target().props.onPointerEnter());
+    assert.equal(target().props.tabIndex, 0, "WorkLine crates remain keyboard-focusable");
+    await act(async () => target().props.onFocus());
     assert.ok(tree.root.findAll((node) => node.type === "rect" && node.props["data-lit"] !== undefined).length > 0);
-    await act(async () => target().props.onClick({ currentTarget: { closest: () => null } }));
-    assert.deepEqual(selected, ["k1"]);
+    assert.equal(typeof target().props.onClick, "undefined");
     await act(async () => { tree.update(createElement(FactoryScene, { ...props, crates: [{ ...crate, station: 2, stage: "Queued" }] })); });
     assert.equal(target().props["data-crate-station"], 2);
     await act(async () => { tree.update(createElement(FactoryScene, { ...props, connected: false, crates: [crate] })); });
-    assert.equal(target().props.disabled, true);
     assert.ok(JSON.stringify(tree.toJSON()).includes("Disconnected · showing last known changes"));
     await act(async () => { tree.update(createElement(FactoryScene, { ...props, connected: false, crates: undefined })); });
     assert.ok(JSON.stringify(tree.toJSON()).includes("Not connected yet"));

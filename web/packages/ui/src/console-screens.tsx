@@ -84,14 +84,12 @@ const NO_CHANGES: readonly ProductionContraption[] = [];
 
 /** The operational floor; every action opens an existing inspector or control. */
 export function FactoryFloor({
-  changes = NO_CHANGES, changesRead = false, selectedChange, onSelectChange, state, graphs, graphErrors, onAddTask, runPaths, lastRunPaths, selectedAgentId, onSelectAgent,
+  changes = NO_CHANGES, changesRead = false, state, graphs, graphErrors, onAddTask, runPaths, lastRunPaths, selectedAgentId, onSelectAgent,
   onSelectHumanRequest, selectedTaskId, onSelectTask, onOpenTasks, connected = true, projectId,
 }: {
   changes?: readonly ProductionContraption[];
   /** Whether `changes` were read on this connection; until then the work line has nothing to look at. */
   changesRead?: boolean;
-  selectedChange?: string;
-  onSelectChange?: (key: string) => void;
   state: StateView | undefined;
   graphs: ReadonlyMap<string, OperationalGraphView> | undefined;
   graphErrors?: ReadonlyMap<string, string>;
@@ -144,13 +142,13 @@ export function FactoryFloor({
         </div></details>}
       </>}
       onInvestigate={investigate}
-      proposals={{ items: proposed.proposals, selected: selectedChange, onSelect: (id) => onSelectChange?.(id) }}
+      proposals={{ items: proposed.proposals }}
       crates={crates}
       selectedWorkerId={selectedAgentId}
       selectedTaskId={selectedTaskId}
       graph={scene.graph}
       projectId={projectId}
-      workers={[...scene.workers, ...proposed.reviewers.filter((worker) => !selectedChange || worker.review?.proposalId === selectedChange)]}
+      workers={[...scene.workers, ...proposed.reviewers]}
       connected={connected}
       unavailable={refused.length === 0 ? undefined : refused.join(", ")}
       reading={graphs === undefined || projects.some((id) => !graphs.has(id) && !graphErrors?.has(id))}
@@ -165,7 +163,6 @@ export function FactoryFloor({
       onSelectWorker={onSelectAgent === undefined || state === undefined ? undefined : (workerID) => {
         const agent = state.agents.get(workerID);
         if (agent !== undefined) onSelectAgent(agent);
-        else { const reviewer = proposed.reviewers.find((actor) => actor.id === workerID); if (reviewer?.review) onSelectChange?.(reviewer.review.proposalId); }
       }}
     />
   </div>;
