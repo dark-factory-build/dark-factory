@@ -1019,8 +1019,13 @@ func (daemon *Daemon) attemptResultTail(
 	// finalization race. The exact live owner retains that proposal; retry it
 	// once the authenticated runner result proves the provider has converged.
 	// A competing durable outcome wins normally: its unauthorized response is
-	// not a license to replace that outcome.
-	if pending, ok := live.pendingOutcomeSnapshot(); ok {
+	// not a license to replace that outcome. Absent one, a terminate the owner
+	// itself delivered owes its cause, not a provider exit.
+	pending, ok := live.pendingOutcomeSnapshot()
+	if !ok && live.terminationCause != nil {
+		pending, ok = *live.terminationCause, true
+	}
+	if ok {
 		if live.beforeRetainedOutcome != nil {
 			live.beforeRetainedOutcome()
 		}

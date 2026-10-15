@@ -35,7 +35,7 @@ func (attempt *liveAttempt) run(ctx context.Context) {
 	// The owner must retain controller authority until it has synchronously
 	// requested convergence and closed the capability. A read/protocol/Store
 	// error is not evidence that the child disappeared.
-	cleanupErr := attempt.shutdownController()
+	cleanupErr := attempt.shutdownController(err)
 	err = errors.Join(err, cleanupErr)
 	attempt.closeSourceOperations()
 	if !attempt.resultReturned {
@@ -219,7 +219,7 @@ func (attempt *liveAttempt) handleBeforeRelease(ctx context.Context, command liv
 		return false, nil
 	case liveCommandShutdown:
 		attempt.shutdownRequested = true
-		err := attempt.shutdownController()
+		err := attempt.shutdownController(errLiveOwnerClosed)
 		command.result <- err
 		return true, err
 	case liveCommandEffect:
@@ -242,7 +242,7 @@ func (attempt *liveAttempt) processLifecycle(ctx context.Context) (bool, error) 
 		return false, nil
 	}
 	if ctx.Err() != nil {
-		if err := attempt.convergeForShutdown(); err != nil {
+		if err := attempt.convergeForShutdown(fmt.Errorf("factoryd stopped before an attempt outcome: %w", ctx.Err())); err != nil {
 			return false, err
 		}
 		// A released, terminal-ready controller that just handed off stops
@@ -279,7 +279,7 @@ func (attempt *liveAttempt) processLifecycle(ctx context.Context) (bool, error) 
 		if correctable {
 			return false, nil
 		}
-		return false, attempt.terminateController()
+		return false, attempt.terminateController(refusal)
 	}
 	if attempt.resultReturned {
 		attempt.daemon.operationMu.Unlock()
@@ -325,7 +325,7 @@ func (attempt *liveAttempt) processLifecycle(ctx context.Context) (bool, error) 
 		default:
 		}
 		attempt.binding = terminalBinding{}
-		return false, attempt.terminateController()
+		return false, attempt.terminateController(nil)
 	}
 	return false, nil
 }
@@ -343,7 +343,7 @@ const handoverQuiesceTimeout = 3 * time.Second
 // controller, a rejection, the bound elapsing, or any transport failure keeps
 // today's terminate convergence; a result that arrives in the same instant is
 // routed through the ordinary completion path instead of being discarded.
-func (attempt *liveAttempt) convergeForShutdown() error {
+func (attempt *liveAttempt) convergeForShutdown(cause error) error {
 	if attempt.terminationSent || attempt.handedOver {
 		return nil
 	}
@@ -361,16 +361,16 @@ func (attempt *liveAttempt) convergeForShutdown() error {
 		attempt.daemon.operationMu.Unlock()
 	}
 	if owed {
-		return attempt.terminateController()
+		return attempt.terminateController(cause)
 	}
 	if err := attempt.controller.SendHandoverQuiesce(); err != nil {
-		return attempt.terminateController()
+		return attempt.terminateController(cause)
 	}
 	deadline := time.Now().Add(handoverQuiesceTimeout)
 	for {
 		remaining := time.Until(deadline)
 		if remaining <= 0 {
-			return attempt.terminateController()
+			return attempt.terminateController(cause)
 		}
 		poll := liveAttemptPoll
 		if remaining < poll {
@@ -378,14 +378,14 @@ func (attempt *liveAttempt) convergeForShutdown() error {
 		}
 		ready, err := attempt.controller.NextReady(poll)
 		if err != nil {
-			return attempt.terminateController()
+			return attempt.terminateController(cause)
 		}
 		if !ready {
 			continue
 		}
 		event, err := attempt.controller.Next(remaining)
 		if err != nil {
-			return attempt.terminateController()
+			return attempt.terminateController(cause)
 		}
 		switch event.Kind {
 		case runner.AttemptHandoverQuiesced:
@@ -403,12 +403,14 @@ func (attempt *liveAttempt) convergeForShutdown() error {
 			// keep waiting for the quiesce reply within the same bound.
 			continue
 		default:
-			return attempt.terminateController()
+			return attempt.terminateController(cause)
 		}
 	}
 }
 
-func (attempt *liveAttempt) terminateController() error {
+// A non-nil cause is why this owner ended a provider that had not exited on its
+// own: the run owes it (transient when factoryd stops), not a provider exit.
+func (attempt *liveAttempt) terminateController(cause error) error {
 	if attempt.terminationSent {
 		return nil
 	}
@@ -428,6 +430,13 @@ func (attempt *liveAttempt) terminateController() error {
 	}
 	attempt.terminationSent = true
 	attempt.terminationDelivered = true
+	if code := kernel.FailureProtocol; cause != nil && !attempt.resultReturned {
+		if errors.Is(cause, context.Canceled) {
+			code = kernel.FailureTransient
+		}
+		proposal, _ := kernel.NewFailureProposal(code, failureDetail(cause))
+		attempt.terminationCause = &proposal
+	}
 	return nil
 }
 
@@ -471,7 +480,7 @@ func (attempt *liveAttempt) handleRunningCommand(command liveAttemptCommand) (bo
 		// or a fence error, where the run is this daemon's to finish. Only
 		// the process's own cancelled context hands a live attempt on.
 		attempt.shutdownRequested = true
-		err := attempt.shutdownController()
+		err := attempt.shutdownController(errLiveOwnerClosed)
 		command.result <- err
 		return true, err
 	default:
@@ -688,7 +697,7 @@ func terminalResultMatches(command runner.TerminalCommand, frame runner.Terminal
 	}
 }
 
-func (attempt *liveAttempt) shutdownController() error {
+func (attempt *liveAttempt) shutdownController(cause error) error {
 	if attempt == nil || attempt.controller == nil {
 		return nil
 	}
@@ -697,7 +706,7 @@ func (attempt *liveAttempt) shutdownController() error {
 	if !attempt.resultReturned && !attempt.handedOver {
 		// A handed-over controller belongs to the runner's takeover endpoint
 		// now; terminating it would kill the provider this handover keeps.
-		result = attempt.terminateController()
+		result = attempt.terminateController(cause)
 	}
 	if closeErr := attempt.controller.Close(); closeErr != nil && !errors.Is(closeErr, runner.ErrState) {
 		result = errors.Join(result, closeErr)

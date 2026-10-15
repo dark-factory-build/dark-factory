@@ -9,6 +9,7 @@ import (
 	"errors"
 	"io"
 	"net"
+	"os"
 	"strings"
 	"testing"
 	"time"
@@ -789,7 +790,7 @@ func TestLiveAttemptShutdownConvergenceDefersToBusyOperationGate(t *testing.T) {
 	attempt.outcomeReceiptPending = true
 	daemon.operationMu.Lock()
 	converged := make(chan error, 1)
-	go func() { converged <- attempt.convergeForShutdown() }()
+	go func() { converged <- attempt.convergeForShutdown(context.Canceled) }()
 	attempt.outcomeReceiptPending = false
 	select {
 	case err := <-converged:
@@ -804,4 +805,61 @@ func TestLiveAttemptShutdownConvergenceDefersToBusyOperationGate(t *testing.T) {
 	if attempt.terminationSent || attempt.handedOver {
 		t.Fatalf("busy gate converged the controller: terminated=%v handedOver=%v", attempt.terminationSent, attempt.handedOver)
 	}
+}
+
+func TestLiveAttemptOwnTerminateOwesItsCauseNotAProviderExit(t *testing.T) {
+	start := func(t *testing.T, seed uint64) (*liveAttempt, *os.File) {
+		t.Helper()
+		controller, peer := readyTerminalEffectController(t)
+		t.Cleanup(func() {
+			_ = controller.Close()
+			_ = peer.Close()
+		})
+		runID, sessionID := liveTestIDs(t, seed)
+		return newLiveAttempt(&Daemon{}, runID, sessionID, controller), peer
+	}
+	awaitTerminate := func(t *testing.T, peer *os.File) {
+		t.Helper()
+		for frame := readTerminalEffectWire(t, peer); frame.Kind != "terminate"; frame = readTerminalEffectWire(t, peer) {
+			// Answer a handover quiesce with an unrelated frame: no handover.
+			writeTerminalEffectWire(t, peer, terminalEffectWireFrame{Version: 1, Kind: "checkpoint", Stage: runner.StageSelection})
+		}
+	}
+	t.Run("factoryd stop is transient", func(t *testing.T) {
+		attempt, peer := start(t, 11301)
+		ctx, cancel := context.WithCancel(context.Background())
+		cancel()
+		converged := make(chan error, 1)
+		go func() { _, err := attempt.processLifecycle(ctx); converged <- err }()
+		awaitTerminate(t, peer)
+		if err := <-converged; err != nil {
+			t.Fatal(err)
+		}
+		if cause := attempt.terminationCause; !attempt.terminationDelivered || cause == nil || cause.Code() != kernel.FailureTransient || !strings.Contains(cause.Detail(), "factoryd stopped") {
+			t.Fatalf("restart terminate cause = %+v", cause)
+		}
+	})
+	t.Run("owner close keeps the daemon cause", func(t *testing.T) {
+		attempt, peer := start(t, 11302)
+		closed := make(chan error, 1)
+		go func() { closed <- attempt.shutdownController(errLiveOwnerClosed) }()
+		awaitTerminate(t, peer)
+		if err := <-closed; err != nil {
+			t.Fatal(err)
+		}
+		if cause := attempt.terminationCause; cause == nil || cause.Code() != kernel.FailureProtocol || cause.Detail() != errLiveOwnerClosed.Error() {
+			t.Fatalf("owner close terminate cause = %+v", cause)
+		}
+	})
+	t.Run("provider that exited first stays a provider exit", func(t *testing.T) {
+		attempt, peer := start(t, 11303)
+		attempt.resultReturned = true // its own result notice arrived first
+		if err := attempt.terminateController(errLiveOwnerClosed); err != nil {
+			t.Fatal(err)
+		}
+		awaitTerminate(t, peer)
+		if attempt.terminationCause != nil {
+			t.Fatalf("self-exited provider owes a terminate cause: %+v", attempt.terminationCause)
+		}
+	})
 }

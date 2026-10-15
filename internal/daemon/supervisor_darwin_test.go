@@ -2061,6 +2061,11 @@ func TestSupervisorCancellationStillJoinsAndCleansOwnedProcesses(t *testing.T) {
 		t.Fatalf("RunNext cancellation = %v", err)
 	}
 	fixture.assertTerminal(t, run, kernel.OutcomeFailed)
+	// factoryd's own terminate of a running provider is a transient stop, not
+	// the provider exiting before an outcome.
+	if run.Proposal == nil || run.Proposal.Code() != kernel.FailureTransient || !strings.Contains(run.Proposal.Detail(), "factoryd stopped") {
+		t.Fatalf("runner-terminated run proposal = %+v", run.Proposal)
+	}
 	fixture.assertOneWitness(t)
 	fixture.assertReleased(t, run)
 }

@@ -45,6 +45,7 @@ var (
 	ErrTerminalClosed   = errors.New("daemon: terminal attachment is closed")
 	ErrTerminalSlow     = errors.New("daemon: terminal attachment was too slow")
 	ErrTerminalReset    = errors.New("daemon: terminal attachment requires reset")
+	errLiveOwnerClosed  = errors.New("daemon: live attempt owner closed before an attempt outcome")
 )
 
 // TerminalEvent is the daemon-owned, browser-facing terminal projection. It
@@ -323,8 +324,11 @@ type liveAttempt struct {
 	releaseSent          bool
 	terminationSent      bool
 	terminationDelivered bool
-	resultReturned       bool
-	shutdownRequested    bool
+	// terminationCause is written only before the result is sent, so the
+	// supervisor reads it after waitResult.
+	terminationCause  *kernel.Proposal
+	resultReturned    bool
+	shutdownRequested bool
 	// handedOver is set once a released, terminal-ready controller has
 	// cleanly quiesced onto the runner's own takeover endpoint. See
 	// convergeForShutdown.
