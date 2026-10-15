@@ -40,6 +40,21 @@ type ProviderAdoption struct {
 	UpdatedAt           UnixMillis
 }
 
+// ProviderSelfCheck is the minimum receipt a native provider must return
+// before its candidate can replace the active commitment. The four edges are
+// deliberately separate: a process that starts but cannot read, commit, or
+// reach the attempt API has not been adopted.
+type ProviderSelfCheck struct {
+	Started      bool
+	ReadCheckout bool
+	Committed    bool
+	AttemptAPI   bool
+}
+
+func (check ProviderSelfCheck) valid() bool {
+	return check.Started && check.ReadCheckout && check.Committed && check.AttemptAPI
+}
+
 func validProviderAdoptionInput(provider Provider, commitment string) error {
 	if provider != ProviderClaudeCode && provider != ProviderCodex {
 		return fmt.Errorf("%w: provider adoption only supports native providers", ErrInvalidValue)
@@ -134,13 +149,25 @@ func (store *Store) RecordProviderCandidate(ctx context.Context, provider Provid
 	return result, nil
 }
 
-func (store *Store) CommitProviderCandidate(ctx context.Context, provider Provider, expected Revision, at UnixMillis) (ProviderAdoption, error) {
+func (store *Store) CommitProviderCandidate(ctx context.Context, provider Provider, expected Revision, check ProviderSelfCheck, at UnixMillis) (ProviderAdoption, error) {
+	if provider != ProviderClaudeCode && provider != ProviderCodex {
+		return ProviderAdoption{}, fmt.Errorf("%w: provider adoption commit", ErrInvalidValue)
+	}
+	if !check.valid() {
+		return ProviderAdoption{}, fmt.Errorf("%w: incomplete native provider self-check", ErrConflict)
+	}
 	tx, err := store.beginValidatedWrite(ctx)
 	if err != nil {
 		return ProviderAdoption{}, err
 	}
 	defer tx.Close()
 	current, found, err := scanProviderAdoption(tx.connection.QueryRowContext(ctx, `SELECT provider, active_commitment, candidate_commitment, candidate_state, failure_detail, needs_you, revision, updated_at_ms FROM provider_adoptions WHERE provider = ?`, provider.String()))
+	if err == nil && found && current.CandidateCommitment == "" && current.ActiveCommitment != "" && current.Revision.Int64() == expected.Int64()+1 {
+		if err := tx.Rollback(nil); err != nil {
+			return ProviderAdoption{}, err
+		}
+		return current, nil
+	}
 	if err != nil || !found || current.Revision != expected || current.CandidateCommitment == "" || current.CandidateState != ProviderAdoptionPending {
 		return ProviderAdoption{}, tx.Rollback(fmt.Errorf("%w: provider candidate is not pending", ErrConflict))
 	}

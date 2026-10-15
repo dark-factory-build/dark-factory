@@ -10,7 +10,7 @@ import (
 )
 
 // Open migrates the eight earlier versions. v44 adds archived_tasks and v45
-// adds the provider adoption boundary. v42
+// adds the provider adoption boundary.
 // archive_batches, which the transaction itself proves, and neither moves
 // history; v43 persists intake author identity; v41 folds the
 // continuations table onto the human request each row awaited; v40 drops
@@ -110,8 +110,10 @@ func legacySchemaStatements(version int) []string {
 		at := slices.IndexFunc(statements, func(statement string) bool { return strings.HasPrefix(statement, "CREATE TABLE browser_clients ") }) + 1
 		statements = slices.Insert(statements, at, browserSecurityEventStatements...)
 	}
-	at := slices.IndexFunc(statements, func(statement string) bool { return strings.HasPrefix(statement, "CREATE TABLE invalidations") })
-	statements = slices.Insert(statements, at, v40Continuations...)
+	if version < v41UserVersion {
+		at := slices.IndexFunc(statements, func(statement string) bool { return strings.HasPrefix(statement, "CREATE TABLE invalidations") })
+		statements = slices.Insert(statements, at, v40Continuations...)
+	}
 	for index, statement := range statements {
 		statements[index] = replacer.Replace(statement)
 		if version <= v42UserVersion {
@@ -123,7 +125,7 @@ func legacySchemaStatements(version int) []string {
 }
 
 // validateOpenableSnapshot accepts a current database or an exact v37, v38,
-// v39, v40, v41, v42 or v43 one, whose durable controls are checked inside the migration
+// v39, v40, v41, v42, v43 or v44 one, whose durable controls are checked inside the migration
 // before it commits.
 func validateOpenableSnapshot(ctx context.Context, connection *sql.Conn) error {
 	if _, version, err := inspectIdentity(ctx, connection); err != nil {
