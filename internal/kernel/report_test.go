@@ -281,23 +281,40 @@ func TestReportLessonCountersUseLatestRevision(t *testing.T) {
 func TestWhyNamesTheAgentOfAProviderExitRun(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
-	store, run, _ := runningOrchestratorRun(t)
+	store, run, keys := admittedOrchestratorRun(t)
 	defer store.Close()
-	exit, _ := NewProcessExitCode(1, 7, mustTime(t, 40))
-	if _, err := store.ObserveProviderExit(ctx, run.ID, run.Revision, registeredProcessIdentity(t, store, run.ID, ResourceProviderProcess), exit, mustTime(t, 41)); err != nil {
+	run, runtimeIdentity, runnerIdentity := activateStartedRunner(t, store, run, 120)
+	resources := resourcesForRunTest(t, store, run.ID)
+	process, group := resourceOfKind(t, resources, ResourceProviderProcess), resourceOfKind(t, resources, ResourceProviderGroup)
+	providerIdentity := processIdentity(t, 1220)
+	if _, _, err := store.ActivateProviderResources(ctx, run.ID, process.ID, process.Revision, group.ID, group.Revision, providerIdentity, mustTime(t, 23)); err != nil {
 		t.Fatal(err)
 	}
-	observeMissingProcessExits(t, store, run.ID, 42)
-	for index, resource := range resourcesForRunTest(t, store, run.ID) {
-		if resource.State == ResourceReleased {
-			continue
-		}
-		if _, err := store.ReleaseResource(ctx, run.ID, resource.ID, resource.Revision, resource.Identity, mustTime(t, int64(50+index))); err != nil {
-			t.Fatal(err)
-		}
+	session := terminalSessionForRunTest(t, store, run.ID)
+	running, err := store.ActivateRun(ctx, run.ID, session.ID, run.Revision, session.Revision, mustTime(t, 24))
+	if err != nil {
+		t.Fatal(err)
 	}
-	finalizing := closeTerminalSessionAtCurrent(t, store, run.ID, 60)
-	if _, err := store.FinalizeRun(ctx, run.ID, finalizing.Revision, mustTime(t, 70)); err != nil {
+	exit, _ := NewAttemptResultExitCode(1)
+	result, _ := NewInnerConvergedAttemptResult(run.ID, keys.AttemptDigest, keys.ResultProofDigest, runtimeIdentity, providerIdentity, exit)
+	consumed, err := store.ConsumeAttemptResult(ctx, result, running.Revision, mustTime(t, 25))
+	if err != nil {
+		t.Fatal(err)
+	}
+	runner := resourceOfKind(t, resourcesForRunTest(t, store, run.ID), ResourceRunnerProcess)
+	afterRunner, _, err := store.RecordRecoveredRunnerAbsence(ctx, run.ID, runner.ID, consumed.Revision, runner.Revision, runnerIdentity, mustTime(t, 26))
+	if err != nil {
+		t.Fatal(err)
+	}
+	closed, _, err := store.CloseTerminalAfterRunner(ctx, result, afterRunner.Revision, terminalSessionForRunTest(t, store, run.ID).Revision, mustTime(t, 27))
+	if err != nil {
+		t.Fatal(err)
+	}
+	runtime := resourceOfKind(t, resourcesForRunTest(t, store, run.ID), ResourceRuntimeRoot)
+	if _, err := store.ReleaseResource(ctx, run.ID, runtime.ID, runtime.Revision, runtime.Identity, mustTime(t, 28)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.FinalizeRun(ctx, run.ID, closed.Revision, mustTime(t, 70)); err != nil {
 		t.Fatal(err)
 	}
 	lines, err := store.Why(ctx, nil, 0, run.TaskID)
