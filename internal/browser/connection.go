@@ -1003,6 +1003,10 @@ func (current *connection) closeTerminal() error {
 	return nil
 }
 
+func (current *connection) closeAndWrite(payload []byte) bool {
+	return current.closeTerminal() == nil && current.write(payload) == nil
+}
+
 func (current *connection) clearTerminal() {
 	if current.terminalAckTimer != nil {
 		current.terminalAckTimer.Stop()
@@ -1086,10 +1090,7 @@ func (current *connection) sendTerminalEvent(event TerminalEvent) bool {
 		current.terminalSent = event.Sequence
 		if !event.Accepted {
 			payload, err := browserprotocol.EncodeTerminalReset(current.terminalAttachID, browserprotocol.TerminalReset{SessionID: current.terminalAttach.SessionID, Floor: browserprotocol.Decimal(event.Floor), Head: browserprotocol.Decimal(event.Head)})
-			if err != nil || current.write(payload) != nil {
-				return false
-			}
-			return current.closeTerminal() == nil
+			return err == nil && current.closeAndWrite(payload)
 		}
 		payload, err := browserprotocol.EncodeTerminalAttached(current.terminalAttachID, browserprotocol.TerminalAttached{SessionID: current.terminalAttach.SessionID, Floor: browserprotocol.Decimal(event.Floor), Head: browserprotocol.Decimal(event.Head), AcknowledgedSequence: browserprotocol.Decimal(event.Sequence), MaxUnackedBytes: browserprotocol.MaxTerminalUnackedBytes})
 		if err != nil || current.write(payload) != nil {
@@ -1125,10 +1126,7 @@ func (current *connection) sendTerminalEvent(event TerminalEvent) bool {
 			return current.holdTerminalEvent(event)
 		}
 		payload, err := browserprotocol.EncodeTerminalReset(current.terminalAttachID, browserprotocol.TerminalReset{SessionID: current.terminalAttach.SessionID, Floor: browserprotocol.Decimal(event.Floor), Head: browserprotocol.Decimal(event.Head)})
-		if err != nil || current.write(payload) != nil {
-			return false
-		}
-		return current.closeTerminal() == nil
+		return err == nil && current.closeAndWrite(payload)
 	case TerminalEventPTYEOF:
 		if !current.terminalAnnounced {
 			return false
@@ -1143,10 +1141,7 @@ func (current *connection) sendTerminalEvent(event TerminalEvent) bool {
 			return false
 		}
 		payload, err := browserprotocol.EncodeTerminalExit(current.terminalAttachID, browserprotocol.TerminalExit{SessionID: current.terminalAttach.SessionID, ExitCode: int64(event.ExitCode), ExitSignal: int64(event.ExitSignal), Aborted: event.Aborted})
-		if err != nil || current.write(payload) != nil {
-			return false
-		}
-		return current.closeTerminal() == nil
+		return err == nil && current.closeAndWrite(payload)
 	default:
 		return false
 	}
