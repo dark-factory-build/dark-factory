@@ -24,7 +24,6 @@ const (
 	CallProfile
 	CallCreateProject
 	CallProjectRepository
-	CallProjectLimits
 	CallCreateAgent
 	CallAgentIdlePolicy
 	CallEnqueueTask
@@ -125,7 +124,6 @@ type Call struct {
 	digest             AttemptDigest
 	project            CreateProjectInput
 	repository         ProjectRepositoryInput
-	projectLimits      ProjectLimitsInput
 	agent              CreateAgentInput
 	agentIdlePolicy    AgentIdlePolicyInput
 	agentPaths         AgentPathsInput
@@ -276,10 +274,6 @@ func (call Call) CreateProjectInput() (CreateProjectInput, bool) {
 }
 func (call Call) ProjectRepositoryInput() (ProjectRepositoryInput, bool) {
 	return call.repository, call.kind == CallProjectRepository
-}
-
-func (call Call) ProjectLimitsInput() (ProjectLimitsInput, bool) {
-	return call.projectLimits, call.kind == CallProjectLimits
 }
 
 func (call Call) CreateAgentInput() (CreateAgentInput, bool) {
@@ -913,10 +907,6 @@ func decodeCall(domain byte, bearer credential, encoded []byte) (Call, RemoteErr
 		if err := decodeExact(request.Params, &call.repository); err != nil {
 			return Call{}, RemoteInvalidRequest
 		}
-	case CallProjectLimits:
-		if err := decodeExact(request.Params, &call.projectLimits); err != nil || !validID(call.projectLimits.ProjectID) || call.projectLimits.ExpectedRevision == 0 || call.projectLimits.MaxRunSeconds > 86400 {
-			return Call{}, RemoteInvalidRequest
-		}
 	case CallCreateAgent:
 		if err := decodeExact(request.Params, &call.agent); err != nil || !validCreateAgentInput(call.agent) {
 			return Call{}, RemoteInvalidRequest
@@ -1191,8 +1181,6 @@ func methodKind(method string) (CallKind, byte) {
 		return CallCreateProject, operatorDomain
 	case "project_repository":
 		return CallProjectRepository, operatorDomain
-	case "project_limits":
-		return CallProjectLimits, operatorDomain
 	case "create_agent":
 		return CallCreateAgent, operatorDomain
 	case "agent_idle_policy":
@@ -1465,7 +1453,7 @@ func replyMatches(kind CallKind, reply replyKind) bool {
 		return reply == replyOverseerSnapshot
 	case CallProjectRepository:
 		return reply == replyContent
-	case CallCreateProject, CallProjectLimits, CallCreateAgent, CallAgentIdlePolicy, CallAccountLink, CallAgentSelectAccount, CallAgentSelectModel, CallEnqueueTask, CallSetDispatch, CallSetCapacity, CallCompactStorage, CallBackupCreate, CallSucceed, CallBlock, CallFail, CallRequestHuman, CallPeerAsk, CallPeerAnswer, CallSendBack, CallSendBackTask, CallOverseerEnqueueTask, CallOverseerUpdateTask, CallOverseerUpdateAgent, CallOverseerStopRun, CallOverseerReplaceRun, CallOverseerMessageWorker, CallOverseerInterruptWorker, CallOverseerReplyHuman, CallOperatorUpdateTask, CallOperatorUpdateAgent, CallOperatorStopRun, CallOperatorReplaceRun, CallOperatorMessageWorker, CallOperatorInterruptWorker, CallHumanReply, CallHumanCancel:
+	case CallCreateProject, CallCreateAgent, CallAgentIdlePolicy, CallAccountLink, CallAgentSelectAccount, CallAgentSelectModel, CallEnqueueTask, CallSetDispatch, CallSetCapacity, CallCompactStorage, CallBackupCreate, CallSucceed, CallBlock, CallFail, CallRequestHuman, CallPeerAsk, CallPeerAnswer, CallSendBack, CallSendBackTask, CallOverseerEnqueueTask, CallOverseerUpdateTask, CallOverseerUpdateAgent, CallOverseerStopRun, CallOverseerReplaceRun, CallOverseerMessageWorker, CallOverseerInterruptWorker, CallOverseerReplyHuman, CallOperatorUpdateTask, CallOperatorUpdateAgent, CallOperatorStopRun, CallOperatorReplaceRun, CallOperatorMessageWorker, CallOperatorInterruptWorker, CallHumanReply, CallHumanCancel:
 		return reply == replyMutation
 	case CallBackupVerify:
 		return reply == replyContent

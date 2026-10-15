@@ -70,7 +70,7 @@ var v40Continuations = []string{
 
 func legacySchemaStatements(version int) []string {
 	statements := slices.DeleteFunc(slices.Clone(schemaStatements), func(statement string) bool {
-		return statement == archivedTasksTable || statement == archiveBatchesTable && version < v42UserVersion
+		return statement == archivedTasksTable && version < v44UserVersion || statement == archiveBatchesTable && version < v42UserVersion
 	})
 	restoreProjectCeilings := func() {
 		for index, statement := range statements {
@@ -233,7 +233,10 @@ func migrateFrom(ctx context.Context, connection *sql.Conn, version int) error {
 			return err
 		}
 	}
-	statements := []string{archivedTasksTable, fmt.Sprintf("PRAGMA user_version = %d", userVersion)}
+	statements := []string{fmt.Sprintf("PRAGMA user_version = %d", userVersion)}
+	if version < v44UserVersion {
+		statements = append([]string{archivedTasksTable}, statements...)
+	}
 	if version < v42UserVersion {
 		statements = append([]string{archiveBatchesTable}, statements...)
 	}

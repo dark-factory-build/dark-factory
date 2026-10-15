@@ -1,8 +1,6 @@
 package kernel
 
-import (
-	"context"
-)
+import "context"
 
 // MaxOverseerRunSeconds bounds one non-shell overseer run even when the
 // project ceiling is disabled or longer. An overseer must checkpoint and exit
@@ -10,22 +8,6 @@ import (
 // waits instead from holding the project's single overseer lane. Events stay
 // pending, so the next wake resumes from durable state.
 const MaxOverseerRunSeconds = 1800
-
-// SetProjectLimits is retained only for source compatibility with older
-// clients. Project-level ceilings are ignored and never persisted.
-func (store *Store) SetProjectLimits(ctx context.Context, id ProjectID, expected Revision, allowance uint64, maxRunSeconds uint32, at UnixMillis) (Project, error) {
-	project, found, err := store.Project(ctx, id)
-	if err != nil {
-		return Project{}, err
-	}
-	if !found {
-		return Project{}, ErrNotFound
-	}
-	if project.Revision != expected || at.Int64() < project.UpdatedAt.Int64() {
-		return Project{}, ErrRevisionConflict
-	}
-	return project, nil
-}
 
 // OverdueRuns returns admitted and running overseer runs whose fixed backstop
 // has elapsed. A specialist's review shares the backstop. The caller cancels each at its returned

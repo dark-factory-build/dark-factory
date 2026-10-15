@@ -14,8 +14,8 @@ import (
 	"testing"
 )
 
-// A current home opens untouched; a v43 home (without archived_tasks), a v42
-// one (also without the intake author columns), a v41 one (also without
+// A current home opens untouched; a v44 home preserves archived_tasks, a v43
+// home (without archived_tasks), a v42 one (also without the intake author columns), a v41 one (also without
 // archive_batches), a v40
 // one (also with a continuations table), a v39 one (also with
 // browser_security_events), a
@@ -24,7 +24,7 @@ import (
 // record a transient failure.
 func TestCurrentAndLegacyHomesOpenWithEveryRow(t *testing.T) {
 	t.Parallel()
-	for _, version := range []int{userVersion, v43UserVersion, v42UserVersion, v41UserVersion, v40UserVersion, v39UserVersion, v38UserVersion, v37UserVersion} {
+	for _, version := range []int{userVersion, v44UserVersion, v43UserVersion, v42UserVersion, v41UserVersion, v40UserVersion, v39UserVersion, v38UserVersion, v37UserVersion} {
 		t.Run(fmt.Sprintf("v%d", version), func(t *testing.T) { testHomeOpensWithEveryRow(t, version) })
 	}
 }
@@ -38,6 +38,15 @@ func testHomeOpensWithEveryRow(t *testing.T, version int) {
 		t.Fatal(err)
 	}
 	before := snapshotRows(t, ctx, connection)
+	if version == v44UserVersion {
+		if _, err := connection.ExecContext(ctx, `INSERT INTO archive_batches(generation, rows, digest, archived_at_ms) VALUES(1, 1, ?, 5)`, bytes.Repeat([]byte{0x44}, DigestBytes)); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := connection.ExecContext(ctx, `INSERT INTO archived_tasks(task_id, generation) VALUES(?, 1)`, bytes.Repeat([]byte{0x45}, IDBytes)); err != nil {
+			t.Fatal(err)
+		}
+		before = snapshotRows(t, ctx, connection)
+	}
 	if err := connection.Close(); err != nil {
 		t.Fatal(err)
 	}
@@ -80,7 +89,10 @@ func downgradeHome(t *testing.T, store *Store, version int, extra ...string) {
 			"ALTER TABLE projects ADD COLUMN runs_used INTEGER NOT NULL DEFAULT 0 CHECK (runs_used >= 0)",
 			"ALTER TABLE projects ADD COLUMN max_run_seconds INTEGER NOT NULL DEFAULT 0 CHECK (max_run_seconds BETWEEN 0 AND 86400)",
 			"ALTER TABLE project_tokens ADD COLUMN token_limit INTEGER NOT NULL DEFAULT 0 CHECK (token_limit >= 0)",
-			"DROP TABLE archived_tasks", fmt.Sprintf("PRAGMA user_version = %d", version),
+			fmt.Sprintf("PRAGMA user_version = %d", version),
+		}
+		if version < v44UserVersion {
+			statements = append(statements, "DROP TABLE archived_tasks")
 		}
 		if version < v43UserVersion {
 			statements = append([]string{"ALTER TABLE intake_acceptances DROP COLUMN author_type", "ALTER TABLE intake_acceptances DROP COLUMN author_login"}, statements...)

@@ -131,6 +131,14 @@ func (fixture *adapterFixture) pair(t *testing.T) *websocket.Conn {
 	return connection
 }
 
+func TestBrowserBackendRejectsRetiredProjectLimits(t *testing.T) {
+	backend := &browserBackend{}
+	_, err := backend.SetProjectLimits(context.Background(), [browserprotocol.ClientIDSize]byte{}, browserprotocol.ProjectLimits{})
+	if !errors.Is(err, browser.ErrInvalidRequest) {
+		t.Fatalf("retired project limits = %v, want invalid request", err)
+	}
+}
+
 func (fixture *adapterFixture) authenticate(t *testing.T) *websocket.Conn {
 	t.Helper()
 	connection := adapterDial(t, fixture.server)

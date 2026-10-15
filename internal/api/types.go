@@ -1141,12 +1141,6 @@ type ProjectRepositories struct {
 	Repositories []ProjectRepository `json:"repositories"`
 }
 
-type ProjectLimitsInput struct {
-	ProjectID        string `json:"project_id"`
-	ExpectedRevision uint64 `json:"expected_revision"`
-	MaxRunSeconds    uint32 `json:"max_run_seconds"`
-}
-
 type CreateAgentInput struct {
 	ID              string `json:"id"`
 	ProjectID       string `json:"project_id"`

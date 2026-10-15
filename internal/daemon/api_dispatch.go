@@ -364,8 +364,6 @@ func (daemon *Daemon) dispatch(ctx context.Context, call api.Call) api.Reply {
 		return daemon.createProject(ctx, call)
 	case api.CallProjectRepository:
 		return daemon.projectRepository(ctx, call)
-	case api.CallProjectLimits:
-		return daemon.setProjectLimits(ctx, call)
 	case api.CallCreateAgent:
 		return daemon.createAgent(ctx, call)
 	case api.CallAgentIdlePolicy:
@@ -1677,30 +1675,6 @@ func (daemon *Daemon) projectRepository(ctx context.Context, call api.Call) api.
 		return api.NewContentReply(repositoryDTO(value))
 	}
 	return newErrorReply(api.RemoteInvalidRequest)
-}
-
-func (daemon *Daemon) setProjectLimits(ctx context.Context, call api.Call) api.Reply {
-	input, ok := call.ProjectLimitsInput()
-	if !ok {
-		return newErrorReply(api.RemoteInvalidRequest)
-	}
-	id, err := decodeID(input.ProjectID, kernel.ProjectIDFromBytes)
-	if err != nil {
-		return newErrorReply(api.RemoteInvalidRequest)
-	}
-	expected, err := kernel.NewRevision(int64(input.ExpectedRevision))
-	if err != nil {
-		return newErrorReply(api.RemoteInvalidRequest)
-	}
-	at, err := daemon.timestamp()
-	if err != nil {
-		return newErrorReply(api.RemoteInternal)
-	}
-	project, err := daemon.store.SetProjectLimits(ctx, id, expected, 0, input.MaxRunSeconds, at)
-	if err != nil {
-		return newErrorReply(remoteErrorCode(err))
-	}
-	return daemon.mutation(ctx, project.Revision)
 }
 
 func (daemon *Daemon) createAgent(ctx context.Context, call api.Call) api.Reply {

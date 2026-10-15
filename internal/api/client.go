@@ -391,13 +391,6 @@ func (client *OperatorClient) RemoveProjectRepository(ctx context.Context, id st
 	return client.client.call(ctx, "project_repository", ProjectRepositoryInput{Action: "remove", ID: id, ExpectedRevision: revision}, &struct{}{})
 }
 
-func (client *OperatorClient) SetProjectLimits(ctx context.Context, input ProjectLimitsInput) (MutationResult, error) {
-	if !validID(input.ProjectID) || input.ExpectedRevision == 0 || input.MaxRunSeconds > 86400 {
-		return MutationResult{}, ErrInvalidInput
-	}
-	return client.client.mutate(ctx, "project_limits", input)
-}
-
 func (client *OperatorClient) CreateAgent(ctx context.Context, input CreateAgentInput) (MutationResult, error) {
 	if !validCreateAgentInput(input) {
 		return MutationResult{}, ErrInvalidInput
