@@ -94,6 +94,7 @@ func downgradeHome(t *testing.T, store *Store, version int, extra ...string) {
 		if version < v44UserVersion {
 			statements = append(statements, "DROP TABLE archived_tasks")
 		}
+		statements = append(statements, "DROP TABLE provider_adoptions")
 		if version < v43UserVersion {
 			statements = append([]string{"ALTER TABLE intake_acceptances DROP COLUMN author_type", "ALTER TABLE intake_acceptances DROP COLUMN author_login"}, statements...)
 		}

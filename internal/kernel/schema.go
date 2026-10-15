@@ -195,6 +195,18 @@ var schemaStatements = []string{
     created_at_ms INTEGER NOT NULL CHECK (created_at_ms >= 0),
     updated_at_ms INTEGER NOT NULL CHECK (updated_at_ms >= created_at_ms)
 ) STRICT, WITHOUT ROWID`,
+	`CREATE TABLE provider_adoptions (
+    provider TEXT PRIMARY KEY CHECK (provider IN ('claude_code', 'codex')),
+    active_commitment TEXT NOT NULL CHECK (length(CAST(active_commitment AS BLOB)) <= 4096),
+    candidate_commitment TEXT NOT NULL CHECK (length(CAST(candidate_commitment AS BLOB)) <= 4096),
+    candidate_state TEXT NOT NULL CHECK (candidate_state IN ('pending', 'failed')),
+    failure_detail TEXT NOT NULL CHECK (length(CAST(failure_detail AS BLOB)) <= 4096),
+    needs_you INTEGER NOT NULL CHECK (needs_you IN (0, 1)),
+    revision INTEGER NOT NULL CHECK (revision >= 1),
+    updated_at_ms INTEGER NOT NULL CHECK (updated_at_ms >= 0),
+    CHECK ((candidate_commitment = '' AND candidate_state = 'pending' AND failure_detail = '' AND needs_you = 0) OR candidate_commitment <> ''),
+    CHECK ((candidate_state = 'failed') = (needs_you = 1))
+) STRICT, WITHOUT ROWID`,
 	`CREATE UNIQUE INDEX accounts_provider_home_unique ON accounts(provider, home)`,
 	`CREATE TABLE agents (
     id BLOB PRIMARY KEY CHECK (length(id) = 16),
