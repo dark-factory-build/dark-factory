@@ -571,6 +571,89 @@ func TestDaemonDispatchesContentCreateWithoutScheduling(t *testing.T) {
 	}
 }
 
+// TestAttemptCallsShareTheClientRetryWindow holds each daemon's first clock
+// read inside dispatch past the default budget but within the attempt client's
+// RestartRetryWindow: an attempt mutation and attempt task complete once, and
+// an operator call is still cut off at the default.
+func TestAttemptCallsShareTheClientRetryWindow(t *testing.T) {
+	ctx := context.Background()
+	project := testID(110)
+	setup := func(seed byte) (*dispatchFixture, activeAttempt) {
+		fixture := newDispatchFixture(t)
+		operator, err := api.NewOperatorClient(fixture.socket, fixture.operator)
+		if err != nil {
+			t.Fatal(err)
+		}
+		done := fixture.serve(t)
+		if _, err := operator.CreateProject(ctx, api.CreateProjectInput{ID: project, Name: "slow dispatch", Root: contentRepositoryFixture(t)}); err != nil {
+			t.Fatal(err)
+		}
+		waitDispatch(t, done)
+		active := prepareActiveAttemptInProject(t, fixture, seed, project, "worker")
+		var slept atomic.Bool
+		now := fixture.daemon.now
+		fixture.daemon.now = func() time.Time {
+			if slept.CompareAndSwap(false, true) {
+				time.Sleep(defaultDispatchTimeout + time.Second)
+			}
+			return now()
+		}
+		return fixture, active
+	}
+	contentFixture, contentAttempt := setup(111)
+	taskFixture, taskAttempt := setup(121)
+	operatorFixture, _ := setup(131)
+	operator, err := api.NewOperatorClient(operatorFixture.socket, operatorFixture.operator)
+	if err != nil {
+		t.Fatal(err)
+	}
+	contentInput := api.ContentInput{ID: testID(141), ProjectID: project, Kind: "custom", Title: "lesson", Body: "slow write"}
+
+	started := time.Now()
+	var wg sync.WaitGroup
+	var contentErr, taskErr, operatorErr error
+	var created api.Content
+	for _, call := range []struct {
+		fixture *dispatchFixture
+		send    func()
+	}{
+		{contentFixture, func() { created, contentErr = contentAttempt.client.ContentCreate(ctx, contentInput) }},
+		{taskFixture, func() { _, taskErr = taskAttempt.client.Task(ctx) }},
+		{operatorFixture, func() {
+			bounded, cancel := context.WithTimeout(ctx, api.RestartRetryWindow)
+			defer cancel()
+			_, operatorErr = operator.ContentCreate(bounded, contentInput)
+		}},
+	} {
+		done := call.fixture.serve(t)
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			call.send()
+			<-done
+		}()
+	}
+	wg.Wait()
+	if elapsed := time.Since(started); elapsed <= defaultDispatchTimeout || elapsed >= api.RestartRetryWindow {
+		t.Fatalf("calls took %v, want between %v and %v", elapsed, defaultDispatchTimeout, api.RestartRetryWindow)
+	}
+	if contentErr != nil || created.Revision != 1 {
+		t.Fatalf("attempt content create = %+v, %v", created, contentErr)
+	}
+	if taskErr != nil {
+		t.Fatalf("attempt task = %v", taskErr)
+	}
+	if operatorErr == nil {
+		t.Fatal("operator call outlived the default dispatch budget")
+	}
+	for fixture, want := range map[*dispatchFixture]int{contentFixture: 1, operatorFixture: 0} {
+		listed, err := fixture.store.ListContent(ctx, mustProjectID(t, project), "custom", 0, 10)
+		if err != nil || len(listed.Items) != want {
+			t.Fatalf("content rows = %d, %v; want %d", len(listed.Items), err, want)
+		}
+	}
+}
+
 func assertSchedulerWake(t *testing.T, daemon *Daemon) {
 	t.Helper()
 	select {
