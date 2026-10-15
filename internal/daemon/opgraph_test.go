@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"cmp"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net"
@@ -17,6 +18,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/dark-factory-build/dark-factory/internal/api"
 	"github.com/dark-factory-build/dark-factory/internal/browserprotocol"
 	"github.com/dark-factory-build/dark-factory/internal/kernel"
 	"github.com/dark-factory-build/dark-factory/internal/opgraph"
@@ -286,6 +288,67 @@ func TestFactorydHealthExcludesBrowserFrames(t *testing.T) {
 	health := daemon.factorydHealth()
 	if len(health.Calls) != 2 || health.Calls[0].Name != schedulerFunction || health.Calls[1].Name != "snapshot" {
 		t.Fatalf("factoryd calls = %+v, want scheduler and unix API only", health.Calls)
+	}
+}
+
+func TestFactorydHealthPartitionsLocalAPIErrors(t *testing.T) {
+	fixture := newDispatchFixture(t)
+	operator, err := api.NewOperatorClient(fixture.socket, fixture.operator)
+	if err != nil {
+		t.Fatal(err)
+	}
+	done := fixture.serve(t)
+	if status, err := operator.Health(context.Background(), ""); err != nil || !status.Ready {
+		t.Fatalf("successful health: %+v, %v", status, err)
+	}
+	waitDispatch(t, done)
+
+	attemptToken := filepath.Join(filepath.Dir(fixture.socket), "attempt-unknown.token")
+	if err := os.WriteFile(attemptToken, bytes.Repeat([]byte{'x'}, 32), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	previousToken, hadToken := os.LookupEnv("DARK_FACTORY_ATTEMPT_TOKEN_FILE")
+	if err := os.Setenv("DARK_FACTORY_ATTEMPT_TOKEN_FILE", attemptToken); err != nil {
+		t.Fatal(err)
+	}
+	if hadToken {
+		t.Cleanup(func() { _ = os.Setenv("DARK_FACTORY_ATTEMPT_TOKEN_FILE", previousToken) })
+	} else {
+		t.Cleanup(func() { _ = os.Unsetenv("DARK_FACTORY_ATTEMPT_TOKEN_FILE") })
+	}
+	attempt, err := api.NewAttemptClientFromEnvironment(fixture.socket)
+	if err != nil {
+		t.Fatal(err)
+	}
+	done = fixture.serve(t)
+	var remote *api.RemoteError
+	if _, err := attempt.Source(context.Background(), testID(1)); !errors.As(err, &remote) || remote.Code() != api.RemoteUnauthorized {
+		t.Fatalf("unauthorized attempt source = %v", err)
+	}
+	waitDispatch(t, done)
+
+	fixture.daemon.home = filepath.Join(t.TempDir(), "missing")
+	done = fixture.serve(t)
+	if _, err := operator.Profile(context.Background(), api.ProfileInput{Seconds: 1}); !errors.As(err, &remote) || remote.Code() != api.RemoteInternal {
+		t.Fatalf("internal profile = %v", err)
+	}
+	waitDispatch(t, done)
+
+	health := fixture.daemon.factorydHealth()
+	errors := uint64(0)
+	codes := map[string]uint64{}
+	for _, call := range health.Calls {
+		errors += call.Errors
+		for code, count := range call.ErrorCodes {
+			codes[code] += count
+		}
+	}
+	if errors != 2 || !reflect.DeepEqual(codes, map[string]uint64{"unauthorized": 1, "internal": 1}) {
+		t.Fatalf("factoryd calls = %+v, want two classified errors", health.Calls)
+	}
+	encoded, err := json.Marshal(api.FactorydCall{Name: "snapshot", Count: 1})
+	if err != nil || strings.Contains(string(encoded), "error_codes") {
+		t.Fatalf("empty error_codes should be omitted: %s (%v)", encoded, err)
 	}
 }
 

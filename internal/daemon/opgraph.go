@@ -334,6 +334,12 @@ func (daemon *Daemon) factorydHealth() api.FactorydHealth {
 		call := byName[name]
 		call.Name, call.Count = name, call.Count+item.Count
 		call.Errors += item.Errors
+		if code := item.Attributes["error.type"]; code != "" && item.Errors > 0 {
+			if call.ErrorCodes == nil {
+				call.ErrorCodes = map[string]uint64{}
+			}
+			call.ErrorCodes[code] += item.Errors
+		}
 		call.LatencyP95MS = max(call.LatencyP95MS, item.LatencyP95)
 		byName[name] = call
 	}
