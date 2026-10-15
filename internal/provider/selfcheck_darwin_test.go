@@ -5,7 +5,10 @@ package provider
 import (
 	"context"
 	"errors"
+	"os/exec"
+	"strings"
 	"testing"
+	"unicode/utf8"
 
 	"github.com/dark-factory-build/dark-factory/internal/kernel"
 )
@@ -57,5 +60,40 @@ func TestRunNativeSelfCheckRequiresAllRealContractEdges(t *testing.T) {
 				t.Fatalf("failed self-check proof=%+v err=%v", proof, err)
 			}
 		})
+	}
+}
+
+func TestBoundedSelfCheckErrorTruncatesAtUTF8Boundary(t *testing.T) {
+	err := boundedSelfCheckError("commit Change", errors.New(strings.Repeat("x", maxSelfCheckDiagnosticBytes-2)+"€"))
+	if err == nil || !utf8.ValidString(err.Error()) || len(err.Error()) > maxSelfCheckDiagnosticBytes {
+		t.Fatalf("diagnostic=%q valid=%v length=%d", err, err != nil && utf8.ValidString(err.Error()), len(err.Error()))
+	}
+}
+
+func TestConfinedNativeSelfCheckRunnerUsesRealChangeAndAttemptEdges(t *testing.T) {
+	installation, runtime, _ := nativeFixture(t, kernel.ProviderCodex)
+	checkout := t.TempDir()
+	if output, err := exec.Command("/usr/bin/git", "-C", checkout, "init").CombinedOutput(); err != nil {
+		t.Fatalf("git init: %v: %s", err, output)
+	}
+	runtime.factoryctl = "/usr/bin/true"
+	request := requestFor(t, kernel.ProviderCodex, installation, runtime, "", "")
+	launch, err := Build(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	process, err := NewConfinedNativeSelfCheckRunner(request).Start(context.Background(), launch, checkout)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer process.Close()
+	for name, check := range map[string]func(context.Context) error{
+		"read checkout": process.ReadCheckout,
+		"commit Change": process.CommitChange,
+		"attempt API":   process.ReachAttemptAPI,
+	} {
+		if err := check(context.Background()); err != nil {
+			t.Fatalf("%s: %v", name, err)
+		}
 	}
 }

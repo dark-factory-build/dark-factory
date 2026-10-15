@@ -18,6 +18,9 @@ func (daemon *Daemon) AdoptProviderCandidate(ctx context.Context, request provid
 	if daemon == nil || daemon.store == nil {
 		return kernel.ProviderAdoption{}, fmt.Errorf("%w: provider adoption daemon", kernel.ErrInvalidValue)
 	}
+	if runner == nil {
+		runner = provider.NewConfinedNativeSelfCheckRunner(request)
+	}
 	at, err := daemon.timestamp()
 	if err != nil {
 		return kernel.ProviderAdoption{}, err

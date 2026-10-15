@@ -3,6 +3,7 @@ package kernel
 import (
 	"context"
 	"errors"
+	"strings"
 	"testing"
 )
 
@@ -61,6 +62,16 @@ func TestProviderAdoptionFailureRetainsPriorVersionAndRaisesOneNeedYou(t *testin
 	}
 	if _, err := store.CommitProviderCandidate(ctx, ProviderClaudeCode, failed.Revision, ProviderSelfCheck{Started: true, ReadCheckout: true, Committed: true, AttemptAPI: true}, mustTime(t, 15)); !errors.Is(err, ErrConflict) {
 		t.Fatalf("failed candidate promotion = %v", err)
+	}
+
+	unicodeDetail := strings.Repeat("x", MaxProviderAdoptionDetailBytes-3) + "€"
+	unicodeCandidate, err := store.RecordProviderCandidate(ctx, ProviderClaudeCode, "claude-v3", mustTime(t, 16))
+	if err != nil {
+		t.Fatal(err)
+	}
+	unicodeFailed, err := store.FailProviderCandidate(ctx, ProviderClaudeCode, unicodeCandidate.Revision, unicodeDetail, mustTime(t, 17))
+	if err != nil || unicodeFailed.FailureDetail != unicodeDetail || !unicodeFailed.NeedsYou {
+		t.Fatalf("bounded UTF-8 failure was not durable: %v", err)
 	}
 }
 
