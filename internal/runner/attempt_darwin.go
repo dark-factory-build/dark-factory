@@ -760,13 +760,28 @@ func (w *WorkerControl) RunProviderAdoptionSelfCheck(gateExecutable string, spec
 	if err != nil {
 		return err
 	}
+	defer child.Close()
 	if _, err = child.Activate(); err != nil {
 		_, terminateErr := child.Terminate(5 * time.Second)
 		return errors.Join(err, terminateErr)
 	}
+	// Adoption uses a native provider's one-shot completion mode, but its
+	// response can still exceed the PTY buffer. Drain the same PTY while the
+	// lifecycle wait observes process exit; otherwise a successful MCP call can
+	// block before it reaches its completion hook.
+	drained := make(chan struct{})
+	go func() {
+		_, _ = io.Copy(io.Discard, child.ptyMaster)
+		close(drained)
+	}()
 	exit, finishErr := child.FinishAfterExit(5 * time.Minute)
+	closeErr := child.Close()
+	<-drained
 	if finishErr != nil {
-		return finishErr
+		return errors.Join(finishErr, closeErr)
+	}
+	if closeErr != nil {
+		return closeErr
 	}
 	if exit.Code != 0 || exit.Signal != 0 || exit.LaunchErr != "" {
 		return fmt.Errorf("provider adoption self-check failed: exit=%d signal=%d launch=%s", exit.Code, exit.Signal, exit.LaunchErr)

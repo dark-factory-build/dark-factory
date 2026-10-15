@@ -193,7 +193,7 @@ func runProvider(ctx context.Context) (resultErr error) {
 			return selfCheckErr
 		}
 		if config.Role == kernel.RoleWorker {
-			witness := filepath.Join(config.RuntimePath, TempName, runner.ProviderAdoptionWitnessName)
+			witness := filepath.Join(temp, runner.ProviderAdoptionWitnessName)
 			witnessData, witnessErr := os.ReadFile(witness)
 			if witnessErr != nil || string(witnessData) != "provider task\n" {
 				_ = os.Remove(witness)
