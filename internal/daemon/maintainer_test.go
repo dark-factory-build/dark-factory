@@ -7,10 +7,12 @@ import (
 	"errors"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/dark-factory-build/dark-factory/internal/api"
 	"github.com/dark-factory-build/dark-factory/internal/kernel"
 	"github.com/dark-factory-build/dark-factory/internal/maintainer"
+	"github.com/dark-factory-build/dark-factory/internal/review"
 )
 
 func TestFilterOverseerToolsRemovesEveryWriteTool(t *testing.T) {
@@ -35,6 +37,82 @@ func TestMaintainerRefusesWorkerAndInactiveOrchestrator(t *testing.T) {
 				t.Fatalf("%s response: %+v %v", role, result, err)
 			}
 		})
+	}
+}
+
+func TestAuthenticatedWorkerReadsOwnReviewEvidenceAndCannotCrossScopeOrWrite(t *testing.T) {
+	fixture := newDispatchFixture(t)
+	ctx := context.Background()
+	project := mustProjectID(t, testID(198))
+	proof := kernel.RepositorySourceIdentity{RootDevice: 1, RootInode: 198, GitDevice: 1, GitInode: 199, OriginDigest: [32]byte{198}, PublicationRepository: "team/repo"}
+	if _, err := fixture.store.CreateProject(ctx, kernel.NewProject{ID: project, Name: "worker evidence", Root: "/project/198", SourceIdentity: &proof}, mustKernelTime(t, 1)); err != nil {
+		t.Fatal(err)
+	}
+	if err := fixture.store.BindRepositoryGitHubID(ctx, kernel.RepositoryID(project), 7); err != nil {
+		t.Fatal(err)
+	}
+	active := prepareActiveAttemptInProject(t, fixture, 198, project.String(), "worker")
+	session, found, err := fixture.store.TerminalSessionForRun(ctx, active.run.ID)
+	if err != nil || !found {
+		t.Fatalf("session: %v %v", found, err)
+	}
+	live := newLiveAttempt(fixture.daemon, active.run.ID, session.ID, nil)
+	live.agentID, live.attemptDigest = active.run.AgentID, active.run.CredentialDigest
+	if err := fixture.daemon.registerLiveAttempt(live); err != nil {
+		t.Fatal(err)
+	}
+	defer fixture.daemon.unregisterLiveAttempt(active.run.ID, live)
+	head := strings.Repeat("a", 40)
+	prepared, err := review.Prepare(review.Request{Repository: "team/repo", PullNumber: 12, Head: head, Base: strings.Repeat("b", 40), BaseRef: "main", Body: "fixture", Provider: "codex"}, func() time.Time { return time.Unix(2, 0) })
+	if err != nil {
+		t.Fatal(err)
+	}
+	pr := kernel.ProductionPullRequest{Number: 12, Title: "Evidence", URL: "https://github.com/team/repo/pull/12", Head: head, Branch: "feature/evidence", Base: "main", State: "open", Review: kernel.ProductionReview{Head: head, State: "block", Findings: "review finding"}}
+	if err := fixture.store.RecordPublicationWithReviewOperation(ctx, project, active.run.TaskID, "team/repo", pr, prepared.ID, review.Operation{ID: prepared.ID, Request: prepared.Request, State: "completed", Detail: "review detail", Conversation: "comment thread"}, mustKernelTime(t, 3)); err != nil {
+		t.Fatal(err)
+	}
+	if published, ok, err := fixture.store.TaskOpenPullRequest(ctx, active.run.TaskID); err != nil || !ok || published.Head != head {
+		t.Fatalf("published task pull = %+v, ok=%v, err=%v", published, ok, err)
+	}
+	if route, ok, err := fixture.store.TaskRepository(ctx, active.run.TaskID); err != nil || !ok {
+		t.Fatalf("task repository = %+v, ok=%v, err=%v", route, ok, err)
+	}
+	customerMode(t, fixture)
+	fixture.daemon.githubMCP = func(_ context.Context, _ json.RawMessage, _ map[string]uint64) (json.RawMessage, error) {
+		return json.RawMessage(`{"jsonrpc":"2.0","id":1,"result":{"structuredContent":{},"isError":false}}`), nil
+	}
+
+	done := fixture.serve(t)
+	why, err := active.client.Report(ctx, api.ReportInput{TaskID: active.run.TaskID.String()})
+	waitDispatch(t, done)
+	if err != nil || !strings.Contains(strings.Join(why.Lines, "\n"), "review-of-record: review finding") || !strings.Contains(strings.Join(why.Lines, "\n"), "review detail: review detail") || !strings.Contains(strings.Join(why.Lines, "\n"), "pull request comments: comment thread") {
+		t.Fatalf("worker why = %+v, err=%v", why, err)
+	}
+
+	call := func(request string) api.MaintainerResult {
+		done := fixture.serve(t)
+		result, callErr := active.client.Maintainer(ctx, api.MaintainerInput{Request: json.RawMessage(request)})
+		waitDispatch(t, done)
+		if callErr != nil {
+			t.Fatalf("maintainer %s: %v", request, callErr)
+		}
+		return result
+	}
+	for _, request := range []string{
+		`{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"observe_pull_request_checks","arguments":{"repository":"other/repo","pull_number":12,"head_sha":"` + head + `"}}}`,
+		`{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"observe_pull_request_checks","arguments":{"repository":"team/repo","pull_number":12,"head_sha":"` + strings.Repeat("c", 40) + `"}}}`,
+		`{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"submit_pull_request_review","arguments":{"repository":"team/repo","pull_number":12,"head_sha":"` + head + `"}}}`,
+	} {
+		if result := call(request); result.State != "denied" {
+			t.Fatalf("worker boundary %s = %+v", request, result)
+		}
+	}
+	done = fixture.serve(t)
+	_, err = active.client.Report(ctx, api.ReportInput{ProjectID: testID(199), TaskID: active.run.TaskID.String()})
+	waitDispatch(t, done)
+	var remote *api.RemoteError
+	if !errors.As(err, &remote) || remote.Code() != api.RemoteForbidden {
+		t.Fatalf("cross-project report error = %v", err)
 	}
 }
 

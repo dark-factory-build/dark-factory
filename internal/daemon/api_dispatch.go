@@ -590,6 +590,9 @@ func (daemon *Daemon) attemptOperatorCall(ctx context.Context, raw api.AttemptDi
 		if !valid || authority.Role != kernel.RoleWorker || input.Pull != 0 || input.TaskID == "" {
 			return authority.ProjectID, false
 		}
+		if input.ProjectID != "" && input.ProjectID != authority.ProjectID.String() {
+			return authority.ProjectID, false
+		}
 		task, decodeErr := decodeID(input.TaskID, kernel.TaskIDFromBytes)
 		return authority.ProjectID, decodeErr == nil && task == authority.TaskID
 	case intake.Action == "list":
