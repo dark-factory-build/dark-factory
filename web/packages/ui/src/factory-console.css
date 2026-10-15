@@ -704,11 +704,6 @@ summary.dfConsoleItem__summary { cursor: pointer; }
 .dfFactoryEntityTools > * { flex: none; }
 .dfWorkLine { display: flex; align-items: center; gap: .6rem; }
 .dfWorkLine strong { color: #edba6b; font-variant-numeric: tabular-nums; }
-:is(.dfFloorMenu) > summary { cursor: pointer; }
-:is(.dfFloorMenu)[open] > summary { color: var(--df-console-accent); }
-.dfFactoryEntityTools .dfFloorMenu__body { position: absolute; z-index: 10; top: 100%; left: .5rem; right: .5rem; max-height: min(24rem, 55svh); overflow: auto; padding: .75rem; white-space: normal; background: #122027; border: 1px solid #3c5051; box-shadow: 0 6px 16px #0008; }
-.dfFloorMenu__body button { display: block; width: 100%; text-align: left; }
-.dfFloorMenu__body > * + * { margin-top: .4rem; }
 .dfFactoryEntityTools__notice { flex-basis: 100%; display: flex; align-items: baseline; flex-wrap: wrap; gap: .4rem; margin: 0; font-size: var(--df-text-xs); }
 .dfMachineInspector { position: absolute; z-index: 5; bottom: 0; left: 0; right: 0; max-height: 55%; overflow: auto; padding: .75rem; background: var(--df-console-surface); border-top: 1px solid var(--df-console-rule); }
 .dfMachineInspector table { font-size: var(--df-text-xs); }
