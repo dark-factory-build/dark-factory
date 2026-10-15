@@ -852,28 +852,6 @@ pub(crate) struct ChecksResult {
     pub(crate) checks: Vec<CheckResult>,
 }
 
-#[derive(Clone, Debug, Deserialize, Serialize)]
-#[serde(deny_unknown_fields)]
-pub(crate) struct ObservePullRequestComments {
-    pub(crate) repository: String,
-    pub(crate) pull_number: i64,
-    pub(crate) head_sha: String,
-}
-
-#[derive(Debug, Deserialize, Serialize)]
-pub(crate) struct PullRequestCommentsResult {
-    pub(crate) pull_number: i64,
-    pub(crate) head_sha: String,
-    pub(crate) comments: Vec<PullRequestComment>,
-}
-
-#[derive(Debug, Deserialize, Serialize)]
-pub(crate) struct PullRequestComment {
-    pub(crate) id: i64,
-    pub(crate) url: String,
-    pub(crate) body: String,
-}
-
 /// GitHub Deployments, newest first, each with its newest status. Whatever
 /// deploys (Vercel, Actions, any CD tool) writes them, so one read covers
 /// every platform that records them. No URLs, payloads, descriptions or
@@ -1927,48 +1905,6 @@ impl AppAuthority {
     }
 
     #[cfg(target_arch = "wasm32")]
-    pub(crate) async fn observe_pull_request_comments(
-        &self,
-        mut request: ObservePullRequestComments,
-    ) -> Result<PullRequestCommentsResult, OperationError> {
-        request.validate()?;
-        let repository = RepositoryName::requested(&mut request.repository)?;
-        let token = self
-            .0
-            .installation_token(
-                repository,
-                BTreeMap::from([("issues", "read"), ("metadata", "read")]),
-            )
-            .await
-            .map_err(issue_read_error)?;
-        let pull = self
-            .0
-            .verify_pull_request_head(&token, request.pull_number, &request.head_sha)
-            .await?;
-        let entries: Vec<IssueComment> = github_json(
-            &format!(
-                "https://api.github.com/repos/{}/{}/issues/{}/comments?per_page=100",
-                token.repository.owner, token.repository.name, request.pull_number
-            ),
-            token.as_str(),
-        )
-        .await
-        .map_err(|error: Error| issue_read_error(error.into()))?;
-        if entries.len() > 100 || pull.number != request.pull_number {
-            return Err(OperationError::Unavailable);
-        }
-        let comments = entries
-            .into_iter()
-            .map(PullRequestComment::try_from)
-            .collect::<Result<Vec<_>, _>>()?;
-        Ok(PullRequestCommentsResult {
-            pull_number: request.pull_number,
-            head_sha: request.head_sha,
-            comments,
-        })
-    }
-
-    #[cfg(target_arch = "wasm32")]
     pub(crate) async fn list_deployments(
         &self,
         mut request: ListDeployments,
@@ -2811,13 +2747,6 @@ impl ListPullRequests {
             }
         }
         Ok(())
-    }
-}
-
-impl ObservePullRequestComments {
-    fn validate(&self) -> Result<(), OperationError> {
-        valid_exact_integer(self.pull_number)?;
-        valid_sha(&self.head_sha)
     }
 }
 
@@ -5530,31 +5459,6 @@ struct PullRequestReview {
     body: Option<String>,
     commit_id: String,
     state: String,
-}
-
-#[cfg(target_arch = "wasm32")]
-#[derive(Deserialize)]
-struct IssueComment {
-    id: i64,
-    html_url: String,
-    body: Option<String>,
-}
-
-#[cfg(target_arch = "wasm32")]
-impl TryFrom<IssueComment> for PullRequestComment {
-    type Error = OperationError;
-
-    fn try_from(comment: IssueComment) -> Result<Self, Self::Error> {
-        valid_exact_integer(comment.id)?;
-        valid_github_url(&comment.html_url)?;
-        let body = comment.body.unwrap_or_default();
-        valid_text(&body, 0, 65_536, true)?;
-        Ok(Self {
-            id: comment.id,
-            url: comment.html_url,
-            body,
-        })
-    }
 }
 
 #[cfg(any(target_arch = "wasm32", test))]

@@ -588,21 +588,6 @@ fn tools() -> Value {
         },
         "annotations": {"readOnlyHint": true, "destructiveHint": false, "openWorldHint": true}
     }, {
-        "name": "observe_pull_request_comments",
-        "title": "Observe exact-head pull request comments",
-        "description": "Return the bounded issue-comment thread for one pull request, after verifying the requested pull request still has the exact head commit.",
-        "inputSchema": {
-            "type": "object", "additionalProperties": false,
-            "properties": {"repository": {"type": "string"}, "pull_number": {"type": "integer", "minimum": 1}, "head_sha": {"type": "string", "pattern": "^[0-9a-f]{40}$"}},
-            "required": ["repository", "pull_number", "head_sha"]
-        },
-        "outputSchema": {
-            "type": "object", "additionalProperties": false,
-            "required": ["pull_number", "head_sha", "comments"],
-            "properties": {"pull_number": {"type": "integer"}, "head_sha": {"type": "string"}, "comments": {"type": "array", "maxItems": 100, "items": {"type": "object", "additionalProperties": false, "required": ["id", "url", "body"], "properties": {"id": {"type": "integer"}, "url": {"type": "string"}, "body": {"type": "string", "maxLength": 65536}}}}}
-        },
-        "annotations": {"readOnlyHint": true, "destructiveHint": false, "openWorldHint": true}
-    }, {
         "name": "list_deployments",
         "title": "List deployments",
         "description": "Return the newest GitHub Deployments, newest first, each with its newest status's state and time (pending when it has none) and the host its environment URL names. No URLs, payloads or creators.",
@@ -1077,18 +1062,6 @@ async fn call_tool(id: Value, request: &Map<String, Value>, mcp: &McpState) -> R
             match mcp.app.observe_pull_request_checks(arguments).await {
                 Ok(result) => {
                     serialized_tool_result(id, &result, "Exact-head check runs were observed.")
-                }
-                Err(error) => operation_error(id, error),
-            }
-        }
-        Some("observe_pull_request_comments") => {
-            let Ok(arguments) = serde_json::from_value::<ObservePullRequestComments>(arguments)
-            else {
-                return json_rpc_error(id, -32602, "Invalid params");
-            };
-            match mcp.app.observe_pull_request_comments(arguments).await {
-                Ok(result) => {
-                    serialized_tool_result(id, &result, "Pull request comments were observed.")
                 }
                 Err(error) => operation_error(id, error),
             }
