@@ -1076,12 +1076,12 @@ test("an unobserved machine is greyed with no material belt; an observed edge wi
   assert.equal((markup.match(/dfPlant__material/g) ?? []).length, 1, "only the observed belt moves material");
 });
 
-test("the coverage header shows the summary numbers", () => {
+test("a supplied summary draws no aggregate coverage; an unobserved machine still says NO TELEMETRY", () => {
   const summary = { components: 7, inferred: 6, observed: 3, quiet: 1, partial: 1, stale: 0, unobserved: 1, opaque: 1, runtime_only: 1, contradicted: 0 };
-  const markup = render({ graph: { ...graph, summary }, workers: [] });
-  const header = markup.match(/aria-label="Observation coverage"[^>]*>(.*?)<\/p>/)[1].replace(/<[^>]+>/g, "");
-  assert.equal(header, "3 observed · 1 observed, quiet · 1 partly observed · 0 stale · 1 no telemetry · 1 external · 1 runtime-only · grey machines have no telemetry: unknown, not idle", "observation counts add up to the components");
-  assert.doesNotMatch(render({ workers: [] }), /Observation coverage/, "no summary, no claim");
+  const markup = render({ graph: { ...sceneGraph([unit("api", { machines: [machine("api-db", "store")] })]), summary }, workers: [] });
+  assert.doesNotMatch(markup, /Telemetry|Observation coverage/);
+  assert.match(markup, /data-entity-id="api-db" data-observation="unobserved"/);
+  assert.match(markup, />NO TELEMETRY</);
 });
 
 test("a deploy is a changeover dated by the graph, not by the viewer's clock", () => {

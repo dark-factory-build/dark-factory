@@ -1111,10 +1111,6 @@ summary.dfConsoleItem__summary { cursor: pointer; }
 @keyframes dfPlantBlink { 50% { fill: var(--lampoff); } }
 @keyframes dfPlantArm { 50% { transform: translateY(2px); } }
 @media (prefers-reduced-motion: reduce) { .dfPlant * { animation: none !important; } }
-.dfPlantCoverage { margin: 0 0 .5rem; font: 12px ui-monospace, monospace; }
-.dfPlantCoverage--observed { color: #5ad38a; }
-.dfPlantCoverage--partial { color: #f2c94c; }
-.dfPlantCoverage--unobserved { color: #4cc3e6; }
 .dfPlantReading.op-failing { color: #ff5f56; }
 .dfPlantReading.op-degraded { color: #f2c94c; }
 .dfPlantReading.s-unobserved { color: #7f93a8; }
