@@ -935,16 +935,19 @@ func (daemon *Daemon) attemptTask(ctx context.Context, call api.Call) api.Reply 
 		return newErrorReply(api.RemoteInvalidRequest)
 	}
 	// Per-step timings, logged when the fetch is slow, so the slow step is
-	// named instead of guessed (#1780).
+	// named instead of guessed (#1780), with the total time the reads queued
+	// for a pooled reader (#1996).
 	started, step := time.Now(), time.Now()
 	var timings []string
+	var readerWait time.Duration
+	ctx = kernel.WithReaderWait(ctx, &readerWait)
 	mark := func(name string) {
 		timings = append(timings, name+"="+time.Since(step).Round(time.Millisecond).String())
 		step = time.Now()
 	}
 	defer func() {
 		if total := time.Since(started); total > time.Second {
-			LogFactoryd(daemon.log, "factoryd: slow attempt task %s (%s)\n", total.Round(time.Millisecond), strings.Join(timings, " "))
+			LogFactoryd(daemon.log, "factoryd: slow attempt task %s (%s readerwait=%s)\n", total.Round(time.Millisecond), strings.Join(timings, " "), readerWait.Round(time.Millisecond))
 		}
 	}()
 	authority, err := daemon.store.AuthenticateAttempt(ctx, kDigest)
@@ -954,15 +957,20 @@ func (daemon *Daemon) attemptTask(ctx context.Context, call api.Call) api.Reply 
 	}
 	instructionText := authority.Task()
 	accepted, found, err := daemon.store.IntakeAcceptanceForTask(ctx, authority.TaskID)
+	mark("intake")
 	if err != nil {
 		return newErrorReply(remoteErrorCode(err))
 	}
-	if current, taskFound, taskErr := daemon.store.Task(ctx, authority.TaskID); taskErr != nil {
+	// The task step includes the live issue observation in customer mode.
+	current, taskFound, taskErr := daemon.store.Task(ctx, authority.TaskID)
+	if taskErr == nil && taskFound {
+		instructionText, taskErr = daemon.currentTaskText(ctx, authority.Provider, current)
+	}
+	mark("task")
+	if taskErr != nil {
 		return newErrorReply(remoteErrorCode(taskErr))
 	} else if !taskFound {
 		return newErrorReply(api.RemoteInternal)
-	} else if instructionText, taskErr = daemon.currentTaskText(ctx, authority.Provider, current); taskErr != nil {
-		return newErrorReply(remoteErrorCode(taskErr))
 	}
 	attachments, err := daemon.store.TaskAttachments(ctx, authority.TaskID)
 	mark("attachments")
@@ -985,7 +993,6 @@ func (daemon *Daemon) attemptTask(ctx context.Context, call api.Call) api.Reply 
 		}
 	}
 	assignment := api.AttemptTask{Task: string(task)}
-	mark("intake")
 	if found {
 		hash := accepted.Snapshot.ContentHash()
 		assignment.Intake = &api.IntakeTaskSource{LinearTeamID: accepted.Snapshot.LinearTeamID, SourceURL: accepted.Snapshot.URL, AcceptanceID: accepted.ID.String(), Repository: accepted.SourceRepository, RepositoryID: accepted.Snapshot.GitHubRepositoryID, IssueNumber: accepted.Snapshot.IssueNumber, TargetRepositoryID: accepted.RepositoryID.String(), ContentHash: hex.EncodeToString(hash[:])}

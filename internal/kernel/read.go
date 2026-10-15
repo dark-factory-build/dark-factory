@@ -342,6 +342,16 @@ func (store *Store) beginRead(ctx context.Context) (*readTx, error) {
 	return beginPinnedRead(ctx, connection)
 }
 
+// beginBackgroundRead is beginRead on the background pool, for the long
+// periodic whole-store reads.
+func (store *Store) beginBackgroundRead(ctx context.Context) (*readTx, error) {
+	connection, err := store.verifiedConnection(ctx, store.background, "background")
+	if err != nil {
+		return nil, err
+	}
+	return beginPinnedRead(ctx, connection)
+}
+
 func beginPinnedRead(ctx context.Context, connection *sql.Conn) (*readTx, error) {
 	if _, err := connection.ExecContext(ctx, "BEGIN"); err != nil {
 		releaseUncertainConnection(connection)
@@ -377,7 +387,7 @@ func (store *Store) Snapshot(ctx context.Context) (DashboardSnapshot, error) {
 	if err := store.heldCorruption(); err != nil {
 		return DashboardSnapshot{}, err
 	}
-	tx, err := store.beginRead(ctx)
+	tx, err := store.beginBackgroundRead(ctx)
 	if err != nil {
 		return DashboardSnapshot{}, err
 	}

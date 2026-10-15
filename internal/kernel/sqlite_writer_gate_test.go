@@ -227,12 +227,7 @@ func testStoreCloseUncertaintyRetainsExactAuthority(t *testing.T, failureKind st
 	}
 	defer func() {
 		sqlitePoolCloseHook = nil
-		_ = store.readers.Close()
-		_ = store.writer.Close()
-		if store.pathBinding != nil {
-			_ = store.pathBinding.Close()
-			store.pathBinding = nil
-		}
+		releaseRetainedStoreForTest(store)
 	}()
 
 	if err := os.Rename(home, home+".original"); err != nil {
@@ -306,14 +301,7 @@ func TestRejectedOperationalOpenReturnsRetainedStoreOnCloseUncertainty(t *testin
 	defer func() {
 		sqliteActivationHook = nil
 		sqlitePoolCloseHook = nil
-		if store != nil {
-			_ = store.readers.Close()
-			_ = store.writer.Close()
-			if store.pathBinding != nil {
-				_ = store.pathBinding.Close()
-				store.pathBinding = nil
-			}
-		}
+		releaseRetainedStoreForTest(store)
 	}()
 	if store == nil || !errors.Is(openErr, rejected) || !errors.Is(openErr, closeBusy) {
 		t.Fatalf("rejected operational open = %v, %v; want retained uncertain Store", store, openErr)
@@ -636,6 +624,9 @@ func releaseRetainedStoreForTest(store *Store) {
 	if store.readers != nil {
 		_ = store.readers.Close()
 	}
+	if store.background != nil {
+		_ = store.background.Close()
+	}
 	if store.writer != nil {
 		_ = store.writer.Close()
 	}
@@ -712,5 +703,74 @@ func TestSlowWriterHoldLogsItsHolderAndWaiters(t *testing.T) {
 	store.releaseWriter()
 	if got := logged(); len(got) != 2 || !strings.Contains(got[1], "longest sqlite writer wait in the last minute 1.2") || !strings.Contains(got[1], "by kernel.abandonWriterWait") {
 		t.Fatalf("longest-wait log = %q", got)
+	}
+}
+
+func TestReaderWaitCountsTimeQueuedBehindLongReads(t *testing.T) {
+	store, _ := newTestStore(t)
+	defer store.Close()
+	var long []*readTx
+	for range maxReaders {
+		tx, err := store.beginRead(context.Background())
+		if err != nil {
+			t.Fatal(err)
+		}
+		long = append(long, tx)
+	}
+	const held = 200 * time.Millisecond
+	go func() {
+		time.Sleep(held)
+		for _, tx := range long {
+			_ = tx.Close()
+		}
+	}()
+	var wait time.Duration
+	if _, err := store.TaskAttachments(WithReaderWait(context.Background(), &wait), taskID(t, 7)); err != nil {
+		t.Fatal(err)
+	}
+	if wait < held-20*time.Millisecond {
+		t.Fatalf("reader wait = %s, want about %s queued behind %d long reads", wait, held, maxReaders)
+	}
+	wait = 0
+	if _, err := store.TaskAttachments(WithReaderWait(context.Background(), &wait), taskID(t, 7)); err != nil || wait > held/2 {
+		t.Fatalf("unqueued reader wait = %s, %v", wait, err)
+	}
+}
+
+func TestTaskAttachmentsDoesNotQueueBehindLongBackgroundReads(t *testing.T) {
+	store, _ := newTestStore(t)
+	defer store.Close()
+	// Two long reads hold the background pool and two more validations queue
+	// behind them: four long reads in progress.
+	var long []*readTx
+	for range backgroundReaders {
+		tx, err := store.beginBackgroundRead(context.Background())
+		if err != nil {
+			t.Fatal(err)
+		}
+		long = append(long, tx)
+	}
+	queued := make(chan error, 2)
+	for range cap(queued) {
+		go func() { queued <- store.Validate(context.Background()) }()
+	}
+	for store.background.Stats().WaitCount < int64(cap(queued)) {
+		time.Sleep(time.Millisecond)
+	}
+	var wait time.Duration
+	started := time.Now()
+	if _, err := store.TaskAttachments(WithReaderWait(context.Background(), &wait), taskID(t, 7)); err != nil {
+		t.Fatal(err)
+	}
+	if took := time.Since(started); took > time.Second || wait > 100*time.Millisecond {
+		t.Fatalf("TaskAttachments took %s (reader wait %s) behind four long background reads", took, wait)
+	}
+	for _, tx := range long {
+		_ = tx.Close()
+	}
+	for range cap(queued) {
+		if err := <-queued; err != nil {
+			t.Fatal(err)
+		}
 	}
 }

@@ -18,14 +18,18 @@ import (
 )
 
 const (
-	busyMilliseconds = 5000
-	maxReaders       = 4
-	driverName       = "sqlite3"
+	busyMilliseconds  = 5000
+	maxReaders        = 4
+	backgroundReaders = 2
+	driverName        = "sqlite3"
 )
 
 type Store struct {
-	writer      *sql.DB
-	readers     *sql.DB
+	writer  *sql.DB
+	readers *sql.DB
+	// background serves the long whole-store reads (validation, reclaim,
+	// snapshots), so they never queue the readers attempt calls use (#1996).
+	background  *sql.DB
 	writerGate  chan struct{}
 	bindingMu   sync.RWMutex
 	pathBinding *databaseFiles
@@ -95,19 +99,17 @@ func newStore() *Store {
 func openFixedPools(ctx context.Context, store *Store, path string, recheck func() error) error {
 	activationCtx, cancel := context.WithTimeout(ctx, 2*time.Duration(busyMilliseconds)*time.Millisecond)
 	defer cancel()
-	err := openFixedPool(activationCtx, path, "writer", 1, recheck, &store.writer)
-	if err != nil {
-		if store.writer != nil {
-			store.retainCloseUncertainty(err)
+	for _, pool := range []struct {
+		kind  string
+		limit int
+		owner **sql.DB
+	}{{"writer", 1, &store.writer}, {"reader", maxReaders, &store.readers}, {"background", backgroundReaders, &store.background}} {
+		if err := openFixedPool(activationCtx, path, pool.kind, pool.limit, recheck, pool.owner); err != nil {
+			if *pool.owner != nil {
+				store.retainCloseUncertainty(err)
+			}
+			return errors.Join(err, store.Close())
 		}
-		return errors.Join(err, store.Close())
-	}
-	err = openFixedPool(activationCtx, path, "reader", maxReaders, recheck, &store.readers)
-	if err != nil {
-		if store.readers != nil {
-			store.retainCloseUncertainty(err)
-		}
-		return errors.Join(err, store.Close())
 	}
 	return nil
 }
@@ -291,6 +293,14 @@ func (store *Store) readerConnection(ctx context.Context) (*sql.Conn, error) {
 	return store.verifiedConnection(ctx, store.readers, "reader")
 }
 
+type readerWaitKey struct{}
+
+// WithReaderWait adds to wait the time each read under ctx spends queued for a
+// pooled reader connection. The reads under ctx must be sequential.
+func WithReaderWait(ctx context.Context, wait *time.Duration) context.Context {
+	return context.WithValue(ctx, readerWaitKey{}, wait)
+}
+
 func (store *Store) verifiedConnection(ctx context.Context, pool *sql.DB, kind string) (*sql.Conn, error) {
 	store.bindingMu.RLock()
 	defer store.bindingMu.RUnlock()
@@ -302,7 +312,11 @@ func (store *Store) verifiedConnection(ctx context.Context, pool *sql.DB, kind s
 			return nil, fmt.Errorf("recheck retained sqlite binding: %w", err)
 		}
 	}
+	waiting := time.Now()
 	connection, err := pool.Conn(ctx)
+	if wait, ok := ctx.Value(readerWaitKey{}).(*time.Duration); ok && pool == store.readers {
+		*wait += time.Since(waiting)
+	}
 	if err != nil {
 		return nil, fmt.Errorf("checkout %s connection: %w", kind, err)
 	}
@@ -379,7 +393,7 @@ func initializeFresh(ctx context.Context, connection *sql.Conn, config FactoryCo
 }
 
 func (store *Store) validateOpen(ctx context.Context) error {
-	tx, err := store.beginRead(ctx)
+	tx, err := store.beginBackgroundRead(ctx)
 	if err != nil {
 		return err
 	}
@@ -456,7 +470,7 @@ func (store *Store) Close() error {
 		// does not make the resource closure uncertain, so checkpoint failure
 		// must not poison the stable Close result.
 		_ = store.checkpointWAL(context.Background(), "TRUNCATE")
-		poolErr := errors.Join(closeSQLitePool("reader", store.readers), closeSQLitePool("writer", store.writer))
+		poolErr := errors.Join(closeSQLitePool("reader", store.readers), closeSQLitePool("background", store.background), closeSQLitePool("writer", store.writer))
 		if poolErr != nil {
 			store.closeErr = fmt.Errorf("%w: close retained sqlite pools: %w", ErrCorruptState, poolErr)
 			return
@@ -540,7 +554,7 @@ func closeSQLitePool(kind string, pool *sql.DB) error {
 }
 
 func (store *Store) waitForCheckedOutConnections() {
-	for poolInUse(store.writer) || poolInUse(store.readers) {
+	for poolInUse(store.writer) || poolInUse(store.readers) || poolInUse(store.background) {
 		time.Sleep(time.Millisecond)
 	}
 }

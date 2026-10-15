@@ -293,7 +293,7 @@ type ReclaimableChange struct {
 // ReclaimableChanges lists the retained Changes the kernel half of the
 // reclaim rule allows at at, oldest first.
 func (store *Store) ReclaimableChanges(ctx context.Context, at UnixMillis) ([]ReclaimableChange, error) {
-	tx, err := store.beginRead(ctx)
+	tx, err := store.beginBackgroundRead(ctx)
 	if err != nil {
 		return nil, err
 	}
