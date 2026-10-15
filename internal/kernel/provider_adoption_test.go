@@ -6,6 +6,35 @@ import (
 	"testing"
 )
 
+func TestProviderAdoptionFailureKeepsNeedsYouThroughRunFailure(t *testing.T) {
+	store, run, keys := runningWorkerRun(t)
+	defer store.Close()
+	active := bytes.Repeat([]byte{5}, DigestBytes)
+	candidate := bytes.Repeat([]byte{6}, DigestBytes)
+	if _, err := store.ObserveProviderCandidate(context.Background(), ProviderCodex, "/old/codex", active, candidate, "/new/codex", mustTime(t, 30)); err != nil {
+		t.Fatal(err)
+	}
+	_, request, err := store.CompleteProviderAdoptionForAttempt(context.Background(), keys.AttemptDigest, ProviderCodex, candidate, "attempt MCP unavailable", mustTime(t, 31))
+	if err != nil {
+		t.Fatalf("failed adoption question: %v", err)
+	}
+	failure, err := NewFailureProposal(FailureProviderExit, "provider adoption self-check failed")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.FailRunProviderExit(context.Background(), run.ID, run.Revision, failure, mustTime(t, 32)); err != nil {
+		t.Fatalf("fail run: %v", err)
+	}
+	read := requestForTest(t, store, request.ID)
+	if read.Status != HumanRequestOpen || read.Continuation != ContinuationWaiting {
+		t.Fatalf("adoption question after run failure = %+v", read)
+	}
+	projection, found, err := store.HumanRequest(context.Background(), request.ID)
+	if err != nil || !found || !projection.CanReply {
+		t.Fatalf("adoption question projection = %+v found=%v err=%v", projection, found, err)
+	}
+}
+
 func TestProviderAdoptionKeepsFailedCandidateAcrossRestart(t *testing.T) {
 	store, path := newTestStore(t)
 	active := bytes.Repeat([]byte{1}, DigestBytes)

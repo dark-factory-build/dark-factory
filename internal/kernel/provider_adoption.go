@@ -179,6 +179,6 @@ func (store *Store) CompleteProviderAdoptionForAttempt(ctx context.Context, dige
 		QuestionText:   "Provider adoption self-check failed for " + provider.String() + ": " + diagnostic,
 		ReuseExisting:  true,
 	}
-	request, err := store.CreateHumanQuestionForAttempt(ctx, digest, question, at)
+	request, err := store.CreateHumanQuestionAndWaitForAttempt(ctx, digest, question, at)
 	return adoption, request, err
 }
