@@ -159,10 +159,27 @@ func TestRecordChangeRebasedUpdatesRetainedHeadWithoutOpeningWork(t *testing.T) 
 	if _, err := store.RecordChangeRebased(ctx, current.ID, updated.Revision, *current.HeadCommit, newHead, mustTime(t, 82)); !errors.Is(err, ErrRevisionConflict) {
 		t.Fatalf("stale rebase replay = %v", err)
 	}
-	// A rebased Change later reclaimed keeps the rebase's update time and
-	// stays valid (15 Oct 2026: this halted factoryd). The SQL is
-	// ReclaimChange's own column changes, without its task-ended preconditions.
-	corruptSQL(t, store, `UPDATE changes SET phase = 'abandoned', object_format = NULL, base_commit = NULL, repository_dev = NULL, repository_inode = NULL, head_commit = NULL, prepared_at_ms = NULL, available_at_ms = NULL, revision = revision + 1 WHERE id = ?`, updated.ID.Bytes())
+}
+
+// A Change rebased after its run and later reclaimed keeps the rebase's
+// update time and stays valid (15 Oct 2026: this halted factoryd).
+func TestReclaimedChangeRebasedAfterItsRunStaysValid(t *testing.T) {
+	t.Parallel()
+	store, terminal := terminalPreRunningAvailableWorker(t)
+	defer store.Close()
+	ctx := context.Background()
+	retained, found, err := store.Change(ctx, *terminal.ChangeID)
+	if err != nil || !found || retained.HeadCommit == nil {
+		t.Fatalf("retained Change = %+v, found=%v, err=%v", retained, found, err)
+	}
+	newHead, _ := NewCommitID(retained.HeadCommit.format, bytes.Repeat([]byte{0x7b}, retained.HeadCommit.format.oidLength()))
+	rebased, err := store.RecordChangeRebased(ctx, retained.ID, retained.Revision, *retained.HeadCommit, newHead, mustTime(t, terminal.TerminalAt.Int64()+1))
+	if err != nil {
+		t.Fatalf("rebase after the run = %v", err)
+	}
+	if _, err := store.ReclaimChange(ctx, rebased.ID, rebased.Revision, true, mustTime(t, terminal.TerminalAt.Int64()+31*24*3600*1000)); err != nil {
+		t.Fatalf("reclaiming the rebased Change = %v", err)
+	}
 	if err := store.Validate(ctx); err != nil {
 		t.Fatalf("store after rebase then reclaim = %v", err)
 	}
