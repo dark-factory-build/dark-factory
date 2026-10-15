@@ -5,7 +5,7 @@ import (
 	"testing"
 )
 
-func TestOverseerRunHasBackstopBelowDisabledOrLongerProjectLimit(t *testing.T) {
+func TestOverseerRunHasFixedBackstop(t *testing.T) {
 	t.Parallel()
 	for _, role := range []AgentRole{RoleOrchestrator, RoleWorker} {
 		t.Run(role.String(), func(t *testing.T) {
@@ -28,29 +28,10 @@ func TestOverseerRunHasBackstopBelowDisabledOrLongerProjectLimit(t *testing.T) {
 				}
 				return len(due) == 1
 			}
-			setCeiling := func(seconds uint32) {
-				t.Helper()
-				current, found, err := store.Project(ctx, project.ID)
-				if err != nil || !found {
-					t.Fatalf("project = %+v, found=%v, err=%v", current, found, err)
-				}
-				if _, err := store.SetProjectLimits(ctx, current.ID, current.Revision, 0, seconds, mustTime(t, 6)); err != nil {
-					t.Fatal(err)
-				}
-			}
 			isOverseer := role == RoleOrchestrator
 			if overdue(bound-1) || overdue(bound) != isOverseer {
-				t.Fatalf("disabled ceiling: %s backstop wrong", role)
+				t.Fatalf("%s backstop wrong", role)
 			}
-			setCeiling(2700)
-			if overdue(bound-1) || overdue(bound) != isOverseer || !overdue(5+2_700_000) {
-				t.Fatalf("longer ceiling: %s backstop wrong", role)
-			}
-			setCeiling(1)
-			if !overdue(1005) {
-				t.Fatalf("shorter configured ceiling did not apply to %s", role)
-			}
-			setCeiling(0)
 			if _, err := store.writer.Exec(`UPDATE runs SET provider = 'shell' WHERE id = ?`, admitted.Run.ID.Bytes()); err != nil {
 				t.Fatal(err)
 			}
@@ -68,9 +49,6 @@ func TestAdmissionAllowsProjectPastRetainedRunCeiling(t *testing.T) {
 			store, _, exhausted, exhaustedAgent := newAdmissionStore(t, role, 2)
 			defer store.Close()
 			ctx := context.Background()
-			if _, err := store.writer.Exec(`UPDATE projects SET run_budget_limit = 1, runs_used = 0 WHERE id = ?`, exhausted.ID.Bytes()); err != nil {
-				t.Fatal(err)
-			}
 			secondAgent, err := store.CreateAgent(ctx, NewAgent{ID: agentID(t, 250), ProjectID: exhausted.ID, Name: "second", Role: role, Provider: ProviderCodex, ToolBudgetLimit: 5}, mustTime(t, 5))
 			if err != nil {
 				t.Fatal(err)
@@ -88,15 +66,6 @@ func TestAdmissionAllowsProjectPastRetainedRunCeiling(t *testing.T) {
 			result, err := store.AdmitNext(ctx, admissionKeys(t, 230, nil), mustTime(t, 10))
 			if err != nil || !result.Admitted() || result.Run.TaskID != taskID(t, 214) {
 				t.Fatalf("admission = %+v, %v", result, err)
-			}
-			snapshot, err := store.ReadPublicSnapshot(ctx)
-			if err != nil {
-				t.Fatal(err)
-			}
-			for _, summary := range snapshot.Projects {
-				if summary.ID == exhausted.ID && summary.RunsUsed != 2 {
-					t.Fatalf("project snapshot = %+v", summary)
-				}
 			}
 		})
 	}

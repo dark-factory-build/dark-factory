@@ -555,9 +555,8 @@ type Project struct {
 	ID   ProjectID
 	Name string
 	Root string
-	// RunBudgetLimit is an absolute lifetime ceiling. Zero disables it; setting
-	// an allowance records RunsUsed + allowance so past runs never surprise a
-	// later operator configuration.
+	// Deprecated compatibility fields; project-level ceilings are no longer
+	// persisted or enforced.
 	RunBudgetLimit uint64
 	RunsUsed       uint64
 	MaxRunSeconds  uint32

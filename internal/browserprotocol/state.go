@@ -113,7 +113,7 @@ type ProjectItem struct {
 	Name           string  `json:"name"`
 	RunBudgetLimit Decimal `json:"-"`
 	RunsUsed       Decimal `json:"-"`
-	MaxRunSeconds  uint32  `json:"max_run_seconds"`
+	MaxRunSeconds  uint32  `json:"max_run_seconds,omitempty"`
 	// The project's specialist limits: reviews running at once, and open
 	// proposals per specialist.
 	SpecialistRuns          uint32  `json:"-"`

@@ -7,10 +7,9 @@ import (
 	"fmt"
 )
 
-// ProjectTokens is a project's provider token spend and its ceiling. Admission
-// stops once TokensUsed reaches a nonzero TokenLimit; running work finishes.
-// The ceiling is set with SetProjectLimitsWithTokens.
+// ProjectTokens is a project's recorded provider token spend.
 type ProjectTokens struct {
+	// Deprecated: token limits are no longer persisted or enforced.
 	TokenLimit uint64
 	TokensUsed uint64
 }
@@ -25,9 +24,9 @@ func (store *Store) ProjectTokens(ctx context.Context, id ProjectID) (ProjectTok
 		return ProjectTokens{}, err
 	}
 	defer tx.Close()
-	var limit, used int64
-	err = tx.connection.QueryRowContext(ctx, `SELECT COALESCE(SUM(token_limit), 0), COALESCE(SUM(tokens_used), 0) FROM project_tokens WHERE project_id = ?`, id.Bytes()).Scan(&limit, &used)
-	return ProjectTokens{TokenLimit: uint64(limit), TokensUsed: uint64(used)}, err
+	var used int64
+	err = tx.connection.QueryRowContext(ctx, `SELECT COALESCE(SUM(tokens_used), 0) FROM project_tokens WHERE project_id = ?`, id.Bytes()).Scan(&used)
+	return ProjectTokens{TokensUsed: uint64(used)}, err
 }
 
 // AddRunTokens records what one run spent, once: the run's own row is the
@@ -52,7 +51,7 @@ func (store *Store) AddRunTokens(ctx context.Context, runID RunID, tokens uint64
 		// Already recorded, or no such run: nothing more to count.
 		return tx.Rollback(err)
 	}
-	if _, err := tx.connection.ExecContext(ctx, `INSERT INTO project_tokens(project_id, token_limit, tokens_used) SELECT project_id, 0, ?2 FROM runs WHERE id = ?1
+	if _, err := tx.connection.ExecContext(ctx, `INSERT INTO project_tokens(project_id, tokens_used) SELECT project_id, ?2 FROM runs WHERE id = ?1
 		ON CONFLICT(project_id) DO UPDATE SET tokens_used = MIN(tokens_used + ?2, 9223372036854775807)`, runID.Bytes(), int64(tokens)); err != nil {
 		return tx.Rollback(err)
 	}

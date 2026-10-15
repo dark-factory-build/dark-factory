@@ -577,7 +577,8 @@ func idRequired(kind MessageType) bool {
 		TypeHumanRequestReply, TypeHumanRequestReplyResult, TypeHumanRequestCancelRun, TypeHumanRequestCancelRunResult,
 		TypeTaskAttachment, TypeTaskAttachmentResult, TypeTaskEnqueue, TypeTaskEnqueueResult, TypeAgentControl, TypeAgentControlResult, TypeTaskDetailGet, TypeTaskDetail,
 		TypeProjectContent, TypeProjectContentResult,
-		TypeAttachmentRetention, TypeAttachmentRetentionResult, TypeFactoryDispatch, TypeFactoryDispatchResult, TypeAgentUpdate, TypeAgentUpdateResult, TypeProjectLimits, TypeProjectLimitsResult, TypeProjectCreate, TypeProjectCreateResult, TypeRepositoriesGet, TypeRepositories, TypeRepositoryMutate, TypeRepositoryMutateResult, TypeIntake, TypeIntakeResult, TypeTaskUpdate, TypeTaskUpdateResult, TypeOperationalGraphGet, TypeOperationalGraph, TypeOperationalNodeGet, TypeOperationalNode,
+		TypeAttachmentRetention, TypeAttachmentRetentionResult, TypeFactoryDispatch, TypeFactoryDispatchResult, TypeAgentUpdate, TypeAgentUpdateResult, TypeProjectCreate, TypeProjectCreateResult, TypeRepositoriesGet, TypeRepositories, TypeRepositoryMutate, TypeRepositoryMutateResult, TypeIntake, TypeIntakeResult, TypeTaskUpdate, TypeTaskUpdateResult, TypeOperationalGraphGet, TypeOperationalGraph, TypeOperationalNodeGet, TypeOperationalNode,
+		TypeProjectLimits, TypeProjectLimitsResult,
 		TypeRunPathsGet, TypeRunPaths,
 		TypeAccountsDiscover, TypeAccounts, TypeAccountLink, TypeAccountLinkResult, TypeAccountUpdate, TypeAccountUpdateResult,
 		TypeBrowserClientsGet, TypeBrowserClients, TypeBrowserClientRevoke, TypeBrowserClientRevokeResult,
@@ -1068,8 +1069,6 @@ func rejectNullMembers(kind MessageType, body []byte) error {
 		fields = []string{"enabled"}
 	case TypeFactoryDispatch:
 		fields = []string{"expected_revision", "enabled"}
-	case TypeProjectLimits:
-		fields = []string{"max_run_seconds"}
 	case TypeTaskAttachment:
 		fields = []string{"index", "offset", "size", "name", "data"}
 	case TypeTaskEnqueue:

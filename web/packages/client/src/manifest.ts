@@ -78,7 +78,6 @@ export const CONTROL_MANIFEST = [
   { type: "TERMINAL_EXIT", direction: "server" },
   { type: "TERMINAL_RESET", direction: "server" },
   { type: "AGENT_UPDATE", direction: "client" }, { type: "AGENT_UPDATE_RESULT", direction: "server" },
-  { type: "PROJECT_LIMITS", direction: "client" }, { type: "PROJECT_LIMITS_RESULT", direction: "server" },
   { type: "PROJECT_CREATE", direction: "client" }, { type: "PROJECT_CREATE_RESULT", direction: "server" },
   { type: "REPOSITORIES_GET", direction: "client" }, { type: "REPOSITORIES", direction: "server" },
   { type: "REPOSITORY_MUTATE", direction: "client" }, { type: "REPOSITORY_MUTATE_RESULT", direction: "server" },

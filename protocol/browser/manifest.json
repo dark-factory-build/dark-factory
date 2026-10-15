@@ -297,18 +297,6 @@
       "fixture": "agent_update_result.json"
     },
     {
-      "type": "PROJECT_LIMITS",
-      "direction": "client",
-      "id": "required",
-      "fixture": "project_limits.json"
-    },
-    {
-      "type": "PROJECT_LIMITS_RESULT",
-      "direction": "server",
-      "id": "required",
-      "fixture": "project_limits_result.json"
-    },
-    {
       "type": "PROJECT_CREATE",
       "direction": "client",
       "id": "required",

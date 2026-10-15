@@ -9,7 +9,7 @@ import (
 
 const (
 	applicationID = 0x4446474f
-	userVersion   = 44
+	userVersion   = 45
 
 	// SQLite reserves the exact lower-case "sqlite_" prefix. Use a literal,
 	// binary prefix test: LIKE would treat '_' as a wildcard and hide names
@@ -61,7 +61,6 @@ var schemaStatements = []string{
 ) STRICT, WITHOUT ROWID`,
 	`CREATE TABLE project_tokens (
     project_id BLOB PRIMARY KEY REFERENCES projects(id),
-    token_limit INTEGER NOT NULL CHECK (token_limit >= 0),
     tokens_used INTEGER NOT NULL CHECK (tokens_used >= 0)
 ) STRICT, WITHOUT ROWID`,
 	`CREATE TABLE run_tokens (
@@ -104,9 +103,6 @@ var schemaStatements = []string{
 	    name TEXT NOT NULL CHECK (length(CAST(name AS BLOB)) BETWEEN 1 AND 128),
 	    root TEXT NOT NULL CHECK (length(CAST(root AS BLOB)) BETWEEN 1 AND 4096 AND substr(root, 1, 1) = '/'),
 	    verification_policy TEXT NOT NULL CHECK (verification_policy IN ('none', 'rust_workspace_test', 'go_workspace_test')),
-	    run_budget_limit INTEGER NOT NULL DEFAULT 0 CHECK (run_budget_limit >= 0),
-	    runs_used INTEGER NOT NULL DEFAULT 0 CHECK (runs_used >= 0),
-	    max_run_seconds INTEGER NOT NULL DEFAULT 0 CHECK (max_run_seconds BETWEEN 0 AND 86400),
     revision INTEGER NOT NULL CHECK (revision >= 1),
     created_at_ms INTEGER NOT NULL CHECK (created_at_ms >= 0),
     updated_at_ms INTEGER NOT NULL CHECK (updated_at_ms >= created_at_ms)
@@ -710,7 +706,8 @@ func validateSchemaVersion(ctx context.Context, connection *sql.Conn, wantVersio
 			return fmt.Errorf("scan sqlite schema: %w", err)
 		}
 		want, ok := expected[name]
-		if !ok || want.kind != kind || want.sql != definition {
+		legacyProjectLayout := wantVersion < userVersion && (name == "projects" || name == "project_tokens") && ok && want.kind == kind && legacyProjectSchemaEquivalent(name, want.sql, definition)
+		if !ok || want.kind != kind || want.sql != definition && !legacyProjectLayout {
 			return fmt.Errorf("%w: unexpected or changed schema object %s %s", ErrForeignDatabase, kind, name)
 		}
 		seen[name] = true
@@ -737,6 +734,21 @@ func validateSchemaVersion(ctx context.Context, connection *sql.Conn, wantVersio
 		return fmt.Errorf("%w: %d foreign key violations", ErrCorruptState, violations)
 	}
 	return nil
+}
+
+func legacyProjectSchemaEquivalent(name, expected, actual string) bool {
+	columns := []string{}
+	if name == "projects" {
+		columns = []string{"run_budget_limit", "runs_used", "max_run_seconds"}
+	} else {
+		columns = []string{"token_limit"}
+	}
+	for _, column := range columns {
+		if !strings.Contains(actual, column) || !strings.Contains(expected, column) {
+			return false
+		}
+	}
+	return true
 }
 
 func schemaIsEmpty(ctx context.Context, connection *sql.Conn) (bool, error) {

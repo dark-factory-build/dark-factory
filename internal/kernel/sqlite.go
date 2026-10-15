@@ -115,6 +115,20 @@ func openFixedPools(ctx context.Context, store *Store, path string, recheck func
 	return nil
 }
 
+func (store *Store) refreshReadPools(ctx context.Context, path string, recheck func() error) error {
+	if err := errors.Join(closeSQLitePool("reader", store.readers), closeSQLitePool("background", store.background)); err != nil {
+		return err
+	}
+	store.readers = nil
+	store.background = nil
+	activationCtx, cancel := context.WithTimeout(ctx, 2*time.Duration(busyMilliseconds)*time.Millisecond)
+	defer cancel()
+	if err := openFixedPool(activationCtx, path, "reader", maxReaders, recheck, &store.readers); err != nil {
+		return err
+	}
+	return openFixedPool(activationCtx, path, "background", backgroundReaders, recheck, &store.background)
+}
+
 var errConnectionSetExhausted = fmt.Errorf("%w: retained sqlite connection set is exhausted", ErrCorruptState)
 
 // sqliteConnectHook is package-local deterministic fault instrumentation. It

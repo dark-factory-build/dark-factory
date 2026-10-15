@@ -12,66 +12,6 @@ import (
 	"github.com/dark-factory-build/dark-factory/internal/kernel"
 )
 
-func TestRunLimitWatchdogTerminatesOwnedProvider(t *testing.T) {
-	fixture := newSupervisorFixture(t, "set -eu\nprintf x >> __WITNESS__\nsleep 30\n")
-	var skew atomic.Int64
-	fixture.daemon.now = func() time.Time { return time.Now().Add(time.Duration(skew.Load())) }
-	project, found, err := fixture.store.Project(context.Background(), supervisorProjectID(t, 1))
-	if err != nil || !found {
-		t.Fatalf("project = %+v, found=%v, err=%v", project, found, err)
-	}
-	if _, err := fixture.store.SetProjectLimits(context.Background(), project.ID, project.Revision, 0, 1, supervisorTime()); err != nil {
-		t.Fatal(err)
-	}
-	done := make(chan struct {
-		run kernel.Run
-		err error
-	}, 1)
-	go func() {
-		run, err := fixture.daemon.RunNext(context.Background(), fixture.spec)
-		done <- struct {
-			run kernel.Run
-			err error
-		}{run, err}
-	}()
-	if err := waitForWitness(fixture.witness, 10*time.Second); err != nil {
-		t.Fatal(err)
-	}
-	// Pausing future admissions must not disable the active-run watchdog.
-	state, err := fixture.store.Factory(context.Background())
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, err := fixture.store.SetDispatch(context.Background(), state.Revision, false, supervisorTime()); err != nil {
-		t.Fatal(err)
-	}
-	// Step past the one-second run limit instead of waiting it out.
-	skew.Store(int64(1100 * time.Millisecond))
-	if err := fixture.daemon.enforceRunLiveness(context.Background(), SupervisorSpec{}); err != nil {
-		t.Fatal(err)
-	}
-	var result struct {
-		run kernel.Run
-		err error
-	}
-	select {
-	case result = <-done:
-	case <-time.After(12 * time.Second):
-		t.Fatal("watchdog did not terminate owned provider")
-	}
-	if result.err != nil || result.run.Phase != kernel.RunTerminal || result.run.Proposal == nil || result.run.Proposal.Kind() != kernel.OutcomeCancelled || result.run.Proposal.Detail() != kernel.RunLimitDetail {
-		t.Fatalf("watchdog run = %+v, err=%v", result.run, result.err)
-	}
-	fixture.assertReleased(t, result.run)
-	if err := fixture.daemon.enforceRunLiveness(context.Background(), SupervisorSpec{}); err != nil {
-		t.Fatal(err)
-	}
-	project, found, err = fixture.store.Project(context.Background(), project.ID)
-	if err != nil || !found || project.RunsUsed != 1 {
-		t.Fatalf("run allowance after watchdog = %+v, found=%v, err=%v", project, found, err)
-	}
-}
-
 // A stall after output fails the task. A stall with no output at all means the
 // run never started: its task is queued again once, and a second such stall
 // fails it.

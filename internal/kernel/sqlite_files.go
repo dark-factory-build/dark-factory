@@ -130,7 +130,7 @@ func openExistingFiles(ctx context.Context, absolutePath string, files *database
 		}
 		files.shm.minimum = walIndexRegionSize
 	}
-	if err := store.migrateLegacy(ctx); err != nil {
+	if err := store.migrateLegacy(ctx, absolutePath, files.recheckActivationBindings); err != nil {
 		return closeRejectedOpen(store, files, err)
 	}
 	if err := files.refreshPinnedInfo(); err != nil {
