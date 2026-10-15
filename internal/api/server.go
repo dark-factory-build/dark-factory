@@ -420,6 +420,8 @@ const (
 // Failed reports a reply that refuses or fails the call.
 func (reply Reply) Failed() bool { return reply.kind == replyError }
 
+func (reply Reply) ErrorCode() RemoteErrorCode { return reply.code }
+
 type Reply struct {
 	terminalObservation TerminalObservation
 	kind                replyKind

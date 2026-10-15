@@ -305,7 +305,11 @@ func (daemon *Daemon) HandleConnection(ctx context.Context, connection *api.Conn
 	if err != nil {
 		return err
 	}
-	daemon.observe("server", map[string]string{"network.transport": "unix", "rpc.method": call.Method()}, nil, reply.Failed(), time.Since(started))
+	attributes := map[string]string{"network.transport": "unix", "rpc.method": call.Method()}
+	if reply.Failed() {
+		attributes["error.type"] = string(reply.ErrorCode())
+	}
+	daemon.observe("server", attributes, nil, reply.Failed(), time.Since(started))
 	return connection.Respond(reply)
 }
 

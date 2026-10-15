@@ -865,10 +865,11 @@ type FactorydHealth struct {
 }
 
 type FactorydCall struct {
-	Name         string  `json:"name"`
-	Count        uint64  `json:"count"`
-	Errors       uint64  `json:"errors,omitempty"`
-	LatencyP95MS float64 `json:"latency_p95_ms,omitempty"`
+	Name         string            `json:"name"`
+	Count        uint64            `json:"count"`
+	Errors       uint64            `json:"errors,omitempty"`
+	ErrorCodes   map[string]uint64 `json:"error_codes,omitempty"`
+	LatencyP95MS float64           `json:"latency_p95_ms,omitempty"`
 }
 
 // RetainedChangeHandoff identifies one settled worker Change by its Git
