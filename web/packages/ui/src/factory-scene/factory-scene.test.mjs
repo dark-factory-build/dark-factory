@@ -804,13 +804,13 @@ test("stationary tasks link the existing queue and questions", () => {
   }));
   const markup = render({ tasks, onSelectTask() {}, onSelectHumanRequest() {}, onOpenTasks() {} });
   assert.equal((markup.match(/data-floor-inbox="10"/g) ?? []).length, 1);
-  // The tray is a distinct, keyboard reachable route into the existing Tasks panel.
-  assert.match(markup, /data-floor-inbox="10"[^>]*aria-label="Open Tasks"[^>]*role="button"[^>]*tabindex="0"/);
+  // The tray is a distinct, keyboard reachable route into the existing Work view.
+  assert.match(markup, /data-floor-inbox="10"[^>]*aria-label="Open Work"[^>]*role="button"[^>]*tabindex="0"/);
   // Selecting queued work in the panel still lights its pile on the floor.
   assert.match(render({ tasks, selectedTaskId: "task-1", onSelectTask() {}, onOpenTasks() {} }), /data-floor-inbox="10"[\s\S]*?stroke="#80ddff"/);
   const pile = (html) => html.match(/data-floor-inbox="\d+"[\s\S]*?<\/g><\/g>/)[0].match(/fill="#e4dcc0"/g)?.length ?? 0;
   assert.deepEqual([pile(markup), pile(render({ tasks: tasks.slice(0, 3), onOpenTasks() {} })), pile(render({ tasks: [tasks[0]], onOpenTasks() {} }))], [3, 2, 0], "the pile follows the queue, up to three papers");
-  // The tray is there wherever the floor can open Tasks: it stays when nothing waits, and says so.
+  // The tray is there wherever the floor can open Work: it stays when nothing waits, and says so.
   const idle = render({ tasks: [tasks[0]], onSelectTask() {}, onOpenTasks() {} });
   assert.match(idle, /data-floor-inbox="0"/);
   assert.doesNotMatch(idle, />QUEUE/, "the tray says nothing; MERGE QUEUE is the outbound line's station");
@@ -827,8 +827,8 @@ test("stationary tasks link the existing queue and questions", () => {
 test("the board and shelf remain passive scenery while the task tray opens its panel", () => {
   const markup = render({ projectId: "project-a", onOpenTasks() {} });
   assert.doesNotMatch(markup, /data-floor-tray-desk|data-common-table/);
-  assert.equal((markup.match(/>TASKS</g) ?? []).length, 1, "only the live-work implement is signed");
-  assert.match(markup, /data-break-room="tasks" data-floor-inbox="0"[^>]*aria-label="Open Tasks"[^>]*role="button"[^>]*tabindex="0"/);
+  assert.equal((markup.match(/>WORK</g) ?? []).length, 1, "only the live-work implement is signed");
+  assert.match(markup, /data-break-room="tasks" data-floor-inbox="0"[^>]*aria-label="Open Work"[^>]*role="button"[^>]*tabindex="0"/);
   assert.match(markup, /data-break-room="board"(?![^>]*role="button")/);
   assert.match(markup, /data-break-room="shelf"(?![^>]*role="button")/);
 });

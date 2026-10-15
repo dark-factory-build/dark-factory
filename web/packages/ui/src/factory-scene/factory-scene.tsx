@@ -544,10 +544,10 @@ export function FactoryScene({ proposals, crates, tools, onInvestigate, onSelect
   const litUnit = selectedId !== undefined && unitOf.get(selectedId)?.id === selectedId ? selectedId : undefined;
   const members = new Set(litUnit === undefined ? [] : layout.stations.filter((station) => station.unit === litUnit).map((station) => station.entityId));
   const queued = tasks.filter((order) => order.status === "queued" && fromTray(order)).length;
-  // The implements are always there: each opens its panel and the tray shows the queue. Coffee is scenery only.
+  // The implements are always there, but only the tray is live: it shows the queue and opens the console's Work view. Board, shelf and coffee are scenery.
   const implementsShown = nook.furniture;
   const opens: Partial<Record<BreakRoomErrand, readonly [((projectId?: string) => void) | undefined, string, string, string]>> = {
-    tasks: [onOpenTasks, queued === 0 ? "Tasks · queue is empty" : `Tasks · ${queued} queued`, "Open Tasks", "TASKS"],
+    tasks: [onOpenTasks, queued === 0 ? "Work · queue is empty" : `Work · ${queued} queued`, "Open Work", "WORK"],
   };
   const animate = connected && appearance.animation !== "off";
   // Changeovers are dated against the graph's own observation time, never the viewer's clock.
