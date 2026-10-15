@@ -262,7 +262,7 @@ func (daemon *Daemon) RunScheduler(ctx context.Context, spec SupervisorSpec) err
 					if cancellation := ownedCtx.Err(); cancellation == nil || !schedulerOnlyCancellation(event.err, cancellation) {
 						fail(errors.Join(event.err, fmt.Errorf("%w: attempt ended before admission was observed", kernel.ErrCorruptState)))
 					}
-				} else if owner.admitted && !(stopping && event.run.Phase == kernel.RunAdmitted) {
+				} else if owner.admitted {
 					if completionErr := validateCompletion(event.run); completionErr != nil {
 						fail(errors.Join(event.err, completionErr))
 					}

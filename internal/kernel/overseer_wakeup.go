@@ -76,12 +76,13 @@ const overseerStalledItems = overseerItems + `SELECT last, CASE WHEN id IS NULL 
 // overseerPassItems computes the shared item set once for a wake pass. The
 // two branches retain the shapes of overseerWakeItems and
 // overseerStalledItems, but SQLite materializes counted for both consumers.
-const overseerPassItems = overseerItems + `SELECT 1 AS due, id IS NULL, CASE WHEN id IS NULL THEN detail ELSE (` + overseerWakeLine + `) END, item_key, (` + overseerWakeCounts + `), NULL, NULL, NULL
+const overseerPassItems = overseerItems + `SELECT 1 AS due, id IS NULL, CASE WHEN id IS NULL THEN detail ELSE (` + overseerWakeLine + `) END, item_key, (` + overseerWakeCounts + `), NULL, NULL, NULL, version
 FROM (SELECT *, MIN(version) OVER () AS oldest, MAX(version) OVER () AS newest FROM counted
 	WHERE named = 0 OR named_at + ?6 <= ?3 AND (wakes = 0 OR wakes <= rewakes)) AS due
 WHERE ?3 - newest >= ?7 OR ?3 - oldest >= ?8
-UNION ALL SELECT 0, NULL, CASE WHEN id IS NULL THEN detail || CASE WHEN instr(detail, ' [reviewer:') > 0 THEN '' ELSE ' ' || item_key END ELSE (` + overseerWakeLine + `) END, NULL, NULL, last, named_at + ?6 <= ?3, named_at + ?6
-FROM counted AS due WHERE wakes > rewakes AND ?7 + ?8 >= 0`
+UNION ALL SELECT 0, NULL, CASE WHEN id IS NULL THEN detail || CASE WHEN instr(detail, ' [reviewer:') > 0 THEN '' ELSE ' ' || item_key END ELSE (` + overseerWakeLine + `) END, NULL, NULL, last, named_at + ?6 <= ?3, named_at + ?6, version
+FROM counted AS due WHERE wakes > rewakes AND ?7 + ?8 >= 0
+ORDER BY 1 DESC, 9`
 
 const overseerItems = `WITH reviewer AS MATERIALIZED (SELECT e.repository, e.identity, e.observed_at_ms AS at,
 	json_extract(e.document, '$.escalation') AS escalation,
@@ -224,7 +225,8 @@ func readOverseerPass(ctx context.Context, connection *sql.Conn, agent Agent, at
 		var escalation, ripe sql.NullBool
 		var readyAt sql.NullInt64
 		var line, key, counts sql.NullString
-		if err := rows.Scan(&kind, &escalation, &line, &key, &counts, &item.carrier, &ripe, &readyAt); err != nil {
+		var version sql.NullInt64
+		if err := rows.Scan(&kind, &escalation, &line, &key, &counts, &item.carrier, &ripe, &readyAt, &version); err != nil {
 			return nil, err
 		}
 		item.due = kind != 0
