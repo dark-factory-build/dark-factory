@@ -333,61 +333,104 @@ func TestOldBuildRestartedMidTrialStopsTheOrphanedChild(t *testing.T) {
 	}
 }
 
-// A supervisor that died mid-trial decided nothing: its release is failed as
-// interrupted, for the release lane to start again, and a second interruption
-// of the retry stays failed instead of churning trials.
-func TestTrialInterruptedBeforePromotionIsRetriedOnce(t *testing.T) {
+// A supervisor killed mid-trial decided nothing: the next boot fails its
+// release as interrupted, which the release lane retries once
+// (internal/daemon's TestTrialInterruptedBeforePromotionIsRetriedOnceByTheLane),
+// and promotes nothing.
+func TestSupervisorKilledMidTrialLeavesARetryableRelease(t *testing.T) {
 	sha := strings.Repeat("7", 40)
 	home := stagedHome(t, "serve", sha)
 	ctx := context.Background()
+	self, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	supervisor := exec.Command(self, childArgs(home)...)
+	supervisor.SysProcAttr, supervisor.Stderr = &syscall.SysProcAttr{Setpgid: true}, os.Stderr
+	if err := supervisor.Start(); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = syscall.Kill(-supervisor.Process.Pid, syscall.SIGKILL) })
+	exited := make(chan error, 1)
+	go func() { exited <- supervisor.Wait() }()
+	markerUntil := func(done func(install.UpgradeMarker, bool) bool) install.UpgradeMarker {
+		t.Helper()
+		for deadline := time.Now().Add(20 * time.Second); ; time.Sleep(10 * time.Millisecond) {
+			if marker, present, err := install.ReadUpgradeMarker(home); err == nil && done(marker, present) {
+				return marker
+			}
+			select {
+			case err := <-exited:
+				t.Fatalf("the supervisor exited early: %v", err)
+			default:
+			}
+			if time.Now().After(deadline) {
+				t.Fatal("the upgrade marker never reached the expected state")
+			}
+		}
+	}
+	// Its boot settling the stale marker shows its recovery has run; then a
+	// release stages again and signals it, as release() does.
+	markerUntil(func(_ install.UpgradeMarker, present bool) bool { return !present })
+	if err := install.WriteUpgradeMarker(home, install.UpgradeMarker{Target: sha}); err != nil {
+		t.Fatal(err)
+	}
+	if err := supervisor.Process.Signal(syscall.SIGTERM); err != nil {
+		t.Fatal(err)
+	}
+	marker := markerUntil(func(marker install.UpgradeMarker, present bool) bool { return present && marker.Trial > 0 })
+	if err := syscall.Kill(-supervisor.Process.Pid, syscall.SIGKILL); err != nil {
+		t.Fatal(err)
+	}
+	<-exited
+	if marker = markerUntil(func(install.UpgradeMarker, bool) bool { return true }); marker.Reason != "" || marker.TrialPassed {
+		t.Fatalf("a killed supervisor decided its trial: %+v", marker)
+	}
+	// The boot's own orphan stop is covered above; here the orphan is stopped
+	// first so the release record of the dead process can be written.
+	_ = syscall.Kill(-marker.Trial, syscall.SIGKILL)
 	project, err := kernel.ProjectIDFromBytes(bytes.Repeat([]byte{0x33}, kernel.IDBytes))
 	if err != nil {
 		t.Fatal(err)
 	}
-	withStore := func(use func(*kernel.Store) error) {
-		t.Helper()
+	for deadline := time.Now().Add(10 * time.Second); ; time.Sleep(20 * time.Millisecond) {
 		opened, err := install.OpenOperationalHome(ctx, home)
-		if err != nil {
-			t.Fatal(err)
-		}
-		store, err := opened.OpenStore(ctx)
 		if err == nil {
-			err = errors.Join(use(store), store.Close())
-		}
-		if err = errors.Join(err, opened.Close()); err != nil {
-			t.Fatal(err)
-		}
-	}
-	// What Release and the staging release write before the supervisor dies.
-	trial := func(store *kernel.Store) error {
-		at, err := kernel.NewUnixMillis(time.Now().UnixMilli())
-		if err == nil {
-			err = store.RecordDelivery(ctx, project, "dark-factory-build/dark-factory", kernel.ProductionDelivery{ID: "release:" + sha, Kind: "runtime", Destination: "factoryd", Revision: sha, State: "running", Phase: "trial", PullRequests: []uint64{}, UpdatedAt: at.Int64()}, at)
-		}
-		return err
-	}
-	withStore(func(store *kernel.Store) error {
-		at, err := kernel.NewUnixMillis(time.Now().UnixMilli())
-		if err == nil {
-			_, err = store.CreateProject(ctx, kernel.NewProject{ID: project, Name: "self", Root: filepath.Join(filepath.Dir(home), "repo")}, at)
-		}
-		return errors.Join(err, trial(store))
-	})
-	for _, want := range []string{"interrupted by a factoryd restart", "interrupted by a factoryd restart again"} {
-		bootUntilSettled(t, home)
-		withStore(func(store *kernel.Store) error {
-			_, delivery, found, err := store.Delivery(ctx, "release:"+sha)
-			if err != nil || !found || delivery.State != "failed" || delivery.Phase != "trial" || delivery.Reason != want {
-				t.Fatalf("settled release = %+v, %t, %v; want reason %q", delivery, found, err, want)
+			store, storeErr := opened.OpenStore(ctx)
+			at, atErr := kernel.NewUnixMillis(time.Now().UnixMilli())
+			if err = errors.Join(storeErr, atErr); err == nil {
+				_, err = store.CreateProject(ctx, kernel.NewProject{ID: project, Name: "self", Root: filepath.Join(filepath.Dir(home), "repo")}, at)
+				if err == nil {
+					// What release() last wrote before its SIGTERM.
+					err = store.RecordDelivery(ctx, project, "dark-factory-build/dark-factory", kernel.ProductionDelivery{ID: "release:" + sha, Kind: "runtime", Destination: "factoryd", Revision: sha, State: "running", Phase: "trial", PullRequests: []uint64{}, UpdatedAt: at.Int64()}, at)
+				}
+				err = errors.Join(err, store.Close())
 			}
-			return trial(store)
-		})
-		if current, _ := os.ReadFile(filepath.Join(install.ServiceDirectoryPath(home), "bin", "current", "factoryd")); string(current) != currentProgram {
-			t.Fatal("an undecided trial was promoted")
+			if err = errors.Join(err, opened.Close()); err != nil {
+				t.Fatal(err)
+			}
+			break
 		}
-		if err := install.WriteUpgradeMarker(home, install.UpgradeMarker{Target: sha}); err != nil {
-			t.Fatal(err)
+		if time.Now().After(deadline) {
+			t.Fatalf("the orphaned trial still holds the home: %v", err)
 		}
+	}
+	bootUntilSettled(t, home)
+	if current, _ := os.ReadFile(filepath.Join(install.ServiceDirectoryPath(home), "bin", "current", "factoryd")); string(current) != currentProgram {
+		t.Fatal("an undecided trial was promoted")
+	}
+	opened, err := install.OpenOperationalHome(ctx, home)
+	if err != nil {
+		t.Fatal(err)
+	}
+	store, err := opened.OpenStore(ctx)
+	if err != nil {
+		_ = opened.Close()
+		t.Fatal(err)
+	}
+	_, delivery, found, err := store.Delivery(ctx, "release:"+sha)
+	if err = errors.Join(err, store.Close(), opened.Close()); err != nil || !found || delivery.State != "failed" || delivery.Phase != "trial" || delivery.Reason != "interrupted by a factoryd restart" {
+		t.Fatalf("settled release = %+v, %t, %v", delivery, found, err)
 	}
 }
 
