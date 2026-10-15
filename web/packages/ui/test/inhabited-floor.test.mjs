@@ -220,6 +220,7 @@ test("a standing specialist is known by what it does on the floor, never by a sy
   assert.deepEqual(worker(operationsSpecialistID).specialist, { title: "Operations specialist", remit: "Operations: make delivery reliable and every failure diagnosable.", stage: "working", text: "reviewing: make delivery reliable and every failure diagno…", next: "" });
   assert.equal(worker(securitySpecialistID).specialist.text, "waiting: waiting for a free background slot");
   assert.equal(worker(securitySpecialistID).specialist.next, "");
+  assert.equal(fixtureFloorState.agents.get(securitySpecialistID).specialist.next_review_at_ms, 0);
   assert.equal(worker(planningSpecialistID).specialist.stage, "ready");
   assert.match(worker(planningSpecialistID).specialist.next, /^Next review .* \(scheduled\)$/);
   assert.equal(worker(fixtureFloorState.tasks.get("31".repeat(16)).assigned_agent_id).specialist, undefined, "an ordinary worker is not one");
