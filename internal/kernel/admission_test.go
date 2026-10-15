@@ -3,9 +3,11 @@ package kernel
 import (
 	"bytes"
 	"context"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 )
@@ -216,83 +218,127 @@ func TestWhySharedTaskNamesItsPausedWorker(t *testing.T) {
 	}
 }
 
-// A succeeded producer's repository-bound work releases its consumer only once
-// a pull request published for it merged at its exact Change head, so the
-// consumer's fresh base contains it. A producer without a Change needs no merge.
+// A succeeded producer's Change releases its consumer only once a pull request
+// published for it merged at its exact head, so the consumer's fresh base
+// contains it; a reclaimed Change only after such a merge. Each case tries
+// admission before and after its steps. TestAdmissionConsumesExactSuccessful-
+// ProducerRevision covers a producer without a Change.
 func TestPrerequisiteWaitsForItsProducerToMergeAtItsExactHead(t *testing.T) {
 	t.Parallel()
-	bound := []string{`UPDATE changes SET head_commit = randomblob(20)`}
-	publish := func(state, head string) string {
-		return `INSERT INTO publication_tasks (project_id, repository, pull_number, task_id, change_id, created_at_ms) SELECT project_id, 'o/r', 7, task_id, id, 61 FROM changes;
-			INSERT INTO production_records (project_id, repository, kind, identity, visual_id, document, observed_at_ms) SELECT project_id, 'o/r', 'pull_request', '7', '', json_object('state', '` + state + `', 'head', ` + head + `), 61 FROM changes`
-	}
+	const day = 24 * 60 * 60 * 1000
 	for _, test := range []struct {
 		name     string
-		setup    []string
-		role     AgentRole
-		sendBack bool
+		unmoved  bool
+		steps    []string
+		revision int64
 		admitted bool
 	}{
-		{name: "bound Change changing nothing", admitted: true},
-		{name: "producer without a Change", role: RoleOrchestrator, admitted: true},
-		{name: "bound work unpublished", setup: bound},
-		{name: "open or failing pull request", setup: append(bound, publish("open", `lower(hex(head_commit))`))},
-		{name: "closed unmerged pull request", setup: append(bound, publish("closed", `lower(hex(head_commit))`))},
-		{name: "merged at another head", setup: append(bound, publish("merged", `'00'`))},
-		{name: "merged at its exact head", setup: append(bound, publish("merged", `upper(hex(head_commit))`)), admitted: true},
-		{name: "sent back after its merge", setup: append(bound, publish("merged", `lower(hex(head_commit))`)), sendBack: true},
+		{name: "Change that kept its base", unmoved: true, admitted: true},
+		{name: "unpublished", revision: 1},
+		{name: "open or failing pull request", steps: []string{"open"}, revision: 1},
+		{name: "closed unmerged pull request", steps: []string{"closed"}, revision: 1},
+		{name: "merged at another head", steps: []string{"merged other"}, revision: 1},
+		{name: "merged at its exact head", steps: []string{"open", "merged"}, revision: 1, admitted: true},
+		{name: "sent back, then merged at the replaced head", steps: []string{"open", "send back", "merged"}, revision: 2},
+		{name: "reclaimed unpublished", steps: []string{"reclaim"}, revision: 1},
+		{name: "reclaimed after its merge", steps: []string{"merged", "reclaim"}, revision: 1, admitted: true},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			t.Parallel()
 			ctx := context.Background()
 			proposal, _ := NewSuccessProposal("producer result")
-			role := RoleWorker
-			if test.role != 0 {
-				role = test.role
-			}
-			store, finalizing := finalizingReleasedRun(t, role, proposal)
+			store, finalizing := finalizingReleasedRun(t, RoleWorker, proposal)
 			defer store.Close()
-			producer, err := finalizeTestRun(t, store, finalizing, 60)
+			change, _, err := store.Change(ctx, *finalizing.ChangeID)
 			if err != nil {
 				t.Fatal(err)
 			}
-			for _, statement := range test.setup {
-				corruptSQL(t, store, statement)
+			moved := *change.HeadCommit
+			if !test.unmoved {
+				moved, _ = NewCommitID(change.Selection.format, bytes.Repeat([]byte{0xd2}, change.Selection.format.oidLength()))
 			}
-			consumerAgent, err := store.CreateAgent(ctx, NewAgent{ID: agentID(t, 225), ProjectID: producer.ProjectID, Name: "consumer", Role: RoleOrchestrator, Provider: ProviderCodex, ToolBudgetLimit: 5}, mustTime(t, 62))
+			settlement, _ := NewRetainedChangeSettlement(change.Revision, &moved)
+			producer, err := store.FinalizeWorkerRun(ctx, finalizing.ID, finalizing.Revision, settlement, mustTime(t, 60))
 			if err != nil {
 				t.Fatal(err)
 			}
-			consumer, err := store.EnqueueTask(ctx, NewTask{ID: taskID(t, 229), ProjectID: producer.ProjectID, AssignedAgentID: consumerAgent.ID, IncarnationID: incarnationID(t, 230), Title: "consumer", Priority: 10, Prerequisites: []TaskPrerequisite{{TaskID: producer.TaskID, WorkRevision: mustRevision(t, 1)}}}, mustTime(t, 63))
+			consumerAgent, err := store.CreateAgent(ctx, NewAgent{ID: agentID(t, 225), ProjectID: producer.ProjectID, Name: "consumer", Role: RoleOrchestrator, Provider: ProviderCodex, ToolBudgetLimit: 5}, mustTime(t, 61))
 			if err != nil {
 				t.Fatal(err)
 			}
-			want := "waits on: prerequisite: task " + producer.TaskID.String() + " is succeeded at work revision 1; it needs revision 1 to succeed and merge"
-			if test.sendBack {
-				producerTask, _, err := store.Task(ctx, producer.TaskID)
+			consumer, err := store.EnqueueTask(ctx, NewTask{ID: taskID(t, 229), ProjectID: producer.ProjectID, AssignedAgentID: consumerAgent.ID, IncarnationID: incarnationID(t, 230), Title: "consumer", Priority: 10, Prerequisites: []TaskPrerequisite{{TaskID: producer.TaskID, WorkRevision: mustRevision(t, 1)}}}, mustTime(t, 62))
+			if err != nil {
+				t.Fatal(err)
+			}
+			admit := func(seed byte, at int64) bool {
+				t.Helper()
+				result, err := store.AdmitNext(ctx, admissionKeys(t, seed, nil), mustTime(t, at))
 				if err != nil {
-					t.Fatal(err)
+					t.Fatalf("admission at %d: %v", at, err)
 				}
-				if _, err := store.SendBackTask(ctx, nil, producer.TaskID, producerTask.Revision, changeHead(t, store, producer.TaskID), "correct producer", mustTime(t, 64)); err != nil {
-					t.Fatal(err)
-				}
-				want = "waits on: prerequisite: task " + producer.TaskID.String() + " is queued at work revision 2; it needs revision 2 to succeed and merge"
+				return result.Admitted() && result.Run.TaskID == consumer.ID
 			}
-			if test.admitted {
-				result, err := store.AdmitNext(ctx, admissionKeys(t, 231, nil), mustTime(t, 65))
-				if err != nil || !result.Admitted() || result.Run.TaskID != consumer.ID {
-					t.Fatalf("consumer admission = %+v, %v", result, err)
+			at := int64(63)
+			if test.unmoved || !admit(100, at) {
+				head := hex.EncodeToString(moved.Bytes())
+				pr := ProductionPullRequest{Number: 7, Title: "Ship", URL: "https://github.com/example/factory/pull/7", Head: head, Branch: "factory/" + change.ID.String()[:12], Base: "main", State: "open", Review: ProductionReview{Head: head, State: "unknown"}}
+				published := false
+				for _, step := range test.steps {
+					at += 10
+					switch step {
+					case "send back":
+						task, _, err := store.Task(ctx, producer.TaskID)
+						if err != nil {
+							t.Fatal(err)
+						}
+						if _, err := store.SendBackTask(ctx, nil, producer.TaskID, task.Revision, head, "correct producer", mustTime(t, at)); err != nil {
+							t.Fatal(err)
+						}
+					case "reclaim":
+						at += 30 * day
+						current, _, err := store.Change(ctx, change.ID)
+						if err != nil {
+							t.Fatal(err)
+						}
+						if _, err := store.ReclaimChange(ctx, change.ID, current.Revision, true, mustTime(t, at)); err != nil {
+							t.Fatal(err)
+						}
+					default:
+						if !published {
+							if err := store.RecordPublication(ctx, producer.ProjectID, producer.TaskID, "example/factory", pr, mustTime(t, at)); err != nil {
+								t.Fatal(err)
+							}
+							published, at = true, at+1
+						}
+						observed := pr
+						observed.State = strings.Fields(step)[0]
+						if strings.HasSuffix(step, " other") {
+							observed.Head = strings.Repeat("e", len(head))
+						}
+						if err := store.RecordProductionObservation(ctx, producer.ProjectID, ProductionObservation{Repository: "example/factory", ObservedAt: at, PullRequests: []ProductionPullRequest{observed}, Checks: []ProductionCheck{}}, mustTime(t, at)); err != nil {
+							t.Fatal(err)
+						}
+					}
 				}
-			} else if lines, err := store.Why(ctx, nil, 0, consumer.ID); err != nil || lines[len(lines)-1] != want {
-				t.Fatalf("why = %q, %v", lines, err)
+				if got := admit(110, at+1); got != test.admitted {
+					t.Fatalf("consumer admitted = %t, want %t", got, test.admitted)
+				}
+			} else {
+				t.Fatal("consumer admitted before its producer's work merged")
 			}
 			var revision int64
 			var consumed []byte
 			if err := store.readers.QueryRow(`SELECT upstream_work_revision, consumed_run_id FROM task_prerequisites WHERE task_id = ?`, consumer.ID.Bytes()).Scan(&revision, &consumed); err != nil {
 				t.Fatal(err)
 			}
-			if wantRevision := map[bool]int64{false: 1, true: 2}[test.sendBack]; revision != wantRevision || test.admitted != (string(consumed) == string(producer.ID.Bytes())) || !test.admitted && consumed != nil {
+			if test.admitted && !bytes.Equal(consumed, producer.ID.Bytes()) || !test.admitted && (consumed != nil || revision != test.revision) {
 				t.Fatalf("prerequisite = revision %d consumed %x", revision, consumed)
+			}
+			if !test.admitted {
+				want := fmt.Sprintf(" at work revision %d; it needs revision %d to succeed and merge", test.revision, test.revision)
+				if lines, err := store.Why(ctx, nil, 0, consumer.ID); err != nil || !strings.HasSuffix(lines[len(lines)-1], want) {
+					t.Fatalf("why = %q, %v", lines, err)
+				}
 			}
 			if err := store.Validate(ctx); err != nil {
 				t.Fatal(err)
