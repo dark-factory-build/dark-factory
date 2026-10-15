@@ -2072,6 +2072,14 @@ func TestProviderAdoptionUsesCompletionHookWithoutAssignedOutcome(t *testing.T) 
 		if !strings.Contains(joined, "attempt turn-complete --provider-adoption") {
 			t.Fatalf("%s adoption hook missing: %q", kind, joined)
 		}
+		if kind == kernel.ProviderClaudeCode && !slices.Contains(launch.Argv(), "--print") {
+			t.Fatalf("Claude adoption launch is interactive: %q", launch.Argv())
+		}
+		if kind == kernel.ProviderCodex {
+			if !slices.Contains(launch.Argv(), "exec") || !strings.Contains(joined, "DARK_FACTORY_PROVIDER_ADOPTION_WITNESS") {
+				t.Fatalf("Codex adoption launch lacks native completion or witness forwarding: %q", launch.Argv())
+			}
+		}
 	}
 }
 

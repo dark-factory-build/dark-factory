@@ -694,7 +694,14 @@ func Build(request Request) (Launch, error) {
 		// No user, project or local settings are read: a checkout's own
 		// .claude/settings.json could otherwise merge rules that widen the
 		// boundary below. The account login lives outside those files.
-		argv := []string{path, "--permission-mode", "dontAsk", "--setting-sources", ""}
+		argv := []string{path}
+		if request.providerAdoption {
+			// Adoption is a bounded native self-check, not a standing provider
+			// session. Print mode exits after the bootstrap turn so the runner can
+			// validate the real MCP/Change handoff.
+			argv = append(argv, "--print")
+		}
+		argv = append(argv, "--permission-mode", "dontAsk", "--setting-sources", "")
 		if request.role == kernel.RoleWorker {
 			id, resume, err := claudeSessionSelection(request.runtime, request.workingDirectory, request.agentID, request.taskIncarnationID)
 			if err != nil {
@@ -769,9 +776,17 @@ func Build(request Request) (Launch, error) {
 			discoveryCwd = request.previousWorkingDirectory
 		}
 		argv := []string{path}
-		id, resume := codexSessionSelection(request.runtime, discoveryCwd)
-		if resume {
-			argv = append(argv, "resume", id)
+		resume := false
+		if request.providerAdoption {
+			// The exec subcommand is Codex's native non-interactive completion
+			// path; the ordinary session remains interactive for user work.
+			argv = append(argv, "exec")
+		} else {
+			id, selectedResume := codexSessionSelection(request.runtime, discoveryCwd)
+			resume = selectedResume
+			if selectedResume {
+				argv = append(argv, "resume", id)
+			}
 		}
 		// Codex's explicit resume can otherwise open its interactive CWD
 		// chooser when the recorded session belongs to an earlier attempt
@@ -785,7 +800,11 @@ func Build(request Request) (Launch, error) {
 		hooks := "hooks.Stop=[{hooks=[{type=\"command\",command=" + tomlBasicString(stop) + "}]}]"
 		argv = append(argv, "-c", hooks, "--strict-config", "--dangerously-bypass-hook-trust", "--no-alt-screen", "-c", "tui.resume_cwd=\"current\"", "-c", "check_for_update_on_startup=false", "-c", "tool_output_token_limit=32768", "-c", codexUntrustedProjectConfig(request.workingDirectory), "-c", "default_permissions="+tomlBasicString(codexPermissionName(request.runtime)), "-c", `approval_policy="never"`, "-c", permissions, "--disable", "computer_use", "--disable", "browser_use", "--disable", "plugins")
 		attemptServer := codexAttemptServerName(request.runtime)
-		argv = append(argv, "-c", "mcp_servers."+attemptServer+"={command="+tomlBasicString(request.runtime.factoryctl)+`,args=["attempt","mcp"],env_vars=["DARK_FACTORY_SOCKET","DARK_FACTORY_ATTEMPT_TOKEN_FILE","DARK_FACTORY_OVERSEER_SESSION_RESUMED"],enabled=true,required=true,tools={factory={approval_mode="approve"}}}`)
+		attemptEnvVars := `"DARK_FACTORY_SOCKET","DARK_FACTORY_ATTEMPT_TOKEN_FILE","DARK_FACTORY_OVERSEER_SESSION_RESUMED"`
+		if request.providerAdoption {
+			attemptEnvVars += `,"DARK_FACTORY_PROVIDER_ADOPTION_WITNESS"`
+		}
+		argv = append(argv, "-c", "mcp_servers."+attemptServer+"={command="+tomlBasicString(request.runtime.factoryctl)+`,args=["attempt","mcp"],env_vars=[`+attemptEnvVars+`],enabled=true,required=true,tools={factory={approval_mode="approve"}}}`)
 		if browser != "" {
 			args := make([]string, len(browserArgs))
 			for i, arg := range browserArgs {
