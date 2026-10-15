@@ -599,7 +599,7 @@ func TestGitExecutableMustBeActualNativeGitForHost(t *testing.T) {
 	// Cross-compile a thin executable for the other architecture rather than
 	// thinning the host Git, which need not be a universal binary.
 	wrongArchitecture := filepath.Join(secureTempDir(t), "git")
-	architecture := "amd64"
+	architecture := "x86_64"
 	if runtime.GOARCH == "amd64" {
 		architecture = "arm64"
 	}
