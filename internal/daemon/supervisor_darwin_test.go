@@ -936,12 +936,10 @@ func TestSupervisorCodexOverseerReadsMultipleExactRetainedChanges(t *testing.T) 
 	fixture.assertReleased(t, overseer)
 }
 
-// A retry reopens the same worktree: the worker's commit on the Change
-// branch and its uncommitted edits are exactly as it left them, the
-// settled head is what the daemon recorded, and no fresh selection or
-// upstream refresh happens.
+// A retry refreshes the retained worktree onto the registered repository's
+// current main while preserving its identity and uncommitted worker edits.
 func TestSupervisorRetainedRetryReopensTheSameWorktree(t *testing.T) {
-	program := "set -eu\nif [ ! -s __WITNESS__ ]; then printf committed > committed.txt; git add committed.txt; git commit -q -m committed; printf edited > edited.txt; fi\nprintf x >> __WITNESS__\nexit 0\n"
+	program := "set -eu\nif [ ! -s __WITNESS__ ]; then printf committed > committed.txt; git add committed.txt; git commit -q -m committed; printf edited > edited.txt; else git rev-parse HEAD > observed-head.txt; fi\nprintf x >> __WITNESS__\nexit 0\n"
 	fixture := newSupervisorFixture(t, program)
 	first, err := fixture.daemon.RunNext(context.Background(), fixture.spec)
 	if err != nil {
@@ -964,8 +962,16 @@ func TestSupervisorRetainedRetryReopensTheSameWorktree(t *testing.T) {
 	if fmt.Sprintf("%x", firstChange.Selection.Commit().Bytes()) != fixture.base {
 		t.Fatalf("settled base moved: %x", firstChange.Selection.Commit().Bytes())
 	}
+	repository := filepath.Join(fixture.root, "repository")
+	if err := os.WriteFile(filepath.Join(repository, "main-fix.txt"), []byte("main fix\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	supervisorGit(t, supervisorNativeGit(t), "-C", repository, "add", "main-fix.txt")
+	supervisorGit(t, supervisorNativeGit(t), "-C", repository, "commit", "-q", "-m", "advance main")
+	mainHead := strings.TrimSpace(supervisorGitOutput(t, supervisorNativeGit(t), "-C", repository, "rev-parse", "HEAD"))
 	queueSupervisorRetry(t, fixture, first)
-	// A retained retry must not resolve a selector again.
+	// A retained retry must not resolve a selector again; preparation uses the
+	// registered repository and refreshes the existing Change in place.
 	fixture.spec.BaseRevision = "refs/heads/retained-retry-must-not-resolve"
 	second, err := fixture.daemon.RunNext(context.Background(), fixture.spec)
 	if err != nil {
@@ -981,8 +987,14 @@ func TestSupervisorRetainedRetryReopensTheSameWorktree(t *testing.T) {
 			t.Fatalf("retained %s = %q, %v", name, body, err)
 		}
 	}
-	if got := strings.TrimSpace(supervisorGitOutput(t, supervisorNativeGit(t), "-C", changePath, "rev-parse", "HEAD")); got != head {
-		t.Fatalf("retry moved the branch to %s", got)
+	if got := strings.TrimSpace(supervisorGitOutput(t, supervisorNativeGit(t), "-C", changePath, "rev-parse", "HEAD")); got == head || strings.TrimSpace(supervisorGitOutput(t, supervisorNativeGit(t), "-C", changePath, "rev-parse", "HEAD~1")) != mainHead {
+		t.Fatalf("retry did not refresh the branch: old=%s new=%s parent=%s main=%s", head, got, supervisorGitOutput(t, supervisorNativeGit(t), "-C", changePath, "rev-parse", "HEAD~1"), mainHead)
+	}
+	if body, err := os.ReadFile(filepath.Join(changePath, "edited.txt")); err != nil || string(body) != "edited" {
+		t.Fatalf("retained edit after refresh = %q, %v", body, err)
+	}
+	if observed, err := os.ReadFile(filepath.Join(changePath, "observed-head.txt")); err != nil || strings.TrimSpace(string(observed)) != strings.TrimSpace(supervisorGitOutput(t, supervisorNativeGit(t), "-C", changePath, "rev-parse", "HEAD")) {
+		t.Fatalf("provider observed head = %q, %v", observed, err)
 	}
 	if witness, err := os.ReadFile(fixture.witness); err != nil || string(witness) != "xx" {
 		t.Fatalf("retained provider witness = %q, %v", witness, err)
@@ -991,7 +1003,7 @@ func TestSupervisorRetainedRetryReopensTheSameWorktree(t *testing.T) {
 		t.Fatalf("retained retry changed canonical Change: first=%+v second=%+v", first.ChangeID, second.ChangeID)
 	}
 	secondChange, found, err := fixture.store.Change(context.Background(), *second.ChangeID)
-	if err != nil || !found || secondChange.Selection == nil || secondChange.Selection.RepositoryIdentity() != firstChange.Selection.RepositoryIdentity() || secondChange.HeadCommit == nil || fmt.Sprintf("%x", secondChange.HeadCommit.Bytes()) != head {
+	if err != nil || !found || secondChange.Selection == nil || secondChange.Selection.RepositoryIdentity() != firstChange.Selection.RepositoryIdentity() || secondChange.HeadCommit == nil || fmt.Sprintf("%x", secondChange.HeadCommit.Bytes()) == head {
 		t.Fatalf("retained retry changed identities: Change=%+v found=%v err=%v", secondChange, found, err)
 	}
 }
