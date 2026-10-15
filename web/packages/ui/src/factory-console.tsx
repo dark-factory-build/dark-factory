@@ -2,7 +2,7 @@ import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import type { AgentItem, TaskItem } from "@dark-factory/client";
 import { type FactoryAgentSelection, type FactoryAppSnapshot, type FactoryHumanRequestView } from "./factory-app-controller.js";
 import { AgentList, FactoryFloor } from "./console-screens.js";
-import { AgentPanel, ConsoleDialog, HumanRequestPanel, WorkPanel, TaskDetail, editErrorCopy, type TaskEdit, type TaskBrief, type TaskScope, type AddTask, type WorkFilter } from "./console-sidebar.js";
+import { AgentPanel, ConsoleDialog, HumanRequestPanel, WorkPanel, TaskDetail, editErrorCopy, type TaskEdit, type TaskBrief, type TaskScope, type AddTask } from "./console-sidebar.js";
 import type { ProjectContentCall } from "./factory-app-controller.js";
 import { useProduction } from "./production-data.js";
 import { deriveProductionView, inProgressProduction } from "./production-view.js";
@@ -140,9 +140,8 @@ export function FactoryConsole({
   const productionView = useMemo(() => deriveProductionView(productionData.records, Date.now()), [productionData.records]);
   const productionItems = useMemo(() => Object.values(productionView.contraptions).sort((a, b) => Number(a.completed) - Number(b.completed) || (a.completed ? a.completedAt - b.completedAt : 0) || a.visualId.localeCompare(b.visualId)), [productionView]);
   const inProgressItems = useMemo(() => productionItems.filter(inProgressProduction), [productionItems]);
-  const [workFilter, setWorkFilter] = useState<WorkFilter>("all");
   const showWork = () => { onDetail?.("work"); };
-  const openWork = (id: string | undefined) => { selectProject(id); setWorkFilter("all"); showWork(); };
+  const openWork = (id: string | undefined) => { selectProject(id); showWork(); };
   // Routes into Work from outside it (floor, Library, Settings) reset the view first so the answer form or task is never hidden.
   const selectRequest = pickRequest === undefined ? undefined : (request: Parameters<typeof pickRequest>[0]) => { openWork(request.project_id); pickRequest(request); };
   const goTask = selectTask === undefined ? undefined : (id: string) => { openWork(projectId); selectTask(id); };
@@ -218,8 +217,6 @@ export function FactoryConsole({
                 state={scopedState}
                 rows={rows}
                 projectId={projectId}
-                filter={workFilter}
-                onFilter={setWorkFilter}
                 edit={edit}
                 ready={ready}
                 onEditTask={onEditTask}

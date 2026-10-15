@@ -14,7 +14,7 @@ test("the documented floor fixtures fit controls at phone width and stay one row
   const dir = mkdtempSync(join(tmpdir(), "df-floor-layout-"));
   const fixture = join(dir, "fixture.html");
   execFileSync(process.execPath, [preview, "fixture", fixture]);
-  for (const [selector, controls] of [[".dfFactoryEntityTools", "summary, button"], [".dfWorkBar", "summary, .dfConsoleViewToggle button, .dfWorkBar > button"]]) {
+  for (const [selector, controls] of [[".dfFactoryEntityTools", "summary, button"]]) {
     for (const width of [390, 1440]) {
       const measurement = measure(fixture, width, selector, controls);
       assert.equal(measurement.root.scrollWidth, measurement.root.clientWidth, `${selector} horizontally overflows at ${width}px`);

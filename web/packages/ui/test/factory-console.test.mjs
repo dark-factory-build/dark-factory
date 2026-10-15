@@ -105,8 +105,8 @@ test("one screen keeps Factory and the operator panels together", () => {
   assert.doesNotMatch(markup, /ACTIVE RUNS|OPERATOR VIEW/);
   assert.equal(markup.includes("<dt>QUEUED</dt>"), false);
   assert.equal(markup.includes("<dt>NEEDS YOU</dt>"), false);
-  assert.match(markup, /Needs you <span class="dfBadge">1<\/span>/);
   assert.match(markup, /Work <span class="dfBadge">1<\/span>/);
+  assert.doesNotMatch(markup, /aria-label="Work filter"|Show overseer and specialist passes|Needs you <span/);
   assert.match(markup, /Builder One asks/);
   assert.match(markup, /Review the state projection/);
   assert.match(markup, /Review the state projection[\s\S]*North Workshop · Builder One asks/);
@@ -412,22 +412,20 @@ test("Work keeps running tasks visible beside queued ones", () => {
   assert.equal((markup.match(/aria-label="Work"/g) ?? []).length, 1, "one work panel");
 });
 
-test("the Needs-you filter shows an open request plus a blocked task, badge 2", async () => {
+test("Work ranks an open request and a blocked task above queued work, Work badge 2", async () => {
   const blocked = { ...fixtureState.tasks.get(ids.task), id: "b3".repeat(16), title: "Stuck", status: "blocked", blocked_reason: "why" };
   const state = baseState({ tasks: new Map([...fixtureState.tasks, [blocked.id, blocked]]) });
   let tree;
   await act(async () => { tree = create(createElement(FactoryConsole, { status: "ready", state, detail: "work", onDetail() {} })); });
-  const chip = tree.root.findAllByType("button").find((button) => textOf(button) === "Needs you");
-  assert.ok(chip.props.children.some((child) => child?.props?.n === 2));
-  await act(async () => chip.props.onClick());
+  const work = tree.root.findByProps({ "aria-label": "Console views" }).findAllByType("button").find((button) => textOf(button).startsWith("Work"));
+  assert.equal(work.findByProps({ className: "dfBadge" }).children.join(""), "2");
   const titles = tree.root.findByProps({ "aria-label": "Work" }).findAllByProps({ className: "dfConsoleItem__taskTitle dfWorkRow__title" }).map((node) => node.children.join(""));
-  assert.ok(titles.includes("Review the state projection"));
-  assert.ok(tree.root.findByProps({ "aria-label": "Work" }).findAllByType("button").some((button) => button.children.join("") === "Stuck"));
-  assert.equal(titles.includes("Tighten the queue ordering"), false, "queued work is filtered out");
+  const queued = titles.indexOf("Tighten the queue ordering");
+  assert.ok(queued > titles.indexOf("Review the state projection") && queued > titles.indexOf("Stuck") && titles.includes("Stuck"), "needs-you rows lead, queued work follows");
   await act(async () => tree.unmount());
 });
 
-test("an overseer pass is hidden until asked for, but its request row is not", () => {
+test("an overseer pass stays hidden, but its request row does not", () => {
   const overseerTask = { ...fixtureState.tasks.get(ids.task), assigned_agent_id: ids.orchestrator };
   const request = fixtureState.humanRequests.get(ids.request);
   const hide = render({ detail: "work", state: baseState({ tasks: new Map([[overseerTask.id, overseerTask]]), humanRequests: new Map() }) });
@@ -439,7 +437,7 @@ test("a succeeded task linked to an open PR is in review with its PR cell", () =
   const done = { ...fixtureState.tasks.get(ids.task), status: "succeeded" };
   const state = baseState({ tasks: new Map([[done.id, done]]), humanRequests: new Map() });
   const pr = { visualId: "change:1", projectId: done.project_id, repository: "o/r", tasks: [done.id], missions: [], pullRequest: { number: 7, state: "open", title: "Ship", url: "https://github.com/o/r/pull/7", head: "a".repeat(40) }, review: { state: "pending" }, checks: [], deliveries: [], reviewers: [], completed: false, completedAt: 0, status: "open", nextAction: "" };
-  const markup = renderToStaticMarkup(createElement(WorkPanel, { state, rows: workRows(state, [pr]), filter: "all", onFilter() {}, ready: true }));
+  const markup = renderToStaticMarkup(createElement(WorkPanel, { state, rows: workRows(state, [pr]), ready: true }));
   assert.match(markup, /data-stage="in-review">in review/);
   assert.match(markup, /<a href="https:\/\/github.com\/o\/r\/pull\/7" target="_blank" rel="noreferrer">PR #7<\/a>/);
   assert.doesNotMatch(markup, /aria-label="Production inspection"/);
@@ -448,12 +446,12 @@ test("a succeeded task linked to an open PR is in review with its PR cell", () =
 
 test("a task-less production row opens its pull request and keeps its stages", () => {
   const pr = { visualId: "change:taskless", projectId: ids.project, repository: "o/r", tasks: [], missions: [], pullRequest: { number: 8, state: "open", title: "Taskless", url: "https://github.com/o/r/pull/8", head: "b".repeat(40) }, review: { state: "pending" }, checks: [], deliveries: [], reviewers: [], completed: false, completedAt: 0, status: "open", nextAction: "" };
-  const markup = renderToStaticMarkup(createElement(WorkPanel, { state: fixtureState, rows: workRows(fixtureState, [pr]), filter: "all", onFilter() {}, ready: true }));
+  const markup = renderToStaticMarkup(createElement(WorkPanel, { state: fixtureState, rows: workRows(fixtureState, [pr]), ready: true }));
   assert.match(markup, /<a class="dfConsoleItem__taskTitle dfWorkRow__title" href="https:\/\/github.com\/o\/r\/pull\/8" target="_blank" rel="noreferrer">Taskless<\/a>/);
   assert.match(markup, /data-stage="in-review">in review/);
 });
 
-test("Work lists blocked work, hides overseer passes until asked, flags dispatch off and queues new work", async () => {
+test("Work is one ranked list: blocked work first, overseer passes hidden unless they need you, flags dispatch off and queues new work", async () => {
   const running = fixtureState.tasks.get(ids.task);
   const supervisor = fixtureState.agents.get(ids.orchestrator);
   const state = baseState({
@@ -462,6 +460,7 @@ test("Work lists blocked work, hides overseer passes until asked, flags dispatch
       ...fixtureState.tasks,
       ["b1".repeat(16), { ...running, id: "b1".repeat(16), title: "Stuck on a prerequisite", status: "blocked", blocked_reason: "Needs a human to resolve a merge conflict <script>" }],
       ["b2".repeat(16), { ...running, id: "b2".repeat(16), title: "Standing instruction", status: "running", assigned_agent_id: supervisor.id }],
+      ["b3".repeat(16), { ...running, id: "b3".repeat(16), title: "Overseer stuck", status: "blocked", assigned_agent_id: supervisor.id }],
     ]),
   });
   const added = [];
@@ -479,9 +478,11 @@ test("Work lists blocked work, hides overseer passes until asked, flags dispatch
   await act(async () => { panel.findByProps({ "aria-label": "Retry Stuck on a prerequisite" }).props.onClick(); });
   assert.deepEqual(edits.at(-1), ["b1".repeat(16), { retry: true }], "or sent round again in one step");
   const titled = (title) => panel.findAllByType("button").some((button) => button.children.join("") === title);
-  assert.ok(!titled("Standing instruction"), "an overseer pass is hidden by default");
-  await act(async () => { panel.findByProps({ "aria-label": "Show overseer and specialist passes" }).props.onClick(); });
-  assert.ok(titled("Standing instruction"), "and shown once asked for");
+  assert.ok(!titled("Standing instruction"), "an overseer pass is hidden");
+  assert.ok(titled("Overseer stuck"), "unless it needs you");
+  assert.equal(panel.findAllByProps({ "aria-label": "Work filter" }).length + panel.findAllByProps({ "aria-label": "Show overseer and specialist passes" }).length, 0, "no filter or reveal control");
+  const order = panel.findAllByProps({ className: "dfConsoleItem__taskTitle dfWorkRow__title" }).map((row) => row.children.join(""));
+  assert.ok(order.indexOf("Overseer stuck") < order.indexOf("Tighten the queue ordering") && order.indexOf("Stuck on a prerequisite") < order.indexOf("Tighten the queue ordering"), "needs-you rows rank above queued work");
   assert.ok(panel.findAllByProps({ role: "status" }).some((node) => node.children.join("").includes("New work is paused")));
   const form = panel.findByProps({ "aria-label": "New task" });
   const values = { target: `any:${ids.project}`, instruction: " Ship it " };
@@ -601,7 +602,7 @@ test("opening a selected question restores that agent's terminal panel", async (
     await act(async () => { renderer.root.findByProps({ "aria-label": "Project" }).props.onChange({ currentTarget: { value: ids.secondProject } }); });
     assert.equal(renderer.root.findAllByProps({ "aria-label": "Terminal" }).length, 0);
     await act(async () => { renderer.root.findByProps({ "aria-label": "Project" }).props.onChange({ currentTarget: { value: "" } }); });
-    await act(async () => { renderer.root.findAllByType("button").find((button) => textOf(button).startsWith("Needs you")).props.onClick(); });
+    await act(async () => { renderer.root.findAllByType("button").find((button) => textOf(button).startsWith("Work")).props.onClick(); });
     await act(async () => { renderer.root.findAllByType("button").find((button) => button.props.children === "Open terminal").props.onClick(); });
     assert.equal(renderer.root.findByProps({ "aria-label": "Project" }).props.value, ids.project, "opening a global question switches to its agent’s project");
     assert.ok(renderer.root.findByProps({ "aria-label": "Terminal" }).findByProps({ children: "terminal" }));
@@ -948,7 +949,7 @@ test("task selection and floor questions open the exact existing task detail and
 
 test("task detail keeps outcome and instruction without a history disclosure", async () => {
   const agentMarkup = renderToStaticMarkup(createElement(AgentPanel, { agent: fixtureState.agents.get(ids.agent), state: fixtureState, ready: true }));
-  const workMarkup = renderToStaticMarkup(createElement(WorkPanel, { state: fixtureState, rows: workRows(fixtureState, []), filter: "all", onFilter() {}, ready: true }));
+  const workMarkup = renderToStaticMarkup(createElement(WorkPanel, { state: fixtureState, rows: workRows(fixtureState, []), ready: true }));
   let detail;
   await act(async () => { detail = create(createElement(TaskDetail, { task: fixtureState.tasks.get(ids.task), onLoadTaskDetail: async () => ({ taskId: ids.task, revision: 1n, head: 1n, instruction: "kept instruction", feedback: "", outcome: "kept outcome", peerQuestions: [] }) })); });
   const detailMarkup = JSON.stringify(detail.toJSON());
@@ -1228,9 +1229,8 @@ test("Work lists and counts only the chosen project's requests", async () => {
   await act(async () => tree.root.findByProps({ "aria-label": "Project" }).props.onChange({ currentTarget: { value: other } }));
   const text = JSON.stringify(tree.toJSON());
   assert.equal(text.includes(" asks"), false);
-  const tabs = tree.root.findAllByType("button").filter((button) => textOf(button).startsWith("Needs you"));
-  assert.ok(tabs.length > 0);
-  assert.ok(tabs.every((button) => !/\d/.test(textOf(button))));
+  const work = tree.root.findByProps({ "aria-label": "Console views" }).findAllByType("button").find((button) => textOf(button).startsWith("Work"));
+  assert.equal(work.findAllByProps({ className: "dfBadge" }).length, 0);
   assert.doesNotMatch(text, /Review the state projection/);
   await act(async () => tree.unmount());
 });
