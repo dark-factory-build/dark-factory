@@ -1461,6 +1461,19 @@ func RebaseWorktree(ctx context.Context, selection Selection, path string) (Work
 			if reset.exitCode != 0 {
 				return WorktreeFacts{}, newGitError(gitFailureProcess)
 			}
+			stash, stashErr := authority.run(ctx, maxGitSelectionOutput, append(append([]string{}, gitPrefix...), "rev-parse", "--verify", "--quiet", "refs/stash")...)
+			if stashErr != nil {
+				return WorktreeFacts{}, stashErr
+			}
+			if stash.exitCode == 0 {
+				reapplied, reapplyErr := authority.run(ctx, maxGitSelectionOutput, append(append([]string{}, gitPrefix...), "stash", "pop", "--index")...)
+				if reapplyErr != nil {
+					return WorktreeFacts{}, reapplyErr
+				}
+				if reapplied.exitCode != 0 {
+					return WorktreeFacts{}, newGitError(gitFailureProcess)
+				}
+			}
 		}
 		if aborted.exitCode == 0 {
 			return WorktreeFacts{}, &RebaseConflict{Paths: paths, CurrentBase: selection.base.Hex()}
