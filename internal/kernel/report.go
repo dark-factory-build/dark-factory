@@ -380,7 +380,7 @@ func whyTaskWaits(ctx context.Context, c *sql.Conn, task Task) (string, error) {
 		err = c.QueryRowContext(ctx, `SELECT COALESCE(
 			(SELECT 'factoryd: dispatch is disabled' FROM factory WHERE dispatch_enabled = 0),
 			(SELECT 'intake: its issue was withdrawn' WHERE `+taskIssueWithdrawn+`),
-			(SELECT 'prerequisite: task ' || lower(hex(u.id)) || ' is ' || u.status || ' at work revision ' || u.work_revision || '; it needs revision ' || prerequisite.upstream_work_revision || ' to succeed and merge'
+			(SELECT 'prerequisite: task ' || lower(hex(u.id)) || ' is ' || u.status || ' at work revision ' || u.work_revision || '; it needs revision ' || prerequisite.upstream_work_revision || ' or later to succeed and merge'
 				FROM task_prerequisites AS prerequisite JOIN tasks AS u ON u.id = prerequisite.upstream_task_id
 				WHERE prerequisite.task_id = t.id AND prerequisite.consumed_run_id IS NULL AND NOT EXISTS (`+prerequisiteSourceRun+`)),
 			(SELECT 'conflict path: ' || mine.path || ' is held by running task ' || lower(hex(a.id))

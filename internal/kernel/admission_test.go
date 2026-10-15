@@ -148,7 +148,7 @@ func TestCancelledProducerCancelsItsQueuedConsumers(t *testing.T) {
 	if cancelled, err := store.CancelOrphanedTasks(ctx, mustTime(t, 8)); err != nil || len(cancelled) != 0 {
 		t.Fatalf("cancelled before the producer ended = %v, %v", cancelled, err)
 	}
-	if lines, err := store.Why(ctx, nil, 0, consumer.ID); err != nil || lines[len(lines)-1] != "waits on: prerequisite: task "+producer.ID.String()+" is queued at work revision 1; it needs revision 1 to succeed and merge" {
+	if lines, err := store.Why(ctx, nil, 0, consumer.ID); err != nil || lines[len(lines)-1] != "waits on: prerequisite: task "+producer.ID.String()+" is queued at work revision 1; it needs revision 1 or later to succeed and merge" {
 		t.Fatalf("why = %q, %v", lines, err)
 	}
 	if _, err := store.UpdateTaskForOperator(ctx, producer.ID, producer.Revision, TaskPatch{Cancel: true}, mustTime(t, 9)); err != nil {
@@ -340,11 +340,11 @@ func TestPrerequisiteWaitsForItsProducerToMergeAtItsExactHead(t *testing.T) {
 			if err := store.readers.QueryRow(`SELECT upstream_work_revision, consumed_run_id FROM task_prerequisites WHERE task_id = ?`, consumer.ID.Bytes()).Scan(&revision, &consumed); err != nil {
 				t.Fatal(err)
 			}
-			if test.admitted && !bytes.Equal(consumed, producer.ID.Bytes()) || !test.admitted && (consumed != nil || revision != test.revision) {
+			if test.admitted && !bytes.Equal(consumed, producer.ID.Bytes()) || !test.admitted && (consumed != nil || revision != 1) {
 				t.Fatalf("prerequisite = revision %d consumed %x", revision, consumed)
 			}
 			if !test.admitted {
-				want := fmt.Sprintf(" at work revision %d; it needs revision %d to succeed and merge", test.revision, test.revision)
+				want := fmt.Sprintf(" at work revision %d; it needs revision 1 or later to succeed and merge", test.revision)
 				if lines, err := store.Why(ctx, nil, 0, consumer.ID); err != nil || !strings.HasSuffix(lines[len(lines)-1], want) {
 					t.Fatalf("why = %q, %v", lines, err)
 				}
@@ -1427,9 +1427,9 @@ func TestReviewHandoffTextIsAnOrdinaryTask(t *testing.T) {
 }
 
 // A producer that ends without success and is queued again (an automatic
-// requeue, a retry, a send-back) carries its consumers' pins forward: only a
-// success can be superseded, so nothing else may strand a consumer.
-func TestUnsucceededProducerCarriesPrerequisitePins(t *testing.T) {
+// requeue, a retry, a send-back) leaves its consumers' pins in place: its
+// later success satisfies them, and until then they wait.
+func TestRequeuedProducerKeepsPrerequisitePins(t *testing.T) {
 	t.Parallel()
 	neverStarted, _ := NewFailureProposal(FailureTransient, NeverStartedRunDetail)
 	overseerLimit, _ := NewFailureProposal(FailureTransient, OverseerRunLimitDetail)
@@ -1485,12 +1485,132 @@ func TestUnsucceededProducerCarriesPrerequisitePins(t *testing.T) {
 			if err := connection.QueryRowContext(ctx, `SELECT upstream_work_revision FROM task_prerequisites WHERE task_id = ?`, consumer.ID.Bytes()).Scan(&pinned); err != nil {
 				t.Fatal(err)
 			}
-			if pinned != 2 {
-				t.Fatalf("consumer pinned to producer revision %d, want 2", pinned)
+			if pinned != 1 {
+				t.Fatalf("consumer pinned to producer revision %d, want 1", pinned)
 			}
 			connection.Close()
+			if lines, err := store.Why(ctx, nil, 0, consumer.ID); err != nil || lines[len(lines)-1] != "waits on: prerequisite: task "+producer.ID.String()+" is queued at work revision 2; it needs revision 1 or later to succeed and merge" {
+				t.Fatalf("why = %q, %v", lines, err)
+			}
 			if _, err := store.EnqueueTask(ctx, NewTask{ID: taskID(t, 229), ProjectID: finalizing.ProjectID, AssignedAgentID: consumerAgent.ID, IncarnationID: incarnationID(t, 230), Title: "consumer", Prerequisites: []TaskPrerequisite{{TaskID: finalizing.TaskID, WorkRevision: mustRevision(t, 1)}}}, mustTime(t, 80)); err != nil {
-				t.Fatalf("replayed creation after carry: %v", err)
+				t.Fatalf("replayed creation: %v", err)
+			}
+		})
+	}
+}
+
+// A succeeded producer sent back is awaited at its correction: a later
+// revision's success satisfies the earlier pin and is the consumed receipt,
+// while the correction queued, running, failed or cancelled does not.
+func TestLaterProducerSuccessSatisfiesAnEarlierPin(t *testing.T) {
+	t.Parallel()
+	succeeded, _ := NewSuccessProposal("corrected")
+	failed, _ := NewFailureProposal(FailureInternal, "still wrong")
+	for _, test := range []struct {
+		name     string
+		proposal *Proposal
+	}{
+		{name: "succeeded", proposal: &succeeded},
+		{name: "failed", proposal: &failed},
+		{name: "cancelled"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+			ctx := context.Background()
+			proposal, _ := NewSuccessProposal("producer result")
+			store, finalizing := finalizingReleasedRun(t, RoleOrchestrator, proposal)
+			defer store.Close()
+			consumerAgent, err := store.CreateAgent(ctx, NewAgent{ID: agentID(t, 225), ProjectID: finalizing.ProjectID, Name: "consumer", Role: RoleOrchestrator, Provider: ProviderCodex, ToolBudgetLimit: 5}, mustTime(t, 54))
+			if err != nil {
+				t.Fatal(err)
+			}
+			paused, resumed := true, false
+			if consumerAgent, err = store.UpdateAgent(ctx, consumerAgent.ID, consumerAgent.Revision, AgentPatch{Paused: &paused}, mustTime(t, 55)); err != nil {
+				t.Fatal(err)
+			}
+			consumer, err := store.EnqueueTask(ctx, NewTask{ID: taskID(t, 229), ProjectID: finalizing.ProjectID, AssignedAgentID: consumerAgent.ID, IncarnationID: incarnationID(t, 230), Title: "consumer", Priority: 10, Prerequisites: []TaskPrerequisite{{TaskID: finalizing.TaskID, WorkRevision: mustRevision(t, 1)}}}, mustTime(t, 56))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := finalizeTestRun(t, store, finalizing, 60); err != nil {
+				t.Fatal(err)
+			}
+			producer, _, err := store.Task(ctx, finalizing.TaskID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if producer, err = store.SendBackTask(ctx, nil, producer.ID, producer.Revision, changeHead(t, store, producer.ID), "correct producer", mustTime(t, 61)); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := store.UpdateAgent(ctx, consumerAgent.ID, consumerAgent.Revision, AgentPatch{Paused: &resumed}, mustTime(t, 62)); err != nil {
+				t.Fatal(err)
+			}
+			waits := func(status string) {
+				t.Helper()
+				if lines, err := store.Why(ctx, nil, 0, consumer.ID); err != nil || lines[len(lines)-1] != "waits on: prerequisite: task "+producer.ID.String()+" is "+status+" at work revision 2; it needs revision 1 or later to succeed and merge" {
+					t.Fatalf("why = %q, %v", lines, err)
+				}
+			}
+			waits("queued")
+			if test.proposal == nil {
+				if _, err := store.UpdateTaskForOperator(ctx, producer.ID, producer.Revision, TaskPatch{Cancel: true}, mustTime(t, 63)); err != nil {
+					t.Fatal(err)
+				}
+				if cancelled, err := store.CancelOrphanedTasks(ctx, mustTime(t, 64)); err != nil || len(cancelled) != 1 || cancelled[0] != consumer.ID {
+					t.Fatalf("cancelled = %v, %v", cancelled, err)
+				}
+				if err := store.Validate(ctx); err != nil {
+					t.Fatal(err)
+				}
+				return
+			}
+			keys := admissionKeys(t, 100, nil)
+			result, err := store.AdmitNext(ctx, keys, mustTime(t, 63))
+			if err != nil || !result.Admitted() || result.Run.TaskID != producer.ID {
+				t.Fatalf("correction admission = %+v, %v", result, err)
+			}
+			running := activateAllResourcesUnique(t, store, *result.Run, 70, 700)
+			session := terminalSessionForRunTest(t, store, result.Run.ID)
+			if running, err = store.ActivateRun(ctx, result.Run.ID, session.ID, running.Revision, session.Revision, mustTime(t, 80)); err != nil {
+				t.Fatal(err)
+			}
+			waits("running")
+			if _, err := store.ProposeAttemptOutcome(ctx, keys.AttemptDigest, *test.proposal, mustTime(t, 90)); err != nil {
+				t.Fatal(err)
+			}
+			observeMissingProcessExits(t, store, running.ID, 91)
+			for index, resource := range resourcesForRunTest(t, store, running.ID) {
+				if resource.State == ResourceReleased {
+					continue
+				}
+				if _, err := store.ReleaseResource(ctx, running.ID, resource.ID, resource.Revision, resource.Identity, mustTime(t, int64(100+index))); err != nil {
+					t.Fatal(err)
+				}
+			}
+			closeTerminalSessionAtCurrent(t, store, running.ID, 104)
+			current, _, err := store.Run(ctx, running.ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := finalizeTestRun(t, store, current, 105); err != nil {
+				t.Fatal(err)
+			}
+			admitted, err := store.AdmitNext(ctx, admissionKeys(t, 110, nil), mustTime(t, 106))
+			if err != nil || admitted.Admitted() != (test.proposal == &succeeded) || admitted.Admitted() && admitted.Run.TaskID != consumer.ID {
+				t.Fatalf("consumer admission = %+v, %v", admitted, err)
+			}
+			var consumed []byte
+			if err := store.readers.QueryRow(`SELECT consumed_run_id FROM task_prerequisites WHERE task_id = ?`, consumer.ID.Bytes()).Scan(&consumed); err != nil {
+				t.Fatal(err)
+			}
+			if admitted.Admitted() && !bytes.Equal(consumed, running.ID.Bytes()) || !admitted.Admitted() && consumed != nil {
+				t.Fatalf("consumed run = %x, want the revision-2 run %x", consumed, running.ID.Bytes())
+			}
+			if !admitted.Admitted() {
+				waits("failed")
+			}
+			if err := store.Validate(ctx); err != nil {
+				t.Fatal(err)
 			}
 		})
 	}

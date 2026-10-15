@@ -1165,7 +1165,8 @@ func validateTasks(ctx context.Context, connection *sql.Conn) error {
 }
 
 // validateTaskScheduling keeps dependency receipts inside the same project
-// and binds every consumed receipt to the exact successful producer version.
+// and binds every consumed receipt to a successful producer version at or
+// after its pin.
 // The admission query is the normal writer; this pass also protects recovery
 // and every other mutation from accepting a damaged scheduling graph.
 func validateTaskScheduling(ctx context.Context, connection *sql.Conn) error {
@@ -1185,7 +1186,7 @@ func validateTaskScheduling(ctx context.Context, connection *sql.Conn) error {
 				OR consumed.project_id <> consumer.project_id
 				OR consumed.task_id <> producer.id
 				OR consumed.task_incarnation_id <> producer.incarnation_id
-				OR consumed.admitted_task_work_revision <> prerequisite.upstream_work_revision
+				OR consumed.admitted_task_work_revision < prerequisite.upstream_work_revision
 				OR consumed.phase <> 'terminal'
 				OR consumed.terminal_kind <> 'succeeded'
 			)
