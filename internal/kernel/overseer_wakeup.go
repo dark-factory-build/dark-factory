@@ -347,11 +347,7 @@ func (store *Store) EnqueueOverseerWakeups(ctx context.Context, at UnixMillis, c
 				}
 				store.overseerStalled[agent.ID.String()] = overseerStalledState{head: factory.Head.Int64(), nextAt: nextAt, health: string(healthBytes)}
 			} else {
-				pass, err := readOverseerPass(ctx, tx.connection, agent, at.Int64(), cutover, health)
-				if err != nil {
-					return nil, tx.Rollback(err)
-				}
-				body, due, err = overseerWakeFromPass(ctx, tx.connection, agent, at.Int64(), pass)
+				body, due, err = overseerWake(ctx, tx.connection, agent, at.Int64(), cutover, health)
 				if err != nil {
 					return nil, tx.Rollback(err)
 				}

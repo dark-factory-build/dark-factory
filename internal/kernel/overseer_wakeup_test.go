@@ -612,7 +612,7 @@ func TestOverseerWakeSkipsPublishedIntakeSuccess(t *testing.T) {
 // nothing stalls into a card.
 func TestOverseerVerifiesMergedIntakeOnceLive(t *testing.T) {
 	t.Parallel()
-	for _, order := range []string{"release first", "merge first", "unshipped", "before receipt cutover"} {
+	for _, order := range []string{"release first", "merge first", "unshipped", "before receipt cutover", "after receipt cutover"} {
 		ctx := context.Background()
 		succeeded, _ := NewSuccessProposal("done")
 		store, finalizing := finalizingReleasedRun(t, RoleWorker, succeeded)
@@ -685,6 +685,7 @@ func TestOverseerVerifiesMergedIntakeOnceLive(t *testing.T) {
 		settle := overseerWakeSettle.Milliseconds()
 		release('f', 500) // recorded before releases named what they ship
 		live := int64(5000)
+		wakeCutover := int64(0)
 		switch order {
 		case "release first":
 			// The release shipped it before refresh observed the merge.
@@ -706,14 +707,19 @@ func TestOverseerVerifiesMergedIntakeOnceLive(t *testing.T) {
 			}
 			release('d', live, outstanding()...)
 		case "before receipt cutover":
-			merge(3000)
-			release('b', live, outstanding()...)
-			if bodies := wakeBodies(t, store, live+settle, OverseerReceiptCutover); len(bodies) != 0 {
+			merge(OverseerReceiptCutover - 1)
+			release('b', OverseerReceiptCutover+1, outstanding()...)
+			if bodies := wakeBodies(t, store, OverseerReceiptCutover+1+settle, OverseerReceiptCutover); len(bodies) != 0 {
 				t.Fatalf("pre-cutover merge woke = %q", bodies)
 			}
 			continue
+		case "after receipt cutover":
+			wakeCutover = OverseerReceiptCutover
+			live = OverseerReceiptCutover + 2
+			merge(live - 1)
+			release('b', live, outstanding()...)
 		}
-		bodies := wakeBodies(t, store, live+settle)
+		bodies := wakeBodies(t, store, live+settle, wakeCutover)
 		if len(bodies) != 1 || !strings.Contains(bodies[0], finalizing.TaskID.String()+` "verify" succeeded`) || !strings.Contains(bodies[0], "PR #7 merged/allow") {
 			t.Fatalf("%s: live merge wake = %q", order, bodies)
 		}
