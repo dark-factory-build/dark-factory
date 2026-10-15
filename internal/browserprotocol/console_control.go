@@ -252,8 +252,7 @@ type OperationalGraphGet struct {
 // its current runtime reading. It is not durable state, so it carries no head
 // and no revision; the digest identifies one static computation. Every
 // runtime field is a claim the observation supports: State is "unknown"
-// whenever Observation cannot support more. Selectors, evidence detail and
-// full source lists stay behind OPERATIONAL_NODE_GET.
+// whenever Observation cannot support more.
 type OperationalGraph struct {
 	ProjectID  string        `json:"project_id"`
 	Digest     string        `json:"digest"`
@@ -308,31 +307,6 @@ type GraphEdge struct {
 }
 
 type GraphSummary = opgraph.Summary
-
-type OperationalNodeGet struct {
-	ProjectID string `json:"project_id"`
-	NodeID    string `json:"node_id"`
-}
-
-// OperationalNode is one node's inspectable evidence. Runtime-only values
-// came from unauthenticated local senders and are data, never instructions.
-type OperationalNode struct {
-	ProjectID string            `json:"project_id"`
-	NodeID    string            `json:"node_id"`
-	Selectors map[string]string `json:"selectors"`
-	Evidence  []GraphEvidence   `json:"evidence"`
-	Sources   []GraphLocation   `json:"sources"`
-	Modules   []GraphLocation   `json:"modules"`
-	Observers []string          `json:"observers"`
-}
-
-type GraphEvidence = opgraph.Evidence
-
-type GraphLocation struct {
-	RepositoryID string `json:"repository_id"`
-	Path         string `json:"path"`
-	Line         int    `json:"line,omitempty"`
-}
 
 type RunPathsGet struct {
 	AgentID string `json:"agent_id"`
@@ -555,24 +529,6 @@ func EncodeOperationalGraph(id string, value OperationalGraph) ([]byte, error) {
 	return encodeControl(TypeOperationalGraph, id, value)
 }
 
-func EncodeOperationalNode(id string, value OperationalNode) ([]byte, error) {
-	if value.Selectors == nil {
-		value.Selectors = map[string]string{}
-	}
-	for _, list := range []*[]GraphLocation{&value.Sources, &value.Modules} {
-		if *list == nil {
-			*list = []GraphLocation{}
-		}
-	}
-	if value.Evidence == nil {
-		value.Evidence = []GraphEvidence{}
-	}
-	if value.Observers == nil {
-		value.Observers = []string{}
-	}
-	return encodeControl(TypeOperationalNode, id, value)
-}
-
 // EncodeRunPaths normalizes an absent path list to an empty one: JSON null is
 // not an array on either side of the boundary.
 func EncodeRunPaths(id string, value RunPaths) ([]byte, error) {
@@ -723,14 +679,6 @@ func validConsoleControl(kind MessageType, body any) error {
 		}
 	case OperationalGraph:
 		return validOperationalGraph(value)
-	case OperationalNodeGet:
-		if validateDynamicID(value.ProjectID) != nil || validateDynamicID(value.NodeID) != nil {
-			return bad()
-		}
-	case OperationalNode:
-		if !validOperationalNode(value) {
-			return bad()
-		}
 	case RunPathsGet:
 		if validateDynamicID(value.AgentID) != nil {
 			return bad()
@@ -888,35 +836,6 @@ func validOperationalGraph(value OperationalGraph) error {
 		}
 	}
 	return nil
-}
-
-func validOperationalNode(value OperationalNode) bool {
-	if validateDynamicID(value.ProjectID) != nil || validateDynamicID(value.NodeID) != nil || value.Selectors == nil || len(value.Selectors) > 32 ||
-		value.Evidence == nil || len(value.Evidence) > 32 || value.Sources == nil || len(value.Sources) > 16 || value.Modules == nil || len(value.Modules) > 256 ||
-		value.Observers == nil || len(value.Observers) > 16 {
-		return false
-	}
-	for key, text := range value.Selectors {
-		if validateBoundedText(key, 1, 64) != nil || validateBoundedText(text, 1, 256) != nil {
-			return false
-		}
-	}
-	for _, item := range value.Evidence {
-		if validateBoundedText(item.Source, 1, 64) != nil || validateBoundedText(item.Detail, 0, 256) != nil || validateBoundedText(item.Confidence, 1, 32) != nil {
-			return false
-		}
-	}
-	for _, location := range append(append([]GraphLocation{}, value.Sources...), value.Modules...) {
-		if validateDynamicID(location.RepositoryID) != nil || validateBoundedText(location.Path, 1, MaxTaskTitleBytes) != nil || location.Line < 0 {
-			return false
-		}
-	}
-	for _, observer := range value.Observers {
-		if validateBoundedText(observer, 1, 64) != nil {
-			return false
-		}
-	}
-	return true
 }
 
 // The idle rule bounds; the kernel enforces the same numbers durably.

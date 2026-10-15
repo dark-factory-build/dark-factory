@@ -369,18 +369,6 @@
       "fixture": "operational_graph.json"
     },
     {
-      "type": "OPERATIONAL_NODE_GET",
-      "direction": "client",
-      "id": "required",
-      "fixture": "operational_node_get.json"
-    },
-    {
-      "type": "OPERATIONAL_NODE",
-      "direction": "server",
-      "id": "required",
-      "fixture": "operational_node.json"
-    },
-    {
       "type": "RUN_PATHS_GET",
       "direction": "client",
       "id": "required",

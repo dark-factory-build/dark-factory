@@ -694,9 +694,10 @@ The `OPERATIONAL_GRAPH` frame carries for each node only:
 - up to two source paths
 - the three states and a rate bucket
 
-Selectors, evidence and the full source list come from
-`OPERATIONAL_NODE_GET` when the inspector opens. This keeps 4,096 nodes inside
-the 1 MiB frame.
+Selectors, evidence and the full source list are not sent to the browser;
+diagnosing a node belongs in source workflows. This keeps 4,096 nodes inside
+the 1 MiB frame. The machine inspector shows only what the graph frame
+carries, and a fold lists its members by name.
 
 ### The connected floor
 

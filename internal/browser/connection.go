@@ -634,7 +634,7 @@ func (current *connection) dispatch(frame browserprotocol.ControlFrame) bool {
 			return false
 		}
 		payload, err = browserprotocol.EncodeTaskUpdateResult(frame.ID, result)
-	case browserprotocol.OperationalGraphGet, browserprotocol.OperationalNodeGet, browserprotocol.RunPathsGet, browserprotocol.AgentControl, browserprotocol.HumanRequestReply, browserprotocol.HumanRequestCancelRun, browserprotocol.Intake, browserprotocol.GitHubConnection, browserprotocol.RepositoryMutate:
+	case browserprotocol.OperationalGraphGet, browserprotocol.RunPathsGet, browserprotocol.AgentControl, browserprotocol.HumanRequestReply, browserprotocol.HumanRequestCancelRun, browserprotocol.Intake, browserprotocol.GitHubConnection, browserprotocol.RepositoryMutate:
 		// These may use their whole call budget. That must not hold up state
 		// and terminal frames, so one worker answers them in arrival order,
 		// each under its own budget from the moment it starts; the websocket
@@ -1314,20 +1314,6 @@ func (current *connection) observe(frame browserprotocol.ControlFrame) {
 		if payload, err = browserprotocol.EncodeOperationalGraph(frame.ID, result); errors.Is(err, browserprotocol.ErrOversized) {
 			err = ErrTooLarge
 		}
-	case browserprotocol.OperationalNodeGet:
-		if current.server.consoleBackend == nil {
-			err = ErrUnauthorized
-			break
-		}
-		var result browserprotocol.OperationalNode
-		if result, err = current.server.consoleBackend.OperationalNode(ctx, current.principal.ClientID, body); err != nil {
-			break
-		}
-		if result.ProjectID != body.ProjectID || result.NodeID != body.NodeID {
-			err = errBackendResult
-			break
-		}
-		payload, err = browserprotocol.EncodeOperationalNode(frame.ID, result)
 	case browserprotocol.RunPathsGet:
 		if current.server.consoleBackend == nil {
 			err = ErrUnauthorized

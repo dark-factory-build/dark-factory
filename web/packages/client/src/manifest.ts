@@ -84,7 +84,6 @@ export const CONTROL_MANIFEST = [
   { type: "INTAKE", direction: "client" }, { type: "INTAKE_RESULT", direction: "server" },
   { type: "TASK_UPDATE", direction: "client" }, { type: "TASK_UPDATE_RESULT", direction: "server" },
   { type: "OPERATIONAL_GRAPH_GET", direction: "client" }, { type: "OPERATIONAL_GRAPH", direction: "server" },
-  { type: "OPERATIONAL_NODE_GET", direction: "client" }, { type: "OPERATIONAL_NODE", direction: "server" },
   { type: "RUN_PATHS_GET", direction: "client" }, { type: "RUN_PATHS", direction: "server" },
   { type: "ACCOUNTS_DISCOVER", direction: "client" }, { type: "ACCOUNTS", direction: "server" },
   { type: "ACCOUNT_LINK", direction: "client" }, { type: "ACCOUNT_LINK_RESULT", direction: "server" },

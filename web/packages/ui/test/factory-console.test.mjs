@@ -1119,12 +1119,11 @@ test("floor project changes clear task selection without restoring an old dialog
   await act(async () => tree.unmount());
 });
 
-test("one machine inspector loads its evidence on open and investigates once", async (t) => {
+test("one machine inspector investigates once", async (t) => {
   const warnings = [];
   t.mock.method(console, "error", (...args) => warnings.push(args.join(" ")));
-  const store = fixtureGraph.nodes.find((node) => node.label === "state.db"), loads = [], tasks = [];
+  const store = fixtureGraph.nodes.find((node) => node.label === "state.db"), tasks = [];
   const props = { state: fixtureState, graphs: fixtureGraphs,
-    onLoadNode: async (project, node) => { loads.push([project, node]); return { project_id: project, node_id: node, selectors: { "go.package": "internal/kernel/store" }, evidence: [{ origin: "static", source: "go-ast", confidence: "high" }], sources: [], modules: [], observers: [] }; },
     onAddTask: async (...args) => { tasks.push(args); return true; } };
   let renderer;
   await act(async () => { renderer = create(createElement(FactoryFloor, props)); });
@@ -1132,19 +1131,19 @@ test("one machine inspector loads its evidence on open and investigates once", a
   const click = async (label) => { await act(async () => renderer.root.findAllByType("button").find((button) => button.children.join("") === label).props.onClick()); };
   await act(async () => renderer.root.findByProps({ "aria-label": `Inspect ${store.label}` }).props.onClick());
   assert.equal(inspector().length, 1);
-  assert.deepEqual(loads, [[ids.project, store.id]], "evidence is fetched when the inspector opens, by its project and node");
-  assert.ok(inspector()[0].findAllByType("dt").some((term) => term.children.join("") === "go.package"), "the loaded selectors are shown");
+  assert.equal(inspector()[0].findAllByType("details").length, 0, "the inspector has no evidence drill-down");
   await click("Investigate");
   assert.equal(tasks.length, 1);
   assert.equal(tasks[0][0].project_id, ids.project);
   assert.equal(tasks[0][2], "any");
   assert.match(tasks[0][1], /Investigate the store "state\.db" in kernel/);
+  assert.ok(tasks[0][1].includes(`(operational node ${store.id}).`), "the instruction names the node");
+  assert.match(tasks[0][1], /Observation: unobserved;/);
   assert.match(tasks[0][1], /Nothing observes this component/);
   assert.ok(renderer.root.findAllByType("button").some((button) => button.props.disabled && button.children.join("") === "Investigation queued"), "asking twice is not possible");
   const other = fixtureGraph.nodes.find((node) => node.label === "web");
   await act(async () => renderer.root.findByProps({ "aria-label": `Inspect ${other.label}` }).props.onClick());
   assert.equal(inspector().length, 1);
-  assert.deepEqual(loads.at(-1), [ids.project, other.id]);
   assert.ok(renderer.root.findAllByType("button").some((button) => button.children.join("") === "Investigate"), "the old investigation does not follow the new machine");
   assert.ok(!warnings.some((message) => message.includes("same key")), "inspectors must have distinct reconciliation identities");
   await act(async () => renderer.unmount());

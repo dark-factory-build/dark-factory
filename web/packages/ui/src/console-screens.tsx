@@ -1,5 +1,5 @@
 import { useMemo, useState } from "react";
-import type { AgentItem, HumanRequestItem, OperationalGraphView, OperationalNodeView, StateView, TaskItem } from "@dark-factory/client";
+import type { AgentItem, HumanRequestItem, OperationalGraphView, StateView, TaskItem } from "@dark-factory/client";
 import {
   agentStatus,
   agentActivity,
@@ -84,7 +84,7 @@ const NO_CHANGES: readonly ProductionContraption[] = [];
 
 /** The operational floor; every action opens an existing inspector or control. */
 export function FactoryFloor({
-  changes = NO_CHANGES, changesRead = false, selectedChange, onSelectChange, state, graphs, graphErrors, onLoadNode, onAddTask, runPaths, lastRunPaths, selectedAgentId, onSelectAgent,
+  changes = NO_CHANGES, changesRead = false, selectedChange, onSelectChange, state, graphs, graphErrors, onAddTask, runPaths, lastRunPaths, selectedAgentId, onSelectAgent,
   onSelectHumanRequest, selectedTaskId, onSelectTask, onOpenTasks, connected = true, projectId,
 }: {
   changes?: readonly ProductionContraption[];
@@ -95,7 +95,6 @@ export function FactoryFloor({
   state: StateView | undefined;
   graphs: ReadonlyMap<string, OperationalGraphView> | undefined;
   graphErrors?: ReadonlyMap<string, string>;
-  onLoadNode?: (projectId: string, nodeId: string) => Promise<OperationalNodeView>;
   onAddTask?: (agent: AgentItem, instruction: string, mode: "queue" | "any") => Promise<boolean>;
   runPaths?: ReadonlyMap<string, RunPathSample>;
   lastRunPaths?: ReadonlyMap<string, RunPathSample>;
@@ -144,7 +143,6 @@ export function FactoryFloor({
         {unavailable.length > 0 ? <p className="dfFactoryEntityTools__notice" role="status">Source unavailable for {unavailable.map((source) => source.name).join(", ")}; those units cannot be inferred.</p> : null}
         </div></details>}
       </>}
-      onLoadNode={onLoadNode === undefined ? undefined : (nodeId) => { const project = projectOf(nodeId); return project === undefined ? Promise.reject(new Error("unknown node")) : onLoadNode(project, nodeId); }}
       onInvestigate={investigate}
       proposals={{ items: proposed.proposals, selected: selectedChange, onSelect: (id) => onSelectChange?.(id) }}
       crates={crates}

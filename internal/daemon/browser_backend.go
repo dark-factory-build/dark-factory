@@ -726,32 +726,6 @@ func (backend *browserBackend) OperationalGraph(ctx context.Context, rawClient [
 	return graphFrame(request.ProjectID, graph, live, backend.now().UnixMilli()), nil
 }
 
-// OperationalNode serves one node's evidence for the inspector.
-func (backend *browserBackend) OperationalNode(ctx context.Context, rawClient [browserprotocol.ClientIDSize]byte, request browserprotocol.OperationalNodeGet) (browserprotocol.OperationalNode, error) {
-	live, _, err := backend.liveGraph(ctx, rawClient, request.ProjectID)
-	if err != nil {
-		return browserprotocol.OperationalNode{}, err
-	}
-	for _, node := range live.Graph.Nodes {
-		if node.ID != request.NodeID {
-			continue
-		}
-		result := browserprotocol.OperationalNode{ProjectID: request.ProjectID, NodeID: node.ID, Selectors: node.Selectors}
-		for _, item := range node.Evidence {
-			result.Evidence = append(result.Evidence, browserprotocol.GraphEvidence(item))
-		}
-		for _, location := range node.Sources {
-			result.Sources = append(result.Sources, browserprotocol.GraphLocation{RepositoryID: location.Repository, Path: location.Path, Line: location.Line})
-		}
-		for _, location := range node.Modules {
-			result.Modules = append(result.Modules, browserprotocol.GraphLocation{RepositoryID: location.Repository, Path: location.Path})
-		}
-		result.Observers = live.Nodes[node.ID].Sources
-		return result, nil
-	}
-	return browserprotocol.OperationalNode{}, browser.ErrNotFound
-}
-
 // liveGraph reads the static graph outside the client's gate (it may take
 // most of its budget) and overlays the runtime store.
 func (backend *browserBackend) liveGraph(ctx context.Context, rawClient [browserprotocol.ClientIDSize]byte, rawProject string) (opgraph.Live, projectGraph, error) {
