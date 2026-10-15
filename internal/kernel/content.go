@@ -7,6 +7,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"strconv"
 	"strings"
 	"unicode/utf8"
 )
@@ -191,12 +192,34 @@ func createContentTx(ctx context.Context, tx *writeTx, spec NewContent, at UnixM
 
 func createSpecialistPeerQuestionTx(ctx context.Context, tx *writeTx, source TaskID, spec NewContent, at UnixMillis) error {
 	metadata, err := ParseKnowledgeMetadata(spec.SourceReferences)
-	if err != nil || (metadata.RecordType != "contribution" && metadata.RecordType != "amendment" && metadata.RecordType != "review") || metadata.TaskID == "" {
+	if err != nil || (metadata.RecordType != "contribution" && metadata.RecordType != "amendment" && metadata.RecordType != "review") {
 		return nil
 	}
-	rawTarget, err := hex.DecodeString(metadata.TaskID)
-	if err != nil {
-		return ErrInvalidValue
+	var rawTarget []byte
+	if metadata.TaskID != "" {
+		var decodeErr error
+		rawTarget, decodeErr = hex.DecodeString(metadata.TaskID)
+		if decodeErr != nil {
+			return ErrInvalidValue
+		}
+	} else {
+		if !strings.HasPrefix(metadata.RecordID, "issue:#") {
+			return nil
+		}
+		issue, parseErr := strconv.ParseUint(strings.TrimPrefix(metadata.RecordID, "issue:#"), 10, 64)
+		if parseErr != nil {
+			return nil
+		}
+		var matches int
+		if err := tx.connection.QueryRowContext(ctx, `SELECT COUNT(DISTINCT b.task_id), MIN(b.task_id) FROM intake_acceptances AS a JOIN intake_task_bindings AS b ON b.acceptance_id=a.id JOIN tasks AS t ON t.id=b.task_id JOIN task_repository_bindings AS source_binding ON source_binding.task_id=? AND source_binding.repository_id=a.repository_id WHERE a.project_id=? AND a.issue_number=?`, source.Bytes(), spec.ProjectID.Bytes(), issue).Scan(&matches, &rawTarget); err != nil {
+			return nil
+		}
+		if matches > 1 {
+			return ErrConflict
+		}
+		if matches == 0 {
+			return nil
+		}
 	}
 	targetID, err := TaskIDFromBytes(rawTarget)
 	if err != nil {

@@ -756,6 +756,75 @@ func TestSpecialistRecordNamingTaskAttachesToIt(t *testing.T) {
 	}
 }
 
+func TestIssueLinkedSpecialistContributionCreatesPeerQuestionForImportedTask(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	store, run, _ := runningWorkerRun(t)
+	defer store.Close()
+	repository, found, err := store.TaskRepository(ctx, run.TaskID)
+	if err != nil || !found {
+		t.Fatalf("source repository = %+v, %v", repository, err)
+	}
+	sourceID, err := IntakeSourceIDFromBytes(bytes.Repeat([]byte{246}, IDBytes))
+	if err != nil {
+		t.Fatal(err)
+	}
+	intake, err := store.CreateIntakeSource(ctx, NewIntakeSource{ID: sourceID, GitHubRepositoryID: 77, GitHubRepositoryName: "owner/repository", ProjectID: run.ProjectID, TargetRepositoryID: repository.ID, Policy: IntakePolicyManual, PollSeconds: 60, AdmissionLimit: 25}, mustTime(t, 40))
+	if err != nil {
+		t.Fatal(err)
+	}
+	intake, err = store.SetIntakeSourceEnabled(ctx, intake.ID, intake.Revision, true, mustTime(t, 41))
+	if err != nil {
+		t.Fatal(err)
+	}
+	snapshot := IntakeIssueSnapshot{GitHubRepositoryID: 77, IssueNumber: 12, NodeID: "issue-node", Title: "target", Body: "body", URL: "https://example.test/issues/12", AuthorLogin: "maintainer", AuthorType: GitHubAuthorUser}
+	accepted, err := store.AcceptIntakeSnapshot(ctx, intake.ID, snapshot, mustTime(t, 42))
+	if err != nil {
+		t.Fatal(err)
+	}
+	target, err := store.ImportIntakeAcceptance(ctx, accepted.ID, mustTime(t, 43), intake)
+	if err != nil {
+		t.Fatal(err)
+	}
+	newer := snapshot
+	newer.Title = "newer target"
+	if _, err := store.AcceptIntakeSnapshot(ctx, intake.ID, newer, mustTime(t, 44)); err != nil {
+		t.Fatal(err)
+	}
+	_, err = store.CreateContentForAttempt(ctx, run.CredentialDigest, knowledgeSpec(t, run.ProjectID, 247, ContentObservation, KnowledgeMetadata{Status: "tentative", RecordType: "contribution", RecordID: "issue:#12"}), mustTime(t, 45))
+	if err != nil {
+		t.Fatal(err)
+	}
+	questions, _, _, err := store.PeerQuestionsForTask(ctx, target.ID, 0, EventSequence{})
+	if err != nil || len(questions) != 1 || questions[0].SourceTaskID != run.TaskID || questions[0].TargetTaskID != target.ID {
+		t.Fatalf("issue-linked questions = %+v, %v", questions, err)
+	}
+	secondSourceID, err := IntakeSourceIDFromBytes(bytes.Repeat([]byte{248}, IDBytes))
+	if err != nil {
+		t.Fatal(err)
+	}
+	secondSource, err := store.CreateIntakeSource(ctx, NewIntakeSource{ID: secondSourceID, GitHubRepositoryID: 78, GitHubRepositoryName: "other/repository", ProjectID: run.ProjectID, TargetRepositoryID: repository.ID, Policy: IntakePolicyManual, PollSeconds: 60, AdmissionLimit: 25}, mustTime(t, 46))
+	if err != nil {
+		t.Fatal(err)
+	}
+	secondSource, err = store.SetIntakeSourceEnabled(ctx, secondSource.ID, secondSource.Revision, true, mustTime(t, 47))
+	if err != nil {
+		t.Fatal(err)
+	}
+	secondSnapshot := snapshot
+	secondSnapshot.GitHubRepositoryID, secondSnapshot.NodeID = 78, "other-issue-node"
+	secondAccepted, err := store.AcceptIntakeSnapshot(ctx, secondSource.ID, secondSnapshot, mustTime(t, 48))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.ImportIntakeAcceptance(ctx, secondAccepted.ID, mustTime(t, 49), secondSource); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.CreateContentForAttempt(ctx, run.CredentialDigest, knowledgeSpec(t, run.ProjectID, 249, ContentObservation, KnowledgeMetadata{Status: "tentative", RecordType: "contribution", RecordID: "issue:#12"}), mustTime(t, 50)); !errors.Is(err, ErrConflict) {
+		t.Fatalf("ambiguous issue-linked contribution = %v, want ErrConflict", err)
+	}
+}
+
 // Reattaching records at a later work revision must not displace distinct
 // earlier ones from what the next run carries (34 at revision 1, 32 of them
 // again at revision 2: all 34 carry, newest first).
