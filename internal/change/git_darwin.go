@@ -1444,10 +1444,28 @@ func RebaseWorktree(ctx context.Context, selection Selection, path string) (Work
 		abort := append([]string{}, gitPrefix...)
 		abort = append(abort, "rebase", "--abort")
 		aborted, abortErr := authority.run(ctx, maxGitSelectionOutput, abort...)
-		if abortErr != nil {
-			return WorktreeFacts{}, abortErr
+		if abortErr != nil || aborted.exitCode != 0 {
+			// Git may have completed the rebase before applying the autostash.
+			// In that case there is no rebase state for --abort; ORIG_HEAD is
+			// the pre-rebase branch and --merge restores the retained edits.
+			if result.exitCode != 0 || len(paths) == 0 {
+				if abortErr != nil {
+					return WorktreeFacts{}, abortErr
+				}
+				return WorktreeFacts{}, newGitError(gitFailureProcess)
+			}
+			reset, resetErr := authority.run(ctx, maxGitSelectionOutput, append(append([]string{}, gitPrefix...), "reset", "--merge", "ORIG_HEAD")...)
+			if resetErr != nil {
+				return WorktreeFacts{}, resetErr
+			}
+			if reset.exitCode != 0 {
+				return WorktreeFacts{}, newGitError(gitFailureProcess)
+			}
 		}
 		if aborted.exitCode == 0 {
+			return WorktreeFacts{}, &RebaseConflict{Paths: paths, CurrentBase: selection.base.Hex()}
+		}
+		if result.exitCode == 0 && len(paths) > 0 {
 			return WorktreeFacts{}, &RebaseConflict{Paths: paths, CurrentBase: selection.base.Hex()}
 		}
 		return WorktreeFacts{}, newGitError(gitFailureProcess)
