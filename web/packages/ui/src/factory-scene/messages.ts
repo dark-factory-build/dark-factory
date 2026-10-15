@@ -12,9 +12,9 @@ import type { ScenePoint } from "./scene.js";
 export type FloorEvent = Readonly<{
   key: string;
   kind: "assign" | "ask" | "answer" | "read" | "post";
-  /** The worker it comes from; work comes from the tray, a read from the shelf or board. */
+  /** The worker it comes from; work comes from the tray, a read from the shelf. */
   from?: string;
-  /** The worker it goes to; a post goes to the shelf or board. */
+  /** The worker it goes to; a post goes to the shelf. */
   to?: string;
   /** The question or recorded operation it shows. */
   subject?: string;

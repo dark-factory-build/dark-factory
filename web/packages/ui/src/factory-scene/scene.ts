@@ -185,7 +185,7 @@ export type SceneWorkerPlacement = Readonly<{
 }>;
 
 /** Coffee is ambient; the rest are implements, used when a recorded event says so (shelf also ambiently). */
-export type BreakRoomErrand = "shelf" | "coffee" | "board" | "tasks";
+export type BreakRoomErrand = "shelf" | "coffee" | "tasks";
 
 /** A piece of furniture and the spot a worker stands to use it. */
 export type SceneFixture = Readonly<{ errand: BreakRoomErrand; x: number; y: number; stand: ScenePoint }>;
@@ -654,15 +654,15 @@ export function placeWorkers(layout: SceneLayout, workers: readonly SceneWorker[
   return placed.sort((left, right) => compareText(left.id, right.id));
 }
 
-// Left to right along the board wall: the order the four are placed in.
-const NOOK_ORDER: readonly BreakRoomErrand[] = ["board", "tasks", "shelf", "coffee"];
+// Left to right along the break-room wall: the order the three are placed in.
+const NOOK_ORDER: readonly BreakRoomErrand[] = ["tasks", "shelf", "coffee"];
 
 /**
  * Stable furniture, never moved by data.
  * Ambient turns come first in the list, so their timing never depends on the implements beside them.
  */
 export function breakRoomNook(layout: SceneLayout) {
-  return { furniture: (["shelf", "coffee", "board", "tasks"] as const).flatMap((errand) => { const piece = layout.fixtures.find((item) => item.errand === errand); return piece === undefined || !layout.implements.includes(errand) ? [] : [{ ...piece, key: String(errand) }]; }) };
+  return { furniture: (["shelf", "coffee", "tasks"] as const).flatMap((errand) => { const piece = layout.fixtures.find((item) => item.errand === errand); return piece === undefined || !layout.implements.includes(errand) ? [] : [{ ...piece, key: String(errand) }]; }) };
 }
 
 // Each piece of furniture is visited in turns: free for the first part of a turn, then one visitor.

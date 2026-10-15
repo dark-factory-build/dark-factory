@@ -217,7 +217,7 @@ test("a large development unit fills a compact block instead of leaving a right-
   const large = unit("development", { machines: Array.from({ length: 11 }, (_, index) => machine(`job-${index}`, "job")) });
   const layout = layoutScene(sceneGraph([large]));
   assert.equal(layout.width, 452);
-  assert.equal(layout.height, 452);
+  assert.equal(layout.height, 346);
 });
 
 test("worker identity is stable while operational state changes", () => {
@@ -372,7 +372,7 @@ test("at a machine empty hands work it facing it or type, a reviewing specialist
   assert.ok(working(operator, 800).includes("person.skin.0.back.operate.1"));
   assert.ok(working(operator, 0).every((name) => !/face|system|blink|tool|held/.test(name)), `${working(operator, 0)}`);
   assert.ok(workerFrames(operator, { action: "interacting", frame: 1 }).includes("person.skin.0.back.operate.0"), "reduced motion rests on the first frame");
-  // A specialist's running review is inspection instead: it reads its board, then lowers it to look.
+  // A specialist's running review is inspection instead: it reads its clipboard, then lowers it to look.
   const specialist = { ...operator, specialist: { title: "Operations specialist", stage: "ready", text: "reviewing: make delivery reliable", next: "" } };
   const reading = (worker, at, seat, action = "interacting") => workerFrames(worker, { action, frame: 0, at }, seat).filter((name) => /skin|legs|held|tool/.test(name));
   assert.deepEqual([0, 2500].map((at) => reading(specialist, at)), [
@@ -464,9 +464,9 @@ test("resting workers take fair, uninterrupted turns at the break-room furniture
   // The furniture stands on free floor, clear of everyone resting, on a wide floor and on the narrowest.
   const wide = layoutScene(unitsOf(Array.from({ length: 16 }, (_, index) => `room-${index}`)));
   const nook = breakRoomNook(wide);
-  assert.deepEqual(nook.furniture.map((piece) => piece.errand), ["shelf", "coffee", "board", "tasks"]);
+  assert.deepEqual(nook.furniture.map((piece) => piece.errand), ["shelf", "coffee", "tasks"]);
   const narrow = layoutScene(unitsOf(["room-0"])), narrowNook = breakRoomNook(narrow);
-  assert.deepEqual(narrowNook.furniture.map((piece) => piece.errand), ["shelf", "coffee", "board", "tasks"]);
+  assert.deepEqual(narrowNook.furniture.map((piece) => piece.errand), ["shelf", "coffee", "tasks"]);
   for (const [layout, pieces, count] of [[wide, nook.furniture, 12], [narrow, narrowNook.furniture, 40]]) for (const piece of pieces) {
     assert.ok(standable(layout, piece.stand), `${piece.errand} is used from free floor`);
     for (const seat of placeWorkers(layout, Array.from({ length: count }, (_, index) => person(`rest-${index}`)))) assert.ok(Math.abs(seat.x - piece.stand.x) >= 24 || Math.abs(seat.y - piece.stand.y) >= 24, "furniture visitors do not overlap a resting worker");
@@ -532,11 +532,11 @@ test("resting workers take fair, uninterrupted turns at the break-room furniture
   assert.ok(atShelf.some((name) => name.endsWith(".hold")) && atShelf.includes("person.held.book.chest") && atShelf.some((name) => name.includes("legs.") && name.endsWith(".stand")));
   assert.ok(workerFrames(crowd[0], { action: "still", frame: 0, at: 0 }, undefined, "coffee").includes("person.held.cup.chest"));
   assert.ok(atShelf.every((name) => !name.startsWith("person.tool.")));
-  for (const implement of ["board", "tasks"]) assert.ok(workerFrames(crowd[0], { action: "still", frame: 0, at: 0 }, undefined, implement).includes("person.held.clipboard.chest"), implement);
+  assert.ok(workerFrames(crowd[0], { action: "still", frame: 0, at: 0 }, undefined, "tasks").includes("person.held.clipboard.chest"), "tasks");
   // The floor draws exactly the furniture the nook has; with the scenery off, only the implements, never the coffee.
   assert.equal((render().match(/data-break-room=/g) ?? []).length, breakRoomNook(floorFor(graph)).furniture.length);
-  assert.equal(breakRoomNook(floorFor(graph)).furniture.length, 3, "the board and shelf remain scenery beside the coffee");
-  assert.deepEqual(render({ appearance: { scenery: "off", animation: "on" }, onOpenTasks() {} }).match(/data-break-room="\w+"/g), ['data-break-room="shelf"', 'data-break-room="board"', 'data-break-room="tasks"']);
+  assert.equal(breakRoomNook(floorFor(graph)).furniture.length, 2, "the shelf remains beside the coffee");
+  assert.deepEqual(render({ appearance: { scenery: "off", animation: "on" }, onOpenTasks() {} }).match(/data-break-room="\w+"/g), ['data-break-room="shelf"', 'data-break-room="tasks"']);
 });
 
 test("a floor mounted late still starts seated, then someone gets up, stands at the furniture, and comes back", async () => {
@@ -824,12 +824,11 @@ test("stationary tasks link the existing queue and questions", () => {
   assert.doesNotMatch(noObservation, /data-human-request-id=/);
 });
 
-test("the board and shelf remain passive scenery while the task tray opens its panel", () => {
+test("the shelf remains passive scenery while the task tray opens its panel", () => {
   const markup = render({ projectId: "project-a", onOpenTasks() {} });
   assert.doesNotMatch(markup, /data-floor-tray-desk|data-common-table/);
   assert.equal((markup.match(/>WORK</g) ?? []).length, 1, "only the live-work implement is signed");
   assert.match(markup, /data-break-room="tasks" data-floor-inbox="0"[^>]*aria-label="Open Work"[^>]*role="button"[^>]*tabindex="0"/);
-  assert.match(markup, /data-break-room="board"(?![^>]*role="button")/);
   assert.match(markup, /data-break-room="shelf"(?![^>]*role="button")/);
 });
 
