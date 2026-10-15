@@ -263,10 +263,11 @@ itself, so there is no delegated pre-publication source review.
 
 An installed runtime upgrade does not update source in a retained Change.
 Before repeating a sandbox or toolchain blocker, compare its pinned source base
-with already-merged prerequisite fixes. Integrate an exact reviewed prerequisite
-into the assigned writable checkout when required, preserving current edits and
-source lineage; publication against current main must exclude changes already
-merged. Do not reset the Change or mistake the daemon revision for its source.
+with already-merged prerequisite fixes. Never integrate prerequisite work into a
+worker checkout: `--prerequisite TASK:REV` admits the consumer only once the
+producer's pull request has merged at its exact Change head, so a fresh Change
+base already contains it. Do not reset the Change or mistake the daemon
+revision for its source.
 
 Never read the daemon SQLite database, the whole daemon home, or the Changes
 parent. As overseer, run `overseer status --task TASK_ID` for the task

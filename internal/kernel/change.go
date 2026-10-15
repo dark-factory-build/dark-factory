@@ -270,9 +270,13 @@ const (
 
 // reclaimEnded and reclaimGivenUp are that rule over c (changes) and t (its
 // task), with ?1 the latest end for changeReclaimAfterEnd and ?2 for
-// changeReclaimAfterSuccess. A retained Change has no current run.
+// changeReclaimAfterSuccess. A retained Change has no current run. A task
+// still awaiting a succeeded t's work revision, even one cancelled and later
+// retried, keeps the head and base its prerequisite is judged by
+// (prerequisiteSourceRun) until it is admitted or archived.
 const (
-	reclaimEnded   = `c.phase = 'retained' AND t.status IN ('succeeded', 'failed', 'cancelled')`
+	reclaimEnded = `c.phase = 'retained' AND t.status IN ('succeeded', 'failed', 'cancelled')
+		AND NOT (t.status = 'succeeded' AND EXISTS (SELECT 1 FROM task_prerequisites AS w WHERE w.upstream_task_id = t.id AND w.upstream_work_revision = t.work_revision AND w.consumed_run_id IS NULL))`
 	reclaimGivenUp = `(EXISTS (SELECT 1 FROM ` + changePullRequests + ` AND json_extract(r.document, '$.state') = 'merged'
 			AND COALESCE(unixepoch(json_extract(r.document, '$.merged_at')) * 1000, r.observed_at_ms) >= c.updated_at_ms)
 		OR t.status IN ('failed', 'cancelled') AND t.completed_at_ms <= ?1 AND NOT EXISTS (SELECT 1 FROM ` + changePullRequests + ` AND json_extract(r.document, '$.state') = 'open')

@@ -3,9 +3,11 @@ package kernel
 import (
 	"bytes"
 	"context"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 )
@@ -146,7 +148,7 @@ func TestCancelledProducerCancelsItsQueuedConsumers(t *testing.T) {
 	if cancelled, err := store.CancelOrphanedTasks(ctx, mustTime(t, 8)); err != nil || len(cancelled) != 0 {
 		t.Fatalf("cancelled before the producer ended = %v, %v", cancelled, err)
 	}
-	if lines, err := store.Why(ctx, nil, 0, consumer.ID); err != nil || lines[len(lines)-1] != "waits on: prerequisite: task "+producer.ID.String()+" is queued at work revision 1; it needs revision 1 to succeed" {
+	if lines, err := store.Why(ctx, nil, 0, consumer.ID); err != nil || lines[len(lines)-1] != "waits on: prerequisite: task "+producer.ID.String()+" is queued at work revision 1; it needs revision 1 to succeed and merge" {
 		t.Fatalf("why = %q, %v", lines, err)
 	}
 	if _, err := store.UpdateTaskForOperator(ctx, producer.ID, producer.Revision, TaskPatch{Cancel: true}, mustTime(t, 9)); err != nil {
@@ -213,6 +215,217 @@ func TestWhySharedTaskNamesItsPausedWorker(t *testing.T) {
 	pauseAgent(t, store, worker, false, 7)
 	if lines, err := store.Why(ctx, nil, 0, shared.ID); err != nil || lines[len(lines)-1] != "waits on: worker: its task is queued for the next admission" {
 		t.Fatalf("why = %q, %v", lines, err)
+	}
+}
+
+// A succeeded producer's Change releases its consumer only once a pull request
+// published for it merged at its exact head, so the consumer's fresh base
+// contains it. Its Change is not reclaimed while the consumer waits, and is
+// once it was admitted. Each case tries admission before and after its steps.
+// TestAdmissionConsumesExactSuccessfulProducerRevision covers a producer
+// without a Change.
+func TestPrerequisiteWaitsForItsProducerToMergeAtItsExactHead(t *testing.T) {
+	t.Parallel()
+	const day = 24 * 60 * 60 * 1000
+	for _, test := range []struct {
+		name     string
+		unmoved  bool
+		steps    []string
+		revision int64
+		admitted bool
+	}{
+		{name: "Change that kept its base", unmoved: true, steps: []string{"reclaim"}, admitted: true},
+		{name: "unpublished", revision: 1},
+		{name: "open or failing pull request", steps: []string{"open"}, revision: 1},
+		{name: "closed unmerged pull request", steps: []string{"closed"}, revision: 1},
+		{name: "merged at another head", steps: []string{"merged other", "reclaim"}, revision: 1},
+		{name: "merged at its exact head", steps: []string{"open", "merged", "reclaim"}, revision: 1, admitted: true},
+		{name: "sent back, then merged at the replaced head", steps: []string{"open", "send back", "merged"}, revision: 2},
+		{name: "unpublished past its reclaim deadline", steps: []string{"reclaim"}, revision: 1},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+			ctx := context.Background()
+			proposal, _ := NewSuccessProposal("producer result")
+			store, finalizing := finalizingReleasedRun(t, RoleWorker, proposal)
+			defer store.Close()
+			change, _, err := store.Change(ctx, *finalizing.ChangeID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			moved := *change.HeadCommit
+			if !test.unmoved {
+				moved, _ = NewCommitID(change.Selection.format, bytes.Repeat([]byte{0xd2}, change.Selection.format.oidLength()))
+			}
+			settlement, _ := NewRetainedChangeSettlement(change.Revision, &moved)
+			producer, err := store.FinalizeWorkerRun(ctx, finalizing.ID, finalizing.Revision, settlement, mustTime(t, 60))
+			if err != nil {
+				t.Fatal(err)
+			}
+			consumerAgent, err := store.CreateAgent(ctx, NewAgent{ID: agentID(t, 225), ProjectID: producer.ProjectID, Name: "consumer", Role: RoleOrchestrator, Provider: ProviderCodex, ToolBudgetLimit: 5}, mustTime(t, 61))
+			if err != nil {
+				t.Fatal(err)
+			}
+			consumer, err := store.EnqueueTask(ctx, NewTask{ID: taskID(t, 229), ProjectID: producer.ProjectID, AssignedAgentID: consumerAgent.ID, IncarnationID: incarnationID(t, 230), Title: "consumer", Priority: 10, Prerequisites: []TaskPrerequisite{{TaskID: producer.TaskID, WorkRevision: mustRevision(t, 1)}}}, mustTime(t, 62))
+			if err != nil {
+				t.Fatal(err)
+			}
+			reclaim := func(at int64) error {
+				t.Helper()
+				current, _, err := store.Change(ctx, change.ID)
+				if err != nil {
+					t.Fatal(err)
+				}
+				_, err = store.ReclaimChange(ctx, change.ID, current.Revision, !test.unmoved, mustTime(t, at))
+				return err
+			}
+			admit := func(seed byte, at int64) bool {
+				t.Helper()
+				result, err := store.AdmitNext(ctx, admissionKeys(t, seed, nil), mustTime(t, at))
+				if err != nil {
+					t.Fatalf("admission at %d: %v", at, err)
+				}
+				return result.Admitted() && result.Run.TaskID == consumer.ID
+			}
+			at := int64(63)
+			if test.unmoved || !admit(100, at) {
+				head := hex.EncodeToString(moved.Bytes())
+				pr := ProductionPullRequest{Number: 7, Title: "Ship", URL: "https://github.com/example/factory/pull/7", Head: head, Branch: "factory/" + change.ID.String()[:12], Base: "main", State: "open", Review: ProductionReview{Head: head, State: "unknown"}}
+				published := false
+				for _, step := range test.steps {
+					at += 10
+					switch step {
+					case "send back":
+						task, _, err := store.Task(ctx, producer.TaskID)
+						if err != nil {
+							t.Fatal(err)
+						}
+						if _, err := store.SendBackTask(ctx, nil, producer.TaskID, task.Revision, head, "correct producer", mustTime(t, at)); err != nil {
+							t.Fatal(err)
+						}
+					case "reclaim":
+						if at += 30 * day; reclaim(at) == nil {
+							t.Fatal("Change reclaimed while its consumer waits on it")
+						}
+					default:
+						if !published {
+							if err := store.RecordPublication(ctx, producer.ProjectID, producer.TaskID, "example/factory", pr, mustTime(t, at)); err != nil {
+								t.Fatal(err)
+							}
+							published, at = true, at+1
+						}
+						observed := pr
+						observed.State = strings.Fields(step)[0]
+						if strings.HasSuffix(step, " other") {
+							observed.Head = strings.Repeat("e", len(head))
+						}
+						if err := store.RecordProductionObservation(ctx, producer.ProjectID, ProductionObservation{Repository: "example/factory", ObservedAt: at, PullRequests: []ProductionPullRequest{observed}, Checks: []ProductionCheck{}}, mustTime(t, at)); err != nil {
+							t.Fatal(err)
+						}
+					}
+				}
+				if got := admit(110, at+1); got != test.admitted {
+					t.Fatalf("consumer admitted = %t, want %t", got, test.admitted)
+				}
+				if test.admitted {
+					if err := reclaim(at + 31*day); err != nil {
+						t.Fatalf("reclaim after admission: %v", err)
+					}
+				}
+			} else {
+				t.Fatal("consumer admitted before its producer's work merged")
+			}
+			var revision int64
+			var consumed []byte
+			if err := store.readers.QueryRow(`SELECT upstream_work_revision, consumed_run_id FROM task_prerequisites WHERE task_id = ?`, consumer.ID.Bytes()).Scan(&revision, &consumed); err != nil {
+				t.Fatal(err)
+			}
+			if test.admitted && !bytes.Equal(consumed, producer.ID.Bytes()) || !test.admitted && (consumed != nil || revision != test.revision) {
+				t.Fatalf("prerequisite = revision %d consumed %x", revision, consumed)
+			}
+			if !test.admitted {
+				want := fmt.Sprintf(" at work revision %d; it needs revision %d to succeed and merge", test.revision, test.revision)
+				if lines, err := store.Why(ctx, nil, 0, consumer.ID); err != nil || !strings.HasSuffix(lines[len(lines)-1], want) {
+					t.Fatalf("why = %q, %v", lines, err)
+				}
+			}
+			if err := store.Validate(ctx); err != nil {
+				t.Fatal(err)
+			}
+		})
+	}
+}
+
+// A Change reclaimed before its consumer was added has lost the head and base
+// its prerequisite is judged by, so the prerequisite is refused, not stranded.
+func TestPrerequisiteOnAReclaimedProducerChangeIsRefused(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	proposal, _ := NewSuccessProposal("producer result")
+	store, finalizing := finalizingReleasedRun(t, RoleWorker, proposal)
+	defer store.Close()
+	producer, err := finalizeTestRun(t, store, finalizing, 60)
+	if err != nil {
+		t.Fatal(err)
+	}
+	change, _, err := store.Change(ctx, *producer.ChangeID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.ReclaimChange(ctx, change.ID, change.Revision, false, mustTime(t, 61)); err != nil {
+		t.Fatal(err)
+	}
+	_, err = store.EnqueueTask(ctx, NewTask{ID: taskID(t, 229), ProjectID: producer.ProjectID, IncarnationID: incarnationID(t, 230), Title: "consumer", Prerequisites: []TaskPrerequisite{{TaskID: producer.TaskID, WorkRevision: mustRevision(t, 1)}}}, mustTime(t, 62))
+	if !errors.Is(err, ErrConflict) || !strings.Contains(err.Error(), "cannot be shown installed") {
+		t.Fatalf("enqueue on a reclaimed producer = %v", err)
+	}
+}
+
+// A consumer cancelled before admission may be retried, so its prerequisite
+// still keeps the producer's Change from reclamation until it is admitted.
+func TestCancelledConsumerKeepsItsProducerChangeForItsRetry(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	proposal, _ := NewSuccessProposal("producer result")
+	store, finalizing := finalizingReleasedRun(t, RoleWorker, proposal)
+	defer store.Close()
+	producer, err := finalizeTestRun(t, store, finalizing, 60)
+	if err != nil {
+		t.Fatal(err)
+	}
+	consumer, err := store.EnqueueTask(ctx, NewTask{ID: taskID(t, 229), ProjectID: producer.ProjectID, IncarnationID: incarnationID(t, 230), Title: "consumer", Prerequisites: []TaskPrerequisite{{TaskID: producer.TaskID, WorkRevision: mustRevision(t, 1)}}}, mustTime(t, 61))
+	if err != nil {
+		t.Fatal(err)
+	}
+	consumer, err = store.UpdateTaskForOperator(ctx, consumer.ID, consumer.Revision, TaskPatch{Cancel: true}, mustTime(t, 62))
+	if err != nil {
+		t.Fatal(err)
+	}
+	reclaim := func(at int64) error {
+		t.Helper()
+		change, _, err := store.Change(ctx, *producer.ChangeID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		_, err = store.ReclaimChange(ctx, change.ID, change.Revision, false, mustTime(t, at))
+		return err
+	}
+	if reclaim(63) == nil {
+		t.Fatal("Change reclaimed while a cancelled consumer may still be retried")
+	}
+	retried, err := store.RetryTask(ctx, nil, consumer.ID, consumer.Revision, AgentID{}, mustTime(t, 64), 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, err := store.AdmitNext(ctx, admissionKeys(t, 100, nil), mustTime(t, 65))
+	if err != nil || !result.Admitted() || result.Run.TaskID != retried.ID {
+		t.Fatalf("retried consumer admission = %+v, %v", result, err)
+	}
+	if err := reclaim(66); err != nil {
+		t.Fatalf("reclaim after admission: %v", err)
+	}
+	if err := store.Validate(ctx); err != nil {
+		t.Fatal(err)
 	}
 }
 

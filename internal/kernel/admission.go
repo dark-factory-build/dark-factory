@@ -11,6 +11,17 @@ import (
 // taskQueueOrder is shared by admission and the browser queue projection.
 const taskQueueOrder = `priority DESC, created_at_ms ASC, id ASC`
 
+// prerequisiteSourceRun selects the producer run that satisfies prerequisite:
+// its succeeded run at the awaited work revision, whose Change, unless it kept
+// its base, is installed: a pull request published for it merged at its exact
+// head, so the consumer's fresh base contains it. A Change is not reclaimed,
+// losing those facts, while a queued task awaits it (reclaimEnded). A run
+// without a Change (an overseer's) has no merge to wait for.
+const prerequisiteSourceRun = `SELECT source_run.id FROM tasks AS upstream JOIN runs AS source_run ON source_run.task_id = upstream.id AND source_run.project_id = upstream.project_id AND source_run.task_incarnation_id = upstream.incarnation_id AND source_run.admitted_task_work_revision = prerequisite.upstream_work_revision AND source_run.phase = 'terminal' AND source_run.terminal_kind = 'succeeded'
+	WHERE upstream.id = prerequisite.upstream_task_id AND upstream.status = 'succeeded' AND upstream.work_revision = prerequisite.upstream_work_revision
+	  AND NOT EXISTS (SELECT 1 FROM changes AS c WHERE c.settled_run_id = source_run.id AND (c.head_commit IS NULL OR c.head_commit <> c.base_commit)
+	    AND NOT EXISTS (SELECT 1 FROM ` + changePullRequests + ` AND json_extract(r.document, '$.state') = 'merged' AND lower(json_extract(r.document, '$.head')) = lower(hex(c.head_commit))))`
+
 func (store *Store) AdmitNext(ctx context.Context, keys AdmissionKeys, at UnixMillis) (AdmissionResult, error) {
 	if !keys.valid() {
 		return AdmissionResult{}, fmt.Errorf("%w: invalid admission request", ErrInvalidValue)
@@ -63,7 +74,7 @@ func (store *Store) AdmitNext(ctx context.Context, keys AdmissionKeys, at UnixMi
               AND NOT EXISTS (SELECT 1 FROM intake_task_bindings AS binding JOIN intake_acceptances AS acceptance ON acceptance.id = binding.acceptance_id WHERE binding.task_id = t.id AND acceptance.withdrawn_at_ms IS NOT NULL)
 			  AND a.paused = 0 AND a.archived = 0
 			  AND NOT EXISTS (SELECT 1 FROM runs AS r WHERE r.agent_id = a.id AND r.phase <> 'terminal')
-			  AND NOT EXISTS (SELECT 1 FROM task_prerequisites AS prerequisite WHERE prerequisite.task_id = t.id AND prerequisite.consumed_run_id IS NULL AND NOT EXISTS (SELECT 1 FROM tasks AS upstream JOIN runs AS source_run ON source_run.task_id = upstream.id AND source_run.project_id = upstream.project_id AND source_run.task_incarnation_id = upstream.incarnation_id AND source_run.admitted_task_work_revision = prerequisite.upstream_work_revision AND source_run.phase = 'terminal' AND source_run.terminal_kind = 'succeeded' WHERE upstream.id = prerequisite.upstream_task_id AND upstream.status = 'succeeded' AND upstream.work_revision = prerequisite.upstream_work_revision))
+			  AND NOT EXISTS (SELECT 1 FROM task_prerequisites AS prerequisite WHERE prerequisite.task_id = t.id AND prerequisite.consumed_run_id IS NULL AND NOT EXISTS (`+prerequisiteSourceRun+`))
 			  AND NOT EXISTS (SELECT 1 FROM task_conflict_paths AS candidate_path JOIN task_conflict_paths AS active_path ON active_path.path = candidate_path.path JOIN tasks AS active ON active.id = active_path.task_id JOIN task_repository_bindings AS candidate_repository ON candidate_repository.task_id = t.id JOIN task_repository_bindings AS active_repository ON active_repository.task_id = active.id AND active_repository.repository_id = candidate_repository.repository_id WHERE candidate_path.task_id = t.id AND active.project_id = t.project_id AND active.status = 'running')
 			  AND NOT (`+specialistCarrierSQL+` AND `+specialistCarrierHeldSQL+`)
 			  AND ((a.role = 'worker' AND (SELECT COUNT(*) FROM runs WHERE role = 'worker' AND phase <> 'terminal') < ?1)
@@ -199,7 +210,7 @@ func (store *Store) AdmitNext(ctx context.Context, keys AdmissionKeys, at UnixMi
 	if err != nil {
 		return AdmissionResult{}, tx.Rollback(classifyAdmissionConflict(ctx, tx.connection, keys, err))
 	}
-	_, err = tx.connection.ExecContext(ctx, `UPDATE task_prerequisites AS prerequisite SET consumed_run_id = (SELECT source_run.id FROM tasks AS upstream JOIN runs AS source_run ON source_run.task_id = upstream.id AND source_run.project_id = upstream.project_id AND source_run.task_incarnation_id = upstream.incarnation_id AND source_run.admitted_task_work_revision = prerequisite.upstream_work_revision AND source_run.phase = 'terminal' AND source_run.terminal_kind = 'succeeded' WHERE upstream.id = prerequisite.upstream_task_id AND upstream.status = 'succeeded' AND upstream.work_revision = prerequisite.upstream_work_revision) WHERE prerequisite.task_id = ? AND consumed_run_id IS NULL`, task.ID.Bytes())
+	_, err = tx.connection.ExecContext(ctx, `UPDATE task_prerequisites AS prerequisite SET consumed_run_id = (`+prerequisiteSourceRun+`) WHERE prerequisite.task_id = ? AND consumed_run_id IS NULL`, task.ID.Bytes())
 	if err != nil {
 		return AdmissionResult{}, tx.Rollback(err)
 	}

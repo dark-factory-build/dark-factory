@@ -380,9 +380,9 @@ func whyTaskWaits(ctx context.Context, c *sql.Conn, task Task) (string, error) {
 		err = c.QueryRowContext(ctx, `SELECT COALESCE(
 			(SELECT 'factoryd: dispatch is disabled' FROM factory WHERE dispatch_enabled = 0),
 			(SELECT 'intake: its issue was withdrawn' WHERE `+taskIssueWithdrawn+`),
-			(SELECT 'prerequisite: task ' || lower(hex(u.id)) || ' is ' || u.status || ' at work revision ' || u.work_revision || '; it needs revision ' || p.upstream_work_revision || ' to succeed'
-				FROM task_prerequisites AS p JOIN tasks AS u ON u.id = p.upstream_task_id
-				WHERE p.task_id = t.id AND p.consumed_run_id IS NULL AND NOT (u.status = 'succeeded' AND u.work_revision = p.upstream_work_revision)),
+			(SELECT 'prerequisite: task ' || lower(hex(u.id)) || ' is ' || u.status || ' at work revision ' || u.work_revision || '; it needs revision ' || prerequisite.upstream_work_revision || ' to succeed and merge'
+				FROM task_prerequisites AS prerequisite JOIN tasks AS u ON u.id = prerequisite.upstream_task_id
+				WHERE prerequisite.task_id = t.id AND prerequisite.consumed_run_id IS NULL AND NOT EXISTS (`+prerequisiteSourceRun+`)),
 			(SELECT 'conflict path: ' || mine.path || ' is held by running task ' || lower(hex(a.id))
 				FROM task_conflict_paths AS mine JOIN task_conflict_paths AS theirs ON theirs.path = mine.path JOIN tasks AS a ON a.id = theirs.task_id AND a.project_id = t.project_id AND a.status = 'running'
 				JOIN task_repository_bindings AS mr ON mr.task_id = t.id JOIN task_repository_bindings AS ar ON ar.task_id = a.id AND ar.repository_id = mr.repository_id
