@@ -425,12 +425,9 @@ test("Work ranks an open request and a blocked task above queued work, Work badg
   await act(async () => tree.unmount());
 });
 
-test("an overseer pass stays hidden, but its request row does not", () => {
+test("an overseer pass is shown in Work", () => {
   const overseerTask = { ...fixtureState.tasks.get(ids.task), assigned_agent_id: ids.orchestrator };
-  const request = fixtureState.humanRequests.get(ids.request);
-  const hide = render({ detail: "work", state: baseState({ tasks: new Map([[overseerTask.id, overseerTask]]), humanRequests: new Map() }) });
-  assert.doesNotMatch(hide, /Review the state projection/);
-  assert.match(render({ detail: "work", state: baseState({ tasks: new Map([[overseerTask.id, overseerTask]]), humanRequests: new Map([[request.id, request]]) }) }), /Review the state projection/);
+  assert.match(render({ detail: "work", state: baseState({ tasks: new Map([[overseerTask.id, overseerTask]]), humanRequests: new Map() }) }), /Review the state projection/);
 });
 
 test("a succeeded task linked to an open PR is in review with its PR cell", () => {
@@ -451,7 +448,7 @@ test("a task-less production row opens its pull request and keeps its stages", (
   assert.match(markup, /data-stage="in-review">in review/);
 });
 
-test("Work is one ranked list: blocked work first, overseer passes hidden unless they need you, flags dispatch off and queues new work", async () => {
+test("Work is one ranked list: blocked work first, every origin shown, flags dispatch off and queues new work", async () => {
   const running = fixtureState.tasks.get(ids.task);
   const supervisor = fixtureState.agents.get(ids.orchestrator);
   const state = baseState({
@@ -478,11 +475,11 @@ test("Work is one ranked list: blocked work first, overseer passes hidden unless
   await act(async () => { panel.findByProps({ "aria-label": "Retry Stuck on a prerequisite" }).props.onClick(); });
   assert.deepEqual(edits.at(-1), ["b1".repeat(16), { retry: true }], "or sent round again in one step");
   const titled = (title) => panel.findAllByType("button").some((button) => button.children.join("") === title);
-  assert.ok(!titled("Standing instruction"), "an overseer pass is hidden");
-  assert.ok(titled("Overseer stuck"), "unless it needs you");
+  assert.ok(titled("Standing instruction") && titled("Overseer stuck"), "overseer passes are never hidden by origin");
   assert.equal(panel.findAllByProps({ "aria-label": "Work filter" }).length + panel.findAllByProps({ "aria-label": "Show overseer and specialist passes" }).length, 0, "no filter or reveal control");
   const order = panel.findAllByProps({ className: "dfConsoleItem__taskTitle dfWorkRow__title" }).map((row) => row.children.join(""));
   assert.ok(order.indexOf("Overseer stuck") < order.indexOf("Tighten the queue ordering") && order.indexOf("Stuck on a prerequisite") < order.indexOf("Tighten the queue ordering"), "needs-you rows rank above queued work");
+  assert.ok(order.indexOf("Overseer stuck") < order.indexOf("Standing instruction"), "needs-you rows rank above running work");
   assert.ok(panel.findAllByProps({ role: "status" }).some((node) => node.children.join("").includes("New work is paused")));
   const form = panel.findByProps({ "aria-label": "New task" });
   const values = { target: `any:${ids.project}`, instruction: " Ship it " };
