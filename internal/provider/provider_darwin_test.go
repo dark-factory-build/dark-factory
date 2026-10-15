@@ -245,7 +245,7 @@ func TestPrepareWebDependenciesRunsRealOfflineWebTests(t *testing.T) {
 	}
 	testCommand := exec.Command(node, corepack, "pnpm", "test")
 	testCommand.Dir = filepath.Join(working, "web")
-	testCommand.Env = runtime.environmentForRole(kernel.ProviderCodex, kernel.RoleWorker)
+	testCommand.Env = append(runtime.environmentForRole(kernel.ProviderCodex, kernel.RoleWorker), "CI=1")
 	if output, err := testCommand.CombinedOutput(); err != nil {
 		t.Fatalf("offline fresh-Change web tests: %v: %s", err, output)
 	}

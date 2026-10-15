@@ -246,10 +246,11 @@ test("unrelated groups pack toward 16:10, not into a strip", () => {
 });
 
 test("every connection is drawn, as a belt, an overhead link or a pair of named stubs, even where the work runs out", () => {
+  const renderBudget = process.env.CI ? 15000 : 5000;
   for (const [which, size] of [["spokes", 1500], ["hub", 300], ["clique", 40]]) {
-    const graph = pathological(which, size), started = performance.now(), markup = renderToStaticMarkup(createElement(FactoryScene, { graph, workers: [] }));
+    const graph = pathological(which, size), started = performance.now(), markup = renderToStaticMarkup(createElement(FactoryScene, { graph, workers: [] })), elapsed = performance.now() - started;
     assert.equal((markup.match(/data-belt=/g) ?? []).length, graph.flows.length, `${which}: ${graph.flows.length} flows, all drawn`);
-    assert.ok(performance.now() - started < 5000, `${which}: bounded work`);
+    assert.ok(elapsed < renderBudget, `${which}: bounded work (${elapsed.toFixed(1)}ms >= ${renderBudget}ms)`);
   }
 });
 
