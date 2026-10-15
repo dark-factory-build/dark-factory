@@ -1014,11 +1014,9 @@ test("stationary active workers animate while idle, reduced, hidden and disconne
 
 
 test("a reviewer uses its tooltip without a proposal-selection control", async () => {
-  const operations = ["addition", "modification", "removal", "move"].map((kind) => ({ entityId: "lib-in", unitId: "lib", path: `internal/lib/${kind}.go`, kind }));
-  const items = [{ id: "first", title: "First change", state: "active", operations }, { id: "second", title: "Second change", state: "stale", operations: [operations[1]] }];
   const actors = [{ ...workers[0], id: "review-run", nodeId: "lib", observedBayId: "lib-in", review: { proposalId: "first", scope: "Assigned changed paths; file inspection unavailable" } }];
   let tree;
-  await act(async () => { tree = create(createElement(FactoryScene, { graph, appearance: scenic, workers: actors, proposals: { items } })); });
+  await act(async () => { tree = create(createElement(FactoryScene, { graph, appearance: scenic, workers: actors })); });
   const reviewer = tree.root.findByProps({ "data-reviewer-id": "review-run" });
   assert.equal(tree.root.findAllByProps({ "data-worker-id": "review-run" }).length, 1);
   assert.equal(reviewer.findAll((node) => node.props.role === "button").length, 0);
@@ -1297,21 +1295,20 @@ test("the outbound line puts each change request at the station its records name
   assert.match(atStation(crates, 2).stage, /Correction/);
 
   const markup = render({ crates, connected: true });
-  assert.deepEqual([...markup.matchAll(/data-crate-station="(\d)"( data-fault="")?[^>]*aria-label="PR #(\d+)/g)].map((match) => [Number(match[3]), Number(match[1]), match[2] !== undefined]).sort((a, b) => a[0] - b[0]),
-    crates.map((crate) => [crate.number, crate.station, crate.fault]).sort((a, b) => a[0] - b[0]), "drawn where the records put them");
-  assert.match(markup, /aria-label="PR #2 Change 2: Correction/, "the button names the number, title and stage");
-  assert.equal((markup.match(/data-fault=""/g) ?? []).length, 2, "a blocked review and a failed check show the fault");
+  assert.deepEqual([...markup.matchAll(/<span>(Review|Checks|Merge queue|Shipped) <strong>(\d+)<\/strong><\/span>/g)].map((match) => [match[1], Number(match[2])]),
+    [["Review", 2], ["Checks", 2], ["Merge queue", 1], ["Shipped", 1]], "stage counts follow LINE_STATIONS order");
+  assert.doesNotMatch(markup, /data-crate|data-lit|<details/);
   const empty = render({ connected: true });
   assert.match(empty, /data-work-line/, "the line is always there");
-  assert.doesNotMatch(empty, /data-crate=/, "with no change requests, nothing on it");
-  assert.doesNotMatch(render({ crates: [], connected: true }), /data-crate/);
+  assert.doesNotMatch(empty, /data-crate|data-lit/);
+  assert.doesNotMatch(render({ crates: [], connected: true }), /data-crate|data-lit/);
 
   assert.ok(markup.indexOf('data-work-line') < markup.indexOf('class="dfFactoryFloor__viewport"'), "progress lives in the header");
   assert.doesNotMatch(markup, /data-development=/);
   const many = Array.from({ length: 11 }, (_, index) => ({ id: `c${index}`, number: index + 1, title: "x", station: 0, stage: "Review pending", fault: false, taskIds: [] }));
   const all = render({ crates: many });
   assert.equal(all, render({ crates: [...many].reverse() }));
-  assert.deepEqual([...all.matchAll(/aria-label="PR #(\d+)/g)].map((match) => Number(match[1])), [11, 10, 9, 8, 7, 6, 5, 4, 3, 2, 1], "every PR is reachable, newest first");
+  assert.match(all, /Review <strong>11<\/strong>/);
 });
 
 test("the console and factoryd put the shared fixture's records at the same stations", () => {
@@ -1328,29 +1325,28 @@ test("the public floor puts crates on the line by station, with a number and tit
   assert.deepEqual(crates.map((crate) => [crate.id, crate.station, crate.fault, crate.number, crate.title]), [["f".repeat(32), 2, false, 7, "Fix it"], ["e".repeat(32), 0, true, 0, ""]]);
   assert.deepEqual(publicFloor({ ...world, crates: undefined }).crates, [], "an older factory publishes no line");
   const markup = render({ crates, connected: true });
-  assert.match(markup, /data-crate="e{32}" data-crate-station="0" data-fault=""[^>]*aria-label="A change request: Review, needs correction"/);
-  assert.match(markup, /aria-label="PR #7 Fix it: Merge queue"/);
-  assert.equal(markup.match(/PR #/g)?.length, 1, "only the published crate is named");
+  assert.match(markup, /Review <strong>1<\/strong>/);
+  assert.match(markup, /Merge queue <strong>1<\/strong>/);
+  assert.doesNotMatch(markup, /data-crate|data-lit|PR #/);
 });
 
-test("header PRs follow recorded stages, light affected machines and open Work", async () => {
+test("header PRs show exact stage counts in order and retain connection state", async () => {
   const changedGraph = sceneGraph([unit("a")]);
   const crate = { id: "k1", number: 1, title: "Fix", station: 0, stage: "Review", fault: false, taskIds: [] };
-  const props = { graph: changedGraph, workers: [], connected: true, proposals: { items: [{ id: "k1", title: "Fix", state: "open", operations: [{ entityId: "a", kind: "modify" }] }] } };
+  const props = { graph: changedGraph, workers: [], connected: true };
   let tree;
   try {
     await act(async () => { tree = create(createElement(FactoryScene, { ...props, crates: [crate] })); });
-    const target = () => tree.root.findByProps({ "data-crate": "k1" });
-    assert.equal(target().props.tabIndex, 0, "WorkLine crates remain keyboard-focusable");
-    await act(async () => target().props.onFocus());
-    assert.ok(tree.root.findAll((node) => node.type === "rect" && node.props["data-lit"] !== undefined).length > 0);
-    assert.equal(typeof target().props.onClick, "undefined");
-    await act(async () => { tree.update(createElement(FactoryScene, { ...props, crates: [{ ...crate, station: 2, stage: "Queued" }] })); });
-    assert.equal(target().props["data-crate-station"], 2);
+    const line = tree.root.findByProps({ "data-work-line": "" });
+    const text = (node) => node.children.map((child) => typeof child === "string" ? child : child.children.join("")).join("");
+    assert.deepEqual(line.findAllByType("span").map(text), ["Review 1", "Checks 0", "Merge queue 0", "Shipped 0"]);
+    assert.equal(line.findAll((node) => node.props["data-crate"] !== undefined).length, 0);
+    assert.equal(line.findAll((node) => node.props["data-lit"] !== undefined).length, 0);
     await act(async () => { tree.update(createElement(FactoryScene, { ...props, connected: false, crates: [crate] })); });
-    assert.ok(JSON.stringify(tree.toJSON()).includes("Disconnected · showing last known changes"));
+    assert.deepEqual(tree.root.findByProps({ "data-work-line": "" }).findAllByType("span").slice(0, 4).map(text), ["Review —", "Checks —", "Merge queue —", "Shipped —"]);
+    assert.match(text(tree.root.findByProps({ className: "dfWorkLine__state" })), /Disconnected/);
     await act(async () => { tree.update(createElement(FactoryScene, { ...props, connected: false, crates: undefined })); });
-    assert.ok(JSON.stringify(tree.toJSON()).includes("Not connected yet"));
-    assert.equal(JSON.stringify(tree.toJSON()).includes("last known"), false, "a never-connected line claims no remembered changes");
+    assert.deepEqual(tree.root.findByProps({ "data-work-line": "" }).findAllByType("span").slice(0, 4).map(text), ["Review —", "Checks —", "Merge queue —", "Shipped —"]);
+    assert.match(text(tree.root.findByProps({ className: "dfWorkLine__state" })), /Not connected yet/);
   } finally { if (tree) await act(async () => tree.unmount()); }
 });
