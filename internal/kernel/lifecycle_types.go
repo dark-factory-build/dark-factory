@@ -788,7 +788,8 @@ type Resource struct {
 
 // AttemptResult is the bounded, single-use fact authenticated from the exact
 // no-replace result artifact. It deliberately carries no message, timestamp,
-// caller-selected outcome, or filesystem pathname.
+// caller-selected outcome, or filesystem pathname. Only output, the daemon's
+// own redacted tail of the provider terminal, explains a provider exit.
 type AttemptResult struct {
 	runID             RunID
 	attemptDigest     AttemptDigest
@@ -797,6 +798,17 @@ type AttemptResult struct {
 	kind              AttemptResultKind
 	processIdentity   ResourceIdentity
 	exit              AttemptResultExit
+	output            string
+}
+
+// MaxProviderOutputBytes bounds the terminal tail a provider exit carries.
+const MaxProviderOutputBytes = 1024
+
+// WithProviderOutput attaches the provider's last terminal text, which a
+// provider exit before any outcome records in its failure detail.
+func (result AttemptResult) WithProviderOutput(text string) AttemptResult {
+	result.output = text
+	return result
 }
 
 type AttemptResultKind uint8
@@ -882,7 +894,7 @@ func (result AttemptResult) Exit() (AttemptResultExit, bool) {
 }
 
 func (result AttemptResult) valid() bool {
-	if result.runID.zero() || !result.runtimeIdentity.validFor(ResourceRuntimeRoot) {
+	if result.runID.zero() || !result.runtimeIdentity.validFor(ResourceRuntimeRoot) || len(result.output) > MaxProviderOutputBytes || !utf8.ValidString(result.output) {
 		return false
 	}
 	switch result.kind {

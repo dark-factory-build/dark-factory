@@ -233,7 +233,7 @@ func TestConsumeConvergedResultMatrixAndConcurrentConflict(t *testing.T) {
 	wait.Add(2)
 	errs := make(chan error, 2)
 	for _, result := range []AttemptResult{zero, one} {
-		result := result
+		result := result.WithProviderOutput("Error: failed to resume session")
 		go func() {
 			defer wait.Done()
 			<-start
@@ -259,7 +259,7 @@ func TestConsumeConvergedResultMatrixAndConcurrentConflict(t *testing.T) {
 		t.Fatalf("concurrent results success/failure = %d/%d", successes, failures)
 	}
 	fresh, found, err := store.Run(ctx, run.ID)
-	if err != nil || !found || fresh.Phase != RunFinalizing || fresh.ProviderExit == nil || fresh.ProviderExit.Sequence() != 1 || fresh.Proposal == nil || fresh.Proposal.code != FailureProviderExit {
+	if err != nil || !found || fresh.Phase != RunFinalizing || fresh.ProviderExit == nil || fresh.ProviderExit.Sequence() != 1 || fresh.Proposal == nil || fresh.Proposal.code != FailureProviderExit || fresh.Proposal.detail != "provider exited before an attempt outcome: Error: failed to resume session" {
 		t.Fatalf("winning result = %+v found=%v err=%v", fresh, found, err)
 	}
 	resources = resourcesForRunTest(t, store, run.ID)
