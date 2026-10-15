@@ -1938,6 +1938,26 @@ func TestNativeProvidersShareTheBootstrapPrompt(t *testing.T) {
 	}
 }
 
+func TestBootstrapPromptSettlesMergedLiveObservation(t *testing.T) {
+	installation, runtime, _ := nativeFixture(t, kernel.ProviderCodex)
+	request := roleRequestFor(t, kernel.ProviderCodex, installation, runtime, "", "", kernel.RoleOrchestrator)
+	prompt := bootstrapPromptFor(request, "factory_attempt")
+	if strings.Contains(prompt, "send-back that task at its line's change head") {
+		t.Fatal("bootstrap prompt sends a merged task back for live observation")
+	}
+	for _, want := range []string{
+		"if the signal is pending or does not hold but no concrete code defect is identified",
+		"record the quoted gap and exact external gate",
+		"finish successfully without sending the merged task back",
+		"create new actionable intake work for the correction",
+		"never resurrecting the merged task",
+	} {
+		if !strings.Contains(prompt, want) {
+			t.Fatalf("bootstrap prompt lacks %q", want)
+		}
+	}
+}
+
 func TestCustomerMaintainerIsOrchestratorOnly(t *testing.T) {
 	for _, kind := range []kernel.Provider{kernel.ProviderCodex, kernel.ProviderClaudeCode} {
 		t.Run(kind.String(), func(t *testing.T) {
