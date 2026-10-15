@@ -1753,6 +1753,18 @@ func TestSupervisorProviderExitWithoutTypedOutcomeFails(t *testing.T) {
 	fixture.assertOneWitness(t)
 }
 
+func TestSupervisorProviderExitCarriesItsStderr(t *testing.T) {
+	fixture := newSupervisorFixture(t, "set -eu\nprintf x >> __WITNESS__\nprintf 'Error: failed to resume session\\n' >&2\nexit 1\n")
+	run, err := fixture.daemon.RunNext(context.Background(), fixture.spec)
+	if err != nil {
+		t.Fatalf("RunNext: %v", err)
+	}
+	fixture.assertTerminal(t, run, kernel.OutcomeFailed)
+	if run.Proposal == nil || run.Proposal.Code() != kernel.FailureProviderExit || run.Proposal.Detail() != "provider exited before an attempt outcome: Error: failed to resume session" {
+		t.Fatalf("provider exit proposal = %+v", run.Proposal)
+	}
+}
+
 func TestSupervisorPersistsOuterRunnerExitNotProviderExit(t *testing.T) {
 	fixture := newSupervisorFixture(t, providerExitAfterSuccessProgram(t, 7))
 	run, err := fixture.daemon.RunNext(context.Background(), fixture.spec)

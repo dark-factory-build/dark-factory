@@ -310,6 +310,9 @@ func (store *Store) ConsumeAttemptResult(ctx context.Context, result AttemptResu
 			failureCode, detail = FailureSpawn, "runner converged without a registered inner process"
 		} else if run.Phase == RunRunning {
 			failureCode, detail = FailureProviderExit, "provider exited before an attempt outcome"
+			if result.output != "" {
+				detail += ": " + result.output
+			}
 		}
 		proposal, _ := NewFailureProposal(failureCode, detail)
 		kind, code, proposalDetail, proposalResult := proposalSQL(proposal)

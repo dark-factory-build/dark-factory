@@ -41,7 +41,8 @@ head (section 5). Record the next action and its existing task, Change, PR or op
 identity in the retained result so a later pass can continue without duplication.
 An unavailable authority or exhausted repair allowance needs a precise escalation,
 not a claim that delegation completed the objective. A worker run that ended
-`failed` with `provider exited before an attempt outcome` proves nothing about
+`failed` with `provider exited before an attempt outcome` (followed by the
+provider's last redacted terminal text, its own exit reason) proves nothing about
 effects: a provider can act and then exit before reporting. Read the settled
 run's evidence first: `overseer status --task` gives the failed task's exact
 run detail with its provider exit and how long it ran after activation, its

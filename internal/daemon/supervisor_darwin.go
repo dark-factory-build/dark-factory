@@ -1042,11 +1042,15 @@ func (daemon *Daemon) attemptResultTail(
 			return kernel.Run{}, kernel.NewOutcomeUnknownError(fmt.Errorf("daemon: retained outcome proposal: %w", proposeErr))
 		}
 	}
+	// The provider's stderr is its PTY, so the terminal tail is its own exit
+	// reason; a run that settled with an outcome never reads it.
+	floor, head, payload := live.diagnosticSnapshot()
+	result = result.WithProviderOutput(terminalTextProjection(payload, floor != 0, kernel.MaxProviderOutputBytes))
 	run, err = daemon.consumeAttemptResult(daemon.cleanupCtx, result, false)
 	if err != nil {
 		return kernel.Run{}, err
 	}
-	if floor, head, payload := live.diagnosticSnapshot(); len(payload) > 0 {
+	if len(payload) > 0 {
 		if capturedAt, timestampErr := daemon.timestamp(); timestampErr == nil {
 			_ = daemon.store.SaveTerminalDiagnostics(daemon.cleanupCtx, kernel.TerminalDiagnostics{RunID: run.ID, Floor: floor, Head: head, Payload: payload, CapturedAt: capturedAt})
 		}
