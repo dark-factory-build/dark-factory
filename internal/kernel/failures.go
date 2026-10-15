@@ -39,7 +39,7 @@ func failureLedger(ctx context.Context, c *sql.Conn, archived history, scope []b
 		project = scope
 	}
 	rows, err := c.QueryContext(ctx, `SELECT r.terminal_kind, COALESCE(r.terminal_code, ''), r.provider_exit_code, r.provider_exit_signal,
-			r.runner_exit_code, COALESCE(r.terminal_detail, t.blocked_reason, ''), r.terminal_at_ms, lower(hex(t.id)), '', ''
+			r.runner_exit_code, COALESCE(r.terminal_detail, t.blocked_reason, ''), r.terminal_at_ms, lower(hex(t.id)), '', lower(hex(r.id))
 		FROM `+archived.table("runs")+` AS r JOIN `+archived.table("tasks")+` AS t ON t.id = r.task_id JOIN agents AS a ON a.id = r.agent_id
 		WHERE (?1 IS NULL OR r.project_id = ?1) AND r.terminal_kind IN ('failed', 'blocked') AND r.terminal_at_ms IS NOT NULL AND NOT `+specialistCarrierSQL+`
 		UNION ALL SELECT 'check', json_extract(document, '$.name'), NULL, NULL, NULL,
