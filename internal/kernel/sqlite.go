@@ -18,14 +18,18 @@ import (
 )
 
 const (
-	busyMilliseconds = 5000
-	maxReaders       = 4
-	driverName       = "sqlite3"
+	busyMilliseconds  = 5000
+	maxReaders        = 4
+	backgroundReaders = 2
+	driverName        = "sqlite3"
 )
 
 type Store struct {
-	writer      *sql.DB
-	readers     *sql.DB
+	writer  *sql.DB
+	readers *sql.DB
+	// background serves the long whole-store reads (validation, reclaim,
+	// snapshots), so they never queue the readers attempt calls use (#1996).
+	background  *sql.DB
 	writerGate  chan struct{}
 	bindingMu   sync.RWMutex
 	pathBinding *databaseFiles
@@ -94,19 +98,17 @@ func newStore() *Store {
 func openFixedPools(ctx context.Context, store *Store, path string, recheck func() error) error {
 	activationCtx, cancel := context.WithTimeout(ctx, 2*time.Duration(busyMilliseconds)*time.Millisecond)
 	defer cancel()
-	err := openFixedPool(activationCtx, path, "writer", 1, recheck, &store.writer)
-	if err != nil {
-		if store.writer != nil {
-			store.retainCloseUncertainty(err)
+	for _, pool := range []struct {
+		kind  string
+		limit int
+		owner **sql.DB
+	}{{"writer", 1, &store.writer}, {"reader", maxReaders, &store.readers}, {"background", backgroundReaders, &store.background}} {
+		if err := openFixedPool(activationCtx, path, pool.kind, pool.limit, recheck, pool.owner); err != nil {
+			if *pool.owner != nil {
+				store.retainCloseUncertainty(err)
+			}
+			return errors.Join(err, store.Close())
 		}
-		return errors.Join(err, store.Close())
-	}
-	err = openFixedPool(activationCtx, path, "reader", maxReaders, recheck, &store.readers)
-	if err != nil {
-		if store.readers != nil {
-			store.retainCloseUncertainty(err)
-		}
-		return errors.Join(err, store.Close())
 	}
 	return nil
 }
@@ -390,7 +392,7 @@ func initializeFresh(ctx context.Context, connection *sql.Conn, config FactoryCo
 }
 
 func (store *Store) validateOpen(ctx context.Context) error {
-	tx, err := store.beginRead(ctx)
+	tx, err := store.beginBackgroundRead(ctx)
 	if err != nil {
 		return err
 	}
@@ -467,7 +469,7 @@ func (store *Store) Close() error {
 		// does not make the resource closure uncertain, so checkpoint failure
 		// must not poison the stable Close result.
 		_ = store.checkpointWAL(context.Background(), "TRUNCATE")
-		poolErr := errors.Join(closeSQLitePool("reader", store.readers), closeSQLitePool("writer", store.writer))
+		poolErr := errors.Join(closeSQLitePool("reader", store.readers), closeSQLitePool("background", store.background), closeSQLitePool("writer", store.writer))
 		if poolErr != nil {
 			store.closeErr = fmt.Errorf("%w: close retained sqlite pools: %w", ErrCorruptState, poolErr)
 			return
@@ -551,7 +553,7 @@ func closeSQLitePool(kind string, pool *sql.DB) error {
 }
 
 func (store *Store) waitForCheckedOutConnections() {
-	for poolInUse(store.writer) || poolInUse(store.readers) {
+	for poolInUse(store.writer) || poolInUse(store.readers) || poolInUse(store.background) {
 		time.Sleep(time.Millisecond)
 	}
 }

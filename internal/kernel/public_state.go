@@ -85,7 +85,7 @@ func (store *Store) ReadPublicSnapshot(ctx context.Context) (PublicSnapshot, err
 	if err := store.heldCorruption(); err != nil {
 		return PublicSnapshot{}, err
 	}
-	tx, err := store.beginRead(ctx)
+	tx, err := store.beginBackgroundRead(ctx)
 	if err != nil {
 		return PublicSnapshot{}, err
 	}
