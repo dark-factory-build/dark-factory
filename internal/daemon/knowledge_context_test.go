@@ -3,6 +3,7 @@ package daemon
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"github.com/dark-factory-build/dark-factory/internal/change"
 	"os"
@@ -255,14 +256,53 @@ func TestKnowledgeLaunchCarriesTaskAndKnowledge(t *testing.T) {
 // pinned to the integrated revision is judged against that head, not the base.
 func TestKnowledgeLaunchJudgesFreshRepairAtItsPullRequestHead(t *testing.T) {
 	f := newDispatchFixture(t)
-	active := prepareActiveAttemptInProjectWithProvider(t, f, 84, testID(84), "worker", "codex")
+	prepareActiveAttemptInProjectWithProvider(t, f, 84, testID(84), "orchestrator", "codex")
 	ctx := context.Background()
-	repository, found, err := f.store.TaskRepository(ctx, active.run.TaskID)
+	operator, err := api.NewOperatorClient(f.socket, f.operator)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, invoke := range []func() error{
+		func() error {
+			_, err := operator.CreateAgent(ctx, api.CreateAgentInput{ID: testID(141), ProjectID: testID(84), Name: "worker", Role: "worker", Provider: "codex"})
+			return err
+		},
+		func() error {
+			_, err := operator.EnqueueTask(ctx, api.EnqueueTaskInput{ID: testID(142), ProjectID: testID(84), AssignedAgentID: testID(141), IncarnationID: testID(143), Title: "repair", Body: "repair the guard", Priority: 1})
+			return err
+		},
+	} {
+		done := f.serve(t)
+		if err := invoke(); err != nil {
+			t.Fatal(err)
+		}
+		waitDispatch(t, done)
+	}
+	// Stop at admission: the run's Change is reserved, as when runNext builds its prompt.
+	digestBytes := sha256.Sum256(bytes.Repeat([]byte{150}, 32))
+	digest, err := kernel.AttemptDigestFromBytes(digestBytes[:])
+	if err != nil {
+		t.Fatal(err)
+	}
+	candidate, err := kernel.ChangeIDFromBytes(mustIDBytes(t, testID(159)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	proof, err := kernel.ResultProofDigestFromBytes(bytes.Repeat([]byte{170}, 32))
+	if err != nil {
+		t.Fatal(err)
+	}
+	admission, err := f.store.AdmitNext(ctx, kernel.AdmissionKeys{ResultProofDigest: proof, RunID: mustRunID(t, testID(154)), TerminalSessionID: mustTerminalSessionID(t, testID(164)), AttemptDigest: digest, CandidateChangeID: candidate, RuntimeRoot: filepath.Join(filepath.Dir(f.socket), "runtime-150"), Resources: kernel.AdmissionResourceIDs{RuntimeRoot: mustResourceID(t, testID(155)), RunnerProcess: mustResourceID(t, testID(156)), ProviderProcess: mustResourceID(t, testID(157)), ProviderGroup: mustResourceID(t, testID(158))}}, mustKernelTime(t, 1001))
+	if err != nil || !admission.Admitted() || admission.Run.ChangeID == nil {
+		t.Fatalf("worker admission = %+v, %v", admission, err)
+	}
+	run := *admission.Run
+	if state, ok, err := f.store.Change(ctx, *run.ChangeID); err != nil || !ok || state.Selection != nil {
+		t.Fatalf("worker Change is not fresh: %+v %v", state, err)
+	}
+	repository, found, err := f.store.TaskRepository(ctx, run.TaskID)
 	if err != nil || !found {
 		t.Fatalf("repository: %v", err)
-	}
-	if state, ok, err := f.store.Change(ctx, *active.run.ChangeID); err != nil || !ok || state.Selection != nil {
-		t.Fatalf("worker Change is not fresh: %+v %v", state, err)
 	}
 	git := func(args ...string) string {
 		t.Helper()
@@ -273,10 +313,10 @@ func TestKnowledgeLaunchJudgesFreshRepairAtItsPullRequestHead(t *testing.T) {
 		return strings.TrimSpace(string(out))
 	}
 	base := git("rev-parse", "HEAD")
-	lesson := seedContextKnowledge(t, f, active.run.ProjectID, 204, kernel.ContentLesson, kernel.KnowledgeMetadata{Status: "current", SourceRevision: base, Evidence: []string{"review: base"}}, "The guard holds at the base.")
+	lesson := seedContextKnowledge(t, f, run.ProjectID, 204, kernel.ContentLesson, kernel.KnowledgeMetadata{Status: "current", SourceRevision: base, Evidence: []string{"review: base"}}, "The guard holds at the base.")
 	launch := func() []byte {
 		t.Helper()
-		text, _, err := f.daemon.prepareKnowledgeTask(ctx, active.run, []byte("repair the guard"), true)
+		text, _, err := f.daemon.prepareKnowledgeTask(ctx, run, []byte("repair the guard"), true)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -294,7 +334,7 @@ func TestKnowledgeLaunchJudgesFreshRepairAtItsPullRequestHead(t *testing.T) {
 	git("commit", "-q", "-m", "repair changes the guard")
 	head := git("rev-parse", "HEAD")
 	git("checkout", "-q", branch)
-	if err := f.store.RecordPublication(ctx, active.run.ProjectID, active.run.TaskID, "team/repo", kernel.ProductionPullRequest{Number: 7, Title: "Repair", URL: "https://github.com/team/repo/pull/7", Head: head, Branch: "repair", Base: branch, State: "open", Review: kernel.ProductionReview{Head: head, State: "unknown"}}, mustKernelTime(t, 104)); err != nil {
+	if err := f.store.RecordPublication(ctx, run.ProjectID, run.TaskID, "team/repo", kernel.ProductionPullRequest{Number: 7, Title: "Repair", URL: "https://github.com/team/repo/pull/7", Head: head, Branch: "repair", Base: branch, State: "open", Review: kernel.ProductionReview{Head: head, State: "unknown"}}, mustKernelTime(t, 104)); err != nil {
 		t.Fatal(err)
 	}
 	if text := launch(); bytes.Contains(text, []byte("The guard holds at the base.")) || !bytes.Contains(text, []byte(lesson.ID.String())) || !bytes.Contains(text, []byte(`"status":"needs_revalidation"`)) {
