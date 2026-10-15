@@ -1778,7 +1778,7 @@ func TestLaunchActivateSocketOutsideLaunchdReportsNoJob(t *testing.T) {
 	if os.Getenv("XPC_SERVICE_NAME") != "" && os.Getenv("XPC_SERVICE_NAME") != "0" {
 		t.Skip("running as a launchd job")
 	}
-	if fds, err := launchActivateSocket(LocalAPISocketKey); len(fds) != 0 || !errors.Is(err, unix.ESRCH) && !errors.Is(err, unix.ENOENT) {
+	if fds, err := LaunchActivateSocket(LocalAPISocketKey); len(fds) != 0 || !errors.Is(err, unix.ESRCH) && !errors.Is(err, unix.ENOENT) {
 		t.Fatalf("launch_activate_socket = %v, %v", fds, err)
 	}
 }

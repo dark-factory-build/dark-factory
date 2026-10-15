@@ -13,7 +13,7 @@ const (
 	LocalAPISocketName = "factory.sock"
 	// LocalAPISocketKey names the plist socket launchd binds at
 	// LocalAPISocketPath and hands each factoryd generation, and
-	// LocalAPIInheritEnv marks a release trial child given it as fd 3.
+	// LocalAPIInheritEnv marks a release trial child given it as fd 4.
 	LocalAPISocketKey  = "LocalAPI"
 	LocalAPIInheritEnv = "DARK_FACTORY_LOCAL_API_FD"
 	// RelayDirectoryName is the home member the relay connector keeps its node

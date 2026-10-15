@@ -346,11 +346,12 @@ func serve(ctx context.Context, configuration config) error {
 	}
 	// Claim launchd's socket, close-on-exec, before boot starts any child.
 	install.ActivatedLocalAPI()
-	// launchd owns an installed job's console address. Started without that
-	// socket (an install from before Sockets, or an interrupted reload), this
-	// process never binds the paired origin itself: it has launchd reload the
-	// job with the socket, before anything else, and waits to be booted out.
-	if browserSocket == nil && os.Getenv(trialEnv) == "" && install.ServiceHoldsBrowser(configuration.home) {
+	// launchd owns an installed job's console address and local API socket.
+	// Started without either (an install from before them, or an interrupted
+	// reload), this process never binds them itself: it has launchd reload
+	// the job with its sockets, before anything else, and waits to be booted
+	// out.
+	if (browserSocket == nil || install.ActivatedLocalAPI() == nil) && os.Getenv(trialEnv) == "" && install.ServiceHoldsBrowser(configuration.home) {
 		if os.Getppid() != 1 {
 			return errors.New("factoryd: the installed service's launchd job holds the console address; use factoryctl service start")
 		}
@@ -445,14 +446,13 @@ func superviseTrial(home string, args []string, marker install.UpgradeMarker) er
 	defer cancel()
 	child := exec.CommandContext(ctx, filepath.Join(install.ServiceDirectoryPath(home), "bin", "previous", "factoryd"), args...)
 	child.Env = append(os.Environ(), trialEnv+"=1")
-	// The trial serves the canonical socket this build was handed, so the
-	// socket and its queued connections outlive the handover.
-	if activated := activatedLocalAPI(); activated != nil {
-		child.ExtraFiles, child.Env = []*os.File{activated}, append(child.Env, install.LocalAPIInheritEnv+"=3")
-	}
 	child.Stderr = recoveryLog
-	if browserSocket != nil {
-		child.ExtraFiles = []*os.File{browserSocket}
+	// The trial serves the sockets launchd handed this build, the console at
+	// fd 3 and the local API at fd 4, so they and the local API's queued
+	// connections outlive the handover.
+	child.ExtraFiles = []*os.File{browserSocket, activatedLocalAPI()}
+	if child.ExtraFiles[1] != nil {
+		child.Env = append(child.Env, install.LocalAPIInheritEnv+"=4")
 	}
 	// Its own process group, recorded in the marker: launchd does not end a
 	// child whose supervisor died, so the next boot does.

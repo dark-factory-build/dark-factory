@@ -96,17 +96,17 @@ var localAPISetListenerDeadline = func(listener *net.UnixListener, deadline time
 }
 
 // activatedLocalAPI is the canonical socket this process was handed: by
-// launchd, or by a release supervisor to its trial child as fd 3. It stays
+// launchd, or by a release supervisor to its trial child as fd 4. It stays
 // open for the process's life, so a generation's withdrawal leaves the socket
 // bound and connections queue in its backlog for the next generation. Outside
 // launchd (first boot of an older plist, tests) it is nil and factoryd binds.
 var activatedLocalAPI = sync.OnceValues(func() (*os.File, error) {
-	if os.Getenv(LocalAPIInheritEnv) == "3" {
+	if os.Getenv(LocalAPIInheritEnv) == "4" {
 		_ = os.Unsetenv(LocalAPIInheritEnv)
-		unix.CloseOnExec(3)
-		return os.NewFile(3, LocalAPISocketKey), nil
+		unix.CloseOnExec(4)
+		return os.NewFile(4, LocalAPISocketKey), nil
 	}
-	fds, err := launchActivateSocket(LocalAPISocketKey)
+	fds, err := LaunchActivateSocket(LocalAPISocketKey)
 	if errors.Is(err, unix.ESRCH) || errors.Is(err, unix.ENOENT) {
 		return nil, nil
 	}

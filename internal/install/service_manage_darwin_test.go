@@ -376,11 +376,10 @@ func TestMigrateServicePlistBringsAPreSocketsInstallationToSockets(t *testing.T)
 	}
 }
 
-func TestServicePlistReadBoundCoversFourEscapedHomePaths(t *testing.T) {
+func TestServicePlistReadBoundCoversFiveEscapedHomePaths(t *testing.T) {
 	fixture := newManageFixture(t)
 	home := "/" + strings.Repeat(`"`, serviceMaxPathBytes-1)
-	// Such a home has no socket within MaxSocketPathBytes, so no Sockets key.
-	body, _, err := ServicePlist(home, fixture.config.Label, "", "", "", "", false)
+	body, _, err := ServicePlist(home, fixture.config.Label, "", "", "", "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -392,7 +391,7 @@ func TestServicePlistReadBoundCoversFourEscapedHomePaths(t *testing.T) {
 		t.Fatal(err)
 	}
 	if _, _, err := readServicePlist(fixture.plistDir, fixture.config.plistName(), legacyLimit); err == nil {
-		t.Fatal("old plist read bound accepted four escaped home paths")
+		t.Fatal("old plist read bound accepted five escaped home paths")
 	}
 	read, present, err := readServicePlist(fixture.plistDir, fixture.config.plistName(), serviceMaxPlistBytes)
 	if err != nil || !present || !bytes.Equal(read, body) {
@@ -977,7 +976,7 @@ func TestServiceArgumentsSurviveInstallStatusAndUninstall(t *testing.T) {
 	installed := &recordedLaunchctl{results: append(fixture.printAbsent(), launchctlResult{status: 0}, fixture.printRunning(77))}
 	fixture.install(t, installed.run)
 
-	expected, expectedDigest, err := ServicePlist(fixture.home, fixture.config.Label, origin, address, fixture.config.ToolPath, toolchain, true)
+	expected, expectedDigest, err := ServicePlist(fixture.home, fixture.config.Label, origin, address, fixture.config.ToolPath, toolchain)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1007,7 +1006,7 @@ func TestServiceArgumentsSurviveInstallStatusAndUninstall(t *testing.T) {
 	if err != nil || status.State != ServiceRunning || status.PID != 78 {
 		t.Fatalf("changed toolchain install = %+v, %v (%q)", status, err, reconfigured.calls)
 	}
-	if expected, _, err = ServicePlist(fixture.home, fixture.config.Label, origin, address, changed.ToolPath, toolchain, true); err != nil {
+	if expected, _, err = ServicePlist(fixture.home, fixture.config.Label, origin, address, changed.ToolPath, toolchain); err != nil {
 		t.Fatal(err)
 	}
 	if body, err := os.ReadFile(fixture.plistPath()); err != nil || !bytes.Equal(body, expected) {
@@ -1058,7 +1057,7 @@ func TestServiceInstallReconfiguresAChangedRelayOriginInPlace(t *testing.T) {
 		if err != nil || status.State != ServiceRunning {
 			t.Fatalf("install %q = %+v, %v", to, status, err)
 		}
-		want, _, err := ServicePlist(fixture.home, fixture.config.Label, to, "", "", "", true)
+		want, _, err := ServicePlist(fixture.home, fixture.config.Label, to, "", "", "")
 		if err != nil {
 			t.Fatal(err)
 		}

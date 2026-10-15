@@ -270,8 +270,8 @@ func TestStagedBuildServesTheActivatedSocketAndLeavesIt(t *testing.T) {
 		t.Fatalf("the trial changed the activated socket: %v, %v", after, err)
 	}
 	successor := exec.Command(filepath.Join(install.ServiceDirectoryPath(home), "bin", "current", "factoryd"), childArgs(home)...)
-	successor.Env = append(os.Environ(), install.LocalAPIInheritEnv+"=3")
-	successor.ExtraFiles, successor.Stderr = []*os.File{activated}, os.Stderr
+	successor.Env = append(os.Environ(), install.LocalAPIInheritEnv+"=4")
+	successor.ExtraFiles, successor.Stderr = []*os.File{nil, activated}, os.Stderr
 	if err := successor.Start(); err != nil {
 		t.Fatal(err)
 	}

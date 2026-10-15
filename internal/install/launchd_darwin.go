@@ -19,9 +19,9 @@ var libc_free_trampoline_addr uintptr
 //go:linkname syscall_syscall syscall.syscall
 func syscall_syscall(fn, a1, a2, a3 uintptr) (r1, r2 uintptr, err syscall.Errno)
 
-// launchActivateSocket returns the descriptors launchd bound for name in this
+// LaunchActivateSocket returns the descriptors launchd bound for name in this
 // job's plist: ESRCH outside launchd, ENOENT for a plist without it.
-var launchActivateSocket = func(name string) ([]int, error) {
+func LaunchActivateSocket(name string) ([]int, error) {
 	key, err := unix.BytePtrFromString(name)
 	if err != nil {
 		return nil, err
