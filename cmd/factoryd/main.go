@@ -642,7 +642,6 @@ func openProcess(ctx context.Context, configuration config) (_ *process, resultE
 	if err != nil {
 		return nil, err
 	}
-	owner.served = time.Now()
 	startupPhase("listener")
 	// A trial under a supervisor without the console socket proves no bind:
 	// it would only take the paired origin and release it again.
@@ -673,7 +672,7 @@ func openProcess(ctx context.Context, configuration config) (_ *process, resultE
 		}
 		startupPhase("relay")
 	}
-	owner.apiStart = true
+	owner.apiStart, owner.served = true, time.Now()
 	go owner.accept(ownedContext, owner.listener)
 	owner.cleanupRuns = make(map[kernel.RunID]struct{})
 	owner.supervisorSpec.UnsettledCompletion = func(id kernel.RunID, err error) {
@@ -821,6 +820,16 @@ func (owner *process) close() error {
 }
 
 func (owner *process) shutdown() error {
+	// A staged release's outage starts as this generation stops serving; a
+	// trial acts on nothing.
+	if owner.listener != nil && owner.daemon != nil && os.Getenv(trialEnv) == "" {
+		stamp, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		if err := owner.daemon.WithdrawRelease(stamp, time.Now()); err != nil {
+			daemon.LogFactoryd(recoveryLog, "factoryd: recording the release socket withdrawal: %v\n", err)
+		}
+		cancel()
+		startupPhase("withdrawn")
+	}
 	if owner.cancel != nil {
 		owner.cancel()
 	}
@@ -836,14 +845,6 @@ func (owner *process) shutdown() error {
 		owner.listener = nil
 		owner.apiAuthority = nil
 		owner.lifecycleMu.Unlock()
-		// A staged release's outage starts here; a trial acts on nothing.
-		if listener != nil && owner.daemon != nil && os.Getenv(trialEnv) == "" {
-			stamp, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-			if err := owner.daemon.WithdrawRelease(stamp, time.Now()); err != nil {
-				daemon.LogFactoryd(recoveryLog, "factoryd: recording the release socket withdrawal: %v\n", err)
-			}
-			cancel()
-		}
 	}
 	if owner.apiStart {
 		<-owner.apiDone

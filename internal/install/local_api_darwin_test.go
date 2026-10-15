@@ -1845,8 +1845,34 @@ func TestLocalAPIAuthorityServesActivatedSocketAcrossGenerations(t *testing.T) {
 		}
 		return home, protocol
 	}
-	retiring, _ := generation()
-	if err := retiring.Close(); err != nil {
+	retiring, retiringProtocol := generation()
+	inFlight, err := net.DialUnix("unix", nil, &net.UnixAddr{Name: socketPath, Net: "unix"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer inFlight.Close()
+	accepted, err := retiringProtocol.Accept()
+	if err != nil {
+		t.Fatal(err)
+	}
+	closed := make(chan error, 1)
+	go func() { closed <- retiring.Close() }()
+	// The retiring generation dropped the in-flight connection only after it
+	// marked the socket, so the client that saw the drop sees the mark.
+	if err := inFlight.SetReadDeadline(time.Now().Add(time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := inFlight.Read(make([]byte, 1)); !errors.Is(err, io.EOF) {
+		t.Fatalf("in-flight connection after retirement = %v", err)
+	}
+	marked, err := os.Lstat(socketPath)
+	if err != nil || marked.ModTime().Equal(before.ModTime()) {
+		t.Fatalf("a dropped connection saw an unmarked socket: %v, %v", marked, err)
+	}
+	if err := accepted.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := <-closed; err != nil {
 		t.Fatal(err)
 	}
 	after, err := os.Lstat(socketPath)

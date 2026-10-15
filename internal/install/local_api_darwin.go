@@ -813,6 +813,13 @@ func (state *localAPIState) close() error {
 			result = errors.Join(result, errors.New("close local API listener failed"))
 		}
 	}
+	if state.adopted {
+		// The activated socket outlives this generation, so its inode cannot
+		// mark the restart: a new mtime, set before any connection drops,
+		// tells a client whose reply is lost here to replay it.
+		now := unix.NsecToTimespec(time.Now().UnixNano())
+		_ = unix.UtimesNanoAt(int(state.runtimes.Fd()), LocalAPISocketName, []unix.Timespec{now, now}, unix.AT_SYMLINK_NOFOLLOW)
+	}
 	for _, connection := range connections {
 		if err := state.closeExactConnection(connection, false); err != nil && !errors.Is(err, ErrClosed) {
 			result = errors.Join(result, errors.New("close local API connection failed"))

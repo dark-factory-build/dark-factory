@@ -13,6 +13,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"syscall"
 	"testing"
 	"time"
@@ -249,6 +250,75 @@ func TestStagedBuildServesTheActivatedSocketAndLeavesIt(t *testing.T) {
 	if after, err := os.Lstat(path); err != nil || !os.SameFile(before, after) {
 		t.Fatalf("the trial changed the activated socket: %v, %v", after, err)
 	}
+}
+
+// withRelease runs use against home's store, closed again after.
+func withRelease(t *testing.T, home string, use func(context.Context, *kernel.Store) error) {
+	t.Helper()
+	ctx := context.Background()
+	opened, err := install.OpenOperationalHome(ctx, home)
+	if err != nil {
+		t.Fatal(err)
+	}
+	store, err := opened.OpenStore(ctx)
+	if err == nil {
+		err = use(ctx, store)
+		err = errors.Join(err, store.Close())
+	}
+	if err = errors.Join(err, opened.Close()); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// A release restart's outage runs from when the staging generation stops
+// serving, stamped while its socket is still bound, to when the settling one
+// starts accepting, after its browser and relay are up.
+func TestReleaseOutageStampsTheServingTransitions(t *testing.T) {
+	home := stagedHome(t, "serve", "development")
+	withRelease(t, home, func(ctx context.Context, store *kernel.Store) error {
+		project, err := kernel.ProjectIDFromBytes(bytes.Repeat([]byte{0x33}, kernel.IDBytes))
+		at, atErr := kernel.NewUnixMillis(time.Now().UnixMilli())
+		if err = errors.Join(err, atErr); err == nil {
+			_, err = store.CreateProject(ctx, kernel.NewProject{ID: project, Name: "self", Root: filepath.Join(filepath.Dir(home), "repo")}, at)
+		}
+		if err == nil {
+			err = store.RecordDelivery(ctx, project, "dark-factory-build/dark-factory", kernel.ProductionDelivery{ID: "release:development", Kind: "runtime", Destination: "factoryd", Revision: strings.Repeat("e", 40), State: "running", Phase: "trial", PullRequests: []uint64{}, UpdatedAt: at.Int64()}, at)
+		}
+		return err
+	})
+	hook := startupPhaseHook
+	t.Cleanup(func() { startupPhaseHook = hook })
+	var bound atomic.Bool
+	var browser atomic.Int64
+	startupPhaseHook = func(phase string) {
+		switch phase {
+		case "withdrawn":
+			_, err := os.Lstat(install.LocalAPISocketPath(home))
+			bound.Store(err == nil)
+		case "browser":
+			browser.Store(time.Now().UnixMilli())
+			time.Sleep(2 * time.Millisecond)
+		}
+	}
+	owner, err := openProcess(context.Background(), testConfig(home))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := owner.close(); err != nil {
+		t.Fatal(err)
+	}
+	if !bound.Load() {
+		t.Fatal("the withdrawal was stamped after the socket was withdrawn")
+	}
+	selfSource = func() string { return "development" }
+	bootUntilSettled(t, home)
+	withRelease(t, home, func(ctx context.Context, store *kernel.Store) error {
+		_, delivery, found, err := store.Delivery(ctx, "release:development")
+		if err != nil || !found || delivery.State != "verified" || delivery.WithdrawnAt == 0 || delivery.ServedAt <= browser.Load() || delivery.ServedAt < delivery.WithdrawnAt {
+			t.Errorf("release = %+v, %t, %v; browser bound at %d", delivery, found, err, browser.Load())
+		}
+		return nil
+	})
 }
 
 func TestPassedTrialRecoveryRestartsAndSettlesWithoutRepeatingPromotion(t *testing.T) {
