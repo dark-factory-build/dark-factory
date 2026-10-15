@@ -655,7 +655,7 @@ pub(crate) struct ObservePullRequestComments {
 #[derive(Debug, Deserialize, Serialize)]
 pub(crate) struct PullRequestComment {
     pub(crate) id: i64,
-    #[serde(rename = "user")]
+    #[serde(rename(deserialize = "user", serialize = "author"))]
     pub(crate) author: PullRequestCommentAuthor,
     pub(crate) body: String,
     pub(crate) created_at: String,
@@ -9401,6 +9401,9 @@ fn pull_request_comments_decode_github_user_shape() {
     .unwrap();
     assert_eq!(comments[0].author.login, "reviewer");
     assert_eq!(comments[0].body, "Please address this line.");
+    let encoded = serde_json::to_value(&comments).unwrap();
+    assert_eq!(encoded[0]["author"]["login"], "reviewer");
+    assert!(encoded[0].get("user").is_none());
 }
 
 #[cfg(test)]
