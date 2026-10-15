@@ -860,12 +860,16 @@ func TestADisputedBlockIsReviewedOnceMoreThenEscalatedOnce(t *testing.T) {
 
 func TestMergeQueueEjectionSendsBackOnceAndAMergeCloses(t *testing.T) {
 	conflicting := false
+	failureLines := append([]string{"--- FAIL: TestFailure (0.01s)"}, make([]string, 40)...)
+	for i := range failureLines[1:] {
+		failureLines[i+1] = fmt.Sprintf("failure-%d", i+1)
+	}
 	for _, test := range []struct {
 		pull  review.Pull
 		state string
 		note  string
 	}{
-		{pull: review.Pull{State: "open", Failing: []string{"ci / go", "ci / ui"}}, state: "enqueued", note: "Failing checks: ci / go, ci / ui."},
+		{pull: review.Pull{State: "open", Failing: []string{"ci / go", "ci / ui"}, Tests: failureLines}, state: "enqueued", note: "Failing checks: ci / go, ci / ui."},
 		// #1376: a conflicting pull request whose Change factoryd cannot
 		// rebase goes back for rebase once.
 		{pull: review.Pull{State: "open", Mergeable: &conflicting}, state: "enqueued", note: "conflicts with main. Rebase this Change onto origin/main"},
@@ -899,6 +903,17 @@ func TestMergeQueueEjectionSendsBackOnceAndAMergeCloses(t *testing.T) {
 		sentBack := current.WorkRevision.Int64() == 2 && test.note != "" && strings.Contains(kernel.TaskFeedback(current), test.note)
 		if op.State != test.state || sentBack != (test.note != "") || current.WorkRevision.Int64() > 2 || backend.enqueues != 1 {
 			t.Fatalf("%s: operation=%+v task revision %d feedback %q", test.state, op, current.WorkRevision.Int64(), kernel.TaskFeedback(current))
+		}
+		if test.pull.Failing != nil {
+			feedback := kernel.TaskFeedback(current)
+			for _, line := range test.pull.Tests[:40] {
+				if !strings.Contains(feedback, "\n- "+line) {
+					t.Fatalf("failing detail lost %q: %q", line, feedback)
+				}
+			}
+			if strings.Contains(feedback, "\n- failure-40") {
+				t.Fatalf("failing detail was not bounded: %q", feedback)
+			}
 		}
 	}
 }
