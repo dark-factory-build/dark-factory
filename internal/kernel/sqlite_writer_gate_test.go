@@ -714,3 +714,34 @@ func TestSlowWriterHoldLogsItsHolderAndWaiters(t *testing.T) {
 		t.Fatalf("longest-wait log = %q", got)
 	}
 }
+
+func TestReaderWaitCountsTimeQueuedBehindLongReads(t *testing.T) {
+	store, _ := newTestStore(t)
+	defer store.Close()
+	var long []*readTx
+	for range maxReaders {
+		tx, err := store.beginRead(context.Background())
+		if err != nil {
+			t.Fatal(err)
+		}
+		long = append(long, tx)
+	}
+	const held = 200 * time.Millisecond
+	go func() {
+		time.Sleep(held)
+		for _, tx := range long {
+			_ = tx.Close()
+		}
+	}()
+	var wait time.Duration
+	if _, err := store.TaskAttachments(WithReaderWait(context.Background(), &wait), taskID(t, 7)); err != nil {
+		t.Fatal(err)
+	}
+	if wait < held-20*time.Millisecond {
+		t.Fatalf("reader wait = %s, want about %s queued behind %d long reads", wait, held, maxReaders)
+	}
+	wait = 0
+	if _, err := store.TaskAttachments(WithReaderWait(context.Background(), &wait), taskID(t, 7)); err != nil || wait > held/2 {
+		t.Fatalf("unqueued reader wait = %s, %v", wait, err)
+	}
+}

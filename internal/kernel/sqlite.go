@@ -290,6 +290,14 @@ func (store *Store) readerConnection(ctx context.Context) (*sql.Conn, error) {
 	return store.verifiedConnection(ctx, store.readers, "reader")
 }
 
+type readerWaitKey struct{}
+
+// WithReaderWait adds to wait the time each read under ctx spends queued for a
+// pooled reader connection. The reads under ctx must be sequential.
+func WithReaderWait(ctx context.Context, wait *time.Duration) context.Context {
+	return context.WithValue(ctx, readerWaitKey{}, wait)
+}
+
 func (store *Store) verifiedConnection(ctx context.Context, pool *sql.DB, kind string) (*sql.Conn, error) {
 	store.bindingMu.RLock()
 	defer store.bindingMu.RUnlock()
@@ -301,7 +309,11 @@ func (store *Store) verifiedConnection(ctx context.Context, pool *sql.DB, kind s
 			return nil, fmt.Errorf("recheck retained sqlite binding: %w", err)
 		}
 	}
+	waiting := time.Now()
 	connection, err := pool.Conn(ctx)
+	if wait, ok := ctx.Value(readerWaitKey{}).(*time.Duration); ok && pool == store.readers {
+		*wait += time.Since(waiting)
+	}
 	if err != nil {
 		return nil, fmt.Errorf("checkout %s connection: %w", kind, err)
 	}
