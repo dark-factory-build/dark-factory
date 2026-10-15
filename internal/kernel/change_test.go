@@ -147,7 +147,8 @@ func TestRecordChangeRebasedUpdatesRetainedHeadWithoutOpeningWork(t *testing.T) 
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := store.FinalizeWorkerRun(ctx, finalizing.ID, finalizing.Revision, settlement, mustTime(t, 80)); err != nil {
+	terminal, err := store.FinalizeWorkerRun(ctx, finalizing.ID, finalizing.Revision, settlement, mustTime(t, 80))
+	if err != nil {
 		t.Fatal(err)
 	}
 	retained, _, _ := store.Change(ctx, current.ID)
@@ -158,6 +159,20 @@ func TestRecordChangeRebasedUpdatesRetainedHeadWithoutOpeningWork(t *testing.T) 
 	}
 	if _, err := store.RecordChangeRebased(ctx, current.ID, updated.Revision, *current.HeadCommit, newHead, mustTime(t, 82)); !errors.Is(err, ErrRevisionConflict) {
 		t.Fatalf("stale rebase replay = %v", err)
+	}
+	_, keys := queueRetryForTerminal(t, store, terminal, 83)
+	admission, err := store.AdmitNext(ctx, keys, mustTime(t, 84))
+	if err != nil || !admission.Admitted() {
+		t.Fatalf("retained retry admission = %+v, %v", admission, err)
+	}
+	available, found, err := store.Change(ctx, retained.ID)
+	if err != nil || !found || available.Phase != ChangeAvailable {
+		t.Fatalf("available retry Change = %+v, found=%v, err=%v", available, found, err)
+	}
+	availableHead := *available.HeadCommit
+	availableNewHead, _ := NewCommitID(availableHead.format, bytes.Repeat([]byte{0x7b}, availableHead.format.oidLength()))
+	if updated, err := store.RecordChangeRebased(ctx, available.ID, available.Revision, availableHead, availableNewHead, mustTime(t, 85)); err != nil || updated.Phase != ChangeAvailable || !updated.HeadCommit.equal(availableNewHead) {
+		t.Fatalf("rebased available Change = %+v, err=%v", updated, err)
 	}
 }
 

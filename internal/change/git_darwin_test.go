@@ -601,7 +601,7 @@ func TestGitExecutableMustBeActualNativeGitForHost(t *testing.T) {
 	if runtime.GOARCH == "amd64" {
 		architecture = "arm64"
 	}
-	command := exec.Command(filepath.Join(filepath.Dir(actual), "lipo"), actual, "-thin", architecture, "-output", wrongArchitecture)
+	command := exec.Command("/usr/bin/lipo", actual, "-thin", architecture, "-output", wrongArchitecture)
 	command.Env = []string{"HOME=/dev/null", "TMPDIR=" + os.Getenv("TMPDIR"), "LC_ALL=C", "LANG=C"}
 	if output, err := command.CombinedOutput(); err != nil {
 		t.Fatalf("create wrong-architecture Git fixture: %v: %s", err, output)

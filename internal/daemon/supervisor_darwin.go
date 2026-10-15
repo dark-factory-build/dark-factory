@@ -359,6 +359,39 @@ func (daemon *Daemon) runNext(ctx context.Context, spec SupervisorSpec) (resultR
 		changeID = *run.ChangeID
 		finalName = changeID.String()
 	}
+	var changeState kernel.Change
+	var retained *changeworker.Result
+	var retainedConflict *change.RebaseConflict
+	if worker {
+		var found bool
+		changeState, found, err = daemon.store.Change(ctx, changeID)
+		if err != nil || !found {
+			if err == nil {
+				err = kernel.ErrCorruptState
+			}
+			return daemon.failRunBeforeRuntime(daemon.cleanupCtx, run, keys.resources.RuntimeRoot, kernel.FailureInternal, err)
+		}
+		if changeState.Phase == kernel.ChangeAvailable && changeState.Revision == *run.AdmittedChangeRevision {
+			var retainedRepository change.RepositoryIdentity
+			retained, retainedRepository, err = retainedWorkerCheckpoint(changeState)
+			if err != nil || !retainedRepository.Equal(repositoryIdentity) {
+				return daemon.failRunBeforeRuntime(daemon.cleanupCtx, run, keys.resources.RuntimeRoot, kernel.FailureSource, errors.Join(err, errInvalidContract))
+			}
+		} else if changeState.Phase != kernel.ChangeReserved || changeState.Revision != *run.AdmittedChangeRevision {
+			return daemon.failRunBeforeRuntime(daemon.cleanupCtx, run, keys.resources.RuntimeRoot, kernel.FailureInternal, kernel.ErrCorruptState)
+		}
+	}
+	if retained != nil {
+		updated, conflict, prepareErr := daemon.prepareRetainedChange(ctx, changeState, filepath.Join(spec.ChangeParent, finalName))
+		if prepareErr != nil {
+			return daemon.failRunBeforeRuntime(daemon.cleanupCtx, run, keys.resources.RuntimeRoot, kernel.FailureSource, prepareErr)
+		}
+		changeState, retainedConflict = updated, conflict
+		retained, _, err = retainedWorkerCheckpoint(changeState)
+		if err != nil {
+			return daemon.failRunBeforeRuntime(daemon.cleanupCtx, run, keys.resources.RuntimeRoot, kernel.FailureSource, err)
+		}
+	}
 	task, found, err := daemon.store.Task(ctx, run.TaskID)
 	if err != nil || !found {
 		if err == nil {
@@ -384,6 +417,10 @@ func (daemon *Daemon) runNext(ctx context.Context, spec SupervisorSpec) (resultR
 	if err != nil {
 		return daemon.failRunBeforeRuntime(daemon.cleanupCtx, run, keys.resources.RuntimeRoot, kernel.FailureSpawn, err)
 	}
+	if retainedConflict != nil {
+		rawProviderTask = appendRetainedConflictContext(rawProviderTask, changeState, retainedConflict)
+		daemon.retainedConflictContexts.Store(run.ID, retainedConflictContext(changeState, retainedConflict))
+	}
 	delivery, preparedTask, err := provider.PrepareTask(run.Provider, rawProviderTask)
 	if err != nil {
 		return daemon.failRunBeforeRuntime(daemon.cleanupCtx, run, keys.resources.RuntimeRoot, kernel.FailureSpawn, err)
@@ -398,27 +435,6 @@ func (daemon *Daemon) runNext(ctx context.Context, spec SupervisorSpec) (resultR
 		}
 	default:
 		return daemon.failRunBeforeRuntime(daemon.cleanupCtx, run, keys.resources.RuntimeRoot, kernel.FailureSpawn, provider.ErrInvalid)
-	}
-	var changeState kernel.Change
-	var retained *changeworker.Result
-	if worker {
-		var found bool
-		changeState, found, err = daemon.store.Change(ctx, changeID)
-		if err != nil || !found {
-			if err == nil {
-				err = kernel.ErrCorruptState
-			}
-			return daemon.failRunBeforeRuntime(daemon.cleanupCtx, run, keys.resources.RuntimeRoot, kernel.FailureInternal, err)
-		}
-		if changeState.Phase == kernel.ChangeAvailable && changeState.Revision == *run.AdmittedChangeRevision {
-			var retainedRepository change.RepositoryIdentity
-			retained, retainedRepository, err = retainedWorkerCheckpoint(changeState)
-			if err != nil || !retainedRepository.Equal(repositoryIdentity) {
-				return daemon.failRunBeforeRuntime(daemon.cleanupCtx, run, keys.resources.RuntimeRoot, kernel.FailureSource, errors.Join(err, errInvalidContract))
-			}
-		} else if changeState.Phase != kernel.ChangeReserved || changeState.Revision != *run.AdmittedChangeRevision {
-			return daemon.failRunBeforeRuntime(daemon.cleanupCtx, run, keys.resources.RuntimeRoot, kernel.FailureInternal, kernel.ErrCorruptState)
-		}
 	}
 	// A fresh Change for a task published on an open pull request (a repair,
 	// or work whose Change was reclaimed) starts at that pull request's exact
@@ -760,40 +776,16 @@ func (daemon *Daemon) runNext(ctx context.Context, spec SupervisorSpec) (resultR
 		return daemon.failRun(run, kernel.FailureSource, errInvalidContract)
 	}
 	if worker {
-		if retained != nil || pull.Number != 0 {
+		if retained == nil && pull.Number != 0 {
 			path := filepath.Join(spec.ChangeParent, finalName)
-			if retained != nil {
-				updated, conflict, prepareErr := daemon.prepareRetainedChange(ctx, changeState, path)
-				if prepareErr != nil {
-					return daemon.failRun(run, kernel.FailureSource, prepareErr)
-				}
-				changeState = updated
-				if conflict != nil {
-					rawProviderTask = appendRetainedConflictContext(rawProviderTask, changeState, conflict)
-					delivery, preparedTask, prepareErr = provider.PrepareTask(run.Provider, rawProviderTask)
-					if prepareErr != nil {
-						return daemon.failRun(run, kernel.FailureSpawn, prepareErr)
-					}
-					if delivery == provider.TaskDeliveryFD11 {
-						providerTask = preparedTask
-					} else if delivery != provider.TaskDeliveryAttemptAPI || len(preparedTask) != 0 {
-						return daemon.failRun(run, kernel.FailureSpawn, provider.ErrInvalid)
-					}
-				}
-				retained, _, err = retainedWorkerCheckpoint(changeState)
-				if err != nil {
-					return daemon.failRun(run, kernel.FailureSource, err)
-				}
-			} else {
-				// Fresh repair Changes still need the exact pull head in their
-				// private administration; only the registered checkout fetches.
-				current, selectErr := change.SelectRegisteredGit(ctx, spec.GitExecutable, repository.Root, repository.BaseRef, change.RepositorySourceIdentity{Root: repositoryIdentity, Git: repositoryGitIdentity, OriginDigest: repositoryOriginDigest})
-				if selectErr != nil {
-					return daemon.failRun(run, kernel.FailureSource, selectErr)
-				}
-				if fetchErr := change.FetchBase(ctx, current, path); fetchErr != nil {
-					return daemon.failRun(run, kernel.FailureSource, fetchErr)
-				}
+			// Fresh repair Changes still need the exact pull head in their
+			// private administration; only the registered checkout fetches.
+			current, selectErr := change.SelectRegisteredGit(ctx, spec.GitExecutable, repository.Root, repository.BaseRef, change.RepositorySourceIdentity{Root: repositoryIdentity, Git: repositoryGitIdentity, OriginDigest: repositoryOriginDigest})
+			if selectErr != nil {
+				return daemon.failRun(run, kernel.FailureSource, selectErr)
+			}
+			if fetchErr := change.FetchBase(ctx, current, path); fetchErr != nil {
+				return daemon.failRun(run, kernel.FailureSource, fetchErr)
 			}
 		}
 		// The daemon reads the worktree itself: fresh Changes use private Git

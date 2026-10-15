@@ -589,6 +589,10 @@ func (daemon *Daemon) prepareRetainedChange(ctx context.Context, state kernel.Ch
 }
 
 func appendRetainedConflictContext(task []byte, state kernel.Change, conflict *change.RebaseConflict) []byte {
+	return append(task, []byte(retainedConflictContext(state, conflict))...)
+}
+
+func retainedConflictContext(state kernel.Change, conflict *change.RebaseConflict) string {
 	paths := conflict.Paths
 	if len(paths) > 32 {
 		paths = paths[:32]
@@ -602,7 +606,7 @@ func appendRetainedConflictContext(task []byte, state kernel.Change, conflict *c
 	if len(context) > maxContext {
 		context = context[:maxContext]
 	}
-	return append(task, context...)
+	return context
 }
 
 func (daemon *Daemon) reviewCoordinator(ctx context.Context, project kernel.ProjectID, repository string) (review.Coordinator, error) {
