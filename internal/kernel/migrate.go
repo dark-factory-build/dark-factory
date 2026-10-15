@@ -206,6 +206,15 @@ func migrateFrom(ctx context.Context, connection *sql.Conn, version int) error {
 				return err
 			}
 		}
+		if _, err := connection.ExecContext(ctx, `PRAGMA writable_schema = ON`); err != nil {
+			return err
+		}
+		if _, err := connection.ExecContext(ctx, `UPDATE sqlite_schema SET sql = replace(sql, char(10) || char(9) || '    revision', char(10) || '    revision') WHERE type = 'table' AND name IN ('projects', 'project_tokens')`); err != nil {
+			return err
+		}
+		if _, err := connection.ExecContext(ctx, `PRAGMA writable_schema = OFF`); err != nil {
+			return err
+		}
 	}
 	if version < v41UserVersion {
 		if err := migrateToV41(ctx, connection, version); err != nil {

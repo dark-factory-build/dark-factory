@@ -128,8 +128,40 @@ func downgradeHome(t *testing.T, store *Store, version int, extra ...string) {
 			t.Fatal(err)
 		}
 	}
+	if version == v44UserVersion {
+		rebuildV44ProjectTables(t, store)
+	}
 	if err := store.Close(); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func rebuildV44ProjectTables(t *testing.T, store *Store) {
+	t.Helper()
+	ctx := context.Background()
+	expected := expectedSchemaOf(legacySchemaStatements(v44UserVersion))
+	projects := expected["projects"].sql
+	tokens := expected["project_tokens"].sql
+	statements := []string{
+		"PRAGMA foreign_keys = OFF",
+		"PRAGMA legacy_alter_table = ON",
+		"DROP INDEX projects_root_unique",
+		"ALTER TABLE projects RENAME TO projects_v44_source",
+		projects,
+		`INSERT INTO projects SELECT id, name, root, verification_policy, run_budget_limit, runs_used, max_run_seconds, revision, created_at_ms, updated_at_ms, specialist_runs, specialist_open_proposals FROM projects_v44_source`,
+		"DROP TABLE projects_v44_source",
+		"CREATE UNIQUE INDEX projects_root_unique ON projects(root)",
+		"ALTER TABLE project_tokens RENAME TO project_tokens_v44_source",
+		tokens,
+		`INSERT INTO project_tokens SELECT project_id, token_limit, tokens_used FROM project_tokens_v44_source`,
+		"DROP TABLE project_tokens_v44_source",
+		"PRAGMA legacy_alter_table = OFF",
+		"PRAGMA foreign_keys = ON",
+	}
+	for _, statement := range statements {
+		if _, err := store.writer.ExecContext(ctx, statement); err != nil {
+			t.Fatal(err)
+		}
 	}
 }
 
