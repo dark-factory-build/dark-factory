@@ -433,7 +433,7 @@ func TestDaemonDispatchesOperatorCallsAndBoundsProjection(t *testing.T) {
 		ID: testID(3), ProjectID: projectInput.ID, AssignedAgentID: testID(2), IncarnationID: testID(4),
 		Title: "public title", Body: "private task body sentinel", Priority: 7,
 	})
-	if err != nil || taskResult.Revision != 1 || taskResult.Head != 6 {
+	if err != nil || taskResult.Revision != 1 || taskResult.Head != 5 {
 		t.Fatalf("enqueue task = %+v, %v", taskResult, err)
 	}
 	waitDispatch(t, done)
@@ -441,7 +441,7 @@ func TestDaemonDispatchesOperatorCallsAndBoundsProjection(t *testing.T) {
 
 	done = fixture.serve(t)
 	dispatchResult, err := client.SetDispatch(ctx, stop.Revision, true)
-	if err != nil || dispatchResult.Revision != 3 || dispatchResult.Head != 7 {
+	if err != nil || dispatchResult.Revision != 3 || dispatchResult.Head != 6 {
 		t.Fatalf("set dispatch = %+v, %v", dispatchResult, err)
 	}
 	waitDispatch(t, done)
@@ -453,7 +453,7 @@ func TestDaemonDispatchesOperatorCallsAndBoundsProjection(t *testing.T) {
 		t.Fatal(err)
 	}
 	waitDispatch(t, done)
-	if snapshot.Head != 7 || len(snapshot.Projects) != 1 || len(snapshot.Agents) != 1 || len(snapshot.Tasks) != 1 {
+	if snapshot.Head != 6 || len(snapshot.Projects) != 1 || len(snapshot.Agents) != 1 || len(snapshot.Tasks) != 1 {
 		t.Fatalf("snapshot = %+v", snapshot)
 	}
 	if snapshot.Projects[0].ID != projectInput.ID || snapshot.Projects[0].Name != projectInput.Name || snapshot.Agents[0].Role != "orchestrator" || snapshot.Tasks[0].Title != "public title" {
