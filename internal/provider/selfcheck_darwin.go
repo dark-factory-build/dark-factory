@@ -7,12 +7,11 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
 	"sync"
-	"syscall"
-	"time"
 	"unicode/utf8"
 
 	"github.com/dark-factory-build/dark-factory/internal/gitauthor"
@@ -21,6 +20,7 @@ import (
 )
 
 const maxSelfCheckDiagnosticBytes = kernel.MaxProviderAdoptionDetailBytes
+const selfCheckMarkerDir = ".dark-factory/self-check"
 
 // NativeSelfCheckProcess is the narrow real-provider contract used during
 // adoption. The caller supplies the confined runner; this package owns the
@@ -59,23 +59,29 @@ func (r confinedNativeSelfCheckRunner) Start(ctx context.Context, launch Launch,
 	if err := factoryctl.Verify(); err != nil {
 		return nil, err
 	}
-	if _, err := runner.PrepareCommittedExecSpec(launch.Executable(), launch.Argv(), launch.Environment(), checkout); err != nil {
+	argv := launch.Argv()
+	if len(argv) == 0 {
+		return nil, fmt.Errorf("%w: missing native self-check prompt", ErrInvalid)
+	}
+	argv[len(argv)-1] = nativeSelfCheckPrompt(checkout, factoryctl.Path())
+	if _, err := runner.PrepareCommittedExecSpec(launch.Executable(), argv, launch.Environment(), checkout); err != nil {
 		return nil, err
 	}
-	command := exec.CommandContext(ctx, launch.Argv()[0], launch.Argv()[1:]...)
+	command := exec.CommandContext(ctx, argv[0], argv[1:]...)
 	command.Dir = checkout
 	command.Env = launch.Environment()
-	command.Stdin = strings.NewReader("")
+	command.Stdin = nil
 	command.Stdout = io.Discard
 	command.Stderr = io.Discard
 	if err := command.Start(); err != nil {
 		return nil, err
 	}
-	process := &confinedNativeSelfCheckProcess{command: command, done: make(chan error, 1), checkout: checkout, factoryctl: factoryctl.Path(), environment: launch.Environment()}
+	process := &confinedNativeSelfCheckProcess{command: command, done: make(chan error, 1), checkout: checkout}
 	go func() {
 		err := command.Wait()
 		process.waitMu.Lock()
 		process.waitErr = err
+		process.waitDone = true
 		process.waitMu.Unlock()
 		process.done <- err
 	}()
@@ -83,105 +89,83 @@ func (r confinedNativeSelfCheckRunner) Start(ctx context.Context, launch Launch,
 }
 
 type confinedNativeSelfCheckProcess struct {
-	command     *exec.Cmd
-	done        chan error
-	waitMu      sync.Mutex
-	waitErr     error
-	waitDone    bool
-	checkout    string
-	factoryctl  string
-	environment []string
+	command  *exec.Cmd
+	done     chan error
+	waitMu   sync.Mutex
+	waitErr  error
+	waitDone bool
+	checkout string
 }
 
 func (p *confinedNativeSelfCheckProcess) ReadCheckout(ctx context.Context) error {
 	if p == nil || p.command == nil {
 		return ErrInvalid
 	}
-	if err := p.running(); err != nil {
+	if err := p.wait(ctx); err != nil {
 		return err
 	}
-	command := exec.CommandContext(ctx, "/usr/bin/git", "-C", p.checkout, "rev-parse", "--show-toplevel")
-	command.Env = []string{"PATH=/usr/bin:/bin", "GIT_CONFIG_NOSYSTEM=1", "GIT_CONFIG_GLOBAL=/dev/null"}
-	output, err := command.Output()
-	if err != nil {
-		return err
-	}
-	want, err := filepath.EvalSymlinks(p.checkout)
-	if err != nil || filepath.Clean(strings.TrimSpace(string(output))) != filepath.Clean(want) {
-		return fmt.Errorf("%w: self-check checkout is not a real Change", ErrInvalid)
-	}
-	return p.running()
+	return p.marker("checkout")
 }
 
 func (p *confinedNativeSelfCheckProcess) CommitChange(ctx context.Context) error {
 	if p == nil || p.command == nil {
 		return ErrInvalid
 	}
-	if err := p.running(); err != nil {
+	if err := p.wait(ctx); err != nil {
 		return err
 	}
-	if err := p.git(ctx, "-C", p.checkout, "add", "--all"); err != nil {
-		return err
-	}
-	if err := p.git(ctx, "-C", p.checkout, "-c", "user.name="+gitauthor.AutomationName, "-c", "user.email="+gitauthor.AutomationEmail, "commit", "--allow-empty", "-m", "provider self-check"); err != nil {
-		return err
-	}
-	return p.running()
+	return p.marker("commit")
 }
 
 func (p *confinedNativeSelfCheckProcess) ReachAttemptAPI(ctx context.Context) error {
 	if p == nil || p.command == nil {
 		return ErrInvalid
 	}
-	if err := p.running(); err != nil {
+	if err := p.wait(ctx); err != nil {
 		return err
 	}
-	command := exec.CommandContext(ctx, p.factoryctl, "attempt", "task")
-	command.Dir = p.checkout
-	command.Env = append([]string(nil), p.environment...)
-	command.Stdout = io.Discard
-	command.Stderr = io.Discard
-	if err := command.Run(); err != nil {
-		return err
-	}
-	return p.running()
+	return p.marker("attempt-api")
 }
 
-func (p *confinedNativeSelfCheckProcess) running() error {
+func (p *confinedNativeSelfCheckProcess) wait(ctx context.Context) error {
 	if p == nil || p.command == nil || p.command.Process == nil || p.done == nil {
 		return ErrInvalid
 	}
+	p.waitMu.Lock()
+	if p.waitDone {
+		err := p.waitErr
+		p.waitMu.Unlock()
+		if err != nil {
+			return fmt.Errorf("native provider self-check provider exited: %w", err)
+		}
+		return nil
+	}
+	p.waitMu.Unlock()
 	select {
 	case err := <-p.done:
 		p.waitMu.Lock()
 		p.waitErr = err
 		p.waitDone = true
 		p.waitMu.Unlock()
-		return fmt.Errorf("native provider self-check provider exited: %w", err)
-	default:
-		if err := p.command.Process.Signal(syscall.Signal(0)); err != nil {
+		if err != nil {
 			return fmt.Errorf("native provider self-check provider exited: %w", err)
 		}
 		return nil
+	case <-ctx.Done():
+		return ctx.Err()
 	}
 }
 
-func (p *confinedNativeSelfCheckProcess) git(ctx context.Context, args ...string) error {
-	command := exec.CommandContext(ctx, "/usr/bin/git", args...)
-	command.Env = []string{"PATH=/usr/bin:/bin", "GIT_CONFIG_NOSYSTEM=1", "GIT_CONFIG_GLOBAL=/dev/null"}
-	command.Stdout = io.Discard
-	command.Stderr = io.Discard
-	return command.Run()
+func (p *confinedNativeSelfCheckProcess) marker(name string) error {
+	if _, err := os.Stat(filepath.Join(p.checkout, selfCheckMarkerDir, name)); err != nil {
+		return fmt.Errorf("%w: provider self-check marker %s: %v", ErrInvalid, name, err)
+	}
+	return nil
 }
 
 func (p *confinedNativeSelfCheckProcess) Close() error {
 	if p == nil || p.command == nil || p.command.Process == nil || p.done == nil {
 		return nil
-	}
-	select {
-	case <-p.done:
-		return nil
-	default:
 	}
 	p.waitMu.Lock()
 	waitDone := p.waitDone
@@ -190,16 +174,18 @@ func (p *confinedNativeSelfCheckProcess) Close() error {
 		return nil
 	}
 	_ = p.command.Process.Kill()
-	select {
-	case err := <-p.done:
-		var exitErr *exec.ExitError
-		if errors.As(err, &exitErr) {
-			return nil
-		}
-		return err
-	case <-time.After(time.Second):
-		return errors.New("native provider self-check provider did not exit")
+	err := <-p.done
+	var exitErr *exec.ExitError
+	if errors.As(err, &exitErr) {
+		return nil
 	}
+	return err
+}
+
+func nativeSelfCheckPrompt(checkout, factoryctl string) string {
+	quote := func(value string) string { return "'" + strings.ReplaceAll(value, "'", "'\\''") + "'" }
+	marker := filepath.Join(checkout, selfCheckMarkerDir)
+	return fmt.Sprintf("# Run this provider self-check in the current checkout using your own shell.\nset -eu\nexport GIT_TERMINAL_PROMPT=0 GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null\ntest \"$(git rev-parse --show-toplevel)\" = %s\nmkdir -p %s\nprintf checkout > %s/checkout\ngit add --all %s\ngit -c user.name=%s -c user.email=%s commit --no-verify --allow-empty -m 'provider self-check'\nprintf commit > %s/commit\n%s attempt peer status\nprintf attempt-api > %s/attempt-api\n", quote(checkout), quote(marker), quote(marker), quote(marker), quote(gitauthor.AutomationName), quote(gitauthor.AutomationEmail), quote(marker), quote(factoryctl), quote(marker))
 }
 
 // RunNativeSelfCheck builds the exact native launch, starts it once in the

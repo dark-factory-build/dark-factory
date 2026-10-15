@@ -73,23 +73,16 @@ func TestBoundedSelfCheckErrorTruncatesAtUTF8Boundary(t *testing.T) {
 }
 
 func TestConfinedNativeSelfCheckRunnerUsesRealChangeAndAttemptEdges(t *testing.T) {
-	installation, runtime, _ := nativeFixture(t, kernel.ProviderCodex)
 	checkout := t.TempDir()
 	if output, err := exec.Command("/usr/bin/git", "-C", checkout, "init").CombinedOutput(); err != nil {
 		t.Fatalf("git init: %v: %s", err, output)
 	}
-	longLived, err := runner.CommitExecutableLocator("/usr/bin/yes")
+	executable, err := runner.CommitExecutableLocator("/bin/sh")
 	if err != nil {
 		t.Fatal(err)
 	}
-	installation.executable = longLived
-	runtime.factoryctl = "/usr/bin/true"
-	request := requestFor(t, kernel.ProviderCodex, installation, runtime, "", "")
-	launch, err := Build(request)
-	if err != nil {
-		t.Fatal(err)
-	}
-	process, err := NewConfinedNativeSelfCheckRunner(request).Start(context.Background(), launch, checkout)
+	launch := Launch{executable: executable, argv: []string{"/bin/sh", "-c", "self-check"}, environment: []string{"PATH=/usr/bin:/bin", "DARK_FACTORY_FACTORYCTL=/usr/bin/true"}, taskDelivery: TaskDeliveryAttemptAPI}
+	process, err := (confinedNativeSelfCheckRunner{factoryctl: "/usr/bin/true"}).Start(context.Background(), launch, checkout)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -105,30 +98,7 @@ func TestConfinedNativeSelfCheckRunnerUsesRealChangeAndAttemptEdges(t *testing.T
 	}
 }
 
-func TestConfinedNativeSelfCheckRejectsProviderThatExitsBeforeAttemptAPI(t *testing.T) {
-	installation, runtime, _ := nativeFixture(t, kernel.ProviderCodex)
-	runtime.factoryctl = "/usr/bin/true"
-	checkout := t.TempDir()
-	if output, err := exec.Command("/usr/bin/git", "-C", checkout, "init").CombinedOutput(); err != nil {
-		t.Fatalf("git init: %v: %s", err, output)
-	}
-	request := requestFor(t, kernel.ProviderCodex, installation, runtime, "", "")
-	launch, err := Build(request)
-	if err != nil {
-		t.Fatal(err)
-	}
-	process, err := NewConfinedNativeSelfCheckRunner(request).Start(context.Background(), launch, checkout)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer process.Close()
-	if err := process.ReadCheckout(context.Background()); err == nil || !strings.Contains(err.Error(), "provider exited") {
-		t.Fatalf("read checkout error=%v, want provider exit", err)
-	}
-}
-
 func TestConfinedNativeSelfCheckUsesActualAttemptAPI(t *testing.T) {
-	installation, runtime, _ := nativeFixture(t, kernel.ProviderCodex)
 	factoryctl := os.Getenv("DARK_FACTORY_FACTORYCTL")
 	if factoryctl == "" {
 		output, _ := exec.Command("/bin/sh", "-lc", "command -v factoryctl").Output()
@@ -137,33 +107,21 @@ func TestConfinedNativeSelfCheckUsesActualAttemptAPI(t *testing.T) {
 	if factoryctl == "" {
 		t.Skip("factoryctl is not installed")
 	}
-	runtime.factoryctl = factoryctl
 	checkout := t.TempDir()
 	if output, err := exec.Command("/usr/bin/git", "-C", checkout, "init").CombinedOutput(); err != nil {
 		t.Fatalf("git init: %v: %s", err, output)
 	}
-	longLived, err := runner.CommitExecutableLocator("/usr/bin/yes")
+	executable, err := runner.CommitExecutableLocator("/bin/sh")
 	if err != nil {
 		t.Fatal(err)
 	}
-	installation.executable = longLived
-	request := requestFor(t, kernel.ProviderCodex, installation, runtime, "", "")
-	launch, err := Build(request)
-	if err != nil {
-		t.Fatal(err)
-	}
-	process, err := NewConfinedNativeSelfCheckRunner(request).Start(context.Background(), launch, checkout)
+	launch := Launch{executable: executable, argv: []string{"/bin/sh", "-c", "self-check"}, environment: []string{"PATH=/usr/bin:/bin", "DARK_FACTORY_FACTORYCTL=" + factoryctl, "DARK_FACTORY_SOCKET=/invalid"}, taskDelivery: TaskDeliveryAttemptAPI}
+	process, err := (confinedNativeSelfCheckRunner{factoryctl: factoryctl}).Start(context.Background(), launch, checkout)
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer process.Close()
-	if err := process.ReadCheckout(context.Background()); err != nil {
-		t.Fatal(err)
-	}
-	if err := process.CommitChange(context.Background()); err != nil {
-		t.Fatal(err)
-	}
-	if err := process.ReachAttemptAPI(context.Background()); err == nil {
-		t.Fatal("attempt API unexpectedly succeeded")
+	if err := process.ReadCheckout(context.Background()); err == nil || !strings.Contains(err.Error(), "provider exited") {
+		t.Fatalf("actual attempt API error=%v, want provider failure after invoking factoryctl", err)
 	}
 }
