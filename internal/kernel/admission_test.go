@@ -381,6 +381,54 @@ func TestPrerequisiteOnAReclaimedProducerChangeIsRefused(t *testing.T) {
 	}
 }
 
+// A consumer cancelled before admission may be retried, so its prerequisite
+// still keeps the producer's Change from reclamation until it is admitted.
+func TestCancelledConsumerKeepsItsProducerChangeForItsRetry(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	proposal, _ := NewSuccessProposal("producer result")
+	store, finalizing := finalizingReleasedRun(t, RoleWorker, proposal)
+	defer store.Close()
+	producer, err := finalizeTestRun(t, store, finalizing, 60)
+	if err != nil {
+		t.Fatal(err)
+	}
+	consumer, err := store.EnqueueTask(ctx, NewTask{ID: taskID(t, 229), ProjectID: producer.ProjectID, IncarnationID: incarnationID(t, 230), Title: "consumer", Prerequisites: []TaskPrerequisite{{TaskID: producer.TaskID, WorkRevision: mustRevision(t, 1)}}}, mustTime(t, 61))
+	if err != nil {
+		t.Fatal(err)
+	}
+	consumer, err = store.UpdateTaskForOperator(ctx, consumer.ID, consumer.Revision, TaskPatch{Cancel: true}, mustTime(t, 62))
+	if err != nil {
+		t.Fatal(err)
+	}
+	reclaim := func(at int64) error {
+		t.Helper()
+		change, _, err := store.Change(ctx, *producer.ChangeID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		_, err = store.ReclaimChange(ctx, change.ID, change.Revision, false, mustTime(t, at))
+		return err
+	}
+	if reclaim(63) == nil {
+		t.Fatal("Change reclaimed while a cancelled consumer may still be retried")
+	}
+	retried, err := store.RetryTask(ctx, nil, consumer.ID, consumer.Revision, AgentID{}, mustTime(t, 64), 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, err := store.AdmitNext(ctx, admissionKeys(t, 100, nil), mustTime(t, 65))
+	if err != nil || !result.Admitted() || result.Run.TaskID != retried.ID {
+		t.Fatalf("retried consumer admission = %+v, %v", result, err)
+	}
+	if err := reclaim(66); err != nil {
+		t.Fatalf("reclaim after admission: %v", err)
+	}
+	if err := store.Validate(ctx); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestAdmissionConsumesExactSuccessfulProducerRevision(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
