@@ -178,7 +178,7 @@ func newWorkerConfigFixture(t *testing.T) (*WorkerControl, *os.File) {
 func TestWorkerAwaitsSlowReleaseWithoutDeadline(t *testing.T) {
 	shortenWait(t, &attemptControlTimeout)
 	worker, peer := newWorkerConfigFixture(t)
-	worker.state = workerPopulationReported
+	worker.state = workerProviderAdoptionReported
 	delay := 2 * attemptControlTimeout
 	written := make(chan error, 1)
 	time.AfterFunc(delay, func() {
@@ -458,6 +458,18 @@ func runAttemptWorkerHelper(args []string) error {
 		cwd.Close()
 		return err
 	}
+	if err := control.AwaitProviderAdoption(); err != nil {
+		cwd.Close()
+		return err
+	}
+	if err := write("provider-adoption", "adopted"); err != nil {
+		cwd.Close()
+		return err
+	}
+	if err := control.ReportProviderAdoption([]byte("adopted")); err != nil {
+		cwd.Close()
+		return err
+	}
 	if err := control.AwaitProvider(); err != nil {
 		cwd.Close()
 		return err
@@ -654,6 +666,18 @@ func (f *attemptFixture) activateOuter() Identity {
 	return event.Identity
 }
 
+func TestProviderAdoptionMarkerCanCoexistWithActivatedWorker(t *testing.T) {
+	f := newAttemptFixture(t, "shell", "")
+	f.activateOuter()
+	lease, _, err := CreateGateLease(f.dir, f.lifetime, ProviderAdoptionMarkerName)
+	if err != nil {
+		t.Fatalf("provider adoption marker: %v", err)
+	}
+	if err := lease.Close(); err != nil {
+		t.Fatalf("close provider adoption marker: %v", err)
+	}
+}
+
 func (f *attemptFixture) advanceToProvider() {
 	f.t.Helper()
 	steps := []struct {
@@ -664,6 +688,7 @@ func (f *attemptFixture) advanceToProvider() {
 		{StageSelection, StageSelection, "selection"},
 		{StagePreparation, StagePreparation, "preparation"},
 		{StagePopulation, StagePopulation, "population"},
+		{StageProviderAdoption, StageProviderAdoption, "provider-adoption"},
 	}
 	for _, step := range steps {
 		if err := f.controller.Release(step.release); err != nil {

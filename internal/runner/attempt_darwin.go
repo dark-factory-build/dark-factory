@@ -38,6 +38,8 @@ const (
 	controllerPreparationReported
 	controllerPopulationReleased
 	controllerPopulationReported
+	controllerProviderAdoptionReleased
+	controllerProviderAdoptionReported
 	controllerProviderReleased
 	controllerResult
 	controllerSpent
@@ -246,7 +248,7 @@ func (c *AttemptController) Next(timeout time.Duration) (AttemptEvent, error) {
 		}
 		if frame.Kind == "provider-exec-error" {
 			switch c.state {
-			case controllerSelectionReleased, controllerPreparationReleased, controllerPopulationReleased:
+			case controllerSelectionReleased, controllerPreparationReleased, controllerPopulationReleased, controllerProviderAdoptionReleased:
 				if validProviderErrorFrame(frame) {
 					return AttemptEvent{}, errors.Join(fmt.Errorf("runner: worker preparation: %s", frame.Payload), c.spend())
 				}
@@ -267,6 +269,8 @@ func (c *AttemptController) Next(timeout time.Duration) (AttemptEvent, error) {
 			return c.acceptCheckpoint(frame, StagePreparation, controllerPreparationReported)
 		case controllerPopulationReleased:
 			return c.acceptCheckpoint(frame, StagePopulation, controllerPopulationReported)
+		case controllerProviderAdoptionReleased:
+			return c.acceptCheckpoint(frame, StageProviderAdoption, controllerProviderAdoptionReported)
 		case controllerProviderReleased:
 			if isTerminalEventKind(frame.Kind) {
 				if frame.Version != commandVersion || !validTerminalEnvelope(frame, false) {
@@ -370,8 +374,10 @@ func (c *AttemptController) Release(stage AttemptStage) error {
 		want, next = controllerSelectionReported, controllerPreparationReleased
 	case StagePopulation:
 		want, next = controllerPreparationReported, controllerPopulationReleased
+	case StageProviderAdoption:
+		want, next = controllerPopulationReported, controllerProviderAdoptionReleased
 	case StageProvider:
-		want, next = controllerPopulationReported, controllerProviderReleased
+		want, next = controllerProviderAdoptionReported, controllerProviderReleased
 	default:
 		return ErrState
 	}
@@ -472,6 +478,8 @@ const (
 	workerPreparationReported
 	workerPopulation
 	workerPopulationReported
+	workerProviderAdoption
+	workerProviderAdoptionReported
 	workerProvider
 	workerExec
 )
@@ -634,8 +642,16 @@ func (w *WorkerControl) ReportPopulation(payload []byte) error {
 	return w.report(StagePopulation, workerPopulation, workerPopulationReported, payload)
 }
 
+func (w *WorkerControl) AwaitProviderAdoption() error {
+	return w.await(StageProviderAdoption, workerPopulationReported, workerProviderAdoption)
+}
+
+func (w *WorkerControl) ReportProviderAdoption(payload []byte) error {
+	return w.report(StageProviderAdoption, workerProviderAdoption, workerProviderAdoptionReported, payload)
+}
+
 func (w *WorkerControl) AwaitProvider() error {
-	return w.await(StageProvider, workerPopulationReported, workerProvider)
+	return w.await(StageProvider, workerProviderAdoptionReported, workerProvider)
 }
 
 // ReportProviderError is the one bounded pre-exec failure report. It lets the
@@ -726,6 +742,51 @@ func (w *WorkerControl) ExecProvider(spec *LaunchSpec, cwd, task *os.File) error
 		}
 	}
 	return err
+}
+
+// RunProviderAdoptionSelfCheck launches one native provider through the same
+// runner gate as the final provider. It deliberately leaves the worker in the
+// adoption checkpoint until the daemon observes the result.
+func (w *WorkerControl) RunProviderAdoptionSelfCheck(gateExecutable string, spec *LaunchSpec) error {
+	if w == nil || w.file == nil || w.dir == nil || w.lifetime == nil || w.state != workerProviderAdoption || spec == nil || gateExecutable == "" {
+		return ErrState
+	}
+	lease, _, err := CreateGateLease(w.dir, w.lifetime, ProviderAdoptionMarkerName)
+	if err != nil {
+		return err
+	}
+	defer lease.Close()
+	child, err := StartBlockedPTY(lease, gateExecutable, spec, false)
+	if err != nil {
+		return err
+	}
+	defer child.Close()
+	if _, err = child.Activate(); err != nil {
+		_, terminateErr := child.Terminate(5 * time.Second)
+		return errors.Join(err, terminateErr)
+	}
+	// Adoption uses a native provider's one-shot completion mode, but its
+	// response can still exceed the PTY buffer. Drain the same PTY while the
+	// lifecycle wait observes process exit; otherwise a successful MCP call can
+	// block before it reaches its completion hook.
+	drained := make(chan struct{})
+	go func() {
+		_, _ = io.Copy(io.Discard, child.ptyMaster)
+		close(drained)
+	}()
+	exit, finishErr := child.FinishAfterExit(5 * time.Minute)
+	closeErr := child.Close()
+	<-drained
+	if finishErr != nil {
+		return errors.Join(finishErr, closeErr)
+	}
+	if closeErr != nil {
+		return closeErr
+	}
+	if exit.Code != 0 || exit.Signal != 0 || exit.LaunchErr != "" {
+		return fmt.Errorf("provider adoption self-check failed: exit=%d signal=%d launch=%s", exit.Code, exit.Signal, exit.LaunchErr)
+	}
+	return nil
 }
 
 func providerErrorPayload(cause error) ([]byte, error) {
@@ -1179,7 +1240,8 @@ func runAttempt(daemon, dir, lifetime *os.File, cfg attemptConfig, workerConfig 
 	}{
 		{StageSelection, StagePreparation},
 		{StagePreparation, StagePopulation},
-		{StagePopulation, StageProvider},
+		{StagePopulation, StageProviderAdoption},
+		{StageProviderAdoption, StageProvider},
 	}
 	for _, step := range sequence {
 		frame, source, err = nextAttemptFrame(child, daemon, workerParent, true, true, stagePTY, 0)

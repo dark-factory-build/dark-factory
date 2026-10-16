@@ -20,6 +20,7 @@ import (
 )
 
 const liveAttemptPoll = 100 * time.Millisecond
+const providerAdoptionCheckpointTimeout = 5 * time.Minute
 const terminalEffectsSupported = true
 
 func startLiveAttempt(attempt *liveAttempt, ctx context.Context) {
@@ -165,7 +166,12 @@ func (attempt *liveAttempt) loop(ctx context.Context) error {
 
 func (attempt *liveAttempt) handleBeforeRelease(ctx context.Context, command liveAttemptCommand) (bool, error) {
 	switch command.kind {
-	case liveCommandReleaseProvider:
+	case liveCommandReleaseProviderAdoption, liveCommandReleaseProvider:
+		releaseStage := runner.StageProvider
+		adoptionRelease := command.kind == liveCommandReleaseProviderAdoption
+		if adoptionRelease {
+			releaseStage = runner.StageProviderAdoption
+		}
 		if ctx.Err() != nil {
 			command.result <- ctx.Err()
 			return false, ctx.Err()
@@ -207,14 +213,23 @@ func (attempt *liveAttempt) handleBeforeRelease(ctx context.Context, command liv
 			err = ctx.Err()
 		}
 		if err == nil {
-			err = attempt.controller.Release(runner.StageProvider)
+			err = attempt.controller.Release(releaseStage)
 		}
 		attempt.daemon.operationMu.Unlock()
+		if err == nil && adoptionRelease {
+			var checkpoint runner.AttemptEvent
+			checkpoint, err = attempt.controller.Next(providerAdoptionCheckpointTimeout)
+			if err == nil && (checkpoint.Kind != runner.AttemptCheckpoint || checkpoint.Stage != runner.StageProviderAdoption) {
+				err = runner.ErrState
+			}
+		}
 		if err != nil {
 			command.result <- err
 			return false, err
 		}
-		attempt.releaseSent = true
+		if !adoptionRelease {
+			attempt.releaseSent = true
+		}
 		command.result <- nil
 		return false, nil
 	case liveCommandShutdown:

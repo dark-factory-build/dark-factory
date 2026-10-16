@@ -93,9 +93,7 @@ func TestRegisteredShellWorkerCompletesExactFourReleaseSequence(t *testing.T) {
 	if _, err := os.Stat(fixture.witness); !errors.Is(err, os.ErrNotExist) {
 		t.Fatal("provider effect before provider release")
 	}
-	if err := fixture.controller.Release(runner.StageProvider); err != nil {
-		t.Fatal(err)
-	}
+	fixture.releaseProvider(t)
 	record := fixture.finish(t)
 	if process, ok := record.Result().Process(); !ok || process != inner {
 		t.Fatalf("result=%+v inner=%+v", record.Result(), inner)
@@ -159,9 +157,7 @@ func TestRegisteredShellWorkerExecutesMaximumTaskWithoutPTYStartupTraffic(t *tes
 	for _, stage := range []runner.AttemptStage{runner.StageSelection, runner.StagePreparation, runner.StagePopulation} {
 		fixture.release(t, stage, stage)
 	}
-	if err := fixture.controller.Release(runner.StageProvider); err != nil {
-		t.Fatal(err)
-	}
+	fixture.releaseProvider(t)
 	record := fixture.finish(t)
 	if process, ok := record.Result().Process(); !ok || process != inner {
 		t.Fatalf("result=%+v inner=%+v", record.Result(), inner)
@@ -183,9 +179,7 @@ func TestRegisteredShellWorkerKeepsPTYExclusiveForPostReadyInput(t *testing.T) {
 	for _, stage := range []runner.AttemptStage{runner.StageSelection, runner.StagePreparation, runner.StagePopulation} {
 		fixture.release(t, stage, stage)
 	}
-	if err := fixture.controller.Release(runner.StageProvider); err != nil {
-		t.Fatal(err)
-	}
+	fixture.releaseProvider(t)
 	if frame := fixture.nextTerminal(t, runner.TerminalReady, 0); frame.Kind != runner.TerminalReady {
 		t.Fatalf("terminal ready=%+v", frame)
 	}
@@ -282,9 +276,7 @@ func TestFinalFactoryctlCommitmentRejectsReplacementBeforeProviderWitness(t *tes
 	if err := os.Rename(replacement, target); err != nil {
 		t.Fatal(err)
 	}
-	if err := fixture.controller.Release(runner.StageProvider); err != nil {
-		t.Fatal(err)
-	}
+	fixture.releaseProvider(t)
 	fixture.finish(t, false)
 	if _, err := os.Stat(fixture.witness); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("provider witness exists after factoryctl replacement: %v", err)
@@ -323,9 +315,7 @@ func TestCompleteWorkerLeavesExactFDAndGoroutineCensus(t *testing.T) {
 	fixture.release(t, runner.StageSelection, runner.StageSelection)
 	fixture.release(t, runner.StagePreparation, runner.StagePreparation)
 	fixture.release(t, runner.StagePopulation, runner.StagePopulation)
-	if err := fixture.controller.Release(runner.StageProvider); err != nil {
-		t.Fatal(err)
-	}
+	fixture.releaseProvider(t)
 	fixture.finish(t)
 	fixture.close()
 	if after := fdCensus(t); !reflect.DeepEqual(after, beforeFD) {
@@ -397,15 +387,14 @@ func TestFinalRecheckRejectsABranchMovedBeforeTheProvider(t *testing.T) {
 	fixture.release(t, runner.StageSelection, runner.StageSelection)
 	fixture.release(t, runner.StagePreparation, runner.StagePreparation)
 	fixture.release(t, runner.StagePopulation, runner.StagePopulation)
+	fixture.releaseProviderAdoption(t)
 	published := filepath.Join(fixture.changeParent, fixture.finalName)
 	if err := os.WriteFile(filepath.Join(published, "early.txt"), []byte("early\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	runGit(t, fixture.git, "-C", published, "add", "early.txt")
 	runGit(t, fixture.git, "-C", published, "commit", "-q", "-m", "moved before provider")
-	if err := fixture.controller.Release(runner.StageProvider); err != nil {
-		t.Fatal(err)
-	}
+	fixture.releaseProviderOnly(t)
 	record := fixture.finish(t, false)
 	if diagnostic := fixture.output(); !strings.Contains(diagnostic, "Change worktree moved before the provider ran") {
 		t.Fatalf("missing exact moved-branch rejection: %q", diagnostic)
@@ -426,6 +415,7 @@ func TestFinalRecheckRejectsAReplacedGitfile(t *testing.T) {
 	fixture.release(t, runner.StageSelection, runner.StageSelection)
 	fixture.release(t, runner.StagePreparation, runner.StagePreparation)
 	fixture.release(t, runner.StagePopulation, runner.StagePopulation)
+	fixture.releaseProviderAdoption(t)
 	published := filepath.Join(fixture.changeParent, fixture.finalName)
 	if err := os.Remove(filepath.Join(published, ".git")); err != nil {
 		t.Fatal(err)
@@ -433,9 +423,7 @@ func TestFinalRecheckRejectsAReplacedGitfile(t *testing.T) {
 	if err := os.Mkdir(filepath.Join(published, ".git"), 0o700); err != nil {
 		t.Fatal(err)
 	}
-	if err := fixture.controller.Release(runner.StageProvider); err != nil {
-		t.Fatal(err)
-	}
+	fixture.releaseProviderOnly(t)
 	record := fixture.finish(t, false)
 	if code, ok := record.Result().Code(); ok && code == 0 {
 		t.Fatalf("replaced gitfile reached provider: %+v", record.Result())
@@ -451,6 +439,7 @@ func TestFinalRuntimeRecheckRejectsFixedChildReplacement(t *testing.T) {
 	fixture.release(t, runner.StageSelection, runner.StageSelection)
 	fixture.release(t, runner.StagePreparation, runner.StagePreparation)
 	fixture.release(t, runner.StagePopulation, runner.StagePopulation)
+	fixture.releaseProviderAdoption(t)
 	binding, err := fixture.runtime.Binding()
 	if err != nil {
 		t.Fatal(err)
@@ -465,9 +454,7 @@ func TestFinalRuntimeRecheckRejectsFixedChildReplacement(t *testing.T) {
 	if err := os.Mkdir(home, 0o700); err != nil {
 		t.Fatal(err)
 	}
-	if err := fixture.controller.Release(runner.StageProvider); err != nil {
-		t.Fatal(err)
-	}
+	fixture.releaseProviderOnly(t)
 	record := fixture.finish(t, false)
 	if diagnostic := fixture.output(); !strings.Contains(diagnostic, "runtime authority verification: Change worker failed") {
 		t.Fatalf("missing exact runtime rejection: %q", diagnostic)
@@ -739,6 +726,24 @@ func (f *workerFixture) release(t *testing.T, release, report runner.AttemptStag
 		t.Fatalf("event=%+v err=%v diag=%q", event, err, f.output())
 	}
 	return event
+}
+
+func (f *workerFixture) releaseProvider(t *testing.T) {
+	t.Helper()
+	f.releaseProviderAdoption(t)
+	f.releaseProviderOnly(t)
+}
+
+func (f *workerFixture) releaseProviderAdoption(t *testing.T) {
+	t.Helper()
+	f.release(t, runner.StageProviderAdoption, runner.StageProviderAdoption)
+}
+
+func (f *workerFixture) releaseProviderOnly(t *testing.T) {
+	t.Helper()
+	if err := f.controller.Release(runner.StageProvider); err != nil {
+		t.Fatal(err)
+	}
 }
 
 func (f *workerFixture) nextTerminal(t *testing.T, kind runner.TerminalEventKind, correlation uint64) runner.TerminalFrame {

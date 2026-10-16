@@ -135,16 +135,24 @@ func (store *Store) CreateHumanQuestionForAttempt(ctx context.Context, digest At
 // revokes the old bearer, and persists its continuation. A reply cannot commit
 // between the question and yield edges.
 func (store *Store) CreateHumanQuestionAndYieldForAttempt(ctx context.Context, digest AttemptDigest, input NewHumanQuestion, at UnixMillis) (HumanRequest, error) {
-	return store.createHumanQuestionForAttemptWithYield(ctx, digest, input, at, MaxOpenHumanRequests, true)
+	return store.createHumanQuestionForAttemptWithYield(ctx, digest, input, at, MaxOpenHumanRequests, true, false)
+}
+
+// CreateHumanQuestionAndWaitForAttempt records a question that must remain an
+// actionable continuation while the current attempt reports its failure. It
+// does not change the run phase or revoke the attempt bearer; the caller owns
+// that failure transition.
+func (store *Store) CreateHumanQuestionAndWaitForAttempt(ctx context.Context, digest AttemptDigest, input NewHumanQuestion, at UnixMillis) (HumanRequest, error) {
+	return store.createHumanQuestionForAttemptWithYield(ctx, digest, input, at, MaxOpenHumanRequests, false, true)
 }
 
 // createHumanQuestionForAttempt keeps the cap as an argument only for bounded
 // package tests; production always uses MaxOpenHumanRequests above.
 func (store *Store) createHumanQuestionForAttempt(ctx context.Context, digest AttemptDigest, input NewHumanQuestion, at UnixMillis, openLimit int64) (HumanRequest, error) {
-	return store.createHumanQuestionForAttemptWithYield(ctx, digest, input, at, openLimit, false)
+	return store.createHumanQuestionForAttemptWithYield(ctx, digest, input, at, openLimit, false, false)
 }
 
-func (store *Store) createHumanQuestionForAttemptWithYield(ctx context.Context, digest AttemptDigest, input NewHumanQuestion, at UnixMillis, openLimit int64, yield bool) (HumanRequest, error) {
+func (store *Store) createHumanQuestionForAttemptWithYield(ctx context.Context, digest AttemptDigest, input NewHumanQuestion, at UnixMillis, openLimit int64, yield, wait bool) (HumanRequest, error) {
 	if err := input.valid(); err != nil {
 		return HumanRequest{}, err
 	}
@@ -186,6 +194,13 @@ func (store *Store) createHumanQuestionForAttemptWithYield(ctx context.Context, 
 			if err := tx.Commit(ctx); err != nil {
 				return HumanRequest{}, err
 			}
+		} else if wait {
+			if err := waitHumanQuestion(ctx, tx, existing); err != nil {
+				return HumanRequest{}, err
+			}
+			if err := tx.Commit(ctx); err != nil {
+				return HumanRequest{}, err
+			}
 		} else if err := tx.Rollback(nil); err != nil {
 			return HumanRequest{}, err
 		}
@@ -214,6 +229,10 @@ func (store *Store) createHumanQuestionForAttemptWithYield(ctx context.Context, 
 			}
 			if yield {
 				if err := store.yieldHumanQuestion(ctx, tx, run, existingOpen, at); err != nil {
+					return HumanRequest{}, err
+				}
+			} else if wait {
+				if err := waitHumanQuestion(ctx, tx, existingOpen); err != nil {
 					return HumanRequest{}, err
 				}
 			}
@@ -245,7 +264,13 @@ func (store *Store) createHumanQuestionForAttemptWithYield(ctx context.Context, 
 	if err != nil {
 		return HumanRequest{}, tx.Rollback(err)
 	}
-	inserted, err := tx.connection.ExecContext(ctx, `INSERT INTO human_requests(id, run_id, idempotency_key, kind, reason_code, question_text, options_json, status, revision, created_at_ms, updated_at_ms) VALUES(?, ?, ?, 'question', 'provider_question', ?, ?, 'open', 1, ?, ?)`, rawID[:], run.ID.Bytes(), input.IdempotencyKey[:], input.QuestionText, string(optionsJSON), at.Int64(), at.Int64())
+	columns := ""
+	values := ""
+	if wait {
+		columns = ", continuation"
+		values = ", 'waiting'"
+	}
+	inserted, err := tx.connection.ExecContext(ctx, `INSERT INTO human_requests(id, run_id, idempotency_key, kind, reason_code, question_text, options_json, status, revision, created_at_ms, updated_at_ms`+columns+`) VALUES(?, ?, ?, 'question', 'provider_question', ?, ?, 'open', 1, ?, ?`+values+`)`, rawID[:], run.ID.Bytes(), input.IdempotencyKey[:], input.QuestionText, string(optionsJSON), at.Int64(), at.Int64())
 	if err := requireOneRow(inserted, err); err != nil {
 		return HumanRequest{}, tx.Rollback(err)
 	}
@@ -272,6 +297,17 @@ func (store *Store) createHumanQuestionForAttemptWithYield(ctx context.Context, 
 		return HumanRequest{}, err
 	}
 	return request, nil
+}
+
+func waitHumanQuestion(ctx context.Context, tx *writeTx, request HumanRequest) error {
+	if request.Status != HumanRequestOpen || request.Continuation != "" && request.Continuation != ContinuationWaiting {
+		return tx.Rollback(ErrConflict)
+	}
+	if request.Continuation == ContinuationWaiting {
+		return nil
+	}
+	updated, err := tx.connection.ExecContext(ctx, `UPDATE human_requests SET continuation='waiting' WHERE id=? AND status='open' AND continuation IS NULL`, request.ID.Bytes())
+	return requireOneRow(updated, err)
 }
 
 func humanRequestByKey(ctx context.Context, connection *sql.Conn, runID RunID, key [IDBytes]byte) (HumanRequest, bool, error) {
@@ -812,9 +848,8 @@ func (store *Store) RecoverHumanDeliveries(ctx context.Context, at UnixMillis) (
 // running origin durable before the run transition becomes observable.
 func transitionHumanRequestsForRun(ctx context.Context, connection *sql.Conn, runID RunID, at UnixMillis, terminal bool, cancelRequest *HumanRequestID) ([]pendingInvalidation, error) {
 	rows, err := connection.QueryContext(ctx, `SELECT id, status, revision, updated_at_ms FROM human_requests WHERE run_id = ?1 AND status IN ('open', 'delivering', 'delivery_unknown')
-		AND (continuation IS NULL OR ?2 AND EXISTS(SELECT 1 FROM tasks t JOIN runs r ON r.task_id = t.id AND r.task_incarnation_id = t.incarnation_id AND r.admitted_task_work_revision = t.work_revision
-			WHERE r.id = ?1 AND t.status NOT IN ('queued', 'running') AND NOT (r.terminal_kind = 'cancelled' AND r.terminal_detail = 'yielded awaiting human_request')))
-		ORDER BY id`, runID.Bytes(), terminal)
+		AND continuation IS NULL
+		ORDER BY id`, runID.Bytes())
 	if err != nil {
 		return nil, err
 	}

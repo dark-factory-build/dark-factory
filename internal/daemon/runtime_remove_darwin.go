@@ -201,6 +201,7 @@ func isRemovableRuntimeFile(name string) bool {
 	switch name {
 	case attemptTokenName,
 		runner.OuterActivationMarkerName, runner.InnerActivationMarkerName,
+		runner.ProviderAdoptionMarkerName,
 		runner.GateConfigScratchName, runner.GateStdinScratchName,
 		runner.TerminalScratchName,
 		runner.TakeoverGrantName, runner.TakeoverScratchName, runner.TakeoverSocketName,

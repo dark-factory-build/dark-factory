@@ -145,6 +145,7 @@ func allowedEnv(k string) bool {
 	case "HOME", "PATH", "LANG", "LC_ALL", "LC_CTYPE", "TMPDIR", "TERM", "SHELL", "USER", "LOGNAME",
 		"DISABLE_AUTOUPDATER",
 		"DARK_FACTORY_TASK_ATTACHMENTS", "DARK_FACTORY_SOCKET", "DARK_FACTORY_ATTEMPT_TOKEN_FILE", "DARK_FACTORY_FACTORYCTL", "DARK_FACTORY_LOCAL_CI_DIRECTORY",
+		"DARK_FACTORY_PROVIDER_ADOPTION_WITNESS",
 		"DARK_FACTORY_OVERSEER_SESSION_RESUMED",
 		"DF_CI_CACHE_ROOT", "DF_CI_GO_MODULE_CACHE",
 		"CODEX_HOME", "CLAUDE_CONFIG_DIR",
@@ -232,6 +233,13 @@ func (commitment ExecutableCommitment) Verify() error {
 		return fmt.Errorf("runner: executable commitment changed: %w", ErrIdentity)
 	}
 	return nil
+}
+
+// Digest is the stable, non-secret identity of the committed executable. It
+// lets a supervisor persist an adoption decision without persisting a live
+// descriptor or treating a pathname as authority.
+func (commitment ExecutableCommitment) Digest() [sha256.Size]byte {
+	return sha256.Sum256([]byte(fmt.Sprintf("%s\x00%d\x00%d\x00%d\x00%d\x00%d", commitment.executable.Path, commitment.executable.Device, commitment.executable.Inode, commitment.executable.UID, commitment.executable.GID, commitment.executable.Mode)))
 }
 
 func commitExecutable(path string) (fileCommitment, error) {

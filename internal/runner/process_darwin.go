@@ -27,7 +27,7 @@ type GateLease struct {
 }
 
 func CreateGateLease(dir, lifetime *os.File, basename string) (*GateLease, FileIdentity, error) {
-	if dir == nil || lifetime == nil || basename != OuterActivationMarkerName && basename != InnerActivationMarkerName {
+	if dir == nil || lifetime == nil || basename != OuterActivationMarkerName && basename != InnerActivationMarkerName && basename != ProviderAdoptionMarkerName {
 		return nil, FileIdentity{}, fmt.Errorf("runner: invalid marker name")
 	}
 	dup, err := unix.FcntlInt(dir.Fd(), unix.F_DUPFD_CLOEXEC, 0)
@@ -263,6 +263,24 @@ func (c *OwnedChild) refreshExit() error {
 
 func StartBlocked(lease *GateLease, gateExecutable string, spec *LaunchSpec, keepDirectoryAcrossExec bool) (child *OwnedChild, err error) {
 	prepared, err := PrepareBlocked(lease, gateExecutable, spec, keepDirectoryAcrossExec)
+	if err != nil {
+		return nil, err
+	}
+	started, err := prepared.Start()
+	if err != nil {
+		return nil, err
+	}
+	child, err = started.Bind()
+	if err != nil {
+		return nil, errors.Join(err, convergeStartedChild(started))
+	}
+	return child, nil
+}
+
+// StartBlockedPTY launches through the same activation gate with a controlling
+// terminal, preserving native provider launch behavior for adoption checks.
+func StartBlockedPTY(lease *GateLease, gateExecutable string, spec *LaunchSpec, keepDirectoryAcrossExec bool) (child *OwnedChild, err error) {
+	prepared, err := PrepareBlockedPTY(lease, gateExecutable, spec, keepDirectoryAcrossExec)
 	if err != nil {
 		return nil, err
 	}

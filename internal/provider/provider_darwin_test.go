@@ -2060,6 +2060,29 @@ func TestNativeProvidersShareTheBootstrapPrompt(t *testing.T) {
 	}
 }
 
+func TestProviderAdoptionUsesCompletionHookWithoutAssignedOutcome(t *testing.T) {
+	for _, kind := range []kernel.Provider{kernel.ProviderClaudeCode, kernel.ProviderCodex} {
+		installation, runtime, _ := nativeFixture(t, kind)
+		request := requestFor(t, kind, installation, runtime, "", "").WithProviderAdoption()
+		launch, err := Build(request)
+		if err != nil {
+			t.Fatal(err)
+		}
+		joined := strings.Join(launch.Argv(), " ")
+		if !strings.Contains(joined, "attempt turn-complete --provider-adoption") {
+			t.Fatalf("%s adoption hook missing: %q", kind, joined)
+		}
+		if kind == kernel.ProviderClaudeCode && !slices.Contains(launch.Argv(), "--print") {
+			t.Fatalf("Claude adoption launch is interactive: %q", launch.Argv())
+		}
+		if kind == kernel.ProviderCodex {
+			if !slices.Contains(launch.Argv(), "exec") || !strings.Contains(joined, "DARK_FACTORY_PROVIDER_ADOPTION_WITNESS") {
+				t.Fatalf("Codex adoption launch lacks native completion or witness forwarding: %q", launch.Argv())
+			}
+		}
+	}
+}
+
 func TestBootstrapPromptSettlesMergedLiveObservation(t *testing.T) {
 	installation, runtime, _ := nativeFixture(t, kernel.ProviderCodex)
 	request := roleRequestFor(t, kernel.ProviderCodex, installation, runtime, "", "", kernel.RoleOrchestrator)

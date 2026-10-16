@@ -107,7 +107,7 @@ func newTerminalEffectFixtureConfiguredWithProvider(t *testing.T, provider kerne
 func readyTerminalEffectController(t *testing.T) (*runner.AttemptController, *os.File) {
 	t.Helper()
 	controller, peer := innerReadyControlPair(t, "daemon-terminal-effect")
-	for _, stage := range []runner.AttemptStage{runner.StageSelection, runner.StagePreparation, runner.StagePopulation} {
+	for _, stage := range []runner.AttemptStage{runner.StageSelection, runner.StagePreparation, runner.StagePopulation, runner.StageProviderAdoption} {
 		if err := controller.Release(stage); err != nil {
 			t.Fatal(err)
 		}
