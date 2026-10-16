@@ -9,7 +9,8 @@ import (
 	"strings"
 )
 
-// Open migrates the seven earlier versions. v44 adds archived_tasks and v42
+// Open migrates the eight earlier versions. v44 adds archived_tasks and v45
+// adds the provider adoption boundary.
 // archive_batches, which the transaction itself proves, and neither moves
 // history; v43 persists intake author identity; v41 folds the
 // continuations table onto the human request each row awaited; v40 drops
@@ -70,7 +71,7 @@ var v40Continuations = []string{
 
 func legacySchemaStatements(version int) []string {
 	statements := slices.DeleteFunc(slices.Clone(schemaStatements), func(statement string) bool {
-		return statement == archivedTasksTable && version < v44UserVersion || statement == archiveBatchesTable && version < v42UserVersion
+		return statement == archivedTasksTable && version < v44UserVersion || statement == archiveBatchesTable && version < v42UserVersion || strings.HasPrefix(statement, "CREATE TABLE provider_adoptions ") && version < userVersion
 	})
 	restoreProjectCeilings := func() {
 		for index, statement := range statements {
@@ -109,8 +110,10 @@ func legacySchemaStatements(version int) []string {
 		at := slices.IndexFunc(statements, func(statement string) bool { return strings.HasPrefix(statement, "CREATE TABLE browser_clients ") }) + 1
 		statements = slices.Insert(statements, at, browserSecurityEventStatements...)
 	}
-	at := slices.IndexFunc(statements, func(statement string) bool { return strings.HasPrefix(statement, "CREATE TABLE invalidations") })
-	statements = slices.Insert(statements, at, v40Continuations...)
+	if version < v41UserVersion {
+		at := slices.IndexFunc(statements, func(statement string) bool { return strings.HasPrefix(statement, "CREATE TABLE invalidations") })
+		statements = slices.Insert(statements, at, v40Continuations...)
+	}
 	for index, statement := range statements {
 		statements[index] = replacer.Replace(statement)
 		if version <= v42UserVersion {
@@ -122,7 +125,7 @@ func legacySchemaStatements(version int) []string {
 }
 
 // validateOpenableSnapshot accepts a current database or an exact v37, v38,
-// v39, v40, v41, v42 or v43 one, whose durable controls are checked inside the migration
+// v39, v40, v41, v42, v43 or v44 one, whose durable controls are checked inside the migration
 // before it commits.
 func validateOpenableSnapshot(ctx context.Context, connection *sql.Conn) error {
 	if _, version, err := inspectIdentity(ctx, connection); err != nil {
@@ -248,6 +251,20 @@ func migrateFrom(ctx context.Context, connection *sql.Conn, version int) error {
 	statements := []string{fmt.Sprintf("PRAGMA user_version = %d", userVersion)}
 	if version < v44UserVersion {
 		statements = append([]string{archivedTasksTable}, statements...)
+	}
+	if version < userVersion {
+		statements = append([]string{`CREATE TABLE provider_adoptions (
+    provider TEXT PRIMARY KEY CHECK (provider IN ('claude_code', 'codex')),
+    active_commitment TEXT NOT NULL CHECK (length(CAST(active_commitment AS BLOB)) <= 4096),
+    candidate_commitment TEXT NOT NULL CHECK (length(CAST(candidate_commitment AS BLOB)) <= 4096),
+    candidate_state TEXT NOT NULL CHECK (candidate_state IN ('pending', 'failed')),
+    failure_detail TEXT NOT NULL CHECK (length(CAST(failure_detail AS BLOB)) <= 4096),
+    needs_you INTEGER NOT NULL CHECK (needs_you IN (0, 1)),
+    revision INTEGER NOT NULL CHECK (revision >= 1),
+    updated_at_ms INTEGER NOT NULL CHECK (updated_at_ms >= 0),
+    CHECK ((candidate_commitment = '' AND candidate_state = 'pending' AND failure_detail = '' AND needs_you = 0) OR candidate_commitment <> ''),
+    CHECK ((candidate_state = 'failed') = (needs_you = 1))
+) STRICT, WITHOUT ROWID`}, statements...)
 	}
 	if version < v42UserVersion {
 		statements = append([]string{archiveBatchesTable}, statements...)

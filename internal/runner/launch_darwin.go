@@ -234,6 +234,15 @@ func (commitment ExecutableCommitment) Verify() error {
 	return nil
 }
 
+// Fingerprint is the durable identity of the exact executable commitment.
+// It is not a replacement for Verify: it only lets the kernel distinguish a
+// newly discovered candidate from the active commitment across restarts.
+func (commitment ExecutableCommitment) Fingerprint() string {
+	value := fmt.Sprintf("%s\x00%d:%d\x00%d:%d\x00%s\x00%d:%d:%d:%d", commitment.executable.Path, commitment.executable.Device, commitment.executable.Inode, commitment.executable.UID, commitment.executable.GID, commitment.executable.SHA256, commitment.executable.Size, commitment.executable.MtimeSec, commitment.executable.CtimeSec, commitment.executable.CtimeNsec)
+	digest := sha256.Sum256([]byte(value))
+	return hex.EncodeToString(digest[:])
+}
+
 func commitExecutable(path string) (fileCommitment, error) {
 	path, err := canonical(path)
 	if err != nil {

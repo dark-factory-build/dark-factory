@@ -23,7 +23,6 @@ import (
 // (also without the specialist columns) migrate, keep every row, and then
 // record a transient failure.
 func TestCurrentAndLegacyHomesOpenWithEveryRow(t *testing.T) {
-	t.Parallel()
 	for _, version := range []int{userVersion, v44UserVersion, v43UserVersion, v42UserVersion, v41UserVersion, v40UserVersion, v39UserVersion, v38UserVersion, v37UserVersion} {
 		t.Run(fmt.Sprintf("v%d", version), func(t *testing.T) { testHomeOpensWithEveryRow(t, version) })
 	}
@@ -94,6 +93,7 @@ func downgradeHome(t *testing.T, store *Store, version int, extra ...string) {
 		if version < v44UserVersion {
 			statements = append(statements, "DROP TABLE archived_tasks")
 		}
+		statements = append(statements, "DROP TABLE provider_adoptions")
 		if version < v43UserVersion {
 			statements = append([]string{"ALTER TABLE intake_acceptances DROP COLUMN author_type", "ALTER TABLE intake_acceptances DROP COLUMN author_login"}, statements...)
 		}
@@ -290,7 +290,7 @@ func snapshotRows(t *testing.T, ctx context.Context, connection *sql.Conn) map[s
 func TestSchemaDigestsArePinned(t *testing.T) {
 	t.Parallel()
 	sum := sha256.Sum256([]byte(strings.Join(schemaStatements, "\n")))
-	if got := hex.EncodeToString(sum[:]); got != "8ec2d351c12a13ad9ba03cea5d5dd2194366ee7a916f790fcc60fdcf4294639f" {
+	if got := hex.EncodeToString(sum[:]); got != "a963333720b1c78ab279d1e8751eed1d6cc0078625d70d9694369941e75d108a" {
 		t.Errorf("current schema digest = %s", got)
 	}
 	sum = sha256.Sum256([]byte(strings.Join(legacySchemaStatements(v43UserVersion), "\n")))

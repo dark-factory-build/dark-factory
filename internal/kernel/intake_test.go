@@ -530,7 +530,6 @@ func TestPendingIntakeAcceptancesSkipsSupersededWithdrawnAndImportedReceipts(t *
 }
 
 func TestTrustedIntakeSourcePersistsAndValidatesAuthorsAfterReopen(t *testing.T) {
-	t.Parallel()
 	ctx := context.Background()
 	store, path := newTestStore(t)
 	defer store.Close()

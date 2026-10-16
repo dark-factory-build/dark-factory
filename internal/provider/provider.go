@@ -357,6 +357,13 @@ func NewRequest(kind kernel.Provider, installation Installation, model, reasonin
 func (Request) String() string   { return "provider build request (private)" }
 func (Request) GoString() string { return "provider.Request{private}" }
 
+// Commitment identifies the exact executable selected for this request. The
+// kernel stores only this opaque fingerprint; launch still carries and verifies
+// the complete runner commitment.
+func (request Request) Commitment() string { return request.installation.executable.Fingerprint() }
+
+func (request Request) Provider() kernel.Provider { return request.provider }
+
 // Launch is the entire provider-owned result. It deliberately has no cwd,
 // task input, descriptors, callbacks, process controls, or output decoder.
 type Launch struct {
