@@ -569,27 +569,45 @@ func assertWaitedAndAbsent(t *testing.T, child *OwnedChild) {
 // owner's cleanup has not yet observed it.
 func TestTerminateMarksOnlyAnExitItCausedAborted(t *testing.T) {
 	for _, tc := range []struct {
-		name, script   string
-		signal         int
-		aborted, alive bool
+		name, script          string
+		code, signal          int
+		aborted, alive, retry bool
 	}{
-		{name: "running provider", script: "exec sleep 30", signal: int(unix.SIGTERM), aborted: true, alive: true},
-		{name: "provider that sent itself TERM", script: "kill -TERM $$", signal: int(unix.SIGTERM)},
-		{name: "provider that sent itself KILL", script: "kill -KILL $$", signal: int(unix.SIGKILL)},
+		{name: "running provider", script: "printf r > READY; exec sleep 30", code: -1, signal: int(unix.SIGTERM), aborted: true, alive: true},
+		{name: "provider that handles TERM and exits", script: "trap 'exit 0' TERM; printf r > READY; while :; do sleep 0.01; done", aborted: true, alive: true},
+		{name: "terminated provider reaped by a retried cleanup", script: "printf r > READY; exec sleep 30", code: -1, signal: int(unix.SIGTERM), aborted: true, alive: true, retry: true},
+		{name: "provider that sent itself TERM", script: "kill -TERM $$", code: -1, signal: int(unix.SIGTERM)},
+		{name: "provider that sent itself KILL", script: "kill -KILL $$", code: -1, signal: int(unix.SIGKILL)},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			f := newFixture(t)
-			child := f.start("/bin/sh", []string{"-c", tc.script}, nil, outputFile(t, filepath.Join(f.root, "out")))
+			ready := filepath.Join(f.root, "ready")
+			child := f.start("/bin/sh", []string{"-c", strings.ReplaceAll(tc.script, "READY", ready)}, nil, outputFile(t, filepath.Join(f.root, "out")))
 			if _, err := child.Activate(); err != nil {
 				t.Fatal(err)
 			}
 			installOwnedChildSafetyCleanup(t, child)
-			if !tc.alive {
+			if tc.alive {
+				waitFile(t, ready)
+			} else {
 				waitOwnedGroupWithoutLiveMembers(t, child.Identity())
 			}
-			exit, err := child.Terminate(time.Second)
-			if err != nil || exit.Signal != tc.signal || exit.Aborted != tc.aborted {
-				t.Fatalf("exit=%+v err=%v, want signal %d aborted %v", exit, err, tc.signal, tc.aborted)
+			if tc.retry {
+				// The first convergence is interrupted after TERM was delivered.
+				child.testConvergence = func() error { child.testConvergence = nil; return unix.EINTR }
+				if _, err := child.Terminate(time.Second); !errors.Is(err, unix.EINTR) {
+					t.Fatalf("interrupted termination = %v", err)
+				}
+			}
+			var exit Exit
+			var err error
+			if tc.retry {
+				exit, err = child.FinishAfterExit(time.Second)
+			} else {
+				exit, err = child.Terminate(time.Second)
+			}
+			if err != nil || exit.Code != tc.code || exit.Signal != tc.signal || exit.Aborted != tc.aborted {
+				t.Fatalf("exit=%+v err=%v, want code %d signal %d aborted %v", exit, err, tc.code, tc.signal, tc.aborted)
 			}
 			assertWaitedAndAbsent(t, child)
 		})
