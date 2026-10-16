@@ -140,6 +140,9 @@ type OwnedChild struct {
 	keepDirectory  bool
 	ptyMaster      *os.File
 	ptyDrained     bool
+	// termSent: Terminate signalled a leader not yet a zombie; termHandled: it
+	// was still alive once signalled. They outlive a retried cleanup.
+	termSent, termHandled bool
 	// testSignal injects a package-test-only owned-group signal result.
 	// Production children always leave it nil and call signalOwnedGroup.
 	testSignal func(unix.Signal) error
@@ -840,6 +843,9 @@ func (c *OwnedChild) waitOnce() error {
 	err := c.cmd.Wait()
 	c.state = stateWaited
 	c.exit = exitFromWait(c.cmd.ProcessState, err)
+	// Aborted: our TERM ended the provider, by its handler or the signal. A
+	// provider that exited on its own before the signal keeps its own status.
+	c.exit.Aborted = c.termSent && (c.termHandled || c.exit.Signal == int(unix.SIGTERM) || c.exit.Signal == int(unix.SIGKILL))
 	return err
 }
 
@@ -886,7 +892,10 @@ func (c *OwnedChild) Terminate(timeout time.Duration) (Exit, error) {
 	}
 	var signalFailure error
 	if !c.exitObserved {
-		if err := c.signalGroup(unix.SIGTERM); err != nil {
+		c.termSent = c.termSent || c.leaderLive()
+		err := c.signalGroup(unix.SIGTERM)
+		c.termHandled = c.termHandled || c.termSent && err == nil && c.leaderLive()
+		if err != nil {
 			// The exact child can exit between signalOwnedGroup's census and
 			// kill. Retain the failure while the owned kqueue waits for proof.
 			signalFailure = fmt.Errorf("%w: TERM: %v", ErrUnresolved, err)
@@ -934,6 +943,13 @@ func (c *OwnedChild) Terminate(timeout time.Duration) (Exit, error) {
 		return Exit{}, withSignalFailure(waitErr)
 	}
 	return c.exit, nil
+}
+
+// leaderLive reads the unreaped leader from the process table, never the
+// shared kqueue, so unread PTY or daemon readiness cannot delay it.
+func (c *OwnedChild) leaderLive() bool {
+	leader, err := unix.SysctlKinfoProc("kern.proc.pid", c.identity.PID)
+	return err == nil && leader.Proc.P_stat != darwinZombieState
 }
 
 func (c *OwnedChild) signalGroup(signal unix.Signal) error {

@@ -86,6 +86,7 @@ type AttemptResult struct {
 	process   Identity
 	code      int
 	signal    int
+	aborted   bool // the runner's own terminate ended the provider
 }
 
 func (result AttemptResult) AttemptID() string       { return result.attemptID }
@@ -110,6 +111,7 @@ func (result AttemptResult) Code() (int, bool) {
 func (result AttemptResult) Signal() (int, bool) {
 	return result.signal, result.kind == AttemptResultInnerConverged && result.code == -1 && result.signal > 0
 }
+func (result AttemptResult) Aborted() bool { return result.aborted }
 
 // AttemptResultNotice is the complete non-authoritative live notification.
 // Result bytes are always reopened from the exact runtime directory.
@@ -172,8 +174,9 @@ type attemptResultWire struct {
 }
 
 type attemptResultExitWire struct {
-	Code   *int `json:"code,omitempty"`
-	Signal *int `json:"signal,omitempty"`
+	Code    *int `json:"code,omitempty"`
+	Signal  *int `json:"signal,omitempty"`
+	Aborted bool `json:"aborted,omitempty"`
 }
 
 func innerUnregisteredConvergedResult(attemptID string, proof ResultProof) (AttemptResult, error) {
@@ -185,7 +188,7 @@ func innerUnregisteredConvergedResult(attemptID string, proof ResultProof) (Atte
 }
 
 func innerConvergedResult(attemptID string, proof ResultProof, process Identity, exit Exit) (AttemptResult, error) {
-	result := AttemptResult{attemptID: attemptID, kind: AttemptResultInnerConverged, proof: proof, process: process, code: exit.Code, signal: exit.Signal}
+	result := AttemptResult{attemptID: attemptID, kind: AttemptResultInnerConverged, proof: proof, process: process, code: exit.Code, signal: exit.Signal, aborted: exit.Aborted}
 	if !validAttemptResult(result) {
 		return AttemptResult{}, ErrIdentity
 	}
@@ -198,7 +201,7 @@ func validAttemptResult(result AttemptResult) bool {
 	}
 	switch result.kind {
 	case AttemptResultInnerUnregisteredConverged:
-		return result.process == (Identity{}) && result.code == -1 && result.signal == 0
+		return result.process == (Identity{}) && result.code == -1 && result.signal == 0 && !result.aborted
 	case AttemptResultInnerConverged:
 		return result.process.Valid() && (result.code >= 0 && result.signal == 0 || result.code == -1 && result.signal > 0)
 	default:
@@ -217,7 +220,7 @@ func canonicalAttemptResult(result AttemptResult) ([]byte, error) {
 	wire := attemptResultWire{Version: 1, AttemptID: result.attemptID, Kind: result.kind, Proof: proof}
 	if result.kind == AttemptResultInnerConverged {
 		wire.Process = &result.process
-		wire.Exit = &attemptResultExitWire{}
+		wire.Exit = &attemptResultExitWire{Aborted: result.aborted}
 		if result.code >= 0 {
 			code := result.code
 			wire.Exit.Code = &code
@@ -267,7 +270,7 @@ func decodeCanonicalAttemptResult(body []byte) (AttemptResult, error) {
 		if wire.Process == nil || wire.Exit == nil || (wire.Exit.Code == nil) == (wire.Exit.Signal == nil) {
 			return AttemptResult{}, ErrIdentity
 		}
-		result.process = *wire.Process
+		result.process, result.aborted = *wire.Process, wire.Exit.Aborted
 		if wire.Exit.Code != nil {
 			result.code = *wire.Exit.Code
 		} else {

@@ -1019,8 +1019,16 @@ func (daemon *Daemon) attemptResultTail(
 	// finalization race. The exact live owner retains that proposal; retry it
 	// once the authenticated runner result proves the provider has converged.
 	// A competing durable outcome wins normally: its unauthorized response is
-	// not a license to replace that outcome.
-	if pending, ok := live.pendingOutcomeSnapshot(); ok {
+	// not a license to replace that outcome. Absent one, a terminate the owner
+	// itself ended the provider with owes its cause; that is often factoryd
+	// stopping, so it outlives ctx as consumption does.
+	pending, ok := live.pendingOutcomeSnapshot()
+	proposalCtx := ctx
+	if !ok {
+		pending, ok = live.owedTermination(record.Result().Aborted())
+		proposalCtx = daemon.cleanupCtx
+	}
+	if ok {
 		if live.beforeRetainedOutcome != nil {
 			live.beforeRetainedOutcome()
 		}
@@ -1028,7 +1036,7 @@ func (daemon *Daemon) attemptResultTail(
 		if proposalErr != nil {
 			return kernel.Run{}, proposalErr
 		}
-		proposalRun, proposeErr := daemon.store.ProposeAttemptOutcome(ctx, live.attemptDigest, pending, at)
+		proposalRun, proposeErr := daemon.store.ProposeAttemptOutcome(proposalCtx, live.attemptDigest, pending, at)
 		if proposeErr == nil {
 			run = proposalRun
 		} else if !errors.Is(proposeErr, kernel.ErrUnauthorized) {

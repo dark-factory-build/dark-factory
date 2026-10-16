@@ -77,7 +77,7 @@ func TestTerminateConvergesQueuedNaturalExit(t *testing.T) {
 	waitOwnedGroupWithoutLiveMembers(t, child.Identity())
 
 	exit, err := child.Terminate(time.Second)
-	if err != nil || exit.Code != 23 || exit.Signal != 0 {
+	if err != nil || exit.Code != 23 || exit.Signal != 0 || exit.Aborted {
 		t.Fatalf("queued natural exit=%+v err=%v", exit, err)
 	}
 	assertWaitedAndAbsent(t, child)
@@ -106,7 +106,8 @@ func TestTerminateDischargesEPERMOnlyAfterExactNaturalExit(t *testing.T) {
 	if setupErr != nil {
 		t.Fatalf("race setup: %v", setupErr)
 	}
-	if err != nil || exit.Code != 23 || exit.Signal != 0 {
+	// It exited on its own after Terminate saw it alive: not runner-caused.
+	if err != nil || exit.Code != 23 || exit.Signal != 0 || exit.Aborted {
 		t.Fatalf("exact exit did not discharge EPERM: exit=%+v err=%v", exit, err)
 	}
 	if got := calls.Load(); got != 1 {
@@ -561,4 +562,54 @@ func assertWaitedAndAbsent(t *testing.T, child *OwnedChild) {
 		t.Fatalf("child not solely waited: state=%d process_state=%v", child.state, child.cmd.ProcessState)
 	}
 	waitExactAbsence(t, child.Identity())
+}
+
+// Only an exit this Terminate caused is Aborted. A provider that already died
+// on its own, even by TERM or KILL, keeps an unaborted exit although its
+// owner's cleanup has not yet observed it.
+func TestTerminateMarksOnlyAnExitItCausedAborted(t *testing.T) {
+	for _, tc := range []struct {
+		name, script          string
+		code, signal          int
+		aborted, alive, retry bool
+	}{
+		{name: "running provider", script: "printf r > READY; exec sleep 30", code: -1, signal: int(unix.SIGTERM), aborted: true, alive: true},
+		{name: "provider that handles TERM and exits", script: "trap 'exit 0' TERM; printf r > READY; while :; do sleep 0.01; done", aborted: true, alive: true},
+		{name: "terminated provider reaped by a retried cleanup", script: "printf r > READY; exec sleep 30", code: -1, signal: int(unix.SIGTERM), aborted: true, alive: true, retry: true},
+		{name: "provider that sent itself TERM", script: "kill -TERM $$", code: -1, signal: int(unix.SIGTERM)},
+		{name: "provider that sent itself KILL", script: "kill -KILL $$", code: -1, signal: int(unix.SIGKILL)},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newFixture(t)
+			ready := filepath.Join(f.root, "ready")
+			child := f.start("/bin/sh", []string{"-c", strings.ReplaceAll(tc.script, "READY", ready)}, nil, outputFile(t, filepath.Join(f.root, "out")))
+			if _, err := child.Activate(); err != nil {
+				t.Fatal(err)
+			}
+			installOwnedChildSafetyCleanup(t, child)
+			if tc.alive {
+				waitFile(t, ready)
+			} else {
+				waitOwnedGroupWithoutLiveMembers(t, child.Identity())
+			}
+			if tc.retry {
+				// The first convergence is interrupted after TERM was delivered.
+				child.testConvergence = func() error { child.testConvergence = nil; return unix.EINTR }
+				if _, err := child.Terminate(time.Second); !errors.Is(err, unix.EINTR) {
+					t.Fatalf("interrupted termination = %v", err)
+				}
+			}
+			var exit Exit
+			var err error
+			if tc.retry {
+				exit, err = child.FinishAfterExit(time.Second)
+			} else {
+				exit, err = child.Terminate(time.Second)
+			}
+			if err != nil || exit.Code != tc.code || exit.Signal != tc.signal || exit.Aborted != tc.aborted {
+				t.Fatalf("exit=%+v err=%v, want code %d signal %d aborted %v", exit, err, tc.code, tc.signal, tc.aborted)
+			}
+			assertWaitedAndAbsent(t, child)
+		})
+	}
 }
