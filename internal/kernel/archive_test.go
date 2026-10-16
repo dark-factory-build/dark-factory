@@ -69,11 +69,12 @@ func archiveFixture(t *testing.T) (*Store, string, Run, func(*Store) (string, er
 			return "", err
 		}
 		report, err := store.Report(ctx, &run.ProjectID, 0, 3600000)
-		// The report's last line is the live WAL size, not history.
-		if err == nil && (len(report) == 0 || !strings.HasPrefix(report[len(report)-1], "wal_bytes=")) {
-			err = fmt.Errorf("report without its WAL line: %q", report)
+		// The report's final factoryd-since and WAL lines are live state, not
+		// history; both can change across the close/reopen boundary.
+		if err == nil && (len(report) < 2 || !strings.HasPrefix(report[len(report)-2], "factoryd since=") || !strings.HasPrefix(report[len(report)-1], "wal_bytes=")) {
+			err = fmt.Errorf("report without its live lines: %q", report)
 		} else if err == nil {
-			report = report[:len(report)-1]
+			report = report[:len(report)-2]
 		}
 		return fmt.Sprintf("%+v %+v %q", activity, accesses, report), err
 	}
