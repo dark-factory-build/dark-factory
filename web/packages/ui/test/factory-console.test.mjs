@@ -466,6 +466,9 @@ test("Work is one ranked list: blocked work first, every origin shown, flags dis
   assert.ok(order.indexOf("Overseer stuck") < order.indexOf("Tighten the queue ordering") && order.indexOf("Stuck on a prerequisite") < order.indexOf("Tighten the queue ordering"), "needs-you rows rank above queued work");
   assert.ok(order.indexOf("Overseer stuck") < order.indexOf("Standing instruction"), "needs-you rows rank above running work");
   assert.ok(panel.findAllByProps({ role: "status" }).some((node) => node.children.join("").includes("New work is paused")));
+  // Admission is CLI-only: the paused status names factoryctl and no header button offers to change it.
+  assert.match(markup, /<p role="status">New work is paused\. Queued tasks wait; active processes continue\. Resume with <code>factoryctl dispatch on<\/code>\.<\/p>/);
+  assert.doesNotMatch(markup, /Pause new work|Resume new work|dfConsoleBar__actions/);
   const form = panel.findByProps({ "aria-label": "New task" });
   const values = { target: `any:${ids.project}`, instruction: " Ship it " };
   const nativeFormData = globalThis.FormData;
@@ -1090,26 +1093,6 @@ test("new task retains pasted files on failure, supports removal, and clears on 
     assert.equal(resets, 1);
     assert.equal(renderer.root.findAllByProps({ "aria-label": "Task attachments" }).length, 0);
   } finally { globalThis.FormData = nativeFormData; await act(async () => renderer.unmount()); }
-});
-
-
-test("new-work admission reports acknowledgement and preserves active work", async () => {
-  let acknowledge;
-  const calls = [];
-  let tree;
-  await act(async () => { tree = create(createElement(FactoryConsole, {
-    status: "ready", state: fixtureState,
-    onSetDispatch: (revision, enabled) => { calls.push({ revision, enabled }); return new Promise((resolve) => { acknowledge = resolve; }); },
-  })); });
-  const label = fixtureState.factory.dispatch_enabled ? "Pause new work" : "Resume new work";
-  const control = tree.root.findAllByType("button").find((button) => textOf(button) === label);
-  await act(async () => control.props.onClick());
-  assert.deepEqual(calls, [{ revision: fixtureState.factory.revision, enabled: !fixtureState.factory.dispatch_enabled }]);
-  assert.match(JSON.stringify(tree.toJSON()), /Waiting…/);
-  assert.doesNotMatch(JSON.stringify(tree.toJSON()), /New work resumed\.|New work paused\. Active/);
-  await act(async () => acknowledge({ revision: fixtureState.factory.revision + 1n, enabled: !fixtureState.factory.dispatch_enabled }));
-  assert.match(JSON.stringify(tree.toJSON()), fixtureState.factory.dispatch_enabled ? /New work paused\. Active processes continue\./ : /New work resumed\./);
-  await act(async () => tree.unmount());
 });
 
 

@@ -62,7 +62,6 @@ export const CONTROL_MANIFEST = [
   { type: "HUMAN_REQUEST_DETAIL_GET", direction: "client" }, { type: "HUMAN_REQUEST_DETAIL", direction: "server" },
   { type: "HUMAN_REQUEST_REPLY", direction: "client" }, { type: "HUMAN_REQUEST_REPLY_RESULT", direction: "server" },
   { type: "HUMAN_REQUEST_CANCEL_RUN", direction: "client" }, { type: "HUMAN_REQUEST_CANCEL_RUN_RESULT", direction: "server" },
-  { type: "FACTORY_DISPATCH", direction: "client" }, { type: "FACTORY_DISPATCH_RESULT", direction: "server" },
   { type: "TASK_ATTACHMENT", direction: "client" }, { type: "TASK_ATTACHMENT_RESULT", direction: "server" },
   { type: "TASK_ENQUEUE", direction: "client" }, { type: "TASK_ENQUEUE_RESULT", direction: "server" },
   { type: "TERMINAL_TARGET_GET", direction: "client" }, { type: "TERMINAL_TARGET", direction: "server" },

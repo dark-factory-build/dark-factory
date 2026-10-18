@@ -1,7 +1,6 @@
 import {
   type BrowserClientsView,
   MAX_TERMINAL_PAYLOAD,
-  CAPABILITIES,
   ProtocolError,
   SessionError,
   consumePairingChallenge,
@@ -118,8 +117,6 @@ export type FactoryAppSnapshot = Readonly<{
   /** Most recent observed paths remain an annotation after that run ends. */
   lastRunPaths?: ReadonlyMap<string, RunPathSample>;
   edit?: FactoryEditView;
-  /** True only while a ready session carries the full loopback grant. */
-  dispatchAllowed?: boolean;
   repositories?: ReadonlyMap<string, readonly RepositoryView[]>;
   intake?: ReadonlyMap<string, IntakeView>;
   intakePending?: ReadonlySet<string>;
@@ -135,7 +132,7 @@ type TerminalSession = Pick<BrowserSession, "resolveAgentTerminal" | "openTermin
 type AgentTaskSession = Pick<BrowserSession, "enqueueAgentTaskWithFiles" | "enqueueAgentTask" | "controlAgent" | "resolveAgentTerminal">;
 type ConsoleSession = Pick<BrowserSession, "createProject" | "getRepositories" | "intake" | "updateTask" | "getOperationalGraph" | "getRunPaths" | "discoverAccounts" | "linkAccount" | "listBrowserClients" | "revokeBrowserClient" | "githubConnection" | "clientId">;
 type RemoteInviteSession = Pick<BrowserSession, "inviteRemote" | "capabilities">;
-type ControlledClient = Pick<BrowserClient, "connect" | "close"> & { readonly session?: HumanSession & TerminalSession & AgentTaskSession & ConsoleSession & RemoteInviteSession & Partial<Pick<BrowserSession, "projectContent" | "setDispatch">> };
+type ControlledClient = Pick<BrowserClient, "connect" | "close"> & { readonly session?: HumanSession & TerminalSession & AgentTaskSession & ConsoleSession & RemoteInviteSession & Partial<Pick<BrowserSession, "projectContent">> };
 type ClientFactory = (options: BrowserSessionOptions) => ControlledClient;
 
 export type FactoryAppControllerOptions = {
@@ -295,12 +292,6 @@ export class FactoryAppController {
     this.#closeTerminal();
     this.watchRunPaths(false);
     this.#client?.close();
-  }
-
-  async setDispatch(expectedRevision: bigint, enabled: boolean): Promise<{ revision: bigint; enabled: boolean }> {
-    const session = this.#client?.session;
-    if (this.#closed || this.#status !== "ready" || session?.setDispatch === undefined) throw new SessionError("unsupported");
-    return session.setDispatch({ expectedRevision, enabled });
   }
 
   async projectContent(operation: ProjectContentOperation, input: ProjectContentInput): Promise<ProjectContentOutput> {
@@ -1145,7 +1136,6 @@ export class FactoryAppController {
         replyMaxBytes: selection.detail?.replyMaxBytes ?? 0,
         reply: selection.reply,
       },
-      dispatchAllowed: this.#status === "ready" && ((this.#client?.session?.capabilities ?? 0) & CAPABILITIES.administration) !== 0,
       repositories: this.#repositories,
       intake: this.#intake,
       intakePending: this.#intakePending,

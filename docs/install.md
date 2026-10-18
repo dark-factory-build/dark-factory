@@ -156,8 +156,8 @@ overseer can run alongside them.
 On the floor, select the task tray for **Tasks**, the planning
 table for **Missions**, the board or the bookshelf. A mission records an
 objective and acceptance criteria for an overseer; its related work remains
-inspectable after workers finish. **Pause new work** stops new admission while
-active processes continue.
+inspectable after workers finish. `factoryctl dispatch off` stops new admission
+while active processes continue; the Work panel reports the pause.
 
 The Tasks panel's **New task** form accepts pasted images, dropped files, or
 files selected with **Attach files** (up to 8 files and 8 MiB total). Add an

@@ -652,37 +652,6 @@ func TestBrowserAttachmentRetentionRoundTrip(t *testing.T) {
 	}
 }
 
-func TestBrowserFactoryDispatchRequiresAdministrationAndAcknowledgesRevision(t *testing.T) {
-	ctx := context.Background()
-	for _, capability := range []kernel.BrowserCapabilityMask{kernel.BrowserCapabilityObserve, kernel.BrowserCapabilityAdministration} {
-		fixture := newAdapterFixture(t, capability|kernel.BrowserCapabilityObserve)
-		fixture.pair(t)
-		state, err := fixture.store.Factory(ctx)
-		if err != nil {
-			t.Fatal(err)
-		}
-		request := browserprotocol.FactoryDispatch{ExpectedRevision: browserprotocol.Decimal(state.Revision.Int64()), Enabled: browserprotocol.Bool(true)}
-		result, err := fixture.backend.SetDispatch(ctx, rawBrowserClient(fixture.client.ID), request)
-		if capability == kernel.BrowserCapabilityObserve {
-			if !errors.Is(mapBrowserError(err), browser.ErrUnauthorized) {
-				t.Fatalf("unauthorized dispatch: %v", err)
-			}
-			continue
-		}
-		if err != nil || result.Revision != request.ExpectedRevision+1 || !bool(result.Enabled) {
-			t.Fatalf("dispatch acknowledgement: %+v %v", result, err)
-		}
-		current, err := fixture.store.Factory(ctx)
-		if err != nil || current.Revision.Int64() != state.Revision.Int64()+1 || !current.DispatchEnabled {
-			t.Fatalf("dispatch state: %+v %v", current, err)
-		}
-		_, err = fixture.backend.SetDispatch(ctx, rawBrowserClient(fixture.client.ID), browserprotocol.FactoryDispatch{ExpectedRevision: request.ExpectedRevision, Enabled: browserprotocol.Bool(false)})
-		if !errors.Is(mapBrowserError(err), browser.ErrStale) {
-			t.Fatalf("stale dispatch: %v", err)
-		}
-	}
-}
-
 // An unavailable source leaves only the fallback nodes at the repository root.
 func onlyRoot(nodes []browserprotocol.GraphNode) bool {
 	for _, node := range nodes {
