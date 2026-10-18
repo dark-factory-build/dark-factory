@@ -77,20 +77,6 @@ func HostToken(identity Identity, sequence uint64, now time.Time) string {
 	})
 }
 
-// PairTicket mints a single-use pairing credential for one controller id.
-func PairTicket(identity Identity, controller [ControllerIDSize]byte, expires time.Time) string {
-	if !identity.valid() {
-		return ""
-	}
-	return sign(identity, ticketDomain, TicketPayload{
-		Node:       identity.nodeID,
-		Controller: base64.RawURLEncoding.EncodeToString(controller[:]),
-		Purpose:    PurposePair,
-		Ticket:     newTicketID(),
-		Expires:    expires.Unix(),
-	})
-}
-
 // ControlTicket mints a credential bound to one controller id and one device
 // public key. The relay accepts it only alongside a proof signed by that key.
 func ControlTicket(identity Identity, clientID [ControllerIDSize]byte, deviceSEC1 [DeviceKeySize]byte, expires time.Time) string {

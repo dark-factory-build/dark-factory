@@ -56,9 +56,6 @@ func testEncodeTerminalLeaseRenew(id string, v browserprotocol.TerminalLeaseRene
 func testEncodeTerminalDetach(id string, v browserprotocol.TerminalDetach) ([]byte, error) {
 	return testProtocolEncode(browserprotocol.TypeTerminalDetach, id, v)
 }
-func testEncodeRemoteInvite(id string, v browserprotocol.RemoteInvite) ([]byte, error) {
-	return testProtocolEncode(browserprotocol.TypeRemoteInvite, id, v)
-}
 func testEncodePushSubscribe(id string, v browserprotocol.PushSubscribe) ([]byte, error) {
 	return testProtocolEncode(browserprotocol.TypePushSubscribe, id, v)
 }

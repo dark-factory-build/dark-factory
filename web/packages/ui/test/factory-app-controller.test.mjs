@@ -33,12 +33,6 @@ function detailFor(item = request, suffix = "", replyMaxBytes = 8192) {
     cancelRun: Object.freeze({ requestId: item.id, expectedRequestRevision: item.revision, expectedRunRevision: 17n }),
   });
 }
-
-const remoteInvite = Object.freeze({
-  link: "https://app.darkfactory.build/remote#df_remote&node=n0&expires=1767225600",
-  expiresAtMs: 1767225600000n,
-  svg: "<svg viewBox=\"0 0 1 1\"/>",
-});
 function stateWithRequests(items) {
   return { ...fixtureState, humanRequests: new Map(items.map((item) => [item.id, item])) };
 }
@@ -57,7 +51,6 @@ function harness(overrides = {}) {
     discoverAccounts: overrides.discoverAccounts ?? (async () => []),
     updateAccount: overrides.updateAccount ?? (async () => ({ accountId: "00".repeat(16), revision: 2n })),
     linkAccount: overrides.linkAccount ?? (async () => ({ accountId: "00".repeat(16), revision: 1n })),
-    inviteRemote: overrides.inviteRemote ?? (async () => remoteInvite),
     listBrowserClients: overrides.listBrowserClients ?? (async () => ({ clients: [], more: false })),
     revokeBrowserClient: overrides.revokeBrowserClient ?? (async () => { throw new SessionError("not_found"); }),
     getRepositories: overrides.getRepositories ?? (async () => []),

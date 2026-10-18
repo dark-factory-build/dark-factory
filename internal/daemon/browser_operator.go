@@ -220,3 +220,12 @@ func (daemon *Daemon) WebRevokeClient(ctx context.Context, input api.WebClientRe
 	}
 	return result, nil
 }
+
+func runtimeAllowsProductionOrigin(runtime *BrowserRuntime) bool {
+	for _, origin := range runtime.origins {
+		if origin == webProductionOrigin {
+			return true
+		}
+	}
+	return false
+}

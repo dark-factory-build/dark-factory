@@ -14,7 +14,7 @@ test("the console bundle factoryd embeds is one self-contained module", async ()
   try {
     copyFileSync(join(web, "..", "internal", "browser", "console", "console.js"), join(directory, "console.mjs"));
     const bundle = await import(join(directory, "console.mjs"));
-    for (const name of ["mount", "FactoryApp", "RemoteApp", "FactoryScene", "publicFloor", "createElement", "createRoot"]) {
+    for (const name of ["mount", "FactoryApp", "FactoryScene", "publicFloor", "createElement", "createRoot"]) {
       assert.equal(typeof bundle[name], "function", name);
     }
   } finally {

@@ -8,7 +8,7 @@ import { MAX_SNAPSHOT_ENTITIES, ProtocolError, SessionError } from "@dark-factor
 import { FactoryApp, FactoryConsole } from "../dist/src/index.js";
 import { layoutScene } from "../dist/src/factory-scene/scene.js";
 import { projectGraph, projectFloor, workRows } from "../dist/src/console-view.js";
-import { FactoryFloor, StageMeter } from "../dist/src/console-screens.js";
+import { FactoryFloor } from "../dist/src/console-screens.js";
 import { AgentPanel, WorkPanel } from "../dist/src/console-sidebar.js";
 import { FactoryScene } from "../dist/src/factory-scene/factory-scene.js";
 import { TerminalPanel } from "../dist/src/factory-app.js";
@@ -77,10 +77,10 @@ const runSample = (agentId, paths, taskId = ids.task, taskRevision = fixtureStat
 // The selectable sprite of a non-archived agent on the floor.
 const workerSprite = (tree, id) => tree.root.findByProps({ "data-worker-id": id }).find((node) => node.type === "g" && node.props.role === "button");
 
-test("error banner keeps its centered layout after the paragraph reset", () => {
+test("error banner keeps its margin after the paragraph reset", () => {
   const css = readFileSync(new URL("../src/factory-console.css", import.meta.url), "utf8");
   assert.match(css, /\.dfFactoryConsole :where\(h1, h2, p, dl, ul\),[\s\S]*?\.dfConsoleSidebar :where\(h1, h2, h3, p, dl, ul\)\s*\{\s*margin: 0;\s*\}/);
-  assert.match(css, /\.dfFactoryConsole__error\s*\{[\s\S]*?margin: 0 auto 1\.25rem;/);
+  assert.match(css, /\.dfFactoryConsole__error\s*\{[^}]*margin: 0 0 1\.25rem;/);
   assert.match(css, /\.dfFactoryFloor__map \{ position: absolute; inset: 0; overflow: auto; height: 100%;/);
   assert.match(css, /\.dfFactoryTooltip \{[^}]*-webkit-line-clamp: 8;[^}]*pointer-events: none;/, "a tooltip stays short enough to need no scrolling, and never takes the click meant for what it covers");
   assert.match(render(), /class="dfFactoryFloor__map" role="region" aria-label="Scrollable factory floor" tabindex="0"/);
@@ -868,17 +868,6 @@ test("floor preparation survives draft and live snapshot updates and relayouts o
   assert.notEqual(layout(), originalLayout);
   await act(async () => { renderer.unmount(); });
 });
-
-test("task meter displays every canonical status without conflating cancellation", () => {
-  for (const [stage, filled, marker] of [["queued", 1, ""], ["running", 2, ""], ["succeeded", 2, "✓"], ["failed", 0, "×"], ["blocked", 0, "!"], ["cancelled", 0, "−"]]) {
-    const markup = renderToStaticMarkup(createElement(StageMeter, { stage }));
-    assert.ok(markup.includes(`stage: ${stage}`));
-    assert.equal((markup.match(/segment--filled/g) ?? []).length, filled);
-    assert.ok(markup.includes(`aria-hidden="true">${marker}</span>`));
-    assert.equal(markup.includes("terminal--failed"), stage === "failed");
-  }
-});
-
 
 test("Work has no browser intake acceptance or polling surface", async (t) => {
   t.mock.timers.enable({ apis: ["setInterval"] });

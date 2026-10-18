@@ -44,16 +44,14 @@ service receipt records the exact argument list it was rendered from, so
 receipt and keep proving ownership. Changing or removing the relay origin is
 `factoryctl service uninstall` followed by a fresh install carrying the origin
 you want: repeating an install with a different origin refuses, printing the
-origin already installed, rather than silently keeping or dropping it. Pair a
-phone from the console's PAIR A PHONE button.
+origin already installed, rather than silently keeping or dropping it.
 
-Pairing a browser with the full grant is an operator action: `factoryctl web
+Pairing a browser is an operator action: `factoryctl web
 pair` mints a one-shot link (it expires after five minutes) and opens your
 default browser already paired, never printing the link. Run it to pair another browser on
 this Mac (make it the default first), or to recover when a browser's saved
-credential is no longer accepted, for example after `web revoke`. A phone or
-another machine pairs with the reduced remote grant from a paired console's PAIR
-A PHONE button. The loopback listener itself mints nothing.
+credential is no longer accepted, for example after `web revoke`. The loopback
+listener itself mints nothing.
 
 Pairing, inspection and revocation run through the operator client. Operator
 commands find the default home `$HOME/.dark-factory` on their own; exporting

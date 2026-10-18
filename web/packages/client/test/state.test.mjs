@@ -28,8 +28,6 @@ import {
   MAX_TERMINAL_ROWS,
   MAX_TERMINAL_COLS,
   MAX_MODEL_SOURCE_BYTES,
-  MAX_REMOTE_INVITE_LINK_BYTES,
-  MAX_REMOTE_INVITE_SVG_BYTES,
   MAX_IDLE_AFTER_SECONDS,
   MAX_IDLE_RUN_BUDGET,
   ProtocolError,
@@ -394,8 +392,6 @@ test("manifest bounds and registry are an exact readable mirror", () => {
     maxTerminalCols: MAX_TERMINAL_COLS,
     maxAgentModelBytes: MAX_AGENT_MODEL_BYTES,
     maxModelSourceBytes: MAX_MODEL_SOURCE_BYTES,
-    maxRemoteInviteLinkBytes: MAX_REMOTE_INVITE_LINK_BYTES,
-    maxRemoteInviteSvgBytes: MAX_REMOTE_INVITE_SVG_BYTES,
     maxIdleAfterSeconds: MAX_IDLE_AFTER_SECONDS,
     maxIdleRunBudget: MAX_IDLE_RUN_BUDGET,
   }, {
@@ -421,8 +417,6 @@ test("manifest bounds and registry are an exact readable mirror", () => {
     maxTerminalCols: manifest.bounds.max_terminal_cols,
     maxAgentModelBytes: manifest.bounds.max_agent_model_bytes,
     maxModelSourceBytes: manifest.bounds.max_model_source_bytes,
-    maxRemoteInviteLinkBytes: manifest.bounds.max_remote_invite_link_bytes,
-    maxRemoteInviteSvgBytes: manifest.bounds.max_remote_invite_svg_bytes,
     maxIdleAfterSeconds: manifest.bounds.max_idle_after_seconds,
     maxIdleRunBudget: manifest.bounds.max_idle_run_budget,
   });

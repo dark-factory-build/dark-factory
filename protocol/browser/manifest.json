@@ -50,8 +50,6 @@
     "max_terminal_cols": 4096,
     "max_agent_model_bytes": 128,
     "max_model_source_bytes": 1024,
-    "max_remote_invite_link_bytes": 8192,
-    "max_remote_invite_svg_bytes": 32768,
     "max_idle_after_seconds": 604800,
     "max_idle_run_budget": 1000000
   },
@@ -391,18 +389,6 @@
       "direction": "server",
       "id": "required",
       "fixture": "github_connection_result.json"
-    },
-    {
-      "type": "REMOTE_INVITE",
-      "direction": "client",
-      "id": "required",
-      "fixture": "remote_invite.json"
-    },
-    {
-      "type": "REMOTE_INVITE_RESULT",
-      "direction": "server",
-      "id": "required",
-      "fixture": "remote_invite_result.json"
     },
     {
       "type": "PUSH_SUBSCRIBE",

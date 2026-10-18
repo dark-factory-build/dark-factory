@@ -19,6 +19,4 @@ export type {
   TerminalHandle,
   SessionErrorLike,
 } from "./terminal_session.js";
-export * from "./remote/index.js";
-
 export * from "./project-content.js";

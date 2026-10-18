@@ -211,10 +211,6 @@ func encodeDecoded(frame ControlFrame) ([]byte, error) {
 		return encodeControl(TypeTerminalExit, frame.ID, value)
 	case TerminalReset:
 		return encodeControl(TypeTerminalReset, frame.ID, value)
-	case RemoteInvite:
-		return EncodeRemoteInvite(frame.ID, value)
-	case RemoteInviteResult:
-		return EncodeRemoteInviteResult(frame.ID, value)
 	case PushSubscribe:
 		return EncodePushSubscribe(frame.ID, value)
 	case PushSubscribeResult:
@@ -565,8 +561,6 @@ func TestManifestMatchesImplementedRegistry(t *testing.T) {
 			MaxTerminalCols              int    `json:"max_terminal_cols"`
 			MaxAgentModelBytes           int    `json:"max_agent_model_bytes"`
 			MaxModelSourceBytes          int    `json:"max_model_source_bytes"`
-			MaxRemoteInviteLinkBytes     int    `json:"max_remote_invite_link_bytes"`
-			MaxRemoteInviteSVGBytes      int    `json:"max_remote_invite_svg_bytes"`
 			MaxIdleAfterSeconds          int    `json:"max_idle_after_seconds"`
 			MaxIdleRunBudget             int    `json:"max_idle_run_budget"`
 		} `json:"bounds"`
@@ -600,7 +594,7 @@ func TestManifestMatchesImplementedRegistry(t *testing.T) {
 	}
 	// The manifest carries a stable name, not a generation: the contract is
 	// unversioned by owner decision on 4 September 2026.
-	if manifest.Name != "dark-factory/browser" || len(manifest.Control) != 63 || len(manifest.Terminal.Opcodes) != 2 {
+	if manifest.Name != "dark-factory/browser" || len(manifest.Control) != 61 || len(manifest.Terminal.Opcodes) != 2 {
 		t.Fatalf("manifest registry incomplete: %+v", manifest)
 	}
 	capabilityNames := []string{"observe", "private_human_request_detail", "human_actions", "terminal_input", "administration"}
@@ -621,9 +615,9 @@ func TestManifestMatchesImplementedRegistry(t *testing.T) {
 		MaxTaskPriority                                                                                               int64
 		MaxSQLiteInteger                                                                                              string
 		MaxTerminalUnackedBytes, TerminalAckTimeoutMS, TerminalLeaseRenewIntervalMS, MaxTerminalRows, MaxTerminalCols int
-		MaxAgentModelBytes, MaxModelSourceBytes, MaxRemoteInviteLinkBytes, MaxRemoteInviteSVGBytes                    int
+		MaxAgentModelBytes, MaxModelSourceBytes                                                                       int
 		MaxIdleAfterSeconds, MaxIdleRunBudget                                                                         int
-	}{MaxControlBytes, MaxJSONDepth, MaxJSONArray, MaxJSONObject, MaxSnapshotBytes, MaxSnapshotEntities, MaxProjectNameBytes, MaxAgentNameBytes, MaxTaskTitleBytes, MaxHumanQuestionBytes, MaxHumanReplyBytes, MaxTaskInstructionBytes, MaxFactoryCapacity, MaxTaskPriority, fmt.Sprint(MaxSQLiteInteger), MaxTerminalUnackedBytes, TerminalAckTimeoutMS, TerminalLeaseRenewIntervalMS, int(MaxTerminalRows), int(MaxTerminalCols), MaxAgentModelBytes, MaxModelSourceBytes, MaxRemoteInviteLinkBytes, MaxRemoteInviteSVGBytes, MaxIdleAfterSeconds, MaxIdleRunBudget}
+	}{MaxControlBytes, MaxJSONDepth, MaxJSONArray, MaxJSONObject, MaxSnapshotBytes, MaxSnapshotEntities, MaxProjectNameBytes, MaxAgentNameBytes, MaxTaskTitleBytes, MaxHumanQuestionBytes, MaxHumanReplyBytes, MaxTaskInstructionBytes, MaxFactoryCapacity, MaxTaskPriority, fmt.Sprint(MaxSQLiteInteger), MaxTerminalUnackedBytes, TerminalAckTimeoutMS, TerminalLeaseRenewIntervalMS, int(MaxTerminalRows), int(MaxTerminalCols), MaxAgentModelBytes, MaxModelSourceBytes, MaxIdleAfterSeconds, MaxIdleRunBudget}
 	if fmt.Sprint(manifest.Bounds) != fmt.Sprint(wantBounds) {
 		t.Fatalf("bounds drift: got %+v want %+v", manifest.Bounds, wantBounds)
 	}

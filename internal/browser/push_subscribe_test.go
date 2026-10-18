@@ -2,7 +2,6 @@ package browser
 
 import (
 	"context"
-	"encoding/hex"
 	"sync"
 	"testing"
 
@@ -15,9 +14,7 @@ type taskDispatchBackend struct {
 	client [browserprotocol.ClientIDSize]byte
 	err    error
 
-	invitation  browserprotocol.RemoteInviteResult
-	push        browserprotocol.PushSubscribe
-	inviteCalls int
+	push browserprotocol.PushSubscribe
 }
 
 func newTaskDispatchBackend() *taskDispatchBackend {
@@ -38,14 +35,6 @@ func (backend *taskDispatchBackend) SubscribePush(_ context.Context, client [bro
 	return backend.err
 }
 
-func (backend *taskDispatchBackend) RemoteInvite(_ context.Context, client [browserprotocol.ClientIDSize]byte) (browserprotocol.RemoteInviteResult, error) {
-	backend.mu.Lock()
-	defer backend.mu.Unlock()
-	backend.inviteCalls++
-	backend.client = client
-	return backend.invitation, backend.err
-}
-
 func startTaskServer(t *testing.T, backend Backend) *Server {
 	t.Helper()
 	server, err := Listen(Config{Address: "127.0.0.1:0", AllowedOrigins: []string{testOrigin, devOrigin}, Backend: backend})
@@ -58,47 +47,6 @@ func startTaskServer(t *testing.T, backend Backend) *Server {
 		}
 	})
 	return server
-}
-
-func TestRemoteInviteDispatchesAndCorrelatesTheMintedInvitation(t *testing.T) {
-	invitation := browserprotocol.RemoteInviteResult{
-		Link:        "https://app.darkfactory.build/remote#df_remote&node=n0&expires=1767225600",
-		ExpiresAtMS: 1767225600000,
-		SVG:         `<svg viewBox="0 0 1 1"/>`,
-	}
-	payload, err := testEncodeRemoteInvite("invite", browserprotocol.RemoteInvite{})
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Run("dispatched result", func(t *testing.T) {
-		backend := newTaskDispatchBackend()
-		backend.invitation = invitation
-		server := startTaskServer(t, backend)
-		connection, _ := dialServer(t, server, testOrigin)
-		authenticate(t, connection)
-		writeClientFrame(t, connection, payload)
-		frame := readServerFrame(t, connection)
-		if frame.Type != browserprotocol.TypeRemoteInviteResult || frame.ID != "invite" || frame.Body.(browserprotocol.RemoteInviteResult) != invitation {
-			t.Fatalf("invite result = %+v", frame)
-		}
-		wantClient, err := hex.DecodeString(testID)
-		if err != nil {
-			t.Fatal(err)
-		}
-		backend.mu.Lock()
-		calls, gotClient := backend.inviteCalls, backend.client
-		backend.mu.Unlock()
-		if calls != 1 || string(gotClient[:]) != string(wantClient) {
-			t.Fatalf("dispatch calls=%d client=%x", calls, gotClient)
-		}
-	})
-	t.Run("missing optional backend", func(t *testing.T) {
-		server := startTaskServer(t, newFakeBackend())
-		connection, _ := dialServer(t, server, testOrigin)
-		authenticate(t, connection)
-		writeClientFrame(t, connection, payload)
-		assertError(t, readServerFrame(t, connection), browserprotocol.ErrorUnauthorized)
-	})
 }
 
 func TestPushSubscribeDispatchesAndCorrelatesItsResult(t *testing.T) {

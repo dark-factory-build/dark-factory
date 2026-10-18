@@ -19,8 +19,6 @@ import {
   MAX_JSON_DEPTH,
   MAX_OBJECT_MEMBERS,
   MAX_PROJECT_NAME_BYTES,
-  MAX_REMOTE_INVITE_LINK_BYTES,
-  MAX_REMOTE_INVITE_SVG_BYTES,
   MAX_SNAPSHOT_BYTES,
   MAX_SNAPSHOT_ENTITIES,
   MAX_SQLITE_INTEGER,
@@ -160,15 +158,13 @@ export type TerminalInputResultBody = { session_id: string; generation: bigint; 
 export type TerminalEOFBody = { session_id: string };
 export type TerminalExitBody = { session_id: string; exit_code: number; exit_signal: number; aborted: boolean };
 export type TerminalResetBody = { session_id: string; floor: bigint; head: bigint };
-export type RemoteInviteBody = Record<string, never>;
-export type RemoteInviteResultBody = { link: string; expires_at_ms: bigint; svg: string };
 /** One device's Web Push subscription plus the VAPID key pair it minted for it, base64url without padding. */
 export type PushSubscribeBody = { endpoint: string; public_key: string; private_key: string };
 export type PushSubscribeResultBody = Record<string, never>;
 /** `secret` is the bearer, non-empty only in the answer to a mint. */
 const MAX_PUSH_ENDPOINT_BYTES = 2048;
 const BASE64URL = /^[A-Za-z0-9_-]+$/;
-/** The push services behind every browser that can install the remote console; the daemon refuses any other host. */
+/** The push services behind every browser that can install the console; the daemon refuses any other host. */
 const PUSH_SERVICE_HOSTS = new Set(["web.push.apple.com", "fcm.googleapis.com", "updates.push.services.mozilla.com"]);
 function pushServiceEndpoint(endpoint: string): boolean {
   let url: URL;
@@ -176,9 +172,6 @@ function pushServiceEndpoint(endpoint: string): boolean {
   if (url.protocol !== "https:" || url.username !== "" || url.password !== "" || url.port !== "") return false;
   return PUSH_SERVICE_HOSTS.has(url.hostname) || (url.hostname.endsWith(".notify.windows.com") && url.hostname.length > ".notify.windows.com".length);
 }
-
-/** The exact everything-before-the-members of a minted invitation link. */
-const REMOTE_INVITE_LINK_PREFIX = "https://app.darkfactory.build/remote#df_remote&";
 
 export type HelloFrame = { type: "HELLO"; body: HelloBody };
 export type PairProveFrame = { type: "PAIR_PROVE"; id: string; body: PairProveBody };
@@ -228,7 +221,6 @@ export type ServerControlFrame = { type: "PROJECT_CONTENT_RESULT"; id: string; b
   | { type: "BROWSER_CLIENT_REVOKE_RESULT"; id: string; body: BrowserClientRevokeResultBody }
   | { type: "GITHUB_CONNECTION_RESULT"; id: string; body: GitHubConnectionResultBody }
   | { type: "TERMINAL_TARGET"; id: string; body: TerminalTargetBody }
-  | { type: "REMOTE_INVITE_RESULT"; id: string; body: RemoteInviteResultBody }
   | { type: "PUSH_SUBSCRIBE_RESULT"; id: string; body: PushSubscribeResultBody }
   | TerminalServerControlFrame | ErrorFrame | UnknownServerControlFrame;
 export type ClientControlFrame = { type: "PROJECT_CONTENT"; id: string; body: ProjectContentRequest } | PairProveFrame | AuthProveFrame | StateGetFrame | StateWatchFrame | HumanRequestDetailGetFrame
@@ -247,7 +239,6 @@ export type ClientControlFrame = { type: "PROJECT_CONTENT"; id: string; body: Pr
   | { type: "BROWSER_CLIENT_REVOKE"; id: string; body: BrowserClientRevokeBody }
   | { type: "GITHUB_CONNECTION"; id: string; body: GitHubConnectionBody }
   | { type: "TERMINAL_TARGET_GET"; id: string; body: TerminalTargetGetBody }
-  | { type: "REMOTE_INVITE"; id: string; body: RemoteInviteBody }
   | { type: "PUSH_SUBSCRIBE"; id: string; body: PushSubscribeBody }
   | TerminalControlFrame | ErrorFrame;
 type ControlBody = ClientControlFrame["body"] | ServerControlFrame["body"];
@@ -404,10 +395,8 @@ function validateBody(type: ControlType, body: unknown, wire: boolean): ControlB
     case "TERMINAL_EOF": requireKeys(body, ["session_id"], wire); return { session_id: dynamicID(body.session_id) };
     case "TERMINAL_EXIT": requireKeys(body, ["session_id", "exit_code", "exit_signal", "aborted"], wire); if (typeof body.aborted !== "boolean") malformed(); { const exit_code = integer(body.exit_code, 0, Number.MAX_SAFE_INTEGER); const exit_signal = integer(body.exit_signal, 0, Number.MAX_SAFE_INTEGER); if (exit_signal !== 0 && exit_code !== 0) malformed(); return { session_id: dynamicID(body.session_id), exit_code, exit_signal, aborted: body.aborted }; }
     case "TERMINAL_RESET": requireKeys(body, ["session_id", "floor", "head"], wire); { const floor = decimal(body.floor, wire); const head = decimal(body.head, wire); if (floor > head) malformed(); return { session_id: dynamicID(body.session_id), floor, head }; }
-    case "REMOTE_INVITE": requireKeys(body, [], wire); return {};
     case "PUSH_SUBSCRIBE": requireKeys(body, ["endpoint", "public_key", "private_key"], wire); { const endpoint = boundedText(body.endpoint, 9, MAX_PUSH_ENDPOINT_BYTES); if (/[\u0000-\u001f\u007f]/.test(endpoint) || !pushServiceEndpoint(endpoint) || typeof body.public_key !== "string" || body.public_key.length !== 87 || !BASE64URL.test(body.public_key) || typeof body.private_key !== "string" || body.private_key.length === 0 || body.private_key.length > 512 || !BASE64URL.test(body.private_key)) malformed(); return { endpoint, public_key: body.public_key, private_key: body.private_key }; }
     case "PUSH_SUBSCRIBE_RESULT": requireKeys(body, [], wire); return {};
-    case "REMOTE_INVITE_RESULT": requireKeys(body, ["link", "expires_at_ms", "svg"], wire); { const link = boundedText(body.link, 1, MAX_REMOTE_INVITE_LINK_BYTES); const svg = boundedText(body.svg, 1, MAX_REMOTE_INVITE_SVG_BYTES); if (!link.startsWith(REMOTE_INVITE_LINK_PREFIX) || /[\u0000-\u001f\u007f]/.test(link) || !svg.startsWith("<svg")) malformed(); return { link, expires_at_ms: decimal(body.expires_at_ms, wire, true), svg }; }
     case "ERROR": requireKeys(body, ["code", "retryable"], wire); if (typeof body.code !== "string" || typeof body.retryable !== "boolean") malformed(); if (!(ERROR_CODES as readonly string[]).includes(body.code)) { if (!wire) malformed(); return { code: "internal", retryable: false }; } return { code: body.code as ErrorCode, retryable: body.retryable };
   }
 }

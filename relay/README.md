@@ -120,16 +120,10 @@ forwards every daemon frame untouched, and additionally sends one text frame
 frame and never hands it to the session, so no session decoder has to tolerate
 a member it does not own.
 
-A pairing invitation is a link the factory prints and the controller scans:
-
-```text
-https://app.darkfactory.build/remote#df_remote&node=…&daemon=…&challenge=…&ticket=…&expires=…
-```
-
-The fragment is plain query pairs (`URLSearchParams`). `relay` and `host` are
-optional and omitted at their defaults, `wss://relay.darkfactory.build` and
-`127.0.0.1:43123`; `ticket` is a `pair` ticket and `challenge` is the daemon's
-own pairing challenge, which is what actually authorizes the pairing.
+A `pair` ticket admits a controller that has not paired yet; the daemon's own
+pairing challenge, carried in the application frames, is what actually
+authorizes the pairing. factoryd currently mints no `pair` tickets: nothing
+invites a new controller through the relay.
 
 ## Public world
 

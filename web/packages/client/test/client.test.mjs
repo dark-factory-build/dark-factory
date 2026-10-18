@@ -30,8 +30,6 @@ import {
   TERMINAL_LEASE_RENEW_INTERVAL_MS,
   MAX_AGENT_MODEL_BYTES,
   MAX_MODEL_SOURCE_BYTES,
-  MAX_REMOTE_INVITE_LINK_BYTES,
-  MAX_REMOTE_INVITE_SVG_BYTES,
   MAX_IDLE_AFTER_SECONDS,
   MAX_IDLE_RUN_BUDGET,
   ProtocolError,
@@ -65,8 +63,7 @@ const clientBounds = {
   maxTaskPriority: MAX_TASK_PRIORITY, maxSQLiteInteger: MAX_SQLITE_INTEGER, maxTerminalUnackedBytes: MAX_TERMINAL_UNACKED_BYTES,
   terminalAckTimeoutMs: TERMINAL_ACK_TIMEOUT_MS, terminalLeaseRenewIntervalMs: TERMINAL_LEASE_RENEW_INTERVAL_MS,
   maxTerminalRows: MAX_TERMINAL_ROWS, maxTerminalCols: MAX_TERMINAL_COLS, maxAgentModelBytes: MAX_AGENT_MODEL_BYTES,
-  maxModelSourceBytes: MAX_MODEL_SOURCE_BYTES, maxRemoteInviteLinkBytes: MAX_REMOTE_INVITE_LINK_BYTES,
-  maxRemoteInviteSvgBytes: MAX_REMOTE_INVITE_SVG_BYTES, maxIdleAfterSeconds: MAX_IDLE_AFTER_SECONDS, maxIdleRunBudget: MAX_IDLE_RUN_BUDGET,
+  maxModelSourceBytes: MAX_MODEL_SOURCE_BYTES, maxIdleAfterSeconds: MAX_IDLE_AFTER_SECONDS, maxIdleRunBudget: MAX_IDLE_RUN_BUDGET,
 };
 const expectMalformed = (fn) => assert.throws(fn, (e) => e instanceof ProtocolError && ["malformed", "wrong_direction"].includes(e.code));
 // The contract tolerates additive change: a member this build does not know is
@@ -79,8 +76,8 @@ const expectIgnoredMember = (base, mutated, role = "client") => {
 };
 
 test("canonical control fixtures decode by sender role and re-encode exactly", () => {
-  const client = ["pair_prove", "auth_prove", "remote_invite", "push_subscribe", "browser_clients_get", "browser_client_revoke", "run_paths_get"];
-  const server = ["hello", "pair_result", "auth_result", "remote_invite_result", "push_subscribe_result", "browser_clients", "browser_client_revoke_result", "run_paths"];
+  const client = ["pair_prove", "auth_prove", "push_subscribe", "browser_clients_get", "browser_client_revoke", "run_paths_get"];
+  const server = ["hello", "pair_result", "auth_result", "push_subscribe_result", "browser_clients", "browser_client_revoke_result", "run_paths"];
   for (const name of client) assert.equal(encodeClientControl(decodeClientControl(fixture(`${name}.json`))), fixture(`${name}.json`));
   for (const name of server) assert.equal(encodeServerControl(decodeServerControl(fixture(`${name}.json`))), fixture(`${name}.json`));
   // An agent with no live run is in no room, so an empty run identity may not

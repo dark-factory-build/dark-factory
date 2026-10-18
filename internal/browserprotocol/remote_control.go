@@ -8,29 +8,8 @@ import (
 	"unicode/utf8"
 )
 
-const (
-	MaxRemoteInviteLinkBytes = 8192
-	MaxRemoteInviteSVGBytes  = 32768
-)
-
-// remoteInviteLinkPrefix is the exact everything-before-the-members of the
-// invitation the daemon mints. The link is a live pairing secret, so the wire
-// admits only that one syntactic form.
-const remoteInviteLinkPrefix = "https://app.darkfactory.build/remote#df_remote&"
-
-// RemoteInvite asks the factory for one remote pairing invitation. It carries
-// no members: the invitation is entirely the daemon's to mint.
-type RemoteInvite struct{}
-
-type RemoteInviteResult struct {
-	Link        string  `json:"link"`
-	ExpiresAtMS Decimal `json:"expires_at_ms"`
-	SVG         string  `json:"svg"`
-}
-
-func EncodeRemoteInviteResult(id string, value RemoteInviteResult) ([]byte, error) {
-	return encodeControl(TypeRemoteInviteResult, id, value)
-}
+// maxIngestURLBytes bounds the telemetry ingest URL the factory names.
+const maxIngestURLBytes = 8192
 
 // TelemetryIngest reads the telemetry ingest endpoint ("status"), mints a new
 // secret for it ("mint", which rotates), or revokes it ("revoke").
@@ -58,7 +37,7 @@ const MaxPushEndpointBytes = 2048
 // A subscription names the endpoint, and any observing client may register
 // one, so without this list the verb would be a daemon-side request to an
 // address of the client's choosing. These are the push services behind every
-// browser that can install the remote console; Edge's is per-tenant under one
+// browser that can install the console; Edge's is per-tenant under one
 // suffix.
 var pushServiceHosts = map[string]bool{
 	"web.push.apple.com":                true,
@@ -121,11 +100,7 @@ func validRemoteControl(kind MessageType, body any) error {
 		}
 		return true
 	}
-	link := func(value string) bool {
-		return len(value) != 0 && len(value) <= MaxRemoteInviteLinkBytes && strings.HasPrefix(value, remoteInviteLinkPrefix) && printable(value)
-	}
 	switch value := body.(type) {
-	case RemoteInvite:
 	case PushSubscribeResult:
 	case TelemetryIngest:
 		if value.Action != "status" && value.Action != "mint" && value.Action != "revoke" {
@@ -133,7 +108,7 @@ func validRemoteControl(kind MessageType, body any) error {
 		}
 	case TelemetryIngestResult:
 		// The secret is 32 bytes as unpadded base64url, the only bearer the relay admits.
-		if len(value.URL) > MaxRemoteInviteLinkBytes || !printable(value.URL) || !strings.HasSuffix(value.URL, "/v1/traces") ||
+		if len(value.URL) > maxIngestURLBytes || !printable(value.URL) || !strings.HasSuffix(value.URL, "/v1/traces") ||
 			!strings.HasPrefix(value.URL, "https://") && !strings.HasPrefix(value.URL, "http://") ||
 			value.Secret != "" && (!base64URL(value.Secret, 43, 43) || !bool(value.Active)) {
 			return bad()
@@ -143,11 +118,6 @@ func validRemoteControl(kind MessageType, body any) error {
 		// P-256 private key exports to 138 bytes, bounded loosely.
 		if len(value.Endpoint) > MaxPushEndpointBytes || !printable(value.Endpoint) || !pushServiceEndpoint(value.Endpoint) ||
 			!base64URL(value.PublicKey, 87, 87) || !base64URL(value.PrivateKey, 1, 512) {
-			return bad()
-		}
-	case RemoteInviteResult:
-		if !link(value.Link) || value.ExpiresAtMS == 0 || !utf8.ValidString(value.SVG) ||
-			len(value.SVG) == 0 || len(value.SVG) > MaxRemoteInviteSVGBytes || !strings.HasPrefix(value.SVG, "<svg") {
 			return bad()
 		}
 	default:

@@ -100,8 +100,6 @@ const (
 	TypeTerminalEOF                 MessageType = "TERMINAL_EOF"
 	TypeTerminalExit                MessageType = "TERMINAL_EXIT"
 	TypeTerminalReset               MessageType = "TERMINAL_RESET"
-	TypeRemoteInvite                MessageType = "REMOTE_INVITE"
-	TypeRemoteInviteResult          MessageType = "REMOTE_INVITE_RESULT"
 	TypePushSubscribe               MessageType = "PUSH_SUBSCRIBE"
 	TypePushSubscribeResult         MessageType = "PUSH_SUBSCRIBE_RESULT"
 	TypeTelemetryIngest             MessageType = "TELEMETRY_INGEST"
@@ -459,10 +457,6 @@ func decodeControl(data []byte, role senderRole) (ControlFrame, error) {
 		body = new(TerminalExit)
 	case TypeTerminalReset:
 		body = new(TerminalReset)
-	case TypeRemoteInvite:
-		body = new(RemoteInvite)
-	case TypeRemoteInviteResult:
-		body = new(RemoteInviteResult)
 	case TypePushSubscribe:
 		body = new(PushSubscribe)
 	case TypePushSubscribeResult:
@@ -544,7 +538,7 @@ func idRequired(kind MessageType) bool {
 		TypeTerminalAttach, TypeTerminalAttached, TypeTerminalLeaseAcquire, TypeTerminalLeaseRenew, TypeTerminalLeaseRelease,
 		TypeTerminalLeaseResult, TypeTerminalResize, TypeTerminalResized, TypeTerminalDetach, TypeTerminalDetached,
 		TypeTerminalInputResult, TypeTerminalEOF, TypeTerminalExit, TypeTerminalReset,
-		TypeRemoteInvite, TypeRemoteInviteResult, TypePushSubscribe, TypePushSubscribeResult, TypeTelemetryIngest, TypeTelemetryIngestResult:
+		TypePushSubscribe, TypePushSubscribeResult, TypeTelemetryIngest, TypeTelemetryIngestResult:
 		return true
 	default:
 		return false
@@ -557,13 +551,13 @@ func typeAllowed(role senderRole, kind MessageType) bool {
 	}
 	if role == clientRole {
 		return kind == TypePairProve || kind == TypeAuthProve || kind == TypeStateGet ||
-			kind == TypeStateWatch || kind == TypeHumanRequestDetailGet || kind == TypeHumanRequestReply || kind == TypeHumanRequestCancelRun || kind == TypeTerminalTargetGet || kind == TypeTerminalAttach || kind == TypeTerminalAck || kind == TypeTerminalLeaseAcquire || kind == TypeTerminalLeaseRenew || kind == TypeTerminalLeaseRelease || kind == TypeTerminalResize || kind == TypeTerminalDetach || kind == TypeRemoteInvite || kind == TypePushSubscribe || kind == TypeTelemetryIngest ||
+			kind == TypeStateWatch || kind == TypeHumanRequestDetailGet || kind == TypeHumanRequestReply || kind == TypeHumanRequestCancelRun || kind == TypeTerminalTargetGet || kind == TypeTerminalAttach || kind == TypeTerminalAck || kind == TypeTerminalLeaseAcquire || kind == TypeTerminalLeaseRenew || kind == TypeTerminalLeaseRelease || kind == TypeTerminalResize || kind == TypeTerminalDetach || kind == TypePushSubscribe || kind == TypeTelemetryIngest ||
 			kind == TypeAgentUpdate || kind == TypeProjectLimits || kind == TypeProjectCreate || kind == TypeRepositoriesGet || kind == TypeRepositoryMutate || kind == TypeTaskUpdate || kind == TypeOperationalGraphGet || kind == TypeRunPathsGet ||
 			kind == TypeAttachmentRetention || kind == TypeProjectContent ||
 			kind == TypeAccountsDiscover || kind == TypeAccountLink || kind == TypeAccountUpdate || kind == TypeBrowserClientsGet || kind == TypeBrowserClientRevoke || kind == TypeGitHubConnection
 	}
 	return role == serverRole && (kind == TypeHello || kind == TypePairResult || kind == TypeAuthResult ||
-		kind == TypeStateSnapshot || kind == TypeStateChanged || kind == TypeHumanRequestDetail || kind == TypeHumanRequestReplyResult || kind == TypeHumanRequestCancelRunResult || kind == TypeTerminalTarget || kind == TypeTerminalAttached || kind == TypeTerminalLeaseResult || kind == TypeTerminalResized || kind == TypeTerminalDetached || kind == TypeTerminalInputResult || kind == TypeTerminalEOF || kind == TypeTerminalExit || kind == TypeTerminalReset || kind == TypeRemoteInviteResult || kind == TypePushSubscribeResult || kind == TypeTelemetryIngestResult ||
+		kind == TypeStateSnapshot || kind == TypeStateChanged || kind == TypeHumanRequestDetail || kind == TypeHumanRequestReplyResult || kind == TypeHumanRequestCancelRunResult || kind == TypeTerminalTarget || kind == TypeTerminalAttached || kind == TypeTerminalLeaseResult || kind == TypeTerminalResized || kind == TypeTerminalDetached || kind == TypeTerminalInputResult || kind == TypeTerminalEOF || kind == TypeTerminalExit || kind == TypeTerminalReset || kind == TypePushSubscribeResult || kind == TypeTelemetryIngestResult ||
 		kind == TypeAttachmentRetentionResult || kind == TypeProjectContentResult || kind == TypeAgentUpdateResult || kind == TypeProjectLimitsResult || kind == TypeProjectCreateResult || kind == TypeRepositories || kind == TypeRepositoryMutateResult || kind == TypeTaskUpdateResult || kind == TypeOperationalGraph || kind == TypeRunPaths ||
 		kind == TypeAccounts || kind == TypeAccountLinkResult || kind == TypeAccountUpdateResult || kind == TypeBrowserClients || kind == TypeBrowserClientRevokeResult || kind == TypeGitHubConnectionResult)
 }
@@ -825,7 +819,7 @@ func validateBody(kind MessageType, body any) error {
 		return validTerminalControl(kind, body)
 	case TypeTerminalReset:
 		return validTerminalControl(kind, body)
-	case TypeRemoteInvite, TypeRemoteInviteResult, TypePushSubscribe, TypePushSubscribeResult, TypeTelemetryIngest, TypeTelemetryIngestResult:
+	case TypePushSubscribe, TypePushSubscribeResult, TypeTelemetryIngest, TypeTelemetryIngestResult:
 		return validRemoteControl(kind, body)
 	case TypeError:
 		value, ok := body.(Error)
