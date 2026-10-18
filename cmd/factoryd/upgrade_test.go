@@ -40,7 +40,7 @@ var runningSource = strings.Repeat("6", 40)
 
 const currentProgram = "#!/bin/sh\n"
 
-// stagedHome is an initialized home with a release staged as bin/previous:
+// stagedHome is an initialized home with a release staged as bin/staged:
 // this test binary, running as mode, under an upgrade marker naming target.
 func stagedHome(t *testing.T, mode, target string) string {
 	t.Helper()
@@ -52,11 +52,11 @@ func stagedHome(t *testing.T, mode, target string) string {
 	}
 	digest := sha256.Sum256([]byte(currentProgram))
 	for _, step := range []error{
-		os.MkdirAll(filepath.Join(bin, "current"), 0o700), os.MkdirAll(filepath.Join(bin, "previous"), 0o700),
+		os.MkdirAll(filepath.Join(bin, "current"), 0o700), os.MkdirAll(filepath.Join(bin, "staged"), 0o700),
 		os.WriteFile(filepath.Join(bin, "current", "factoryd"), []byte(currentProgram), 0o700),
 		// A link, not a copy: on macOS a copy of the running test binary
 		// makes this tree refuse the test's writes while the child runs.
-		os.Link(self, filepath.Join(bin, "previous", "factoryd")),
+		os.Link(self, filepath.Join(bin, "staged", "factoryd")),
 		os.WriteFile(filepath.Join(install.ServiceDirectoryPath(home), "receipt"), []byte(`{"program_digest":"`+hex.EncodeToString(digest[:])+`"}`), 0o600),
 		install.WriteUpgradeMarker(home, install.UpgradeMarker{Target: target}),
 	} {
@@ -182,17 +182,21 @@ func TestPassedTrialRecoveryRestartsAndSettlesWithoutRepeatingPromotion(t *testi
 	if current, _ := os.ReadFile(filepath.Join(install.ServiceDirectoryPath(home), "bin", "current", "factoryd")); string(current) != currentProgram {
 		t.Fatal("an interrupted trial changed current")
 	}
-	if err := serve(context.Background(), testConfig(home)); !errors.Is(err, errRestart) {
-		t.Fatalf("recovery = %v", err)
+	bin := filepath.Join(install.ServiceDirectoryPath(home), "bin")
+	currentPath := filepath.Join(bin, "current")
+	stagedPath := filepath.Join(bin, "staged")
+	interruptedPath := filepath.Join(bin, ".current-before-interruption")
+	if err := os.Rename(currentPath, interruptedPath); err != nil {
+		t.Fatal(err)
 	}
-	if calls != 2 {
-		t.Fatalf("promotion calls after recovery = %d, want 2", calls)
+	if err := os.Rename(stagedPath, currentPath); err != nil {
+		t.Fatal(err)
 	}
-	if marker, present, err := install.ReadUpgradeMarker(home); err != nil || !present || !marker.TrialPassed {
-		t.Fatalf("passed marker after recovery = %+v, %t, %v", marker, present, err)
+	if err := os.Rename(interruptedPath, stagedPath); err != nil {
+		t.Fatal(err)
 	}
-	if current, _ := os.ReadFile(filepath.Join(install.ServiceDirectoryPath(home), "bin", "current", "factoryd")); string(current) == currentProgram {
-		t.Fatal("recovery did not promote the passed trial")
+	if calls != 1 {
+		t.Fatalf("promotion calls before promoted boot = %d, want 1", calls)
 	}
 	selfSource = func() string { return "development" }
 	bootCtx, cancel := context.WithCancel(ctx)
@@ -213,7 +217,19 @@ func TestPassedTrialRecoveryRestartsAndSettlesWithoutRepeatingPromotion(t *testi
 		t.Fatal(err)
 	}
 	if calls != 2 {
-		t.Fatalf("promotion calls after settlement = %d, want 2", calls)
+		t.Fatalf("promotion calls after promoted boot = %d, want 2", calls)
+	}
+	if previous, _ := os.ReadFile(filepath.Join(install.ServiceDirectoryPath(home), "bin", "previous", "factoryd")); string(previous) != currentProgram {
+		t.Fatal("post-swap recovery lost the actual prior build")
+	}
+	current, err := os.ReadFile(filepath.Join(install.ServiceDirectoryPath(home), "bin", "current", "factoryd"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	digest := sha256.Sum256(current)
+	receipt, err := os.ReadFile(filepath.Join(install.ServiceDirectoryPath(home), "receipt"))
+	if err != nil || !bytes.Contains(receipt, []byte(`"`+hex.EncodeToString(digest[:])+`"`)) {
+		t.Fatalf("post-swap recovery receipt = %q, %v", receipt, err)
 	}
 	opened, err = install.OpenOperationalHome(ctx, home)
 	if err != nil {

@@ -373,17 +373,22 @@ func serve(ctx context.Context, configuration config) error {
 		}
 		resumed := false
 		resumedTarget := ""
-		if marker.TrialPassed && marker.Target != selfSource() {
+		if marker.TrialPassed {
 			if err := promoteService(configuration.home); err != nil {
 				daemon.LogFactoryd(recoveryLog, "factoryd: resuming release %s promotion failed: %v\n", marker.Target, err)
 				return errors.Join(err, owner.close())
 			}
-			resumed = true
-			resumedTarget = marker.Target
+			if marker.Target != selfSource() {
+				resumed = true
+				resumedTarget = marker.Target
+			}
 		}
-		// A promotion interrupted after its rename leaves the receipt behind.
-		if err := install.RebindServiceReceipt(configuration.home); err != nil {
-			daemon.LogFactoryd(recoveryLog, "factoryd: rebinding the service receipt: %v\n", err)
+		if !marker.TrialPassed {
+			// A promotion interrupted before its trial passed leaves the receipt
+			// bound to the running build.
+			if err := install.RebindServiceReceipt(configuration.home); err != nil {
+				daemon.LogFactoryd(recoveryLog, "factoryd: rebinding the service receipt: %v\n", err)
+			}
 		}
 		if !resumed {
 			if marker.Target == selfSource() {
@@ -421,7 +426,7 @@ func superviseTrial(home string, args []string, marker install.UpgradeMarker) er
 	defer stop()
 	ctx, cancel := context.WithTimeout(ctx, trialLimit)
 	defer cancel()
-	child := exec.CommandContext(ctx, filepath.Join(install.ServiceDirectoryPath(home), "bin", "previous", "factoryd"), args...)
+	child := exec.CommandContext(ctx, filepath.Join(install.ServiceDirectoryPath(home), "bin", "staged", "factoryd"), args...)
 	child.Env = append(os.Environ(), trialEnv+"=1")
 	child.Stderr = recoveryLog
 	// Its own process group, recorded in the marker: launchd does not end a

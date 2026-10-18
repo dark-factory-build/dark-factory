@@ -1014,7 +1014,7 @@ func upgradeFixture(t *testing.T) (*manageFixture, string, buildinfo.Identity) {
 	restore := verifyServiceRelease
 	t.Cleanup(func() { verifyServiceRelease = restore })
 	verifyServiceRelease = func(_ context.Context, source, staged string, expected buildinfo.Identity) error {
-		if source != next || filepath.Base(staged) != "previous" || expected != identity {
+		if source != next || filepath.Base(staged) != "staged" || expected != identity {
 			return errors.New("unexpected verification")
 		}
 		return nil
@@ -1044,13 +1044,18 @@ func TestServiceUpgradeStagesAndOnlyPromotionSwaps(t *testing.T) {
 		t.Fatal(err)
 	}
 	fixture.requireProgram(t, "current", "#!binary")
-	fixture.requireProgram(t, "previous", "#!next")
+	fixture.requireProgram(t, "staged", "#!next")
 	marker, present, err := ReadUpgradeMarker(fixture.home)
 	if err != nil || !present || marker != (UpgradeMarker{Target: identity.Source()}) {
 		t.Fatalf("marker = %+v, %t, %v", marker, present, err)
 	}
 	if err := PromoteService(fixture.home); err != nil {
 		t.Fatal(err)
+	}
+	fixture.requireProgram(t, "current", "#!next")
+	fixture.requireProgram(t, "previous", "#!binary")
+	if err := PromoteService(fixture.home); err != nil {
+		t.Fatal("repeated promotion: ", err)
 	}
 	fixture.requireProgram(t, "current", "#!next")
 
@@ -1090,7 +1095,7 @@ func TestServiceUpgradeAcceptsAHomeFileOnlyANewerBuildKnows(t *testing.T) {
 	if err := ServiceUpgrade(context.Background(), fixture.home, next, identity); err != nil {
 		t.Fatalf("upgrade refused a home file only the new build knows: %v", err)
 	}
-	fixture.requireProgram(t, "previous", "#!next")
+	fixture.requireProgram(t, "staged", "#!next")
 }
 
 func TestServiceUpgradeOrPromotionFailureLeavesCurrentUntouched(t *testing.T) {
@@ -1155,6 +1160,22 @@ func TestPromotionInterruptedBeforeTheReceiptIsRepaired(t *testing.T) {
 		}
 	}
 	fixture.requireProgram(t, "current", "#!next")
+}
+
+func TestPromotionInterruptedAfterSwapDoesNotSwapBack(t *testing.T) {
+	fixture, next, identity := upgradeFixture(t)
+	if err := ServiceUpgrade(context.Background(), fixture.home, next, identity); err != nil {
+		t.Fatal(err)
+	}
+	bin := filepath.Join(ServiceDirectoryPath(fixture.home), "bin")
+	if err := renameSwap(filepath.Join(bin, "staged"), filepath.Join(bin, "current"), unix.RENAME_SWAP); err != nil {
+		t.Fatal(err)
+	}
+	if err := PromoteService(fixture.home); err != nil {
+		t.Fatal("recovery: ", err)
+	}
+	fixture.requireProgram(t, "current", "#!next")
+	fixture.requireProgram(t, "previous", "#!binary")
 }
 
 func TestRestoreUpgradeBackupPutsBackTheDatabaseOnce(t *testing.T) {
