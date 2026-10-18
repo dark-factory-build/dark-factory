@@ -670,7 +670,23 @@ func (daemon *Daemon) launchReview(project kernel.ProjectID, op review.Operation
 	if ctx == nil {
 		ctx = context.Background()
 	}
-	go func() { _, _ = daemon.resumeReview(ctx, project, op) }()
+	go func() {
+		resumed, err := daemon.resumeReview(ctx, project, op)
+		if err == nil || errors.Is(err, context.Canceled) || resumed.State != "running" {
+			return
+		}
+		// resumeReview normally persists pre-submit failures itself. Errors before
+		// it can build a coordinator used to be lost here, leaving the durable
+		// claim running until orphan recovery. Finish that same retryable path.
+		resumed.State = "failed"
+		resumed.Retryable = true
+		resumed.Detail = "review launch failed: " + err.Error()
+		resumed.UpdatedAt = daemon.now()
+		store := durableReviewStore{store: daemon.store, project: project, repository: strings.ToLower(op.Request.Repository), now: daemon.now}
+		if updateErr := store.Update(ctx, resumed); updateErr != nil {
+			LogFactoryd(daemon.log, "factoryd: review %s launch failure was not durable: %v\n", op.ID, updateErr)
+		}
+	}()
 }
 
 func (daemon *Daemon) publishedReviewRequest(ctx context.Context, project kernel.ProjectID, repository string, pull uint64, publishedHead string) (review.Request, error) {

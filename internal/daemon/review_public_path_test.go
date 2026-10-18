@@ -411,6 +411,30 @@ func TestReviewIntakeAnswersWithTheCreatedOperationWhileItRuns(t *testing.T) {
 	}
 }
 
+func TestReviewLaunchFailureDoesNotLeaveRunningClaim(t *testing.T) {
+	fixture, project := reviewPublicFixture(t)
+	request := publishedReviewRequest()
+	op, err := review.Prepare(review.Request{
+		Repository: request.Repository, PullNumber: request.PullNumber,
+		Head: request.Head, Base: request.Base, BaseRef: request.BaseRef,
+		Body: "fixture body", Provider: request.Provider,
+	}, fixture.daemon.now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	store := durableReviewStore{store: fixture.store, project: project, repository: request.Repository, now: fixture.daemon.now}
+	if err := store.Create(context.Background(), op); err != nil {
+		t.Fatal(err)
+	}
+	// No connected Maintainer or test backend makes the launch fail before the
+	// coordinator can enter its normal pre-submit failure path.
+	fixture.daemon.launchReview(project, op)
+	failed := waitForDurableReview(t, fixture.store, project, func(op review.Operation) bool { return op.State == "failed" })
+	if failed.State != "failed" || !failed.Retryable || !strings.Contains(failed.Detail, "review launch failed: review: Maintainer unavailable") {
+		t.Fatalf("launch failure left an unexplained operation: %+v", failed)
+	}
+}
+
 func TestPublicReviewPathRefusesRetryAfterAmbiguousSubmit(t *testing.T) {
 	fixture, project := reviewPublicFixture(t)
 	backend := &publicReviewBackend{submitAmbiguous: true}
