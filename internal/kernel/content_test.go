@@ -144,6 +144,53 @@ func TestOverseerEnqueuePinsContentAtInitialWorkRevision(t *testing.T) {
 	}
 }
 
+func TestOverseerEnqueueProposalDispatchIsAtomicAndScopedToProposal(t *testing.T) {
+	t.Parallel()
+	store, overseer, _ := runningOrchestratorRun(t)
+	defer store.Close()
+	ctx := context.Background()
+	proposal := func(seed byte) ContentRevision {
+		t.Helper()
+		content, err := store.CreateContent(ctx, knowledgeSpec(t, overseer.ProjectID, seed, ContentObservation, KnowledgeMetadata{Status: "tentative", RecordType: "proposal"}), mustTime(t, int64(seed)))
+		if err != nil {
+			t.Fatal(err)
+		}
+		return content
+	}
+	firstProposal := proposal(130)
+	secondProposal := proposal(131)
+	first, err := store.EnqueueTaskForOverseer(ctx, overseer.CredentialDigest, NewTask{ID: taskID(t, 133), ProjectID: overseer.ProjectID, IncarnationID: incarnationID(t, 134), Title: "first"}, mustTime(t, 140), TaskContentReference{ContentID: firstProposal.ID, ContentRevision: firstProposal.Revision})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Existing proposal acceptance semantics keep one implementation active at a time.
+	_, err = store.EnqueueTaskForOverseer(ctx, overseer.CredentialDigest, NewTask{ID: taskID(t, 136), ProjectID: overseer.ProjectID, IncarnationID: incarnationID(t, 137), Title: "second"}, mustTime(t, 142), TaskContentReference{ContentID: secondProposal.ID, ContentRevision: secondProposal.Revision})
+	if !errors.Is(err, ErrConflict) {
+		t.Fatalf("different active proposal dispatch: %v", err)
+	}
+	if _, err := store.EnqueueTaskForOverseer(ctx, overseer.CredentialDigest, NewTask{ID: taskID(t, 138), ProjectID: overseer.ProjectID, IncarnationID: incarnationID(t, 139), Title: "duplicate"}, mustTime(t, 143), TaskContentReference{ContentID: firstProposal.ID, ContentRevision: firstProposal.Revision}); !errors.Is(err, ErrConflict) {
+		t.Fatalf("duplicate proposal dispatch: %v", err)
+	}
+	if _, err := store.writer.ExecContext(ctx, `UPDATE tasks SET status = 'cancelled', completed_at_ms = 144, updated_at_ms = 144 WHERE id = ?`, first.ID.Bytes()); err != nil {
+		t.Fatal(err)
+	}
+	if current, found, err := store.Task(ctx, first.ID); err != nil || !found || current.Status != TaskCancelled {
+		t.Fatalf("terminal first task = %+v found=%v err=%v", current, found, err)
+	}
+	if _, err := store.EnqueueTaskForOverseer(ctx, overseer.CredentialDigest, NewTask{ID: taskID(t, 140), ProjectID: overseer.ProjectID, IncarnationID: incarnationID(t, 141), Title: "replacement"}, mustTime(t, 145), TaskContentReference{ContentID: firstProposal.ID, ContentRevision: firstProposal.Revision}); err != nil {
+		t.Fatalf("replacement after terminal task: %v", err)
+	}
+	// A failed pin rolls back the task row as well as its would-be provenance.
+	failedID := taskID(t, 142)
+	missing := contentID(t, 250)
+	if _, err := store.EnqueueTaskForOverseer(ctx, overseer.CredentialDigest, NewTask{ID: failedID, ProjectID: overseer.ProjectID, IncarnationID: incarnationID(t, 143), Title: "atomic"}, mustTime(t, 146), TaskContentReference{ContentID: missing, ContentRevision: mustRevision(t, 1)}); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("invalid provenance pin: %v", err)
+	}
+	if _, found, err := store.Task(ctx, failedID); err != nil || found {
+		t.Fatalf("failed enqueue left task: found=%v err=%v", found, err)
+	}
+}
+
 func TestContentDeprecationReplayUsesExpectedRevisionAfterLaterRevision(t *testing.T) {
 	t.Parallel()
 	store, run, _ := runningWorkerRun(t)
