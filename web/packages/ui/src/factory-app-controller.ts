@@ -129,7 +129,7 @@ export type FactoryAppStatus =
 
 type HumanSession = Pick<BrowserSession, "getHumanRequestDetail" | "replyHumanRequest" | "cancelHumanRequest">;
 type TerminalSession = Pick<BrowserSession, "resolveAgentTerminal" | "openTerminal" | "close">;
-type AgentTaskSession = Pick<BrowserSession, "enqueueAgentTaskWithFiles" | "enqueueAgentTask" | "controlAgent" | "resolveAgentTerminal">;
+type AgentTaskSession = Pick<BrowserSession, "controlAgent" | "resolveAgentTerminal">;
 type ConsoleSession = Pick<BrowserSession, "createProject" | "getRepositories" | "intake" | "updateTask" | "getOperationalGraph" | "getRunPaths" | "discoverAccounts" | "linkAccount" | "listBrowserClients" | "revokeBrowserClient" | "githubConnection" | "clientId">;
 type RemoteInviteSession = Pick<BrowserSession, "inviteRemote" | "capabilities">;
 type ControlledClient = Pick<BrowserClient, "connect" | "close"> & { readonly session?: HumanSession & TerminalSession & AgentTaskSession & ConsoleSession & RemoteInviteSession & Partial<Pick<BrowserSession, "projectContent">> };
@@ -479,30 +479,6 @@ export class FactoryAppController {
     }
     this.#publish();
 	return false;
-  }
-
-  /** Queue work from the Tasks panel: for one agent, or for any eligible worker in its project. */
-  async addTask(agent: Pick<AgentItem, "id" | "revision">, instruction: string, mode: "queue" | "any", files: readonly File[] = []): Promise<boolean> {
-    const session = this.#client?.session;
-    if (this.#closed || this.#status !== "ready" || session === undefined || this.#edit?.pending === true) return false;
-    const generation = this.#generation;
-    const edit: FactoryEditView = { target: agent.id, pending: true };
-    this.#edit = edit;
-    this.#publish();
-    try {
-      const request = { agentId: agent.id, expectedAgentRevision: agent.revision, instruction: instruction.trim(), mode };
-      if (files.length === 0) await session.enqueueAgentTask(request);
-      else await session.enqueueAgentTaskWithFiles(request, files);
-      if (!this.#current(generation) || this.#edit !== edit) return false;
-      this.#edit = undefined;
-      this.#publish();
-      return true;
-    } catch (error) {
-      if (!this.#current(generation) || this.#edit !== edit) return false;
-      this.#edit = { target: agent.id, pending: false, error: finiteError(error) };
-      this.#publish();
-      return false;
-    }
   }
 
   clearAgentTerminal(): void {

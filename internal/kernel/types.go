@@ -531,6 +531,9 @@ type NewTask struct {
 	Priority        int64
 	Prerequisites   []TaskPrerequisite
 	ConflictPaths   []string
+	// Attachments commit with the task; each run gets a private copy under
+	// $DARK_FACTORY_TASK_ATTACHMENTS.
+	Attachments []TaskAttachment
 }
 
 // TaskPrerequisite pins a consumer to the producer's particular corrected

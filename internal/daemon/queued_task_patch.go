@@ -110,7 +110,7 @@ func prepareTaskEnqueue(ctx context.Context, store *kernel.Store, task kernel.Ne
 		return err
 	}
 	if task.AssignedAgentID == (kernel.AgentID{}) {
-		return prepareSharedTaskText(task.Title, task.Body)
+		return prepareSharedTaskText(task.Title, task.Body, task.Attachments...)
 	}
 	agent, found, err := store.Agent(ctx, task.AssignedAgentID)
 	if err != nil {
@@ -119,7 +119,7 @@ func prepareTaskEnqueue(ctx context.Context, store *kernel.Store, task kernel.Ne
 	if !found || agent.ProjectID != task.ProjectID || (workerOnly && agent.Role != kernel.RoleWorker) {
 		return nil
 	}
-	return prepareTaskText(agent.Provider, task.Title, task.Body)
+	return prepareTaskText(agent.Provider, task.Title, task.Body, task.Attachments...)
 }
 
 // refusePrivateChangePath refuses an overseer task body that sends a worker to

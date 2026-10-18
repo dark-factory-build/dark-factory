@@ -5,12 +5,15 @@ package daemon
 import (
 	"context"
 	"errors"
+	"path/filepath"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/dark-factory-build/dark-factory/internal/api"
 	"github.com/dark-factory-build/dark-factory/internal/kernel"
+	"github.com/dark-factory-build/dark-factory/internal/runner"
 )
 
 func TestOperatorAttachmentCleanupAndCompaction(t *testing.T) {
@@ -137,4 +140,100 @@ func TestSchedulerExpiresAttachmentsWhileDispatchOff(t *testing.T) {
 	clock.Store(due + int64(time.Hour/time.Millisecond))
 	tick()
 	waitRemoved(ids[1])
+}
+
+// The operator API is the one path that admits files with a task: they commit
+// in the enqueue transaction under the kernel's bounds and count towards the
+// provider's input limit, so a task no provider could hold is never persisted.
+func TestOperatorEnqueueStoresAttachmentsWithinBounds(t *testing.T) {
+	fixture := newDispatchFixture(t)
+	ctx := context.Background()
+	operator, err := api.NewOperatorClient(fixture.socket, fixture.operator)
+	if err != nil {
+		t.Fatal(err)
+	}
+	call := func(invoke func() error) error {
+		t.Helper()
+		done := fixture.serve(t)
+		err := invoke()
+		waitDispatch(t, done)
+		return err
+	}
+	if err := call(func() error {
+		_, err := operator.CreateProject(ctx, api.CreateProjectInput{ID: testID(1), Name: "project", Root: contentRepositoryFixture(t)})
+		return err
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := call(func() error {
+		_, err := operator.CreateAgent(ctx, api.CreateAgentInput{ID: testID(2), ProjectID: testID(1), Name: "worker", Role: "worker", Provider: "codex"})
+		return err
+	}); err != nil {
+		t.Fatal(err)
+	}
+	files := []api.TaskAttachmentInput{{Name: "notes.txt", Data: []byte("private")}, {Name: "shot.png", Data: []byte{0, 255}}}
+	if err := call(func() error {
+		_, err := operator.EnqueueTask(ctx, api.EnqueueTaskInput{ID: testID(3), ProjectID: testID(1), AssignedAgentID: testID(2), IncarnationID: testID(4), Title: "attached", Body: "Inspect the files", Attachments: files})
+		return err
+	}); err != nil {
+		t.Fatal(err)
+	}
+	stored, err := fixture.store.TaskAttachments(ctx, mustTaskID(t, testID(3)))
+	if err != nil || len(stored) != 2 || stored[0].Name != "notes.txt" || string(stored[0].Data) != "private" || stored[1].Name != "shot.png" || stored[1].Removed {
+		t.Fatalf("stored attachments = %+v, %v", stored, err)
+	}
+	for name, attachments := range map[string][]api.TaskAttachmentInput{
+		"empty file": {{Name: "empty.txt"}},
+		"oversized":  {{Name: "large.bin", Data: make([]byte, kernel.MaxTaskAttachmentBytes+1)}},
+		"too many":   make([]api.TaskAttachmentInput, kernel.MaxTaskAttachments+1),
+	} {
+		_, err := operator.EnqueueTask(ctx, api.EnqueueTaskInput{ID: testID(5), ProjectID: testID(1), AssignedAgentID: testID(2), IncarnationID: testID(6), Title: "refused", Attachments: attachments})
+		if !errors.Is(err, api.ErrInvalidInput) {
+			t.Fatalf("%s accepted: %v", name, err)
+		}
+	}
+	err = call(func() error {
+		_, err := operator.EnqueueTask(ctx, api.EnqueueTaskInput{ID: testID(5), ProjectID: testID(1), AssignedAgentID: testID(2), IncarnationID: testID(6), Title: "full", Body: strings.Repeat("x", runner.MaxNativeTaskBytes), Attachments: files[:1]})
+		return err
+	})
+	var remote *api.RemoteError
+	if !errors.As(err, &remote) || remote.Code() != api.RemoteInvalidRequest {
+		t.Fatalf("attachment past the provider limit accepted: %v", err)
+	}
+	if _, found, err := fixture.store.Task(ctx, mustTaskID(t, testID(5))); err != nil || found {
+		t.Fatalf("refused task persisted: found=%v err=%v", found, err)
+	}
+}
+
+// Attachments count towards the provider's input limit before any task is
+// stored, for assigned and shared work alike.
+func TestTaskEnqueuePreparationCountsAttachments(t *testing.T) {
+	ctx := context.Background()
+	store, err := createTestStore(ctx, filepath.Join(t.TempDir(), "kernel.sqlite"), kernel.FactoryConfig{DispatchEnabled: true, Capacity: 8}, mustKernelTime(t, 100))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	project, err := store.CreateProject(ctx, kernel.NewProject{ID: supervisorProjectID(t, 1), Name: "limits", Root: "/limits"}, mustKernelTime(t, 101))
+	if err != nil {
+		t.Fatal(err)
+	}
+	agent, err := store.CreateAgent(ctx, kernel.NewAgent{ID: supervisorAgentID(t, 2), ProjectID: project.ID, Name: "worker", Role: kernel.RoleWorker, Provider: kernel.ProviderCodex, ToolBudgetLimit: 2}, mustKernelTime(t, 102))
+	if err != nil {
+		t.Fatal(err)
+	}
+	full := kernel.NewTask{ID: supervisorTaskID(t, 3), ProjectID: project.ID, AssignedAgentID: agent.ID, IncarnationID: supervisorIncarnationID(t, 4), Title: "title", Body: strings.Repeat("x", runner.MaxNativeTaskBytes)}
+	if err := prepareTaskEnqueue(ctx, store, full, false); err != nil {
+		t.Fatal(err)
+	}
+	full.Attachments = []kernel.TaskAttachment{{Name: "reference.png", Data: []byte{1}}}
+	for _, assigned := range []kernel.AgentID{agent.ID, {}} {
+		full.AssignedAgentID = assigned
+		if err := prepareTaskEnqueue(ctx, store, full, false); !errors.Is(err, kernel.ErrInvalidValue) {
+			t.Fatalf("attachments exceeded provider limit without rejection (agent %v): %v", assigned, err)
+		}
+	}
+	if _, found, err := store.Task(ctx, full.ID); err != nil || found {
+		t.Fatalf("preparation stored a task: found=%v err=%v", found, err)
+	}
 }

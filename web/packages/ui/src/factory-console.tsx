@@ -2,7 +2,7 @@ import { useEffect, useMemo, useState, type ReactNode } from "react";
 import type { AgentItem, TaskItem } from "@dark-factory/client";
 import { type FactoryAgentSelection, type FactoryAppSnapshot, type FactoryHumanRequestView } from "./factory-app-controller.js";
 import { FactoryFloor } from "./console-screens.js";
-import { AgentPanel, HumanRequestPanel, WorkPanel, editErrorCopy, type TaskEdit, type AddTask } from "./console-sidebar.js";
+import { AgentPanel, HumanRequestPanel, WorkPanel, editErrorCopy, type TaskEdit } from "./console-sidebar.js";
 import type { ProjectContentCall } from "./factory-app-controller.js";
 import { useProduction } from "./production-data.js";
 import { deriveProductionView, inProgressProduction } from "./production-view.js";
@@ -21,7 +21,6 @@ export type FactoryConsoleProps = FactoryAppSnapshot & {
   onSelectAgent?: (agent: AgentItem) => void;
   onProjectContent?: ProjectContentCall;
   onEditTask?: (task: TaskItem, change: TaskEdit) => Promise<boolean>;
-  onAddTask?: AddTask;
   onOpenTerminalForHumanRequest?: (request: FactoryHumanRequestView["request"]) => void;
   onSelectHumanRequest?: (request: FactoryHumanRequestView["request"]) => void;
   onHumanReplyChange?: (reply: string) => void;
@@ -85,7 +84,6 @@ export function FactoryConsole({
   onSelectAgent,
   onProjectContent,
   onEditTask,
-  onAddTask,
   onOpenTerminalForHumanRequest,
   onSelectHumanRequest,
   onHumanReplyChange,
@@ -188,7 +186,6 @@ export function FactoryConsole({
                 edit={edit}
                 ready={ready}
                 onEditTask={onEditTask}
-                onAddTask={onAddTask}
                 selectedTaskId={selectedTask?.id}
                 onSelectTask={ready ? selectTask : undefined}
                 selectedHumanRequest={selectedHumanRequest}

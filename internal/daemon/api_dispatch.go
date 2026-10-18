@@ -1816,6 +1816,7 @@ func (daemon *Daemon) enqueueTask(ctx context.Context, call api.Call) api.Reply 
 	if err != nil {
 		return newErrorReply(api.RemoteInvalidRequest)
 	}
+	spec.Attachments = input.TaskAttachments()
 	content, err := decodeContentPins(input.Content)
 	if err != nil {
 		return newErrorReply(api.RemoteInvalidRequest)

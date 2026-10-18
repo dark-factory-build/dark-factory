@@ -422,7 +422,7 @@ test("a task-less production row opens its pull request and keeps its stages", (
   assert.match(markup, /data-stage="in-review">in review/);
 });
 
-test("Work is one ranked list: blocked work first, every origin shown, flags dispatch off and queues new work", async () => {
+test("Work is one ranked list: blocked work first, every origin shown, flags dispatch off", async () => {
   const running = fixtureState.tasks.get(ids.task);
   const supervisor = fixtureState.agents.get(ids.orchestrator);
   const state = baseState({
@@ -434,10 +434,9 @@ test("Work is one ranked list: blocked work first, every origin shown, flags dis
       ["b3".repeat(16), { ...running, id: "b3".repeat(16), title: "Overseer stuck", status: "blocked", assigned_agent_id: supervisor.id }],
     ]),
   });
-  const added = [];
   const edits = [];
   let renderer;
-  await act(async () => { renderer = create(createElement(FactoryConsole, { status: "ready", detail: "work", state, onDetail() {}, onEditTask: async (task, change) => { edits.push([task.id, change]); return true; }, onAddTask: async (agent, instruction, mode) => { added.push([agent.id, instruction, mode]); return true; } })); });
+  await act(async () => { renderer = create(createElement(FactoryConsole, { status: "ready", detail: "work", state, onDetail() {}, onEditTask: async (task, change) => { edits.push([task.id, change]); return true; } })); });
   const panel = renderer.root.findByProps({ "aria-label": "Work" });
   assert.ok(panel.findAllByType("button").some((button) => button.children.join("") === "Stuck on a prerequisite"));
   // The block reason is agent-written free text: it renders as plain text
@@ -458,15 +457,9 @@ test("Work is one ranked list: blocked work first, every origin shown, flags dis
   // Admission is CLI-only: the paused status names factoryctl and no header button offers to change it.
   assert.match(markup, /<p role="status">New work is paused\. Queued tasks wait; active processes continue\. Resume with <code>factoryctl dispatch on<\/code>\.<\/p>/);
   assert.doesNotMatch(markup, /Pause new work|Resume new work|dfConsoleBar__actions/);
-  const form = panel.findByProps({ "aria-label": "New task" });
-  const values = { target: `any:${ids.project}`, instruction: " Ship it " };
-  const nativeFormData = globalThis.FormData;
-  globalThis.FormData = class { get(name) { return values[name]; } };
-  try { await act(async () => { form.props.onSubmit({ preventDefault() {}, currentTarget: { reset() {} } }); }); }
-  finally { globalThis.FormData = nativeFormData; }
-  assert.equal(added.length, 1);
-  assert.deepEqual(added[0].slice(1), [" Ship it ", "any"]);
-  assert.equal(fixtureState.agents.get(added[0][0]).role, "worker", "shared work is queued through a worker of that project");
+  // Task authoring is CLI-only: the Work panel carries no form, file input or submit control.
+  assert.equal(panel.findAllByType("form").length + panel.findAllByType("input").length + panel.findAllByType("textarea").length, 0);
+  assert.doesNotMatch(markup, /New task|Attach files|Add to queue/);
 });
 
 test("a terminal blocked task is neither building nor current agent work", () => {
@@ -1000,40 +993,6 @@ test("the floor reads a machine from its tooltip and offers no inspector or Inve
   assert.equal(renderer.root.findAllByType("button").filter((button) => /Investigate|Close/.test(button.children.join(""))).length, 0);
   await act(async () => renderer.unmount());
 });
-
-test("new task retains pasted files on failure, supports removal, and clears on success", async () => {
-  const state = baseState();
-  const attempts = [];
-  let succeed = false, renderer;
-  await act(async () => { renderer = create(createElement(FactoryConsole, { status: "ready", detail: "work", state, onDetail() {}, onAddTask: async (...args) => { attempts.push(args); return succeed; } })); });
-  const form = () => renderer.root.findByProps({ "aria-label": "New task" });
-  const file = new File(["attachment"], "notes.txt", { type: "text/plain" });
-  let prevented = false;
-  await act(async () => { form().props.onPaste({ clipboardData: { files: [file] }, preventDefault() { prevented = true; } }); });
-  assert.equal(prevented, true);
-  const nativeFormData = globalThis.FormData;
-  globalThis.FormData = class { get(name) { return name === "target" ? `any:${ids.project}` : "Inspect this"; } };
-  let resets = 0;
-  const submit = () => form().props.onSubmit({ preventDefault() {}, currentTarget: { reset() { resets++; } } });
-  try {
-    await act(async () => { submit(); });
-    assert.deepEqual(attempts[0][3], [file]);
-    assert.equal(resets, 0);
-    assert.equal(renderer.root.findAllByProps({ "aria-label": "Remove notes.txt" }).length, 1);
-    await act(async () => { renderer.root.findByProps({ "aria-label": "Remove notes.txt" }).props.onClick(); });
-    assert.equal(renderer.root.findAllByProps({ "aria-label": "Remove notes.txt" }).length, 0);
-    await act(async () => { form().props.onDrop({ dataTransfer: { files: [file] }, preventDefault() {} }); });
-    succeed = true;
-    await act(async () => { submit(); });
-    assert.equal(resets, 1);
-    assert.equal(renderer.root.findAllByProps({ "aria-label": "Task attachments" }).length, 0);
-  } finally { globalThis.FormData = nativeFormData; await act(async () => renderer.unmount()); }
-});
-
-
-
-
-
 
 test("one project is selected automatically, with no header picker", () => {
   const one = baseState({ projects: new Map([...fixtureState.projects].slice(0, 1)) });

@@ -190,7 +190,6 @@ type Backend interface {
 // non-production adapters.
 type TaskBackend interface {
 	Backend
-	EnqueueTask(context.Context, [browserprotocol.ClientIDSize]byte, browserprotocol.TaskEnqueue) (browserprotocol.TaskEnqueueResult, error)
 	RemoteInvite(context.Context, [browserprotocol.ClientIDSize]byte) (browserprotocol.RemoteInviteResult, error)
 	TelemetryIngest(context.Context, [browserprotocol.ClientIDSize]byte, browserprotocol.TelemetryIngest) (browserprotocol.TelemetryIngestResult, error)
 	// SubscribePush stores one device's Web Push subscription for "needs you"

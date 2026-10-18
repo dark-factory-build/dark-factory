@@ -1,4 +1,3 @@
-import { MAX_TASK_ATTACHMENTS, MAX_TASK_ATTACHMENT_BYTES, TASK_ATTACHMENT_CHUNK_BYTES } from "./manifest.js";
 import { projectContentOperation, type ProjectContentOperation, type ProjectContentInput, type ProjectContentOutput } from "./project-content.js";
 import {
   decodeServerControl,
@@ -23,8 +22,6 @@ import {
   type ServerControlFrame,
   type StateChangedFrame,
   type StateSnapshotFrame,
-  type TaskContentPin,
-  type TaskEnqueueResultBody,
   type TaskItem,
   type TaskUpdateBody,
   type TerminalTargetDescriptor,
@@ -134,7 +131,6 @@ export type BrowserSessionOptions = {
 type Request = { kind: ServerControlFrame["type"]; resolve: (value: never) => void; reject: (error: unknown) => void };
 type TargetPending = Request & { agentId: string; expectedAgentRevision: bigint; expectedHead: bigint };
 type HumanPending = Request & { requestId: string; expectedRevision: bigint; expectedRunRevision: bigint; runId?: string; yielded?: boolean };
-type TaskPending = Request & { taskId: string; expectedAgentRevision: bigint };
 type AgentControlPending = Request & { operationId: string; taskId: string; runId: string };
 type ConsoleKind = "AGENT_UPDATE_RESULT" | "TASK_UPDATE_RESULT" | "OPERATIONAL_GRAPH" | "RUN_PATHS";
 type ConsolePending = Request & { entityId: string; expectedRevision: bigint };
@@ -248,7 +244,6 @@ export class BrowserSession {
   #resolveConnect: (() => void) | undefined;
   #rejectConnect: ((error: unknown) => void) | undefined;
   #terminalHandles = new Set<InternalTerminalHandle>();
-  #uploading = false;
   #humanDetails = new WeakSet<HumanRequestDetail>();
   #humanCancelRuns = new WeakMap<HumanRequestCancelRunDescriptor, HumanRequestDetail>();
   #generationToken: object = {};
@@ -263,45 +258,6 @@ export class BrowserSession {
   get capabilities(): CapabilityMask { return this.#capabilities; }
   get pairingBlocked(): boolean { return this.#pairingBlocked; }
   get authAttempted(): boolean { return this.#authAttempted; }
-
-  enqueueAgentTask(request: { agentId: string; expectedAgentRevision: bigint; repositoryId?: string; instruction: string; mode?: "now" | "queue" | "any"; attachmentCount?: number; content?: TaskContentPin[] }): Promise<{ taskId: string; revision: bigint }> {
-    try { this.#ensureLive(); } catch (error) { return Promise.reject(error); }
-    if (!this.#authenticated) return Promise.reject(new SessionError("unauthorized"));
-    if (this.#uploading && request.attachmentCount === undefined) return Promise.reject(new SessionError("rate_limited"));
-    if ((this.#capabilities & CAPABILITIES.human_actions) === 0) return Promise.reject(new SessionError("unauthorized"));
-    if (!validDynamicID(request.agentId) || request.repositoryId !== undefined && !validDynamicID(request.repositoryId) || request.expectedAgentRevision < 1n || request.expectedAgentRevision > MAX_SQLITE_INTEGER || request.mode !== undefined && request.mode !== "now" && request.mode !== "queue" && request.mode !== "any") return Promise.reject(new SessionError("invalid_request"));
-    const bytes = new TextEncoder().encode(request.instruction).length;
-    if (bytes < 1 || bytes > MAX_TASK_INSTRUCTION_BYTES || /^[ \t\r\n]*$/.test(request.instruction)) return Promise.reject(new SessionError("invalid_request"));
-    if (this.#requests.size >= MAX_OUTSTANDING_REQUESTS) return Promise.reject(new SessionError("rate_limited"));
-    let taskId: string, incarnationId: string;
-    try { taskId = this.#randomID(); incarnationId = this.#randomID(); } catch (error) { return Promise.reject(error); }
-    const id = this.#nextID("task-enqueue");
-    let payload: string;
-    try { payload = encodeClientControl({ type: "TASK_ENQUEUE", id, body: { task_id: taskId, incarnation_id: incarnationId, agent_id: request.agentId, ...(request.attachmentCount ? { attachment_count: request.attachmentCount } : {}), ...(request.repositoryId === undefined ? {} : { repository_id: request.repositoryId }), expected_agent_revision: request.expectedAgentRevision, instruction: request.instruction, ...(request.mode === "queue" || request.mode === "any" ? { mode: request.mode } : {}), ...(request.content?.length ? { content: request.content } : {}) } }); } catch (error) { return Promise.reject(error); }
-    return this.#track(id, { kind: "TASK_ENQUEUE_RESULT", taskId, expectedAgentRevision: request.expectedAgentRevision }, payload);
-  }
-
-  /** Chunks share the existing bounded transport, including remote connections. */
-  async enqueueAgentTaskWithFiles(request: Parameters<BrowserSession["enqueueAgentTask"]>[0], files: readonly File[]): Promise<{ taskId: string; revision: bigint }> {
-    this.#ensureLive();
-    if (!this.#authenticated || (this.#capabilities & CAPABILITIES.human_actions) === 0) throw new SessionError("unauthorized");
-    if (this.#uploading) throw new SessionError("rate_limited");
-    if (files.length > MAX_TASK_ATTACHMENTS || files.reduce((n, file) => n + file.size, 0) > MAX_TASK_ATTACHMENT_BYTES || files.some((file) => file.size === 0)) throw new SessionError("too_large");
-    this.#uploading = true;
-    try {
-      for (const [index, file] of files.entries()) {
-        for (let offset = 0; offset < file.size; offset += TASK_ATTACHMENT_CHUNK_BYTES) {
-          const bytes = new Uint8Array(await file.slice(offset, offset + TASK_ATTACHMENT_CHUNK_BYTES).arrayBuffer());
-          this.#ensureLive();
-          if (!this.#authenticated) throw new SessionError("connection");
-          const id = this.#nextID("task-attachment");
-          const payload = encodeClientControl({ type: "TASK_ATTACHMENT", id, body: { index, offset: BigInt(offset), size: BigInt(file.size), name: file.name, data: btoa(String.fromCharCode(...bytes)) } });
-          await this.#track(id, { kind: "TASK_ATTACHMENT_RESULT", offset: BigInt(offset + bytes.length) }, payload);
-        }
-      }
-      return await this.enqueueAgentTask({ ...request, attachmentCount: files.length });
-    } finally { this.#uploading = false; }
-  }
 
   /** One explicit control against the exact task/run the UI just resolved. */
   controlAgent(request: AgentControlRequest): Promise<AgentControlResult> {
@@ -746,14 +702,6 @@ export class BrowserSession {
       this.#terminalTarget(frame);
       return;
     }
-    if (frame.type === "TASK_ATTACHMENT_RESULT") {
-      if (this.#pending<Request & { offset: bigint }>(frame.id, frame.type).offset !== frame.body.offset) throw new ProtocolError("malformed");
-      this.#settle(frame.id, undefined); return;
-    }
-    if (frame.type === "TASK_ENQUEUE_RESULT") {
-      this.#taskResult(frame.body, frame.id);
-      return;
-    }
     if (frame.type === "INTAKE_RESULT" || frame.type === "PUSH_SUBSCRIBE_RESULT" || frame.type === "GITHUB_CONNECTION_RESULT") {
       this.#pending(frame.id, frame.type);
       this.#settle(frame.id, frame.type === "PUSH_SUBSCRIBE_RESULT" ? undefined : Object.freeze(frame.body)); return;
@@ -1134,12 +1082,6 @@ export class BrowserSession {
   #inviteResult(body: RemoteInviteResultBody, id: string): void {
     this.#pending(id, "REMOTE_INVITE_RESULT");
     this.#settle(id, Object.freeze({ link: body.link, expiresAtMs: body.expires_at_ms, svg: body.svg }));
-  }
-
-  #taskResult(body: TaskEnqueueResultBody, id: string): void {
-    const pending = this.#pending<TaskPending>(id, "TASK_ENQUEUE_RESULT");
-    if (body.task_id !== pending.taskId || body.agent_revision !== pending.expectedAgentRevision || body.revision < 1n) throw new ProtocolError("malformed");
-    this.#settle(id, Object.freeze({ taskId: body.task_id, revision: body.revision }));
   }
 
   #agentControlResult(body: AgentControlResultBody, id: string): void {

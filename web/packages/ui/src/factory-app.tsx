@@ -92,7 +92,6 @@ export function FactoryApp({ onStatusChange, browserPort }: FactoryAppProps = {}
       onSelectAgent={(agent) => { setDetail("agent"); owner.current?.selectAgent(agent); }}
       onProjectContent={(operation, input) => owner.current?.projectContent(operation, input) ?? Promise.reject(new Error("closed"))}
       onEditTask={(task, change) => owner.current?.editTask(task, change) ?? Promise.resolve(false)}
-      onAddTask={(agent, instruction, mode, files) => owner.current?.addTask(agent, instruction, mode, files) ?? Promise.resolve(false)}
       onOpenTerminalForHumanRequest={(request) => { setDetail("agent"); owner.current?.openTerminalForHumanRequest(request); }}
       onSelectHumanRequest={(request) => { setDetail("work"); void owner.current?.selectHumanRequest(request); }}
       onHumanReplyChange={(reply) => owner.current?.setHumanReply(reply)}

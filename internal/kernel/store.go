@@ -151,8 +151,8 @@ func (store *Store) CreateAgent(ctx context.Context, spec NewAgent, at UnixMilli
 	return result, nil
 }
 
-// EnqueueTask pins content in the creating transaction, as the browser enqueue
-// does; a replay returns the first enqueue's pins.
+// EnqueueTask pins content and stores attachments in the creating transaction;
+// a replay returns the first enqueue's pins and must carry the same files.
 func (store *Store) EnqueueTask(ctx context.Context, spec NewTask, at UnixMillis, content ...TaskContentReference) (Task, error) {
 	if err := validateNewTask(spec); err != nil {
 		return Task{}, err
@@ -215,6 +215,13 @@ func taskCreationReplay(ctx context.Context, connection *sql.Conn, spec NewTask)
 		return Task{}, false, err
 	}
 	if prerequisiteCount != len(spec.Prerequisites) || conflictPathCount != len(spec.ConflictPaths) {
+		return Task{}, false, ErrConflict
+	}
+	stored, err := taskAttachments(ctx, connection, spec.ID)
+	if err != nil {
+		return Task{}, false, err
+	}
+	if !sameTaskAttachments(stored, spec.Attachments) {
 		return Task{}, false, ErrConflict
 	}
 	// A pin an earlier release carried forward along its producer stays ahead.
@@ -309,6 +316,11 @@ func insertTaskOnConnection(ctx context.Context, connection *sql.Conn, spec NewT
 	}
 	for _, path := range spec.ConflictPaths {
 		if _, err := connection.ExecContext(ctx, `INSERT INTO task_conflict_paths(task_id, path) VALUES(?, ?)`, spec.ID.Bytes(), path); err != nil {
+			return Task{}, err
+		}
+	}
+	for i, item := range spec.Attachments {
+		if _, err := connection.ExecContext(ctx, `INSERT INTO task_attachments (task_id, position, name, data) VALUES (?, ?, ?, ?)`, spec.ID.Bytes(), i, item.Name, item.Data); err != nil {
 			return Task{}, err
 		}
 	}
@@ -473,6 +485,9 @@ func validateNewAgent(spec NewAgent) error {
 func validateNewTask(spec NewTask) error {
 	if spec.ID.zero() || spec.ProjectID.zero() || spec.IncarnationID.zero() || byteLen(spec.Title) < 1 || byteLen(spec.Title) > 1024 || byteLen(spec.Body) > 131072 || spec.Priority < -1_000_000 || spec.Priority > 1_000_000 {
 		return fmt.Errorf("%w: invalid task", ErrInvalidValue)
+	}
+	if _, err := TaskAttachmentInstruction(spec.Body, spec.Attachments); err != nil {
+		return err
 	}
 	seenPrerequisites := make(map[TaskID]bool, len(spec.Prerequisites))
 	for _, prerequisite := range spec.Prerequisites {

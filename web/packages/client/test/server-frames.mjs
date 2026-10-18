@@ -9,7 +9,6 @@ export function encodeStateChanged(id, body) { return encodeServerControl({ type
 export function encodeHumanRequestDetail(id, body) { return encodeServerControl({ type: "HUMAN_REQUEST_DETAIL", id, body }); }
 export function encodeHumanRequestReplyResult(id, body) { return encodeServerControl({ type: "HUMAN_REQUEST_REPLY_RESULT", id, body }); }
 export function encodeHumanRequestCancelRunResult(id, body) { return encodeServerControl({ type: "HUMAN_REQUEST_CANCEL_RUN_RESULT", id, body }); }
-export function encodeTaskEnqueueResult(id, body) { return encodeServerControl({ type: "TASK_ENQUEUE_RESULT", id, body }); }
 export function encodeProjectCreateResult(id, body) { return encodeServerControl({ type: "PROJECT_CREATE_RESULT", id, body }); }
 export function encodeRepositories(id, body) { return encodeServerControl({ type: "REPOSITORIES", id, body }); }
 export function encodeAgentControlResult(id, body) { return encodeServerControl({ type: "AGENT_CONTROL_RESULT", id, body }); }

@@ -1,11 +1,10 @@
-import { useEffect, useState, type ReactNode } from "react";
-import { MAX_TASK_ATTACHMENTS, MAX_TASK_ATTACHMENT_BYTES, type IntakeView, type IntakeBody, type DiscoveredAccount, type AgentItem, type GitHubConnectionBody, type GitHubDelegationBody, type HumanRequestItem, type ProjectItem, type RepositoryView, type StateView, type TaskItem } from "@dark-factory/client";
+import type { ReactNode } from "react";
+import { type IntakeView, type IntakeBody, type DiscoveredAccount, type AgentItem, type GitHubConnectionBody, type GitHubDelegationBody, type HumanRequestItem, type ProjectItem, type RepositoryView, type StateView, type TaskItem } from "@dark-factory/client";
 import type { FactoryEditView, FactoryHumanRequestView } from "./factory-app-controller.js";
 import { AgentSprite } from "./factory-scene/factory-scene.js";
 import { agentActivity, type WorkRow } from "./console-view.js";
 import { productionStages } from "./production-view.js";
 import { AnswerControls } from "./console-interactions.js";
-import { IconButton } from "./icons.js";
 import { SectionHeader, Status, formatTime } from "./console-kit.js";
 import type { PublishedRelease, RuntimeBuild } from "./production-data.js";
 
@@ -65,11 +64,9 @@ function WorkRowShell({ title, chips, meta, onOpen, href, disabled = false, pres
   </li>;
 }
 
-export type AddTask = (agent: AgentItem, instruction: string, mode: "queue" | "any", files?: readonly File[]) => Promise<boolean>;
-
 /** One list for everything open: what needs you, what is in review, running and queued. */
 export function WorkPanel({
-  state, rows, projectId, edit, ready, onEditTask, onAddTask,
+  state, rows, projectId, edit, ready, onEditTask,
   selectedTaskId, onSelectTask, selectedHumanRequest, onSelectHumanRequest, onCloseHumanRequest, requestContent, onIntakeAction, intake,
 }: {
   onIntakeAction?: (projectId: string, request: IntakeBody) => void;
@@ -83,14 +80,12 @@ export function WorkPanel({
   edit?: FactoryEditView;
   ready: boolean;
   onEditTask?: (task: TaskItem, change: TaskEdit) => Promise<boolean>;
-  onAddTask?: AddTask;
   selectedHumanRequest?: FactoryHumanRequestView;
   onSelectHumanRequest?: (request: HumanRequestItem) => void;
   onCloseHumanRequest?: () => void;
   requestContent?: ReactNode;
 }) {
   if (state === undefined) return <section className="dfConsoleSidebar__panel" aria-label="Work"><p className="dfFactoryConsole__empty">Waiting for the latest state…</p></section>;
-  const agents = [...state.agents.values()];
   const busy = selectedHumanRequest?.phase === "replying" || selectedHumanRequest?.phase === "cancelling";
   const owner = (task?: TaskItem) => task === undefined ? "" : task.assigned_agent_id === "" ? "Any eligible worker" : state.agents.get(task.assigned_agent_id)?.name ?? "Agent";
   const chips = (row: WorkRow) => <>
@@ -123,77 +118,9 @@ export function WorkPanel({
   };
   return <section className="dfConsoleSidebar__panel" aria-label="Work">
     {state.factory.dispatch_enabled ? null : <p role="status">New work is paused. Queued tasks wait; active processes continue. Resume with <code>factoryctl dispatch on</code>.</p>}
-    {onAddTask === undefined ? null : <NewTask agents={agents} state={state} disabled={!ready || edit?.pending === true} onAddTask={onAddTask} />}
     {rows.some((row) => row.intake !== undefined) && (intake?.failed || !["ok", "accepted", "imported", "withdrawn", "withdrawal_pending", undefined].includes(intake?.state)) ? <p role="alert">Could not accept: {intake?.failed ? "try again" : intake?.state?.replaceAll("_", " ")}.</p> : null}
     {rows.length === 0 ? <p className="dfFactoryConsole__empty">No open work</p> : <ul className="dfConsoleItems">{rows.map(item)}</ul>}
   </section>;
-}
-
-/** The target is one agent, or "any:" plus a project whose first worker names the shared queue. */
-function NewTask({ agents, state, disabled, onAddTask }: {
-  agents: readonly AgentItem[];
-  state: StateView;
-  disabled: boolean;
-  onAddTask: AddTask;
-}) {
-  const [open, setOpen] = useState(false);
-  const [files, setFiles] = useState<readonly File[]>([]);
-  const [fileError, setFileError] = useState("");
-  const [submitting, setSubmitting] = useState(false);
-  const busy = disabled || submitting;
-  const addFiles = (incoming: readonly File[]) => {
-    if (busy || incoming.length === 0) return;
-    const next = [...files, ...incoming];
-    if (next.length > MAX_TASK_ATTACHMENTS || next.reduce((total, file) => total + file.size, 0) > MAX_TASK_ATTACHMENT_BYTES) { setFileError("Attach up to 8 files, totalling 8 MiB."); return; }
-    if (incoming.some((file) => file.size === 0 || new TextEncoder().encode(file.name).length > 255 || /[\u0000-\u001f\u007f-\u009f]/u.test(file.name))) { setFileError("Choose nonempty files with names under 256 bytes and no control characters."); return; }
-    setFiles(next); setFileError("");
-  };
-  const live = agents.filter((agent) => !agent.archived);
-  const shared = [...state.projects.values()].flatMap((project) => {
-    const worker = live.find((agent) => agent.project_id === project.id && agent.role === "worker");
-    return worker === undefined ? [] : [{ project, worker }];
-  });
-  return <details className="dfConsoleSidebar__section" open={open} onToggle={(event) => setOpen(event.currentTarget.open)}><summary>New task</summary>
-    <form className="dfFactoryConsole__reply" aria-label="New task"
-      onDragOver={(event) => { if (event.dataTransfer.types.includes("Files")) event.preventDefault(); }}
-      onDrop={(event) => { if (event.dataTransfer.files.length > 0) { event.preventDefault(); addFiles(Array.from(event.dataTransfer.files)); } }}
-      onPaste={(event) => { const pasted = Array.from(event.clipboardData.files); if (pasted.length > 0) { event.preventDefault(); addFiles(pasted); } }}
-      onSubmit={(event) => {
-      event.preventDefault();
-      const form = event.currentTarget;
-      const data = new FormData(form);
-      const target = String(data.get("target"));
-      const agent = target.startsWith("any:") ? shared.find(({ project }) => project.id === target.slice(4))?.worker : state.agents.get(target);
-      const instruction = String(data.get("instruction"));
-      if (busy || agent === undefined || instruction.trim() === "") return;
-      setSubmitting(true);
-      void onAddTask(agent, instruction, target.startsWith("any:") ? "any" : "queue", files).then((added) => { if (added) { form.reset(); setFiles([]); setFileError(""); } }).catch(() => setFileError("Submission failed. Your files are still here; try again.")).finally(() => setSubmitting(false));
-    }}>
-      <label htmlFor="df-new-task-target">For</label>
-      <select id="df-new-task-target" name="target" required disabled={busy}>
-        {shared.map(({ project }) => <option key={project.id} value={`any:${project.id}`}>Any eligible worker · {project.name}</option>)}
-        {live.map((agent) => <option key={agent.id} value={agent.id}>{agent.name}</option>)}
-      </select>
-      <label htmlFor="df-new-task-instruction">Instruction</label>
-      <textarea id="df-new-task-instruction" name="instruction" rows={4} required disabled={busy} />
-      <label htmlFor="df-new-task-files">Attach files</label>
-      <input id="df-new-task-files" type="file" multiple disabled={busy} onChange={(event) => { addFiles(Array.from(event.currentTarget.files ?? [])); event.currentTarget.value = ""; }} />
-      <small>Paste images or drop files here. Up to 8 files, 8 MiB total.</small>
-      {files.length === 0 ? null : <ul aria-label="Task attachments">{files.map((file, index) => <li key={index}><AttachmentPreview file={file} /><span>{file.name} · {Math.ceil(file.size / 1024)} KiB</span><button type="button" aria-label={`Remove ${file.name}`} disabled={busy} onClick={() => { setFiles(files.filter((_, i) => i !== index)); setFileError(""); }}>Remove</button></li>)}</ul>}
-      {fileError === "" ? null : <p role="alert">{fileError}</p>}
-      <IconButton icon="plus" type="submit" disabled={busy}>{submitting ? "Adding task…" : "Add to queue"}</IconButton>
-    </form>
-  </details>;
-}
-
-function AttachmentPreview({ file }: { file: File }) {
-  const [url, setURL] = useState<string>();
-  useEffect(() => {
-    if (!["image/png", "image/jpeg", "image/gif", "image/webp"].includes(file.type)) { setURL(undefined); return; }
-    const next = URL.createObjectURL(file); setURL(next);
-    return () => URL.revokeObjectURL(next);
-  }, [file]);
-  return url === undefined ? null : <img src={url} alt={`Preview of ${file.name}`} style={{ maxWidth: 160, maxHeight: 120, objectFit: "contain" }} />;
 }
 
 /** Two observations and one command. Nothing here installs anything, and a

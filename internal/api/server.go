@@ -720,7 +720,7 @@ func (connection *Connection) Receive(ctx context.Context) (Call, error) {
 	}
 	stopCancellation := watchCancellation(ctx, connection.connection)
 	defer stopCancellation()
-	payload, err := readFrame(connection.connection)
+	payload, err := readFrame(connection.connection, maxRequestBytes)
 	if err != nil {
 		return Call{}, classifyFrameError(ctx, err)
 	}
@@ -1397,7 +1397,7 @@ func (connection *Connection) AwaitOutcomeReceipt(ctx context.Context) error {
 	}
 	stopCancellation := watchCancellation(ctx, connection.connection)
 	defer stopCancellation()
-	receipt, err := readFrame(connection.connection)
+	receipt, err := readFrame(connection.connection, maxFrameBytes)
 	if err != nil {
 		return classifyFrameError(ctx, err)
 	}
