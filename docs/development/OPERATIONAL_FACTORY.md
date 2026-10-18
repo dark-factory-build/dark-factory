@@ -696,8 +696,8 @@ The `OPERATIONAL_GRAPH` frame carries for each node only:
 
 Selectors, evidence and the full source list are not sent to the browser;
 diagnosing a node belongs in source workflows. This keeps 4,096 nodes inside
-the 1 MiB frame. The machine inspector shows only what the graph frame
-carries, and a fold lists its members by name.
+the 1 MiB frame. A station's tooltip shows only what the graph frame
+carries, and a fold's tooltip lists its routes by name.
 
 ### The connected floor
 
@@ -849,12 +849,11 @@ The plant is what the software does. Workers are what agents do to it.
 - Reviewers carry a clipboard at the changed machines. CI and checks show on
   the outbound line's Checks station while the Change's checks run. A merge followed by a
   deploy observation for that unit plays the changeover.
-- A machine whose state is `failing`, or an unexplained crate, is
-  inspectable. The inspector's **Investigate** action creates an ordinary
-  task. The task carries only the node ID, kind, static label, source paths
-  and counts. Runtime-only selector values come from unauthenticated local
-  senders, so they never enter agent instructions. Investigation, repair, review, CI,
-  deploy and recovery are then the real pipeline, shown by the same visuals.
+- Every machine is read from its tooltip, on hover, click or keyboard focus;
+  the floor itself has no inspector and no write action. An investigation is
+  an ordinary task, queued with `factoryctl task add`. Investigation, repair,
+  review, CI, deploy and recovery are then the real pipeline, shown by the
+  same visuals.
 - Ambient life stays: the cat, coffee, chatter and errands. It is labelled
   ambient and never invents operational events.
 
