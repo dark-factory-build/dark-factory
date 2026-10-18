@@ -29,16 +29,16 @@ func main() { http.HandleFunc("GET /` + canary + `/route", nil); http.Get(` + ca
 			unit = node.ID
 		}
 	}
-	world := Public(live, []byte("secret"), []Worker{{Activity: "busy", Unit: unit}}, []Crate{{Key: canary + "/repo#7", Station: 2, Fault: true, Repository: canary, Number: 7, Title: canary}}, nil, 123_456_789)
+	world := Public(live, []byte("secret"), []Worker{{Activity: "busy", Unit: unit}}, nil, 123_456_789)
 	encoded, _ := json.Marshal(world)
 	if strings.Contains(strings.ToLower(string(encoded)), strings.ToLower(canary)) || strings.Contains(string(encoded), unit) {
 		t.Fatalf("private data leaked: %s", encoded)
 	}
-	if world.GeneratedAt%(5*60_000) != 0 || len(world.Workers) != 1 || world.Workers[0].Unit == "" || len(world.Crates) != 1 || world.Crates[0] != (PublicCrate{ID: world.Crates[0].ID, Station: 2, Fault: true}) || len(world.Crates[0].ID) != 32 {
+	if world.GeneratedAt%(5*60_000) != 0 || len(world.Workers) != 1 || world.Workers[0].Unit == "" || len(world.Workers[0].Unit) != 32 {
 		t.Fatalf("world = %+v", world)
 	}
-	again := Public(live, []byte("secret"), nil, nil, nil, 0)
-	other := Public(live, []byte("another"), nil, nil, nil, 0)
+	again := Public(live, []byte("secret"), nil, nil, 0)
+	other := Public(live, []byte("another"), nil, nil, 0)
 	if again.Nodes[0].ID != world.Nodes[0].ID || other.Nodes[0].ID == world.Nodes[0].ID {
 		t.Fatal("public identities are not stable per secret")
 	}
@@ -72,7 +72,7 @@ func TestPublicNamesSayWhatAStationIs(t *testing.T) {
 		{ID: "api", Kind: External},
 	}}
 	got := map[string]bool{}
-	for _, node := range Public(Overlay("s", graph, nil, nil, nil, 0, minute), []byte("k"), nil, nil, nil, 0).Nodes {
+	for _, node := range Public(Overlay("s", graph, nil, nil, nil, 0, minute), []byte("k"), nil, nil, 0).Nodes {
 		got[node.Label] = true
 	}
 	for _, want := range []string{"CI pipeline 1", "Edge function 1", "Check 1", "Loop 1", "Entrance 1", "Timer 1", "Outside service 1"} {
@@ -82,8 +82,8 @@ func TestPublicNamesSayWhatAStationIs(t *testing.T) {
 	}
 }
 
-// A named repository publishes real labels, paths, rates and titles; a node
-// with no source (runtime-only) stays an ordinal even beside it.
+// A named repository publishes real labels, paths and rates; a node with no
+// source (runtime-only) stays an ordinal even beside it.
 func TestPublicNamesRealForNamedRepositoriesOnly(t *testing.T) {
 	graph := Graph{Nodes: []Node{
 		{ID: "svc", Kind: Processor, Runtime: "server", Label: "api", Sources: []Location{{Repository: "r1", Path: "cmd/api/main.go"}}},
@@ -91,25 +91,12 @@ func TestPublicNamesRealForNamedRepositoriesOnly(t *testing.T) {
 		{ID: "ghost", Kind: External, Label: "sender"},
 	}}
 	live := Overlay("s", graph, nil, nil, nil, 0, minute)
-	named := map[string]bool{"r1": true, "o/n": true}
-	world := Public(live, []byte("k"), nil, []Crate{{Key: "o/n#1", Repository: "o/n", Number: 1, Title: "Fix"}, {Key: "p/q#2", Repository: "p/q", Number: 2, Title: "Hide"}}, named, 0)
+	world := Public(live, []byte("k"), nil, map[string]bool{"r1": true}, 0)
 	labels := map[string]string{}
 	for _, node := range world.Nodes {
 		labels[node.Label] = strings.Join(node.Paths, ",")
 	}
 	if len(labels) != 3 || labels["api"] != "cmd/api/main.go" || labels["Web server 1"] != "" || labels["Outside service 1"] != "" {
 		t.Fatalf("labels = %v", labels)
-	}
-	shown := 0
-	for _, crate := range world.Crates {
-		if crate.Title != "" {
-			shown++
-			if crate.Number != 1 || crate.Title != "Fix" {
-				t.Fatalf("crate = %+v", crate)
-			}
-		}
-	}
-	if shown != 1 {
-		t.Fatalf("crates = %+v", world.Crates)
 	}
 }

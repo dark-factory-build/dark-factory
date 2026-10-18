@@ -16,136 +16,10 @@ import (
 )
 
 const (
-	// productionStaleAfter is production-view.ts STALE_AFTER: two production
-	// refresh intervals, so a record is stale only once a refresh was missed.
-	productionStaleAfter = 2 * productionRefreshInterval
-	// shippedFor is production-view.ts SHIPPED_FOR and kernel.ProductionRecent.
-	shippedFor = kernel.ProductionRecent
-	// deployingFor is production-view.ts DEPLOYING_FOR: how recent a
-	// repository's last production deployment must be for a merge to wait on
-	// the next one.
-	deployingFor = 7 * 24 * time.Hour
 	// The site's ledger windows: merges listed, and days on the operating clock.
 	ledgerWindowDays = 7
 	ledgerClockDays  = 21
 )
-
-// publicCrates is projectCrates in production-view.ts over the same records,
-// timed by the factory's clock: each open pull request at the first gate its
-// records have not passed (review, current-head checks, merge queue), each
-// merged one shipped for a day, closed unmerged gone. Where GitHub records
-// deployments, merged ships only once a successful production deployment was
-// created at or after the merge, and waits at the merge queue's end until
-// then. A blocked review or a failed current-head check is a fault; merged, a
-// blocked or failed delivery.
-// ponytail: the console also stales a review whose head its local source
-// observation contradicts; factoryd takes the recorded head as the source.
-func publicCrates(records []kernel.ProductionRecord, now int64) []opgraph.Crate {
-	fresh := func(observed int64, unavailable string) bool {
-		for _, part := range strings.Split(unavailable, ",") {
-			if part != "" && !slices.Contains([]string{"jobs", "review_journal", "release_journal", "release_config"}, part) {
-				return false
-			}
-		}
-		return observed > 0 && now-observed <= productionStaleAfter.Milliseconds()
-	}
-	healthy := map[string]bool{}
-	failed := map[string]bool{}  // repository#number#head with a failed head check
-	blocked := map[string]bool{} // repository#number with a blocked latest delivery
-	latest := map[string]kernel.ProductionDelivery{}
-	deployed := map[string]int64{} // newest successful production deployment
-	for _, record := range records {
-		switch record.Kind {
-		case "repository":
-			var health struct {
-				Unavailable string
-				DeployedAt  *int64 `json:"deployed_at"`
-			}
-			healthy[record.Repository] = json.Unmarshal(record.Document, &health) == nil && fresh(record.ObservedAt, health.Unavailable)
-			if health.DeployedAt != nil {
-				deployed[record.Repository] = *health.DeployedAt
-			}
-		case "check":
-			var check kernel.ProductionCheck
-			if json.Unmarshal(record.Document, &check) == nil && check.Scope == "head" && slices.Contains([]string{"failure", "timed_out", "action_required"}, check.Conclusion) {
-				for _, number := range check.PullRequests {
-					failed[record.Repository+"#"+strconv.FormatUint(number, 10)+"#"+check.Revision] = true
-				}
-			}
-		case "delivery":
-			var delivery kernel.ProductionDelivery
-			if json.Unmarshal(record.Document, &delivery) != nil {
-				continue
-			}
-			for _, number := range delivery.PullRequests {
-				key := record.Repository + "#" + strconv.FormatUint(number, 10) + "#" + delivery.Destination
-				if prior, ok := latest[key]; !ok || deliveryBefore(delivery, prior) {
-					latest[key] = delivery
-				}
-			}
-		}
-	}
-	for key, delivery := range latest {
-		if delivery.State == "blocked" || delivery.State == "failed" {
-			blocked[key[:strings.LastIndex(key, "#")]] = true
-		}
-	}
-	crates := []opgraph.Crate{}
-	for _, record := range records {
-		var pr kernel.ProductionPullRequest
-		if record.Kind != "pull_request" || json.Unmarshal(record.Document, &pr) != nil {
-			continue
-		}
-		key := record.Repository + "#" + strconv.FormatUint(pr.Number, 10)
-		switch pr.State {
-		case "merged":
-			at := record.ObservedAt
-			if merged, err := time.Parse(time.RFC3339, pr.MergedAt); err == nil {
-				at = merged.UnixMilli()
-			}
-			if now-at <= shippedFor.Milliseconds() {
-				station := 3
-				// A repository that has not deployed this way within deployingFor
-				// of the merge no longer does: the merge ships.
-				if deployedAt, ok := deployed[record.Repository]; ok && deployedAt < at && at-deployedAt <= deployingFor.Milliseconds() {
-					station = 2
-				}
-				crates = append(crates, opgraph.Crate{Key: key, Station: station, Fault: blocked[key], Repository: strings.ToLower(record.Repository), Number: pr.Number, Title: pr.Title})
-			}
-		case "open":
-			current := pr.Review.Head != "" && pr.Review.Head == pr.Head
-			allowed := current && pr.Review.State == "allow" && healthy[record.Repository] && fresh(record.ObservedAt, "")
-			correction := current && pr.Review.State == "block" || failed[key+"#"+pr.Head]
-			station := 0
-			if queued := pr.MergeQueue != "" && pr.MergeQueue != "none" && pr.MergeQueue != "unknown"; queued && !correction {
-				station = 2
-			} else if allowed {
-				station = 1
-			}
-			crates = append(crates, opgraph.Crate{Key: key, Station: station, Fault: correction, Repository: strings.ToLower(record.Repository), Number: pr.Number, Title: pr.Title})
-		}
-	}
-	return crates
-}
-
-// deliveryBefore is deliveryOrder in production-view.ts: newest first, an
-// unresolved attempt before a verified receipt of the same second, then id.
-func deliveryBefore(a, b kernel.ProductionDelivery) bool {
-	at := func(d kernel.ProductionDelivery) int64 {
-		if d.UpdatedAt != 0 {
-			return d.UpdatedAt
-		}
-		return d.VerifiedAt
-	}
-	verified := func(d kernel.ProductionDelivery) bool { return d.VerifiedAt > 0 && d.State == "verified" }
-	if at(a) != at(b) {
-		return at(a) > at(b)
-	}
-	if verified(a) != verified(b) {
-		return !verified(a)
-	}
-	return a.ID < b.ID
-}
 
 // publicLedger is the public repositories' work as factoryd recorded it: open
 // pull requests, accepted issues not yet finished, merges in the window, an
@@ -341,16 +215,16 @@ func (daemon *Daemon) readReleasePage(name string, page int) ([]listedRelease, b
 	return listed, err == nil && response.StatusCode == http.StatusOK && json.Unmarshal(body, &listed) == nil
 }
 
-// publicWork reads the work line and, for public repositories, the ledger.
-func (daemon *Daemon) publicWork(ctx context.Context, project kernel.ProjectID) ([]opgraph.Crate, *opgraph.PublicLedger, error) {
+// publicWork reads the ledger of the project's public repositories.
+func (daemon *Daemon) publicWork(ctx context.Context, project kernel.ProjectID) (*opgraph.PublicLedger, error) {
 	now := daemon.now()
 	records, err := daemon.store.PublicProduction(ctx, project, now.AddDate(0, 0, -ledgerClockDays).UnixMilli())
 	if err != nil {
-		return nil, nil, err
+		return nil, err
 	}
 	issues, err := daemon.store.OpenIntakeIssues(ctx, project)
 	if err != nil {
-		return nil, nil, err
+		return nil, err
 	}
 	var names []string
 	for _, record := range records {
@@ -362,5 +236,5 @@ func (daemon *Daemon) publicWork(ctx context.Context, project kernel.ProjectID) 
 		names = append(names, issue.Repository)
 	}
 	slices.Sort(names)
-	return publicCrates(records, now.UnixMilli()), publicLedger(records, issues, daemon.publicRepositories(slices.Compact(names)), now), nil
+	return publicLedger(records, issues, daemon.publicRepositories(slices.Compact(names)), now), nil
 }

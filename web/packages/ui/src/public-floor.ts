@@ -1,6 +1,6 @@
 import type { GraphNode, GraphSummary, OperationalGraphView } from "@dark-factory/client";
 import { projectGraph } from "./console-view.js";
-import type { SceneCrate, SceneWorker } from "./factory-scene/scene.js";
+import type { SceneWorker } from "./factory-scene/scene.js";
 
 /** The public projection factoryd serves at /v1/public/<project>: real labels only for repositories public on GitHub, ordinals otherwise. */
 export type PublicWorld = Readonly<{
@@ -10,8 +10,6 @@ export type PublicWorld = Readonly<{
     evidence: GraphNode["evidence"]; observation: GraphNode["observation"]; state: GraphNode["state"]; rate_per_hour: number; paths?: readonly string[]; deployed?: boolean }>[];
   edges: readonly Readonly<{ from: string; to: string; kind: OperationalGraphView["edges"][number]["kind"]; evidence: GraphNode["evidence"]; observation: GraphNode["observation"]; state: GraphNode["state"]; rate_per_hour: number }>[];
   workers: readonly Readonly<{ activity: SceneWorker["activity"]; unit?: string }>[];
-  /** The outbound work line: a keyed id, station and fault; number and title only for public repositories. Absent from older factories. */
-  crates?: readonly Readonly<{ id: string; station: SceneCrate["station"]; fault?: boolean; number?: number; title?: string }>[];
   /** Present only for repositories public on GitHub. */
   ledger?: PublicLedger;
 }>;
@@ -49,8 +47,6 @@ export function publicFloor(world: PublicWorld) {
     return { id: `public-${index}`, name: `Worker ${index + 1}`, role: "worker", activity: worker.activity,
       location: worker.activity === "busy" ? unit === undefined ? "unobserved" : "working" : "resting", ...(unit === undefined ? {} : { nodeId: unit }) };
   });
-  // A crate from a private repository carries no number or title; the scene names it by station alone.
-  const crates = (world.crates ?? []).map((crate): SceneCrate => ({ id: crate.id, number: crate.number ?? 0, title: crate.title ?? "", station: crate.station, stage: "", fault: crate.fault === true, taskIds: [] }));
   // An ordinal unit name already says the runtime, so a runtime subtitle would only repeat it.
-  return { graph: { ...prepared.graph, units: prepared.graph.units.map(({ runtime: _, ...unit }) => unit) }, workers, crates };
+  return { graph: { ...prepared.graph, units: prepared.graph.units.map(({ runtime: _, ...unit }) => unit) }, workers };
 }

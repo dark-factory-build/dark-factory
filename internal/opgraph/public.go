@@ -22,32 +22,9 @@ type PublicWorld struct {
 	Nodes       []PublicNode   `json:"nodes"`
 	Edges       []PublicEdge   `json:"edges"`
 	Workers     []PublicWorker `json:"workers"`
-	// Crates is the outbound work line: number and title only for public repositories.
-	Crates []PublicCrate `json:"crates"`
 	// Ledger is present only when a repository is public on GitHub, and then
 	// carries only that repository's public work.
 	Ledger *PublicLedger `json:"ledger,omitempty"`
-}
-
-// Crate is one pull request on the outbound line: Key names it privately,
-// Station is REVIEW 0, CHECKS 1, MERGE QUEUE 2 or SHIPPED 3.
-// Repository is its lowercase owner/name; Number and Title are published
-// only when that repository is named.
-type Crate struct {
-	Key        string
-	Station    int
-	Fault      bool
-	Repository string
-	Number     uint64
-	Title      string
-}
-
-type PublicCrate struct {
-	ID      string `json:"id"`
-	Station int    `json:"station"`
-	Fault   bool   `json:"fault,omitempty"`
-	Number  uint64 `json:"number,omitempty"`
-	Title   string `json:"title,omitempty"`
 }
 
 // PublicLedger is what is already public on GitHub about the factory's public
@@ -151,7 +128,7 @@ func publicName(node Node, runtimes map[string]Placement) string {
 // and exact rate; any other node (private, or runtime-only with no source)
 // gets an ordinal label, in hashed-ID order so it does not shift as other
 // nodes come and go, and a bucketed rate. Time is bucketed to five minutes.
-func Public(live Live, secret []byte, workers []Worker, crates []Crate, named map[string]bool, now int64) PublicWorld {
+func Public(live Live, secret []byte, workers []Worker, named map[string]bool, now int64) PublicWorld {
 	id := func(raw string) string {
 		mac := hmac.New(sha256.New, secret)
 		mac.Write([]byte(raw))
@@ -209,16 +186,7 @@ func Public(live Live, secret []byte, workers []Worker, crates []Crate, named ma
 		public = append(public, item)
 	}
 	sort.Slice(public, func(i, j int) bool { return public[i].Unit+public[i].Activity < public[j].Unit+public[j].Activity })
-	line := []PublicCrate{}
-	for _, crate := range crates {
-		item := PublicCrate{ID: id("crate:" + crate.Key), Station: crate.Station, Fault: crate.Fault}
-		if named[crate.Repository] {
-			item.Number, item.Title = crate.Number, crate.Title
-		}
-		line = append(line, item)
-	}
-	sort.Slice(line, func(i, j int) bool { return line[i].ID < line[j].ID })
-	return PublicWorld{GeneratedAt: now - now%(5*60_000), Summary: live.Summary, Nodes: nodes, Edges: edges, Workers: public, Crates: line}
+	return PublicWorld{GeneratedAt: now - now%(5*60_000), Summary: live.Summary, Nodes: nodes, Edges: edges, Workers: public}
 }
 
 // rate is the exact rate per hour for a named reading; otherwise it is

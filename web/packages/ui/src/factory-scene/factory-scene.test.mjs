@@ -10,7 +10,6 @@ import { renderToStaticMarkup } from "react-dom/server";
 import { act, create } from "react-test-renderer";
 import { AgentSprite, FactoryScene, offeredFixtures } from "../../dist/src/factory-scene/factory-scene.js";
 import { WORKER_SIZE, breakRoomNook, layoutScene, placeErrands, placeWorkers, standable } from "../../dist/src/factory-scene/scene.js";
-import { deriveProductionView, projectCrates } from "../../dist/src/production-view.js";
 import { publicFloor } from "../../dist/src/public-floor.js";
 import { breakRoomHabit, resolvedAppearance, restingItem, spriteOptions, workerFrames, workerPhase } from "../../dist/src/factory-scene/appearance.js";
 import { crosses, findRoute, pointOnRoute, walkable } from "../../dist/src/factory-scene/movement.js";
@@ -1273,79 +1272,18 @@ test("a unit's runtime is said in words, each belt runs port to port between the
   assert.equal(publicFloor(world).graph.units[0].runtime, undefined, "a public name already says the runtime");
 });
 
-const pr = (number, document = {}, extra = {}) => ({ repository: "owner/repo", project_id: "project", kind: "pull_request", id: String(number), visual_id: `change:${number}`, observed_at: 10, tasks: [], missions: [], ...extra,
-  document: { number, title: `Change ${number}`, head: "a".repeat(40), state: "open", ...document } });
-const ciCheck = (number, state, conclusion) => ({ repository: "owner/repo", project_id: "project", kind: "check", id: `ci-${number}`, visual_id: "", observed_at: 10, tasks: [], missions: [],
-  document: { name: "CI", revision: "a".repeat(40), scope: "head", state, conclusion, pull_requests: [number] } });
-const allow = { review: { head: "a".repeat(40), state: "allow" } };
-const cratesOf = (records) => projectCrates(Object.values(deriveProductionView(records).contraptions));
-const atStation = (crates, number) => crates.find((crate) => crate.number === number);
-
-test("the outbound line puts each change request at the station its records name, and nowhere without one", () => {
-  const crates = cratesOf([
-    pr(1), pr(2, { review: { head: "a".repeat(40), state: "block" } }),
-    pr(3, allow), ciCheck(3, "in_progress", ""), pr(4, allow), ciCheck(4, "completed", "failure"),
-    pr(5, { ...allow, merge_queue: "queued" }), ciCheck(5, "completed", "success"),
-    pr(6, { ...allow, state: "merged", merge: "d".repeat(40) }), pr(7, { state: "closed" }),
-  ]);
-  // Shipped holds a day of merges by the records' own clock; older ones have left the line.
-  const day = 24 * 60 * 60_000, merged = (number, at) => pr(number, { ...allow, state: "merged", merge: "d".repeat(40), merged_at: new Date(at).toISOString() }, { observed_at: day * 3 });
-  assert.deepEqual(cratesOf([merged(8, day * 2 + 1), merged(9, day * 2 - 1)]).map((crate) => crate.number), [8]);
-  assert.deepEqual(crates.map((crate) => [crate.number, crate.station, crate.fault]).sort((a, b) => a[0] - b[0]),
-    [[1, 0, false], [2, 0, true], [3, 1, false], [4, 1, true], [5, 2, false], [6, 3, false]], "closed unmerged is gone");
-  assert.match(atStation(crates, 2).stage, /Correction/);
-
-  const markup = render({ crates, connected: true });
-  assert.deepEqual([...markup.matchAll(/<span>(Review|Checks|Merge queue|Shipped) <strong>(\d+)<\/strong><\/span>/g)].map((match) => [match[1], Number(match[2])]),
-    [["Review", 2], ["Checks", 2], ["Merge queue", 1], ["Shipped", 1]], "stage counts follow LINE_STATIONS order");
-  assert.doesNotMatch(markup, /data-crate|data-lit|<details/);
-  const empty = render({ connected: true });
-  assert.match(empty, /data-work-line/, "the line is always there");
-  assert.doesNotMatch(empty, /data-crate|data-lit/);
-  assert.doesNotMatch(render({ crates: [], connected: true }), /data-crate|data-lit/);
-
-  assert.ok(markup.indexOf('data-work-line') < markup.indexOf('class="dfFactoryFloor__viewport"'), "progress lives in the header");
-  assert.doesNotMatch(markup, /data-development=/);
-  const many = Array.from({ length: 11 }, (_, index) => ({ id: `c${index}`, number: index + 1, title: "x", station: 0, stage: "Review pending", fault: false, taskIds: [] }));
-  const all = render({ crates: many });
-  assert.equal(all, render({ crates: [...many].reverse() }));
-  assert.match(all, /Review <strong>11<\/strong>/);
-});
-
-test("the console and factoryd put the shared fixture's records at the same stations", () => {
-  // factoryd's publicCrates (internal/daemon/public_work_test.go) reads the same file.
-  const fixture = JSON.parse(readFileSync(new URL("../../../../fixtures/production-crates.json", import.meta.url), "utf8"));
-  const crates = projectCrates(Object.values(deriveProductionView(fixture.records, fixture.now).contraptions));
-  assert.deepEqual(crates.map((crate) => [crate.number, crate.station, crate.fault]).sort((a, b) => a[0] - b[0]), fixture.crates);
-});
-
-test("the public floor puts crates on the line by station, with a number and title only when published", () => {
-  const world = { generated_at: 0, summary: { components: 0, inferred: 0, observed: 0, quiet: 0, partial: 0, stale: 0, unobserved: 0, opaque: 0, runtime_only: 0, contradicted: 0 }, nodes: [], edges: [], workers: [],
-    crates: [{ id: "f".repeat(32), station: 2, number: 7, title: "Fix it" }, { id: "e".repeat(32), station: 0, fault: true }] };
-  const { crates } = publicFloor(world);
-  assert.deepEqual(crates.map((crate) => [crate.id, crate.station, crate.fault, crate.number, crate.title]), [["f".repeat(32), 2, false, 7, "Fix it"], ["e".repeat(32), 0, true, 0, ""]]);
-  assert.deepEqual(publicFloor({ ...world, crates: undefined }).crates, [], "an older factory publishes no line");
-  const markup = render({ crates, connected: true });
-  assert.match(markup, /Review <strong>1<\/strong>/);
-  assert.match(markup, /Merge queue <strong>1<\/strong>/);
-  assert.doesNotMatch(markup, /data-crate|data-lit|PR #/);
-});
-
-test("header PRs show exact stage counts in order and retain connection state", async () => {
-  const changedGraph = sceneGraph([unit("a")]);
-  const crate = { id: "k1", number: 1, title: "Fix", station: 0, stage: "Review", fault: false, taskIds: [] };
-  const props = { graph: changedGraph, workers: [], connected: true };
-  let tree;
-  try {
-    await act(async () => { tree = create(createElement(FactoryScene, { ...props, crates: [crate] })); });
-    const line = tree.root.findByProps({ "data-work-line": "" });
-    const text = (node) => node.children.map((child) => typeof child === "string" ? child : child.children.join("")).join("");
-    assert.deepEqual(line.findAllByType("span").map(text), ["Review 1", "Checks 0", "Merge queue 0", "Shipped 0"]);
-    assert.equal(line.findAll((node) => node.props["data-crate"] !== undefined).length, 0);
-    assert.equal(line.findAll((node) => node.props["data-lit"] !== undefined).length, 0);
-    await act(async () => { tree.update(createElement(FactoryScene, { ...props, connected: false, crates: [crate] })); });
-    assert.deepEqual(tree.root.findByProps({ "data-work-line": "" }).findAllByType("span").map(text), ["Review —", "Checks —", "Merge queue —", "Shipped —"]);
-    await act(async () => { tree.update(createElement(FactoryScene, { ...props, connected: false, crates: undefined })); });
-    assert.deepEqual(tree.root.findByProps({ "data-work-line": "" }).findAllByType("span").map(text), ["Review —", "Checks —", "Merge queue —", "Shipped —"]);
-  } finally { if (tree) await act(async () => tree.unmount()); }
+test("the floor pane carries no pull-request strip: no stage counts, no reserved height, notices still above the floor", () => {
+  const markup = render({ connected: true });
+  assert.doesNotMatch(markup, /data-work-line|Pull request progress|Merge queue|Shipped/);
+  assert.match(markup, /<div class="dfFactoryEntityTools"><\/div><div class="dfFactoryFloor__viewport">/, "an empty bar has nothing to size");
+  assert.doesNotMatch(render({ connected: false }), /data-work-line/, "disconnected draws no placeholder counts either");
+  const css = readFileSync(new URL("../factory-console.css", import.meta.url), "utf8");
+  assert.match(css, /\.dfFactoryEntityTools:empty \{ display: none; \}/, "the empty bar reserves no height");
+  assert.doesNotMatch(css, /dfWorkLine|min-height: 2\.75rem/);
+  const notice = render({ connected: true, tools: createElement("p", { className: "dfFactoryEntityTools__notice", role: "status" }, "Plant unavailable") });
+  assert.match(notice, /<div class="dfFactoryEntityTools"><p class="dfFactoryEntityTools__notice" role="status">Plant unavailable<\/p><\/div>/);
+  assert.match(notice, /aria-label="Scrollable factory floor"/, "the floor and its tools survive");
+  const world = { generated_at: 0, summary: graph.summary, nodes: [], edges: [], workers: [{ activity: "idle" }] };
+  assert.deepEqual(Object.keys(publicFloor(world)).sort(), ["graph", "workers"], "the public floor carries no work line");
+  assert.doesNotMatch(render({ ...publicFloor(world), connected: true }), /data-work-line|Review/);
 });

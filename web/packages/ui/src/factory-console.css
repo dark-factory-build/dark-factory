@@ -615,11 +615,10 @@ summary.dfConsoleItem__summary { cursor: pointer; }
 .dfFactoryScene__target:focus { outline: none; }
 .dfFactoryTooltip { position: fixed; z-index: 1000; width: max-content; max-width: min(256px, calc(100vw - 16px)); box-sizing: border-box; padding: 8px 10px; border: 1px solid #637575; border-radius: 4px; background: #142126; color: #e0e3d6; font: 12px/1.5 system-ui, sans-serif; white-space: pre-line; overflow-wrap: anywhere; display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 8; max-height: 50vh; overflow: hidden; box-shadow: 0 3px 12px #0008; pointer-events: none; }
 
-/* One floor: projection controls and proposal selection stay reachable. */
-.dfFactoryEntityTools { position: relative; display: flex; flex: none; flex-wrap: wrap; align-items: center; gap: .6rem; min-height: 2.75rem; padding: .35rem .6rem; overflow: visible; white-space: normal; font-size: var(--df-text-xs); background: #122027; border-bottom: 1px solid #3c5051; }
+/* One floor: notices stay reachable above it; with none, the floor has the whole pane. */
+.dfFactoryEntityTools { position: relative; display: flex; flex: none; flex-wrap: wrap; align-items: center; gap: .6rem; padding: .35rem .6rem; overflow: visible; white-space: normal; font-size: var(--df-text-xs); background: #122027; border-bottom: 1px solid #3c5051; }
+.dfFactoryEntityTools:empty { display: none; }
 .dfFactoryEntityTools > * { flex: none; }
-.dfWorkLine { display: flex; align-items: center; gap: .6rem; }
-.dfWorkLine strong { color: #edba6b; font-variant-numeric: tabular-nums; }
 .dfFactoryEntityTools__notice { flex-basis: 100%; display: flex; align-items: baseline; flex-wrap: wrap; gap: .4rem; margin: 0; font-size: var(--df-text-xs); }
 
 /* Source identity is exact, including on phone-sized floors. */

@@ -675,7 +675,7 @@ test("the floor is the only agent picker: no Agents view, roster or All agents c
   assert.doesNotMatch(floor, /aria-label="Left view"/);
   assert.doesNotMatch(floor, /aria-label="Agents"|dfAgentList|All agents|>Agents</);
   assert.match(floor, /aria-label="Factory floor"/);
-  assert.match(floor, /aria-label="Pull request progress"/);
+  assert.doesNotMatch(floor, /aria-label="Pull request progress"|data-work-line/, "PR progress lives in Work, not above the floor");
 });
 
 test("FactoryApp server-renders without reading browser globals", () => {

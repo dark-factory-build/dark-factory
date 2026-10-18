@@ -343,9 +343,8 @@ granularity is a fixed table in code, not a runtime claim.
   {"adapter": "github", "environment": "Production", "services": {"Production": "web"}}
   ```
 
-  The newest successful production deployment also moves the work line: see
-  *SHIPPED* in section 13. A customer's installation accepts the
-  `Deployments: read` request before its deploys show. Deployments are read
+  A customer's installation accepts the `Deployments: read` request before
+  its deploys show. Deployments are read
   only for a repository pinned to its GitHub id (`project repository github`,
   through a connection the repository is delegated to). A disabled repository
   can be pinned: the factory then reads its production state but still takes
@@ -754,7 +753,7 @@ Approach (`factory-scene/scene.ts`, `factory-scene/movement.ts`; nothing in
    flows or ownership) can rebuild it. Neither the agent count nor
    which fixtures are offered moves anything.
 4. **Walking.** One geometry serves placement, solids, interaction positions
-   and navigation. Machine bodies and the fixtures are solid; labels, belts, area tints and the work line are
+   and navigation. Machine bodies and the fixtures are solid; labels, belts and area tints are
    floor markings. Workers walk an occupancy grid (6 px cells; a cell is
    free when a worker anywhere in it clears every solid) with
    diagonal steps that never cut a corner, then the path is pulled straight
@@ -890,22 +889,6 @@ shape either way.
 
 Workers appear as an anonymous count by activity and location (unit), with
 no names or task text. Deploy and changeover events carry no versions.
-
-The outbound work line appears as crates: each open pull request, and each
-merged one for a day, as an anonymous stable ID (`HMAC(secret, "crate:" +
-repository#number)`), its station (review, checks, merge queue, shipped) and
-a fault flag. For a public repository it also carries the pull request's
-number and title, which GitHub already shows; never a branch. factoryd places them by the
-console's rule (`publicCrates`, `projectCrates`; one shared fixture,
-`web/fixtures/production-crates.json`, holds both to it) on its own clock.
-*SHIPPED* means deployed where the repository has GitHub deployment records
-of its production environment: a merged crate ships once a successful one
-was created at or after its merge, and waits at the merge queue's end until
-then. The repository record keeps the newest such time once seen, so a failed
-read moves nothing. A repository whose last production deployment is more than
-seven days before a merge no longer deploys that way, so that merge ships: a
-repository that changes how it deploys never holds its line. Without
-deployment records, SHIPPED means merged.
 
 A `ledger` is added only for repositories GitHub serves to an anonymous
 reader: factoryd reads each repository's releases without credentials once

@@ -12,8 +12,6 @@ import {
   placeErrands,
   breakRoomNook,
   stationOf,
-  LINE_STATIONS,
-  type SceneCrate,
   type SceneGraph,
   type SceneLayout,
   type SceneMachinery,
@@ -36,8 +34,6 @@ import { spriteAtlas, spriteSheet, spriteSheetSize } from "./sprites/sprites.gen
 
 
 export type FactorySceneProps = Readonly<{
-  /** Change requests represented by the public stage counts. */
-  crates?: readonly SceneCrate[];
   tools?: ReactNode;
   graph: SceneGraph;
   /** Current project scope, when the floor has one. */
@@ -468,7 +464,7 @@ export function offeredFixtures({ appearance = DEFAULT_SCENE_APPEARANCE, onOpenT
 }
 
 /** A disposable SVG projection of the operational world and current factory state. */
-export function FactoryScene({ crates, tools, graph, workers, appearance = DEFAULT_SCENE_APPEARANCE, selectedWorkerId, onSelectWorker, tasks = [], peerQuestions = NO_QUESTIONS, selectedTaskId, onSelectTask, onOpenTasks, onSelectHumanRequest, projectId, connected = true, reading = false, unavailable }: FactorySceneProps) {
+export function FactoryScene({ tools, graph, workers, appearance = DEFAULT_SCENE_APPEARANCE, selectedWorkerId, onSelectWorker, tasks = [], peerQuestions = NO_QUESTIONS, selectedTaskId, onSelectTask, onOpenTasks, onSelectHumanRequest, projectId, connected = true, reading = false, unavailable }: FactorySceneProps) {
   const mapElement = useRef<HTMLDivElement>(null);
   const floorElement = useRef<SVGSVGElement>(null);
   // Scene pixels per scene unit; undefined fits the whole floor to its pane.
@@ -607,10 +603,7 @@ export function FactoryScene({ crates, tools, graph, workers, appearance = DEFAU
 
   return (
     <div className="dfFactoryFloor__scene">
-    <div className="dfFactoryEntityTools">
-      <WorkLine crates={crates} connected={connected} />
-      {tools}
-    </div>
+    <div className="dfFactoryEntityTools">{tools}</div>
     <div className="dfFactoryFloor__viewport">
     <div ref={mapElement} className="dfFactoryFloor__map" onClick={inspect} onPointerOver={inspect} onFocus={inspect} onPointerLeave={retainFocusedTooltip} onBlur={() => setTooltip(undefined)} onScroll={() => { retainFocusedTooltip(); measure(); }} onKeyDown={(event) => { if (event.key === "Escape") setTooltip(undefined); }} role="region" aria-label="Scrollable factory floor" tabIndex={0} style={zoom === undefined ? { overflow: "hidden" } : undefined}>
     <svg
@@ -708,18 +701,6 @@ export function FactoryScene({ crates, tools, graph, workers, appearance = DEFAU
 
 const MAX_ZOOM = 4;
 const OVERVIEW_KEY = "dfFloorOverview";
-
-/** The same durable PR stages, available without zooming into the floor. */
-function WorkLine({ crates, connected }: {
-  crates: readonly SceneCrate[] | undefined; connected: boolean;
-}) {
-  return <nav className="dfWorkLine" aria-label="Pull request progress" data-work-line="">
-    {LINE_STATIONS.map((label, index) => {
-      const members = (crates ?? []).filter((crate) => crate.station === index);
-      return <span key={label}>{label} <strong>{!connected || crates === undefined ? "—" : members.length}</strong></span>;
-    })}
-  </nav>;
-}
 
 /**
  * The plant at a glance once zoomed past fit: machines painted by coverage,
