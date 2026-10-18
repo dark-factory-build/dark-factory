@@ -179,12 +179,10 @@ export function AgentList({
   ready: boolean;
   onSelectAgent?: (agent: AgentItem) => void;
 }) {
-  const [showArchived, setShowArchived] = useState(false);
   if (state === undefined) return <p className="dfFactoryConsole__empty">waiting for the factory</p>;
-  const agents = [...state.agents.values()].filter((agent) => showArchived || !agent.archived);
+  const agents = [...state.agents.values()].filter((agent) => !agent.archived);
   return (
     <div className="dfAgentList">
-      <label><input type="checkbox" checked={showArchived} onChange={(event) => setShowArchived(event.currentTarget.checked)} /> Show archived</label>
       {agents.length === 0 ? <p className="dfFactoryConsole__empty">no agents</p> : null}
       {(["orchestrator", "specialist", "worker"] as const).map((role) => {
         const members = agents.filter((agent) => role === "specialist" ? isSpecialist(agent) : agent.role === role && !isSpecialist(agent));
@@ -235,7 +233,7 @@ function AgentRow({
       <AgentSprite agent={agent} activity={agentActivity(agent, state)} />
       <span className="dfConsoleRow__title">{agent.name} · {projectLabel(state, agent.project_id)}</span>
       <span className="dfAgentList__provider">{agent.effective_model === "" ? agent.provider : `${agent.provider} · ${agent.effective_model}`}</span>
-      <span className="dfAgentList__activity"><Status stage={agent.archived ? "archived" : activity} /></span>
+      <span className="dfAgentList__activity"><Status stage={activity} /></span>
       <span className="dfConsoleRow__agent">{task?.title ?? "no current task"}</span>
       <span className="dfAgentList__count">{queued} queued</span>
     </>
