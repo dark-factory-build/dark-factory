@@ -11,6 +11,7 @@ import (
 	"testing"
 
 	"github.com/dark-factory-build/dark-factory/internal/kernel"
+	"github.com/dark-factory-build/dark-factory/internal/runner"
 )
 
 func TestVerifyProviderSelfCheckCommitRequiresOneExactFile(t *testing.T) {
@@ -54,7 +55,11 @@ func TestRunProviderSelfCheckUsesRunIsolated(t *testing.T) {
 		{name: "output larger than pipe capacity", mode: "noisy", tools: true, passed: true},
 	} {
 		t.Run(test.name, func(t *testing.T) {
-			root := t.TempDir()
+			root, err := os.MkdirTemp(runner.ShortTempDir(), "provider-self-check-")
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() { _ = os.RemoveAll(root) })
 			git := supervisorNativeGit(t)
 			repository := filepath.Join(root, "repository")
 			supervisorGit(t, git, "init", repository)
