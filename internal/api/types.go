@@ -10,8 +10,10 @@ import (
 )
 
 const (
-	// Eight MiB of task attachments fit one enqueue_task request base64-encoded.
-	maxFrameBytes = 12 << 20
+	maxFrameBytes = 1 << 20
+	// A request may carry eight MiB of task attachments base64-encoded;
+	// responses keep the frame bound.
+	maxRequestBytes = 12 << 20
 	// Four metadata rows fit the frame even when every text byte is JSON-escaped.
 	MaxContentPageItems = 4
 	maxSnapshotEntries  = 4096

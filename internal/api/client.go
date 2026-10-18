@@ -770,7 +770,7 @@ func (client client) call(ctx context.Context, method string, params, output any
 	}
 	method = client.prefix + method
 	encoded, err := json.Marshal(requestEnvelope{Method: method, Params: params})
-	if err != nil || len(encoded)+requestPrelude > maxFrameBytes {
+	if err != nil || len(encoded)+requestPrelude > maxRequestBytes {
 		return ErrInvalidInput
 	}
 
@@ -862,7 +862,7 @@ func (client client) exchange(ctx context.Context, method string, encoded []byte
 		// instead of failing as transport (a merge-queue flake).
 		_ = unix.CloseWrite()
 	}
-	response, err := readFrame(connection)
+	response, err := readFrame(connection, maxFrameBytes)
 	if err != nil {
 		err = classifyFrameError(ctx, err)
 		// A reply lost because its daemon generation unbound the socket is a
@@ -889,7 +889,7 @@ func (client client) exchange(ctx context.Context, method string, encoded []byte
 		return responseErr
 	}
 	if outcomeReceipt {
-		receipt, err := readFrame(connection)
+		receipt, err := readFrame(connection, maxFrameBytes)
 		if err != nil {
 			// Rejections before the server accepts an outcome call have no
 			// receipt. Once dispatch begins, every outcome response does.
@@ -979,7 +979,7 @@ func acknowledgeableOutcomeResponse(err error) bool {
 }
 
 func writeFrame(writer io.Writer, payload []byte) error {
-	if len(payload) == 0 || len(payload) > maxFrameBytes {
+	if len(payload) == 0 || len(payload) > maxRequestBytes {
 		return ErrProtocol
 	}
 	var header [4]byte
@@ -1004,13 +1004,13 @@ func writeAll(writer io.Writer, value []byte) error {
 	return nil
 }
 
-func readFrame(reader io.Reader) ([]byte, error) {
+func readFrame(reader io.Reader, limit int) ([]byte, error) {
 	var header [4]byte
 	if _, err := io.ReadFull(reader, header[:]); err != nil {
 		return nil, err
 	}
 	size := binary.BigEndian.Uint32(header[:])
-	if size == 0 || size > maxFrameBytes {
+	if size == 0 || size > uint32(limit) {
 		return nil, ErrProtocol
 	}
 	payload := make([]byte, int(size))
@@ -1086,7 +1086,7 @@ func validateJSONNames(encoded []byte) error { return validateJSON(encoded, true
 // checks for an embedded foreign JSON document. MCP defines camel-case names,
 // so only its enclosing local-API object uses canonicalJSONName.
 func validateJSON(encoded []byte, canonicalNames bool) error {
-	if len(encoded) == 0 || len(encoded) > maxFrameBytes || !utf8.Valid(encoded) || !validJSONUnicodeEscapes(encoded) {
+	if len(encoded) == 0 || len(encoded) > maxRequestBytes || !utf8.Valid(encoded) || !validJSONUnicodeEscapes(encoded) {
 		return ErrProtocol
 	}
 	decoder := json.NewDecoder(bytes.NewReader(encoded))

@@ -633,7 +633,7 @@ func TestUnknownMembersDoNotRelaxTheFrameBound(t *testing.T) {
 	bearer := testCredential('O')
 	listener, socketPath := newAPITestListener(t, bearer)
 	done := startServerReceive(t, listener, nil)
-	body := []byte(`{"method":"health","params":{},"future":"` + strings.Repeat("x", maxFrameBytes) + `"}`)
+	body := []byte(`{"method":"health","params":{},"future":"` + strings.Repeat("x", maxRequestBytes) + `"}`)
 	if _, err := exchangeRaw(socketPath, rawRequest(operatorDomain, bearer, body), true); err == nil {
 		t.Fatal("oversized tolerant request was answered")
 	}
