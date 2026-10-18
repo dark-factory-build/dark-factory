@@ -115,10 +115,8 @@ func failureCause(code, detail string) string {
 	return "other"
 }
 
-// failureSignature names a failure by its cause class, its structured fields
-// and, for a free text cause, its first clause with identifiers and numbers
-// removed, so the same failure on another task, head or run is the same
-// signature.
+// failureSignature names a run failure by its cause class and structured
+// fields. Check failures also include their diagnostic test name.
 func failureSignature(kind, code string, exit, signal, runner sql.NullInt64, detail string) string {
 	parts := []string{kind, code}
 	for _, value := range []sql.NullInt64{exit, signal, runner} {
@@ -128,41 +126,43 @@ func failureSignature(kind, code string, exit, signal, runner sql.NullInt64, det
 			parts = append(parts, "-")
 		}
 	}
-	head, _, _ := strings.Cut(detail, ":")
 	var words []string
-	for _, raw := range strings.Fields(strings.ToLower(head)) {
-		if strings.ContainsFunc(raw, unicode.IsDigit) {
-			continue
-		}
-		word := strings.TrimFunc(raw, func(r rune) bool { return !unicode.IsLetter(r) })
-		if word != "" && len(words) < 6 {
-			words = append(words, word)
-		}
-	}
-	lower := strings.ToLower(detail)
-	for _, marker := range []string{"--- fail:", "✖", "not ok"} {
-		if offset := strings.Index(lower, marker); offset >= 0 {
-			tail := strings.SplitN(lower[offset+len(marker):], `",`, 2)[0]
-			fields := strings.Fields(tail)
-			if marker == "--- fail:" && len(fields) > 1 {
-				fields = fields[:1]
+	if kind == "check" {
+		head, _, _ := strings.Cut(detail, ":")
+		for _, raw := range strings.Fields(strings.ToLower(head)) {
+			if strings.ContainsFunc(raw, unicode.IsDigit) {
+				continue
 			}
-			if marker == "not ok" && len(fields) > 0 && strings.Trim(fields[0], "0123456789") == "" {
-				fields = fields[1:]
+			word := strings.TrimFunc(raw, func(r rune) bool { return !unicode.IsLetter(r) })
+			if word != "" && len(words) < 6 {
+				words = append(words, word)
 			}
-			for _, field := range fields {
-				if strings.HasPrefix(field, "(") {
-					continue
+		}
+		lower := strings.ToLower(detail)
+		for _, marker := range []string{"--- fail:", "✖", "not ok"} {
+			if offset := strings.Index(lower, marker); offset >= 0 {
+				tail := strings.SplitN(lower[offset+len(marker):], `",`, 2)[0]
+				fields := strings.Fields(tail)
+				if marker == "--- fail:" && len(fields) > 1 {
+					fields = fields[:1]
 				}
-				word := strings.ToLower(strings.TrimFunc(field, func(r rune) bool { return !unicode.IsLetter(r) && !unicode.IsDigit(r) }))
-				if word != "" && strings.TrimFunc(word, unicode.IsDigit) != "" {
-					if !slices.Contains(words, "test") {
-						words = append(words, "test")
+				if marker == "not ok" && len(fields) > 0 && strings.Trim(fields[0], "0123456789") == "" {
+					fields = fields[1:]
+				}
+				for _, field := range fields {
+					if strings.HasPrefix(field, "(") {
+						continue
 					}
-					words = append(words, word)
+					word := strings.ToLower(strings.TrimFunc(field, func(r rune) bool { return !unicode.IsLetter(r) && !unicode.IsDigit(r) }))
+					if word != "" && strings.TrimFunc(word, unicode.IsDigit) != "" {
+						if !slices.Contains(words, "test") {
+							words = append(words, "test")
+						}
+						words = append(words, word)
+					}
 				}
+				break
 			}
-			break
 		}
 	}
 	return failureCause(code, detail) + " " + strings.Join(parts, "/") + " " + strings.Join(words, " ")

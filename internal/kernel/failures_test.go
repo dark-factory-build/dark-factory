@@ -14,7 +14,7 @@ func TestFailureSignatureIgnoresIdentifiersAndNumbers(t *testing.T) {
 	exit := sql.NullInt64{Int64: 70, Valid: true}
 	a := failureSignature("failed", "provider_exit", exit, sql.NullInt64{}, exit, "provider exited before an attempt outcome")
 	b := failureSignature("failed", "provider_exit", exit, sql.NullInt64{}, exit, "provider exited before an attempt outcome")
-	if a != b || a != "provider_crash failed/provider_exit/70/-/70 provider exited before an attempt outcome" {
+	if a != b || a != "provider_crash failed/provider_exit/70/-/70 " {
 		t.Fatalf("signature = %q / %q", a, b)
 	}
 	first := failureSignature("blocked", "", sql.NullInt64{}, sql.NullInt64{}, sql.NullInt64{}, "task 6717e53f321acc7b request 42 failed twice: local API transport failed")
@@ -24,6 +24,20 @@ func TestFailureSignatureIgnoresIdentifiersAndNumbers(t *testing.T) {
 	}
 	if other := failureSignature("failed", "provider_exit", sql.NullInt64{Int64: 1, Valid: true}, sql.NullInt64{}, sql.NullInt64{}, "provider exited before an attempt outcome"); other == a {
 		t.Fatal("a different exit code shared a signature")
+	}
+}
+
+func TestWorkerFailureSignatureUsesCauseAndCodeNotFreeText(t *testing.T) {
+	sameCause := failureSignature("blocked", "", sql.NullInt64{}, sql.NullInt64{}, sql.NullInt64{}, "first wording: local API transport failed")
+	otherWording := failureSignature("blocked", "", sql.NullInt64{}, sql.NullInt64{}, sql.NullInt64{}, "different wording: local API unavailable")
+	if sameCause != otherWording {
+		t.Fatalf("reworded worker failures = %q / %q", sameCause, otherWording)
+	}
+	if differentClass := failureSignature("blocked", "", sql.NullInt64{}, sql.NullInt64{}, sql.NullInt64{}, "premise not reproduced: source differs"); differentClass == sameCause {
+		t.Fatalf("different cause class shared signature: %q", differentClass)
+	}
+	if differentCode := failureSignature("blocked", "protocol", sql.NullInt64{}, sql.NullInt64{}, sql.NullInt64{}, "first wording: local API transport failed"); differentCode == sameCause {
+		t.Fatalf("different structured code shared signature: %q", differentCode)
 	}
 }
 
@@ -68,7 +82,7 @@ func TestFailureCauseOfTransientFollowsItsDetail(t *testing.T) {
 }
 
 func TestFailureSignatureHandlesUnicodeBeforeMarker(t *testing.T) {
-	signature := failureSignature("failed", "checks", sql.NullInt64{}, sql.NullInt64{}, sql.NullInt64{}, "Ⱥ not ok TestUnicode")
+	signature := failureSignature("check", "checks", sql.NullInt64{}, sql.NullInt64{}, sql.NullInt64{}, "Ⱥ not ok TestUnicode")
 	if !strings.Contains(signature, "testunicode") {
 		t.Fatalf("unicode marker signature = %q", signature)
 	}
