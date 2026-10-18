@@ -216,7 +216,7 @@ func TestConflictRepairRebasesAnAppPublishedPullsChangeOnce(t *testing.T) {
 // The failed-check recovery must remain actionable after the reconciler's
 // bounded rebase failures, while the pull observation stays unchanged.
 func TestFailedCheckRecoveryAfterRepeatedReconcileFailures(t *testing.T) {
-	fixture := newRecoveryFixtureWithRole(t, 0xad, kernel.RoleWorker)
+	fixture := newRecoveryFixtureFor(t, 0xad, kernel.RoleWorker, kernel.ProviderCodex)
 	ctx := context.Background()
 	fixture.stageRuntime(t)
 	fixture.beginRunnerStart(t)
