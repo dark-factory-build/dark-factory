@@ -88,9 +88,13 @@ func TestTerminateConvergesQueuedNaturalExit(t *testing.T) {
 
 // The exit a provider reaches because the runner terminated it is the
 // runner's, whatever status its TERM handler picks. The handler here exits
-// the instant the signal lands (the shell is blocked in a builtin read, with
-// no child to wait for), so nothing read after the signal could see it alive:
-// the status alone has to carry the attribution.
+// the instant the signal lands, so nothing read after the signal could see
+// the shell alive: the status alone has to carry the attribution. The
+// sleeper is forked before the witness is written: the group TERM then
+// always reaches it, and `wait` returns at once whether bash runs the trap
+// on the signal or only once its child is gone. A witness written before
+// the fork left a window in which the sleeper never saw the signal, bash 3.2
+// held the pending trap until `wait` returned, and the KILL escalation won.
 func TestTerminateAttributesHandledAndDefaultTERMExits(t *testing.T) {
 	for _, tc := range []struct {
 		name       string
@@ -104,8 +108,13 @@ func TestTerminateAttributesHandledAndDefaultTERMExits(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			f := newFixture(t)
-			child, _ := startControlledNaturalExitAfter(t, f, tc.trap, 23)
+			ready := filepath.Join(f.root, "ready")
+			child := f.start("/bin/sh", []string{"-c", fmt.Sprintf("%s sleep 30 & printf ready > %q; wait", tc.trap, ready)}, nil, outputFile(t, filepath.Join(f.root, "out")))
+			if _, err := child.Activate(); err != nil {
+				t.Fatal(err)
+			}
 			installOwnedChildSafetyCleanup(t, child)
+			waitFile(t, ready)
 			exit, err := child.Terminate(time.Second)
 			if err != nil || exit.Code != tc.wantCode || exit.Signal != tc.wantSignal || !exit.Aborted {
 				t.Fatalf("terminated exit=%+v err=%v, want code=%d signal=%d aborted", exit, err, tc.wantCode, tc.wantSignal)
@@ -148,7 +157,7 @@ func TestSelfSignalledExitIsNotRunnerAborted(t *testing.T) {
 // that finally waits it still reports the runner's termination.
 func TestRetriedCleanupKeepsTerminationAttribution(t *testing.T) {
 	f := newFixture(t)
-	child, _ := startControlledNaturalExitAfter(t, f, "", 23)
+	child, _ := startControlledNaturalExit(t, f, 23)
 	installOwnedChildSafetyCleanup(t, child)
 	child.testConvergence = func() error {
 		return fmt.Errorf("%w: injected group convergence failure", ErrUnresolved)
@@ -549,14 +558,6 @@ func releaseUnreadReadinessAfter(t *testing.T, daemon *os.File, delay time.Durat
 
 func startControlledNaturalExit(t *testing.T, f *fixture, code int) (*OwnedChild, *os.File) {
 	t.Helper()
-	return startControlledNaturalExitAfter(t, f, "", code)
-}
-
-// startControlledNaturalExitAfter runs prelude (shell text such as a trap)
-// before the child blocks in a builtin read, where a trapped signal is handled
-// the instant it lands.
-func startControlledNaturalExitAfter(t *testing.T, f *fixture, prelude string, code int) (*OwnedChild, *os.File) {
-	t.Helper()
 	fifo := filepath.Join(f.root, "natural-exit.fifo")
 	if err := unix.Mkfifo(fifo, 0o600); err != nil {
 		t.Fatal(err)
@@ -567,7 +568,7 @@ func startControlledNaturalExitAfter(t *testing.T, f *fixture, prelude string, c
 	}
 	t.Cleanup(func() { _ = release.Close() })
 	ready := filepath.Join(f.root, "natural-exit.ready")
-	command := fmt.Sprintf("%s printf ready > %q; IFS= read -r _ < %q; exit %d", prelude, ready, fifo, code)
+	command := fmt.Sprintf("printf ready > %q; IFS= read -r _ < %q; exit %d", ready, fifo, code)
 	child := f.start("/bin/sh", []string{"-c", command}, nil, outputFile(t, filepath.Join(f.root, "out")))
 	if _, err := child.Activate(); err != nil {
 		t.Fatal(err)
