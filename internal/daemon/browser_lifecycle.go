@@ -37,6 +37,10 @@ type BrowserRuntime struct {
 // ListenBrowser starts the state-only browser-v1 surface. Address is still
 // validated by internal/browser and therefore accepts only exact IPv4
 // loopback. Terminal and HumanRequest effects are not part of this slice.
+// consoleBundle is this build's embedded console bundle; a test supplies one
+// because only the release build embeds it.
+var consoleBundle = browser.Console
+
 func (daemon *Daemon) ListenBrowser(address string, allowedOrigins []string) (*BrowserRuntime, error) {
 	if daemon == nil || daemon.store == nil {
 		return nil, fmt.Errorf("%w: invalid browser daemon", kernel.ErrInvalidValue)
@@ -47,7 +51,7 @@ func (daemon *Daemon) ListenBrowser(address string, allowedOrigins []string) (*B
 		if err != nil {
 			return nil, err
 		}
-		console = relayhost.SignConsole(identity, browser.Console())
+		console = relayhost.SignConsole(identity, consoleBundle())
 	}
 	daemon.browserMu.Lock()
 	defer daemon.browserMu.Unlock()

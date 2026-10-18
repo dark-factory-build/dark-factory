@@ -334,7 +334,7 @@ async function main() {
   const config = JSON.parse(await readFile(process.argv[2], "utf8"));
   assert.match(config.url, /^ws:\/\/127\.0\.0\.1:[0-9]+\/browser$/);
   assert.match(config.host, /^127\.0\.0\.1:[0-9]+$/);
-  assert.equal(config.origin, `http://${config.host}`);
+  assert.equal(config.origin, "https://app.darkfactory.build");
   assert.match(config.challenge, /^[0-9a-f]{64}$/);
   assert.match(config.agentId, /^[0-9a-f]{32}$/);
 

@@ -2,6 +2,8 @@ package daemon
 
 import (
 	"context"
+	"crypto/ed25519"
+	"encoding/base64"
 	"encoding/hex"
 	"errors"
 	"fmt"
@@ -126,8 +128,9 @@ func (daemon *Daemon) OpenBrowser(ctx context.Context) (string, error) {
 	if !valid || !browserRuntimeReady(runtime) {
 		return "", fmt.Errorf("%w: browser transport unavailable", kernel.ErrBusy)
 	}
-	// The listener serves the desktop console at its own origin.
-	origin := "http://" + runtime.Addr()
+	if !runtimeAllowsProductionOrigin(runtime) {
+		return "", fmt.Errorf("%w: production browser origin is not configured", kernel.ErrInvalidValue)
+	}
 	at, err := daemon.timestamp()
 	if err != nil {
 		return "", err
@@ -147,10 +150,17 @@ func (daemon *Daemon) OpenBrowser(ctx context.Context) (string, error) {
 		return "", fmt.Errorf("%w: browser challenge generation failed", kernel.ErrBusy)
 	}
 	digest := kernel.HashBrowserChallenge(challenge[:])
-	if _, err := daemon.store.CreateBrowserPairingChallenge(ctx, digest, runtime.backend.boot, origin, webCapabilities, at, expires); err != nil {
+	if _, err := daemon.store.CreateBrowserPairingChallenge(ctx, digest, runtime.backend.boot, webProductionOrigin, webCapabilities, at, expires); err != nil {
 		return "", err
 	}
-	link := origin + "/#df_pair=" + hex.EncodeToString(challenge[:])
+	link := webProductionOrigin + "/#df_pair=" + hex.EncodeToString(challenge[:])
+	// The page pins this key and runs only a console bundle it signed.
+	daemon.browserMu.Lock()
+	console := daemon.console
+	daemon.browserMu.Unlock()
+	if len(console) >= ed25519.PublicKeySize {
+		link += "&df_key=" + base64.RawURLEncoding.EncodeToString(console[:ed25519.PublicKeySize])
+	}
 	return link, nil
 }
 
