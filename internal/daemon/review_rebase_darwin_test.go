@@ -332,13 +332,13 @@ func TestFailedCheckRecoveryAfterRepeatedReconcileFailures(t *testing.T) {
 			break
 		}
 	}
+	op := lastDurableReview(t, fixture.store, changeState.ProjectID)
 	if after.WorkRevision.Int64() != 2 {
-		t.Fatalf("recovery did not advance task once: work revision=%d task=%+v", after.WorkRevision.Int64(), after)
+		t.Fatalf("recovery did not advance task once: work revision=%d status=%s task=%+v operation={failures:%d rebased:%t state:%s escalation:%q last:%q}", after.WorkRevision.Int64(), after.Status, after, op.Failures, op.Rebased, op.State, op.Escalation, op.LastAction)
 	}
 	if after.Status != kernel.TaskQueued {
 		t.Fatalf("recovery task is not queued/actionable: status=%s task=%+v", after.Status, after)
 	}
-	op := lastDurableReview(t, fixture.store, changeState.ProjectID)
 	feedback, marker := kernel.TaskFeedback(after), "review-operation: "+op.ID+"\n"
 	if strings.Count(feedback, marker) != 1 {
 		t.Fatalf("recovery feedback marker count=%d, want one: feedback=%q operation=%+v", strings.Count(feedback, marker), feedback, op)
