@@ -156,35 +156,10 @@ export function TerminalContent({
     ? <TerminalHost key={`${terminal.agentId}:${terminal.surfaceVersion}`} controller={controller} surfaceVersion={terminal.surfaceVersion} />
     : undefined;
   if (terminal.finishing) return <>{terminalHost}<p className="dfFactoryConsole__instructionState">Finishing</p></>;
-  if (terminal.taskTitle !== undefined) return <>{terminalHost}<AgentSteering terminal={terminal} controller={controller} /></>;
+  if (terminal.taskTitle !== undefined) return <>{terminalHost}{terminal.phase === "ready" ? null : <p className="dfFactoryConsole__instructionState">Starting</p>}</>;
   if (terminal.paused) return <>{terminalHost}<p className="dfFactoryConsole__instructionState">Paused</p></>;
   if (terminal.queued) return <>{terminalHost}<p className="dfFactoryConsole__instructionState">Queued · waiting for capacity</p></>;
   return terminalHost ?? null;
-}
-
-function AgentSteering({ terminal, controller }: { terminal: FactoryTerminalView; controller: FactoryAppController }) {
-  const pending = terminal.controlPending !== undefined;
-  const unknown = terminal.controlStatus === "delivery_unknown" || terminal.controlError?.code === "connection";
-  const refused = terminal.controlStatus === "rejected" || (terminal.controlError !== undefined && ["invalid_request", "unauthorized", "stale", "too_large", "rate_limited", "not_found", "unsupported"].includes(terminal.controlError.code));
-  const status = terminal.controlStatus === "stopping"
-    ? "Stopping current work"
-    : terminal.controlStatus === "queued"
-      ? "Replacement queued"
-      : refused
-        ? "Control not sent"
-        : unknown
-          ? "Delivery could not be confirmed — check task state before sending again"
-          : undefined;
-  if (!terminal.controlReady) return <p className="dfFactoryConsole__instructionState">{terminal.finishing ? "Finishing" : "Starting"}</p>;
-  return (
-    <section className="dfFactoryConsole__steering" aria-label={`Controls for ${terminal.agentName}`}>
-      <div className="dfFactoryConsole__instructionActions">
-        {status === undefined ? null : <span role={unknown || terminal.controlStatus === "rejected" ? "alert" : "status"}>{status}</span>}
-        <button type="button" disabled={pending} onClick={() => { void controller.controlAgent("interrupt"); }}>Interrupt</button>
-        <button type="button" disabled={pending} onClick={() => { void controller.controlAgent("stop"); }}>Stop current</button>
-      </div>
-    </section>
-  );
 }
 
 function TerminalHost({ controller, surfaceVersion }: { controller: FactoryAppController; surfaceVersion: number }) {

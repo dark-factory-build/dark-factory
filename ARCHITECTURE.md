@@ -116,9 +116,10 @@ The paired browser is a client of the local API, not a second scheduler. It
 may submit a bounded instruction to a ready agent or queue later work while it
 is busy or paused. The daemon creates the same durable task used by `factoryctl`.
 No provider process is created until admission starts a run. Raw terminal input
-remains opaque; explicit message/interrupt controls reserve durable receipts
-before a PTY write. An uncertain receipt is never written again. Stop/replacement
-commits its receipt, optional successor and run finalization atomically.
+remains opaque; the explicit `factoryctl worker` message/interrupt controls
+reserve durable receipts before a PTY write. An uncertain receipt is never
+written again. Stop/replacement commits its receipt, optional successor and run
+finalization atomically.
 
 An orchestrator's attempt credential also grants project-scoped supervision
 commands. Every control revalidates its live authority and target inside the

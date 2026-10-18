@@ -12,7 +12,6 @@ import {
   type BrowserSession,
   type BrowserSessionOptions,
   type AgentItem,
-  type AgentControlAction,
   type HumanRequestItem,
   type SessionErrorCode,
   type SessionStatus,
@@ -23,7 +22,6 @@ import {
   type TaskItem,
   type TerminalReset,
   type RunPathsView,
-  randomOperationID,
   type OperationalGraphView,
 } from "@dark-factory/client";
 
@@ -81,10 +79,6 @@ export type FactoryTerminalView = Readonly<{
   /** Whether terminal attachment, input, or the mounted display reported the error. */
   errorSource?: TerminalErrorSource;
   paused: boolean;
-  controlPending?: AgentControlAction;
-  controlError?: SessionError | ProtocolError;
-  controlStatus?: "delivered" | "delivery_unknown" | "rejected" | "stopping" | "queued";
-  controlReady: boolean;
   queued: boolean;
   /** The mounted Xterm scrollback belongs to this agent's completed work. */
   hasOutputSurface: boolean;
@@ -129,10 +123,9 @@ export type FactoryAppStatus =
 
 type HumanSession = Pick<BrowserSession, "getHumanRequestDetail" | "replyHumanRequest" | "cancelHumanRequest">;
 type TerminalSession = Pick<BrowserSession, "resolveAgentTerminal" | "openTerminal" | "close">;
-type AgentTaskSession = Pick<BrowserSession, "controlAgent" | "resolveAgentTerminal">;
 type ConsoleSession = Pick<BrowserSession, "createProject" | "getRepositories" | "intake" | "updateTask" | "getOperationalGraph" | "getRunPaths" | "discoverAccounts" | "linkAccount" | "listBrowserClients" | "revokeBrowserClient" | "githubConnection" | "clientId">;
 type RemoteInviteSession = Pick<BrowserSession, "inviteRemote" | "capabilities">;
-type ControlledClient = Pick<BrowserClient, "connect" | "close"> & { readonly session?: HumanSession & TerminalSession & AgentTaskSession & ConsoleSession & RemoteInviteSession & Partial<Pick<BrowserSession, "projectContent">> };
+type ControlledClient = Pick<BrowserClient, "connect" | "close"> & { readonly session?: HumanSession & TerminalSession & ConsoleSession & RemoteInviteSession & Partial<Pick<BrowserSession, "projectContent">> };
 type ClientFactory = (options: BrowserSessionOptions) => ControlledClient;
 
 export type FactoryAppControllerOptions = {
@@ -157,9 +150,6 @@ type AgentTerminalSelection = {
   resets: number;
   /** Server session and cursor at which a replay reset can safely resume. */
   resume?: Pick<TerminalReset, "sessionId" | "head">;
-  controlPending?: AgentControlAction;
-  controlError?: SessionError | ProtocolError;
-  controlStatus?: FactoryTerminalView["controlStatus"];
   queuedTaskID?: string;
 };
 
@@ -495,67 +485,6 @@ export class FactoryAppController {
     const selected = this.#selectedAgent;
     if (this.#closed) return;
     this.#replaceTerminal(selected === undefined ? {} : { agentId: selected.agent.id, agentRevision: selected.agent.revision });
-  }
-
-  /** Send one durable receipt to the active task; raw terminal keys stay raw. */
-  async controlAgent(action: AgentControlAction, instruction = ""): Promise<boolean> {
-    const selected = this.#selectedAgent;
-    const session = this.#client?.session;
-    const task = selected?.task;
-    if (
-      this.#closed || this.#status !== "ready" || selected === undefined || task === undefined || selected.finishing ||
-      session === undefined || selected.controlPending !== undefined || this.#terminal?.snapshot.phase !== "ready"
-    ) return false;
-    const current = this.#state?.tasks.get(task.id);
-    const target = this.#terminal.target;
-    if (current === undefined || current.revision !== task.revision || current.status !== "running" || current.assigned_agent_id !== selected.agent.id || target === undefined) {
-      selected.controlError = new SessionError("stale");
-      this.#publish();
-      return false;
-    }
-    const body = instruction.trim();
-    if ((action === "message" || action === "replace") && body === "") return false;
-    let operationId: string, successorTaskId = "", successorIncarnationId = "";
-    try {
-      operationId = randomOperationID();
-      if (action === "replace") {
-        successorTaskId = randomOperationID();
-        successorIncarnationId = randomOperationID();
-      }
-    } catch (error) {
-      selected.controlError = finiteError(error);
-      this.#publish();
-      return false;
-    }
-    const generation = this.#generation;
-    selected.controlPending = action;
-    selected.controlError = undefined;
-    selected.controlStatus = undefined;
-    this.#publish();
-    try {
-      const result = await session.controlAgent({
-        operationId,
-        taskId: task.id,
-        expectedTaskRevision: task.revision,
-        target,
-        action,
-        instruction: action === "message" || action === "replace" ? body : "",
-        successorTaskId,
-        successorIncarnationId,
-      });
-      if (!this.#current(generation) || this.#selectedAgent !== selected) return false;
-      selected.controlPending = undefined;
-      selected.controlStatus = result.status;
-      selected.controlError = result.status === "delivery_unknown" ? new SessionError("connection") : undefined;
-      this.#publish();
-      return result.status !== "delivery_unknown" && result.status !== "rejected";
-    } catch (error) {
-      if (!this.#current(generation) || this.#selectedAgent !== selected) return false;
-      selected.controlPending = undefined;
-      selected.controlError = finiteError(error);
-      this.#publish();
-      return false;
-    }
   }
 
   /** The provider logins on this machine; SETTINGS explicitly asks for them. */
@@ -1134,10 +1063,6 @@ export class FactoryAppController {
         error: this.#terminal?.snapshot.error ?? this.#terminalDisplayError,
         errorSource: this.#terminal?.snapshot.errorSource ?? (this.#terminalDisplayError === undefined ? undefined : "display"),
         paused: this.#selectedAgent.agent.paused,
-        controlPending: this.#selectedAgent.controlPending,
-        controlError: this.#selectedAgent.controlError,
-        controlStatus: this.#selectedAgent.controlStatus,
-        controlReady: this.#selectedAgent.task !== undefined && !this.#selectedAgent.finishing && this.#terminal?.snapshot.phase === "ready",
         queued: this.#selectedAgent.queuedTaskID !== undefined && this.#selectedAgent.task === undefined,
         hasOutputSurface: this.#terminalSurface !== undefined,
         resets: this.#selectedAgent.resets,

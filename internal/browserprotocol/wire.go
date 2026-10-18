@@ -51,8 +51,6 @@ const (
 	TypeHumanRequestReplyResult     MessageType = "HUMAN_REQUEST_REPLY_RESULT"
 	TypeHumanRequestCancelRun       MessageType = "HUMAN_REQUEST_CANCEL_RUN"
 	TypeHumanRequestCancelRunResult MessageType = "HUMAN_REQUEST_CANCEL_RUN_RESULT"
-	TypeAgentControl                MessageType = "AGENT_CONTROL"
-	TypeAgentControlResult          MessageType = "AGENT_CONTROL_RESULT"
 	TypeAttachmentRetention         MessageType = "ATTACHMENT_RETENTION"
 	TypeAttachmentRetentionResult   MessageType = "ATTACHMENT_RETENTION_RESULT"
 	TypeProjectContent              MessageType = "PROJECT_CONTENT"
@@ -365,10 +363,6 @@ func decodeControl(data []byte, role senderRole) (ControlFrame, error) {
 		body = new(HumanRequestCancelRun)
 	case TypeHumanRequestCancelRunResult:
 		body = new(HumanRequestCancelRunResult)
-	case TypeAgentControl:
-		body = new(AgentControl)
-	case TypeAgentControlResult:
-		body = new(AgentControlResult)
 	case TypeAttachmentRetention:
 		body = new(AttachmentRetention)
 	case TypeAttachmentRetentionResult:
@@ -545,7 +539,6 @@ func idRequired(kind MessageType) bool {
 		TypeStateGet, TypeStateSnapshot, TypeStateWatch, TypeStateChanged,
 		TypeHumanRequestDetailGet, TypeHumanRequestDetail,
 		TypeHumanRequestReply, TypeHumanRequestReplyResult, TypeHumanRequestCancelRun, TypeHumanRequestCancelRunResult,
-		TypeAgentControl, TypeAgentControlResult,
 		TypeProjectContent, TypeProjectContentResult,
 		TypeAttachmentRetention, TypeAttachmentRetentionResult, TypeAgentUpdate, TypeAgentUpdateResult, TypeProjectCreate, TypeProjectCreateResult, TypeRepositoriesGet, TypeRepositories, TypeRepositoryMutate, TypeRepositoryMutateResult, TypeIntake, TypeIntakeResult, TypeTaskUpdate, TypeTaskUpdateResult, TypeOperationalGraphGet, TypeOperationalGraph,
 		TypeProjectLimits, TypeProjectLimitsResult,
@@ -571,13 +564,13 @@ func typeAllowed(role senderRole, kind MessageType) bool {
 	if role == clientRole {
 		return kind == TypePairProve || kind == TypeAuthProve || kind == TypeStateGet ||
 			kind == TypeStateWatch || kind == TypeHumanRequestDetailGet || kind == TypeHumanRequestReply || kind == TypeHumanRequestCancelRun || kind == TypeTerminalTargetGet || kind == TypeTerminalAttach || kind == TypeTerminalAck || kind == TypeTerminalLeaseAcquire || kind == TypeTerminalLeaseRenew || kind == TypeTerminalLeaseRelease || kind == TypeTerminalResize || kind == TypeTerminalDetach || kind == TypeRemoteInvite || kind == TypePushSubscribe || kind == TypeTelemetryIngest ||
-			kind == TypeAgentControl || kind == TypeAgentUpdate || kind == TypeProjectLimits || kind == TypeProjectCreate || kind == TypeRepositoriesGet || kind == TypeRepositoryMutate || kind == TypeIntake || kind == TypeTaskUpdate || kind == TypeOperationalGraphGet || kind == TypeRunPathsGet ||
+			kind == TypeAgentUpdate || kind == TypeProjectLimits || kind == TypeProjectCreate || kind == TypeRepositoriesGet || kind == TypeRepositoryMutate || kind == TypeIntake || kind == TypeTaskUpdate || kind == TypeOperationalGraphGet || kind == TypeRunPathsGet ||
 			kind == TypeAttachmentRetention || kind == TypeProjectContent ||
 			kind == TypeAccountsDiscover || kind == TypeAccountLink || kind == TypeAccountUpdate || kind == TypeBrowserClientsGet || kind == TypeBrowserClientRevoke || kind == TypeGitHubConnection
 	}
 	return role == serverRole && (kind == TypeHello || kind == TypePairResult || kind == TypeAuthResult ||
 		kind == TypeStateSnapshot || kind == TypeStateChanged || kind == TypeHumanRequestDetail || kind == TypeHumanRequestReplyResult || kind == TypeHumanRequestCancelRunResult || kind == TypeTerminalTarget || kind == TypeTerminalAttached || kind == TypeTerminalLeaseResult || kind == TypeTerminalResized || kind == TypeTerminalDetached || kind == TypeTerminalInputResult || kind == TypeTerminalEOF || kind == TypeTerminalExit || kind == TypeTerminalReset || kind == TypeRemoteInviteResult || kind == TypePushSubscribeResult || kind == TypeTelemetryIngestResult ||
-		kind == TypeAgentControlResult || kind == TypeAttachmentRetentionResult || kind == TypeProjectContentResult || kind == TypeAgentUpdateResult || kind == TypeProjectLimitsResult || kind == TypeProjectCreateResult || kind == TypeRepositories || kind == TypeRepositoryMutateResult || kind == TypeIntakeResult || kind == TypeTaskUpdateResult || kind == TypeOperationalGraph || kind == TypeRunPaths ||
+		kind == TypeAttachmentRetentionResult || kind == TypeProjectContentResult || kind == TypeAgentUpdateResult || kind == TypeProjectLimitsResult || kind == TypeProjectCreateResult || kind == TypeRepositories || kind == TypeRepositoryMutateResult || kind == TypeIntakeResult || kind == TypeTaskUpdateResult || kind == TypeOperationalGraph || kind == TypeRunPaths ||
 		kind == TypeAccounts || kind == TypeAccountLinkResult || kind == TypeAccountUpdateResult || kind == TypeBrowserClients || kind == TypeBrowserClientRevokeResult || kind == TypeGitHubConnectionResult)
 }
 
@@ -800,8 +793,6 @@ func validateBody(kind MessageType, body any) error {
 		return validTerminalControl(kind, body)
 	case TypeHumanRequestCancelRunResult:
 		return validTerminalControl(kind, body)
-	case TypeAgentControl, TypeAgentControlResult:
-		return validAgentControl(kind, body)
 	case TypeProjectContent, TypeProjectContentResult:
 		return validProjectContent(kind, body)
 	case TypeAttachmentRetention, TypeAttachmentRetentionResult, TypeAgentUpdate, TypeAgentUpdateResult, TypeProjectLimits, TypeProjectLimitsResult, TypeProjectCreate, TypeProjectCreateResult, TypeRepositoriesGet, TypeRepositories, TypeRepositoryMutate, TypeRepositoryMutateResult, TypeIntake, TypeIntakeResult, TypeTaskUpdate, TypeTaskUpdateResult, TypeOperationalGraphGet, TypeOperationalGraph,

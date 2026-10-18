@@ -433,38 +433,6 @@ func (daemon *Daemon) humanReplyOutcome(requestID kernel.HumanRequestID, effectE
 	return projection, nil
 }
 
-// browserIntervention reserves an explicit browser intervention before it
-// reaches a provider. Holding the browser-client gate makes the terminal
-// capability check and the receipt reservation race-free with revocation.
-func (daemon *Daemon) browserIntervention(ctx context.Context, principal browser.Principal, request kernel.TaskInterventionRequest) (kernel.TaskIntervention, error) {
-	clientID, releaseClient, err := daemon.authorizeEffectPrincipal(ctx, principal, kernel.BrowserCapabilityHumanActions)
-	if err != nil {
-		return kernel.TaskIntervention{}, err
-	}
-	defer releaseClient()
-	client, found, err := daemon.store.BrowserClient(ctx, clientID)
-	if err != nil {
-		return kernel.TaskIntervention{}, err
-	}
-	if !found || client.RevokedAt != nil || !client.CapabilityMask.Has(kernel.BrowserCapabilityTerminalInput) {
-		return kernel.TaskIntervention{}, kernel.ErrUnauthorized
-	}
-	if !terminalEffectsSupported {
-		return kernel.TaskIntervention{}, ErrTerminalEffectsUnsupported
-	}
-	daemon.operationMu.Lock()
-	defer daemon.operationMu.Unlock()
-	at, err := daemon.timestamp()
-	if err != nil {
-		return kernel.TaskIntervention{}, err
-	}
-	receipt, newlyReserved, err := daemon.store.ReserveTaskInterventionForBrowser(ctx, clientID, request, at)
-	if err != nil {
-		return kernel.TaskIntervention{}, err
-	}
-	return daemon.deliverIntervention(ctx, receipt, newlyReserved)
-}
-
 func (daemon *Daemon) intervention(ctx context.Context, actor kernel.TaskInterventionActor, digest kernel.AttemptDigest, request kernel.TaskInterventionRequest) (kernel.TaskIntervention, error) {
 	if !terminalEffectsSupported {
 		return kernel.TaskIntervention{}, ErrTerminalEffectsUnsupported

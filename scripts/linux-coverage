@@ -55,7 +55,7 @@ test internal/changeworker/worker_darwin_test.go shared L08
 test internal/daemon/api_dispatch_sandbox_darwin_test.go linux-equivalent L09
 test internal/daemon/api_operator_human_darwin_test.go shared L08
 test internal/daemon/attempt_result_binding_darwin_test.go shared L08
-test internal/daemon/browser_agent_control_darwin_test.go shared L08
+test internal/daemon/browser_adapter_run_darwin_test.go shared L08
 test internal/daemon/browser_source_darwin_test.go shared L08
 test internal/daemon/github_quota_darwin_test.go shared L08
 test internal/daemon/handover_darwin_test.go shared L08

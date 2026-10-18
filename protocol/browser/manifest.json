@@ -435,18 +435,6 @@
       "fixture": "error.json"
     },
     {
-      "type": "AGENT_CONTROL",
-      "direction": "client",
-      "id": "required",
-      "fixture": "agent_control.json"
-    },
-    {
-      "type": "AGENT_CONTROL_RESULT",
-      "direction": "server",
-      "id": "required",
-      "fixture": "agent_control_result.json"
-    },
-    {
       "type": "PROJECT_CONTENT",
       "direction": "client",
       "id": "required",
