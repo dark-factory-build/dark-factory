@@ -82,14 +82,16 @@ func TestKnowledgeRelevanceWindowFindsOlderLessons(t *testing.T) {
 	if err != nil || !found {
 		t.Fatalf("task repository: %v", err)
 	}
-	page, err := f.store.SearchKnowledge(ctx, active.run.ProjectID, repository.ID, kernel.KnowledgeQuery{Limit: 256})
-	if err != nil {
-		t.Fatal(err)
-	}
-	for _, lesson := range relevant {
-		for _, item := range page.Items {
-			if item.ID == lesson.ID {
-				t.Fatalf("relevant lesson %s remained inside the old 256-record window", lesson.ID)
+	for offset := 0; offset < 256; offset += 64 {
+		page, err := f.store.SearchKnowledge(ctx, active.run.ProjectID, repository.ID, kernel.KnowledgeQuery{Offset: offset, Limit: 64})
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, lesson := range relevant {
+			for _, item := range page.Items {
+				if item.ID == lesson.ID {
+					t.Fatalf("relevant lesson %s remained inside the old 256-record window", lesson.ID)
+				}
 			}
 		}
 	}
