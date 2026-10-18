@@ -11,6 +11,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/dark-factory-build/dark-factory/internal/api"
 	"github.com/dark-factory-build/dark-factory/internal/change"
 	"github.com/dark-factory-build/dark-factory/internal/kernel"
 	"github.com/dark-factory-build/dark-factory/internal/maintainer"
@@ -209,6 +210,144 @@ func TestConflictRepairRebasesAnAppPublishedPullsChangeOnce(t *testing.T) {
 	}
 	if found, err := fixture.store.PublishableChanges(ctx, mustKernelTime(t, 1<<40)); err != nil || len(found) != 0 {
 		t.Fatalf("published correction still unpublished: %+v %v", found, err)
+	}
+}
+
+// The failed-check recovery must remain actionable after the reconciler's
+// bounded rebase failures, while the pull observation stays unchanged.
+func TestFailedCheckRecoveryAfterRepeatedReconcileFailures(t *testing.T) {
+	fixture := newRecoveryFixtureFor(t, 0xad, kernel.RoleWorker, kernel.ProviderCodex)
+	ctx := context.Background()
+	fixture.stageRuntime(t)
+	fixture.beginRunnerStart(t)
+	fixture.activateRunner(t)
+	fixture.writeMarker(t, runner.OuterActivationMarkerName)
+	changeState, path := fixture.settlementWorktree(t)
+	g := change.TrustedGitExecutable
+	identity, err := processResourceIdentity(runner.Identity{PID: 99996, PGID: 99996, Birth: runner.Birth{Seconds: 1701, Microseconds: 4}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	states := fixture.resourceStates(t)
+	process, group := states[kernel.ResourceProviderProcess], states[kernel.ResourceProviderGroup]
+	if _, _, err := fixture.store.ActivateProviderResources(ctx, fixture.run.ID, process.ID, process.Revision, group.ID, group.Revision, identity, mustKernelTime(t, 450)); err != nil {
+		t.Fatal(err)
+	}
+	session, found, err := fixture.store.TerminalSessionForRun(ctx, fixture.run.ID)
+	if err != nil || !found {
+		t.Fatalf("session: found=%v err=%v", found, err)
+	}
+	if fixture.run, err = fixture.store.ActivateRun(ctx, fixture.run.ID, session.ID, fixture.currentRun(t).Revision, session.Revision, mustKernelTime(t, 460)); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(path, "made.txt"), []byte("made\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	settlementGit(t, g, path, "add", "made.txt")
+	settlementGit(t, g, path, "commit", "-q", "-m", "made a file")
+	local := strings.TrimSpace(settlementGit(t, g, path, "rev-parse", "HEAD"))
+	success, err := kernel.NewSuccessProposal("made a file")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := fixture.store.ProposeAttemptOutcome(ctx, fixture.keys.AttemptDigest, success, mustKernelTime(t, 500)); err != nil {
+		t.Fatal(err)
+	}
+	fixture.writeArtifact(t, []byte(fmt.Sprintf(`{"version":1,"attempt_id":%q,"kind":"inner_converged","proof":%q,"process":{"pid":99996,"pgid":99996,"birth":{"seconds":1701,"microseconds":4}},"exit":{"code":0}}`, fixture.run.ID.String(), hex.EncodeToString(fixture.proof[:]))))
+	if disposition := fixture.sweep(t); disposition.Action != RecoveredResultConsumed || disposition.Err != nil {
+		t.Fatalf("disposition = %+v", disposition)
+	}
+	if err := fixture.daemon.ContinueUnsettledRun(ctx, fixture.parent, fixture.changeParent, fixture.run.ID); err != nil {
+		t.Fatal(err)
+	}
+	repository := filepath.Join(filepath.Dir(filepath.Dir(fixture.parentPath)), "repo")
+	origin := filepath.Join(filepath.Dir(repository), "origin.git")
+	settlementGit(t, g, repository, "update-ref", "refs/heads/main", local)
+	settlementGit(t, g, repository, "clone", "-q", "--bare", repository, origin)
+	settlementGit(t, g, origin, "update-ref", "refs/heads/main", local)
+	settlementGit(t, g, repository, "remote", "add", "origin", origin)
+	settlementGit(t, g, repository, "config", "protocol.file.allow", "always")
+	source, err := inspectRegisteredRepository(ctx, repository, "main")
+	if err != nil {
+		t.Fatal(err)
+	}
+	source.PublicationRepository = "team/repo"
+	if err := fixture.store.BindRepositorySource(ctx, kernel.RepositoryID(changeState.ProjectID), source); err != nil {
+		t.Fatal(err)
+	}
+	if err := fixture.store.InitializeRepositoryBase(ctx, "main"); err != nil {
+		t.Fatal(err)
+	}
+	pr := kernel.ProductionPullRequest{Number: 12, Title: "Ship it", URL: "https://github.com/team/repo/pull/12", Head: local, Branch: "factory/" + changeState.ID.String()[:12], Base: "main", State: "open", Review: kernel.ProductionReview{Head: local, State: "unknown"}}
+	if err := fixture.store.RecordPublication(ctx, changeState.ProjectID, changeState.TaskID, "team/repo", pr, mustKernelTime(t, 510)); err != nil {
+		t.Fatal(err)
+	}
+	if err := fixture.store.BindRepositoryGitHubID(ctx, kernel.RepositoryID(changeState.ProjectID), 42); err != nil {
+		t.Fatal(err)
+	}
+	if err := fixture.home.WriteMaintainerCredential([]byte(`{"disabled":true}`)); err != nil {
+		t.Fatal(err)
+	}
+	if fixture.daemon.github, err = maintainer.OpenHost(fixture.home); err != nil || !fixture.daemon.customerMaintainer() {
+		t.Fatalf("customer host: %v", err)
+	}
+	backend := &checkoutReviewBackend{publicReviewBackend: publicReviewBackend{}, dir: path}
+	fixture.daemon.reviewBackend = func(string, uint64) review.Backend { return backend }
+	request := api.ReviewRequest{Repository: "team/repo", PullNumber: 12, Head: local, Base: strings.Repeat("f", 40), BaseRef: "main", Provider: "codex"}
+	if _, err := reviewNow(ctx, fixture.daemon, changeState.ProjectID, request); err != nil {
+		t.Fatal(err)
+	}
+	waitForMergePipeline(t, fixture.daemon)
+	backend.pull = &review.Pull{Head: local, State: "open", Failing: []string{"ci / required"}, Tests: []string{"--- FAIL: TestCorrection (0.01s)"}}
+	parent := fixture.daemon.changeParent.Load()
+	if parent == nil {
+		t.Fatal("missing configured Change parent")
+	}
+	gitExecutable := fixture.daemon.gitExecutable.Load()
+	if gitExecutable == nil {
+		t.Fatal("missing configured Git executable")
+	}
+	fixture.daemon.gitExecutable.Store(nil)
+	for range review.FailuresBeforeEscalation {
+		if _, err := fixture.daemon.advanceReviewOperations(ctx, false); err != nil {
+			t.Fatal(err)
+		}
+	}
+	before, _, err := fixture.store.Task(ctx, changeState.TaskID)
+	if err != nil || before.WorkRevision.Int64() != 1 {
+		t.Fatalf("failed actions changed worker task: %+v err=%v", before, err)
+	}
+	fixture.daemon.gitExecutable.Store(gitExecutable)
+	var after kernel.Task
+	for pass := 0; pass < review.FailuresBeforeEscalation; pass++ {
+		if _, err := fixture.daemon.advanceReviewOperations(ctx, false); err != nil {
+			t.Fatal(err)
+		}
+		var found bool
+		after, found, err = fixture.store.Task(ctx, changeState.TaskID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if found && after.WorkRevision.Int64() == 2 && after.Status == kernel.TaskQueued {
+			break
+		}
+	}
+	op := lastDurableReview(t, fixture.store, changeState.ProjectID)
+	if after.WorkRevision.Int64() != 2 {
+		t.Fatalf("recovery did not advance task once: work revision=%d status=%s task=%+v operation={failures:%d rebased:%t state:%s escalation:%q last:%q}", after.WorkRevision.Int64(), after.Status, after, op.Failures, op.Rebased, op.State, op.Escalation, op.LastAction)
+	}
+	if after.Status != kernel.TaskQueued {
+		t.Fatalf("recovery task is not queued/actionable: status=%s task=%+v", after.Status, after)
+	}
+	feedback, marker := kernel.TaskFeedback(after), "review-operation: "+op.ID+"\n"
+	if strings.Count(feedback, marker) != 1 {
+		t.Fatalf("recovery feedback marker count=%d, want one: feedback=%q operation=%+v", strings.Count(feedback, marker), feedback, op)
+	}
+	if !strings.Contains(feedback, "Failing checks: ci / required") {
+		t.Fatalf("recovery feedback lost failed-check text: %q", feedback)
+	}
+	if !strings.Contains(feedback, "--- FAIL: TestCorrection") {
+		t.Fatalf("recovery feedback lost failed-test text: %q", feedback)
 	}
 }
 
