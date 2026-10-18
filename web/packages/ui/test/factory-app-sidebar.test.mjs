@@ -63,23 +63,16 @@ test("paused or capacity-queued idle agents show truthful state without task ent
   }
 });
 
-test("a definite steering refusal is visible", () => {
+test("a running task shows only its terminal: no steering controls or task history", () => {
   const markup = renderToStaticMarkup(createElement(TerminalContent, {
-    terminal: terminalView({ taskTitle: "Standing inspection", controlReady: true, controlError: { code: "stale" } }),
-    controller: {},
-  }));
-  assert.match(markup, />Control not sent</);
-});
-
-test("the terminal has controls but no duplicated task history", () => {
-  const markup = renderToStaticMarkup(createElement(TerminalContent, {
-    terminal: terminalView({ taskTitle: "Standing inspection", controlReady: true }),
+    terminal: terminalView({ taskTitle: "Standing inspection" }),
     controller: {},
   }));
   assert.equal(markup.includes("History"), false);
-  for (const removed of ["textarea", "Any worker", "Start", "Add follow-up work", "Add to queue"]) assert.equal(markup.includes(removed), false, removed);
-  assert.match(markup, />Interrupt<\/button>/);
-  assert.match(markup, />Stop current<\/button>/);
+  for (const removed of ["textarea", "Any worker", "Start", "Add follow-up work", "Add to queue", "Interrupt", "Stop current", "Control not sent"]) assert.equal(markup.includes(removed), false, removed);
+  assert.equal((markup.match(/<button/g) ?? []).length, 0);
+  const attaching = renderToStaticMarkup(createElement(TerminalContent, { terminal: terminalView({ taskTitle: "Standing inspection", phase: "attaching" }), controller: {} }));
+  assert.match(attaching, />Starting<\/p>/);
 });
 
 

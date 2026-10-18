@@ -505,7 +505,6 @@ test("the two-column console keeps one mounted terminal slot", () => {
   assert.match(css, /\.dfFactoryConsole__terminalPanel :where\(p\)\s*\{\s*margin: 0;/);
   assert.match(css, /\.dfConsoleRow\s*\{[^}]*flex-wrap: wrap;/);
   assert.match(css, /\.dfConsoleLayout\s*\{[^}]*grid-template-columns: minmax\(0, 2fr\) minmax\(0, 1fr\);/);
-  assert.match(css, /\.dfFactoryConsole__instructionActions\s*\{[^}]*display: flex;[^}]*flex-wrap: wrap;/);
   assert.match(css, /\.dfConsoleShell\s*\{[^}]*font-family: var\(--df-font-mono\)/);
   assert.match(css, /:focus-visible\s*\{\s*outline: 2px solid var\(--df-console-accent\);/);
 

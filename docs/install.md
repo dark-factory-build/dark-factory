@@ -136,10 +136,11 @@ CLI.
 
 Select an agent on the floor or in the roster. Its terminal, queue and Needs
 You decisions share the side panel. A terminal instruction to a ready agent
-creates durable work; Message steers a running session. Interrupt stops Codex
-generation while preserving the task, while Stop ends it. Send a completed
-result back with feedback or start a separate replacement without losing its
-history. `factoryctl task add` queues later work while an agent is busy.
+creates durable work. Steer a running worker from the CLI: `factoryctl worker
+message` steers its session, `interrupt` stops Codex generation while
+preserving the task, `stop` ends it, and `replace` starts a separate
+replacement without losing its history. `factoryctl task add` queues later
+work while an agent is busy.
 
 Assign work to a named worker or Any eligible worker in the project. Named
 work is taken first; the next free eligible worker then claims shared work.

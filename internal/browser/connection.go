@@ -531,7 +531,7 @@ func (current *connection) dispatch(frame browserprotocol.ControlFrame) bool {
 			return false
 		}
 		payload, err = browserprotocol.EncodeTaskUpdateResult(frame.ID, result)
-	case browserprotocol.OperationalGraphGet, browserprotocol.RunPathsGet, browserprotocol.AgentControl, browserprotocol.HumanRequestReply, browserprotocol.HumanRequestCancelRun, browserprotocol.Intake, browserprotocol.GitHubConnection, browserprotocol.RepositoryMutate:
+	case browserprotocol.OperationalGraphGet, browserprotocol.RunPathsGet, browserprotocol.HumanRequestReply, browserprotocol.HumanRequestCancelRun, browserprotocol.Intake, browserprotocol.GitHubConnection, browserprotocol.RepositoryMutate:
 		// These may use their whole call budget. That must not hold up state
 		// and terminal frames, so one worker answers them in arrival order,
 		// each under its own budget from the moment it starts; the websocket
@@ -1220,22 +1220,6 @@ func (current *connection) observe(frame browserprotocol.ControlFrame) {
 			break
 		}
 		payload, err = browserprotocol.EncodeRunPaths(frame.ID, result)
-	case browserprotocol.AgentControl:
-		backend, ok := current.server.backend.(AgentControlBackend)
-		if !ok {
-			err = ErrUnauthorized
-			break
-		}
-		result, backendErr := backend.ControlAgent(ctx, current.principal, body)
-		if backendErr != nil {
-			err = backendErr
-			break
-		}
-		if result.OperationID != body.OperationID || result.TaskID != body.TaskID || result.RunID != body.RunID || result.SuccessorTaskID != body.SuccessorTaskID {
-			err = errBackendResult
-			break
-		}
-		payload, err = browserprotocol.EncodeAgentControlResult(frame.ID, result)
 	case browserprotocol.HumanRequestReply:
 		if current.server.terminalBackend == nil {
 			err = ErrUnauthorized

@@ -95,9 +95,6 @@ export type HumanRequestReplyBody = { request_id: string; expected_revision: big
 export type HumanRequestReplyResultBody = { request_id: string; revision: bigint; status: "resolved" | "delivery_unknown" };
 export type HumanRequestCancelRunBody = { request_id: string; expected_request_revision: bigint; expected_run_revision: bigint };
 export type HumanRequestCancelRunResultBody = { run_id: string; run_revision: bigint; request_id: string; request_revision: bigint };
-export type AgentControlAction = "message" | "interrupt" | "stop" | "replace";
-export type AgentControlBody = { operation_id: string; task_id: string; run_id: string; expected_task_revision: bigint; expected_run_revision: bigint; action: AgentControlAction; instruction: string; successor_task_id: string; successor_incarnation_id: string };
-export type AgentControlResultBody = { operation_id: string; task_id: string; run_id: string; status: "delivered" | "delivery_unknown" | "rejected" | "stopping" | "queued"; successor_task_id: string };
 export type AgentUpdateBody = { agent_id: string; expected_revision: bigint; appearance?: SpriteAppearance; model?: string; reasoning_effort?: string; account_id?: string; paused?: boolean; archived?: boolean; idle_policy?: IdlePolicy; idle_after_seconds?: number; idle_instruction?: string; idle_wake_on?: IdleWakeOn };
 export type AgentUpdateResultBody = { agent_id: string; revision: bigint };
 export type ProjectCreateBody = { project_id: string; name: string; root: string };
@@ -224,7 +221,6 @@ export type TerminalServerControlFrame =
 export type ServerControlFrame = { type: "PROJECT_CONTENT_RESULT"; id: string; body: ProjectContentResult } | HelloFrame | PairResultFrame | AuthResultFrame | StateSnapshotFrame | StateChangedFrame | HumanRequestDetailFrame
   | { type: "HUMAN_REQUEST_REPLY_RESULT"; id: string; body: HumanRequestReplyResultBody }
   | { type: "HUMAN_REQUEST_CANCEL_RUN_RESULT"; id: string; body: HumanRequestCancelRunResultBody }
-  | { type: "AGENT_CONTROL_RESULT"; id: string; body: AgentControlResultBody }
   | { type: "AGENT_UPDATE_RESULT"; id: string; body: AgentUpdateResultBody }
   | { type: "PROJECT_CREATE_RESULT"; id: string; body: ProjectCreateResultBody }
   | { type: "REPOSITORIES"; id: string; body: RepositoriesBody }
@@ -245,7 +241,6 @@ export type ServerControlFrame = { type: "PROJECT_CONTENT_RESULT"; id: string; b
 export type ClientControlFrame = { type: "PROJECT_CONTENT"; id: string; body: ProjectContentRequest } | PairProveFrame | AuthProveFrame | StateGetFrame | StateWatchFrame | HumanRequestDetailGetFrame
   | { type: "HUMAN_REQUEST_REPLY"; id: string; body: HumanRequestReplyBody }
   | { type: "HUMAN_REQUEST_CANCEL_RUN"; id: string; body: HumanRequestCancelRunBody }
-  | { type: "AGENT_CONTROL"; id: string; body: AgentControlBody }
   | { type: "AGENT_UPDATE"; id: string; body: AgentUpdateBody }
   | { type: "PROJECT_CREATE"; id: string; body: ProjectCreateBody }
   | { type: "REPOSITORIES_GET"; id: string; body: RepositoriesGetBody }
@@ -371,24 +366,6 @@ function validateBody(type: ControlType, body: unknown, wire: boolean): ControlB
     case "HUMAN_REQUEST_REPLY_RESULT": requireKeys(body, ["request_id", "revision", "status"], wire); if (body.status !== "resolved" && body.status !== "delivery_unknown") malformed(); return { request_id: dynamicID(body.request_id), revision: decimal(body.revision, wire, true), status: body.status };
     case "HUMAN_REQUEST_CANCEL_RUN": requireKeys(body, ["request_id", "expected_request_revision", "expected_run_revision"], wire); return { request_id: dynamicID(body.request_id), expected_request_revision: decimal(body.expected_request_revision, wire, true), expected_run_revision: decimal(body.expected_run_revision, wire, true) };
     case "HUMAN_REQUEST_CANCEL_RUN_RESULT": requireKeys(body, ["run_id", "run_revision", "request_id", "request_revision"], wire); return { run_id: dynamicID(body.run_id), run_revision: decimal(body.run_revision, wire, true), request_id: dynamicID(body.request_id), request_revision: decimal(body.request_revision, wire, true) };
-    case "AGENT_CONTROL": {
-      requireKeys(body, ["operation_id", "task_id", "run_id", "expected_task_revision", "expected_run_revision", "action", "instruction", "successor_task_id", "successor_incarnation_id"], wire);
-      const action = agentControlAction(body.action);
-      const instruction = boundedText(body.instruction, 0, action === "replace" ? MAX_TASK_INSTRUCTION_BYTES : MAX_HUMAN_REPLY_BYTES);
-      const successor_task_id = body.successor_task_id === "" ? "" : dynamicID(body.successor_task_id);
-      const successor_incarnation_id = body.successor_incarnation_id === "" ? "" : dynamicID(body.successor_incarnation_id);
-      if (action === "replace") {
-        if (instruction === "" || successor_task_id === "" || successor_incarnation_id === "" || successor_task_id === body.task_id) malformed();
-      } else if (successor_task_id !== "" || successor_incarnation_id !== "" || (action === "message" ? instruction === "" : instruction !== "")) malformed();
-      return { operation_id: dynamicID(body.operation_id), task_id: dynamicID(body.task_id), run_id: dynamicID(body.run_id), expected_task_revision: decimal(body.expected_task_revision, wire, true), expected_run_revision: decimal(body.expected_run_revision, wire, true), action, instruction, successor_task_id, successor_incarnation_id };
-    }
-    case "AGENT_CONTROL_RESULT": {
-      requireKeys(body, ["operation_id", "task_id", "run_id", "status", "successor_task_id"], wire);
-      if (body.status !== "delivered" && body.status !== "delivery_unknown" && body.status !== "rejected" && body.status !== "stopping" && body.status !== "queued") malformed();
-      const successor_task_id = body.successor_task_id === "" ? "" : dynamicID(body.successor_task_id);
-      if (body.status === "queued" ? successor_task_id === "" : successor_task_id !== "") malformed();
-      return { operation_id: dynamicID(body.operation_id), task_id: dynamicID(body.task_id), run_id: dynamicID(body.run_id), status: body.status, successor_task_id };
-    }
     case "AGENT_UPDATE": requireKeys(body, ["agent_id", "expected_revision"], wire, ["appearance", "model", "reasoning_effort", "account_id", "paused", "archived", "idle_policy", "idle_after_seconds", "idle_instruction", "idle_wake_on"]); { const result: AgentUpdateBody = { agent_id: dynamicID(body.agent_id), expected_revision: decimal(body.expected_revision, wire, true) }; if (present(body, "appearance")) result.appearance = spriteAppearance(body.appearance, wire); if (present(body, "model")) result.model = boundedText(body.model, 0, MAX_AGENT_MODEL_BYTES); if (present(body, "reasoning_effort")) result.reasoning_effort = boundedText(body.reasoning_effort, 0, MAX_AGENT_MODEL_BYTES); if (present(body, "account_id")) result.account_id = body.account_id === "" ? "" : dynamicID(body.account_id); if (present(body, "paused")) { if (typeof body.paused !== "boolean") malformed(); result.paused = body.paused; } if (present(body, "archived")) { if (typeof body.archived !== "boolean") malformed(); result.archived = body.archived; } if (present(body, "idle_policy")) result.idle_policy = idlePolicy(body.idle_policy); if (present(body, "idle_after_seconds")) result.idle_after_seconds = integer(body.idle_after_seconds, 0, MAX_IDLE_AFTER_SECONDS); if (present(body, "idle_instruction")) result.idle_instruction = boundedText(body.idle_instruction, 0, MAX_TASK_INSTRUCTION_BYTES); if (present(body, "idle_wake_on")) result.idle_wake_on = wakeOn(body.idle_wake_on); return result; }
     case "AGENT_UPDATE_RESULT": requireKeys(body, ["agent_id", "revision"], wire); return { agent_id: dynamicID(body.agent_id), revision: decimal(body.revision, wire, true) };
     case "PROJECT_CREATE": requireKeys(body, ["project_id", "name", "root"], wire); return { project_id: dynamicID(body.project_id), name: boundedText(body.name, 1, MAX_PROJECT_NAME_BYTES), root: boundedText(body.root, 1, 4096) };
@@ -799,10 +776,6 @@ function taskItem(value: unknown, wire: boolean): TaskItem {
 function sharedTaskItem(value: unknown, wire: boolean): TaskItem {
   if (!isObject(value) || value.assigned_agent_id !== "" || value.status !== "queued") malformed();
   return { ...taskItem({ ...value, assigned_agent_id: "f".repeat(32) }, wire), assigned_agent_id: "" };
-}
-function agentControlAction(value: unknown): AgentControlAction {
-  if (value !== "message" && value !== "interrupt" && value !== "stop" && value !== "replace") malformed();
-  return value;
 }
 function humanRequestOptions(value: unknown): string[] {
   if (!Array.isArray(value) || value.length > 4) malformed();

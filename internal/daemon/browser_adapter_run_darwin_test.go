@@ -2,38 +2,12 @@ package daemon
 
 import (
 	"context"
-	"errors"
 	"strings"
 	"testing"
 
-	"github.com/dark-factory-build/dark-factory/internal/browser"
 	"github.com/dark-factory-build/dark-factory/internal/browserprotocol"
 	"github.com/dark-factory-build/dark-factory/internal/kernel"
 )
-
-func TestBrowserAgentReplacementPreservesProviderLimit(t *testing.T) {
-	fixture := newAdapterFixture(t, kernel.BrowserCapabilityObserve|kernel.BrowserCapabilityHumanActions|kernel.BrowserCapabilityPrivateHumanRequestDetail)
-	fixture.pair(t)
-	run := adapterRunningRun(t, fixture.store, 170)
-	task, found, err := fixture.store.Task(context.Background(), run.TaskID)
-	if err != nil || !found {
-		t.Fatal(err)
-	}
-	request := browserprotocol.AgentControl{OperationID: strings.Repeat("01", 16), TaskID: task.ID.String(), RunID: run.ID.String(), ExpectedTaskRevision: decimalRevision(task.Revision), ExpectedRunRevision: decimalRevision(run.Revision), Action: "replace", Instruction: strings.Repeat("x", 8193), SuccessorTaskID: strings.Repeat("02", 16), SuccessorIncarnationID: strings.Repeat("03", 16)}
-	principal := terminalEffectPrincipal(fixture.client.ID, 1)
-	if _, err := fixture.backend.ControlAgent(context.Background(), principal, request); !errors.Is(mapBrowserError(err), browser.ErrTooLarge) {
-		t.Fatalf("oversized replacement: %v", err)
-	}
-	unchanged, _, err := fixture.store.Run(context.Background(), run.ID)
-	if err != nil || unchanged.Phase != kernel.RunRunning || unchanged.Revision != run.Revision {
-		t.Fatalf("oversized instruction stopped run: %+v %v", unchanged, err)
-	}
-	request.Instruction = "A replacement objective"
-	result, err := fixture.backend.ControlAgent(context.Background(), principal, request)
-	if err != nil || result.Status != "queued" || result.SuccessorTaskID != request.SuccessorTaskID {
-		t.Fatalf("replace result: %+v %v", result, err)
-	}
-}
 
 func TestTaskDetailTextChunkPagesOutcomeWithTheExistingCursor(t *testing.T) {
 	outcome := strings.Repeat("x", 2049)

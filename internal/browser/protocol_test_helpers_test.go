@@ -29,9 +29,6 @@ func testEncodeStateWatch(id string, v browserprotocol.StateWatch) ([]byte, erro
 func testEncodeHumanRequestDetailGet(id string, v browserprotocol.HumanRequestDetailGet) ([]byte, error) {
 	return testProtocolEncode(browserprotocol.TypeHumanRequestDetailGet, id, v)
 }
-func testEncodeAgentControl(id string, v browserprotocol.AgentControl) ([]byte, error) {
-	return testProtocolEncode(browserprotocol.TypeAgentControl, id, v)
-}
 func testEncodeProjectContent(id string, v browserprotocol.ProjectContent) ([]byte, error) {
 	return testProtocolEncode(browserprotocol.TypeProjectContent, id, v)
 }

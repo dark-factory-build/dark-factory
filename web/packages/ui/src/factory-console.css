@@ -315,38 +315,9 @@
   font-size: var(--df-text-xs);
 }
 
-.dfFactoryConsole__instructionActions {
-  display: flex;
-  flex-wrap: wrap;
-  min-height: 2.1rem;
-  align-items: center;
-  justify-content: flex-end;
-  gap: 0.75rem;
-  color: var(--df-console-alert);
-  font-size: var(--df-text-xs);
-  letter-spacing: 0.08em;
-}
-
 .dfFactoryConsole__instructionState {
   color: var(--df-console-muted);
   font-size: var(--df-text-xs);
-}
-
-.dfFactoryConsole__steering {
-  display: grid;
-  gap: 0.6rem;
-  margin-top: 0.75rem;
-}
-
-.dfFactoryConsole__steering textarea {
-  width: 100%;
-  resize: vertical;
-  padding: 0.6rem;
-  color: var(--df-console-text);
-  background: #000;
-  border: 1px solid var(--df-console-rule);
-  font: inherit;
-  line-height: 1.5;
 }
 
 @media (max-width: 720px) {

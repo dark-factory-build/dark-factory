@@ -42,8 +42,6 @@ type terminalTestBackend struct {
 	controlEntered, controlRelease              chan struct{}
 }
 
-var _ AgentControlBackend = (*terminalTestBackend)(nil)
-
 type terminalTestAttachment struct {
 	events        chan TerminalEvent
 	closeDone     chan struct{}
@@ -165,12 +163,6 @@ func (backend *terminalTestBackend) waitControl(ctx context.Context) error {
 		return ctx.Err()
 	}
 }
-func (backend *terminalTestBackend) ControlAgent(ctx context.Context, _ Principal, request browserprotocol.AgentControl) (browserprotocol.AgentControlResult, error) {
-	if err := backend.waitControl(ctx); err != nil {
-		return browserprotocol.AgentControlResult{}, err
-	}
-	return browserprotocol.AgentControlResult{OperationID: request.OperationID, TaskID: request.TaskID, RunID: request.RunID, SuccessorTaskID: request.SuccessorTaskID, Status: "delivered"}, nil
-}
 func (backend *terminalTestBackend) ReplyHumanRequest(ctx context.Context, _ Principal, request browserprotocol.HumanRequestReply) (browserprotocol.HumanRequestReplyResult, error) {
 	if err := backend.waitControl(ctx); err != nil {
 		return browserprotocol.HumanRequestReplyResult{}, err
@@ -275,16 +267,6 @@ func TestTerminalTransportKeepsTinyOutputFlowingDuringSlowControl(t *testing.T) 
 		request func(*terminalTestBackend) ([]byte, error)
 		result  browserprotocol.MessageType
 	}{
-		{
-			name: "agent control",
-			request: func(*terminalTestBackend) ([]byte, error) {
-				return testEncodeAgentControl("control", browserprotocol.AgentControl{
-					OperationID: strings.Repeat("11", 16), TaskID: strings.Repeat("12", 16), RunID: strings.Repeat("13", 16),
-					ExpectedTaskRevision: 1, ExpectedRunRevision: 1, Action: "message", Instruction: "continue",
-				})
-			},
-			result: browserprotocol.TypeAgentControlResult,
-		},
 		{
 			name: "human reply",
 			request: func(backend *terminalTestBackend) ([]byte, error) {

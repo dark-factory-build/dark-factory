@@ -243,13 +243,6 @@ type TerminalBackend interface {
 	CancelHumanRequestRun(context.Context, Principal, browserprotocol.HumanRequestCancelRun) (browserprotocol.HumanRequestCancelRunResult, error)
 }
 
-// AgentControlBackend holds explicit interventions apart from raw terminal
-// keystrokes. Only these bounded controls enter durable task history.
-type AgentControlBackend interface {
-	Backend
-	ControlAgent(context.Context, Principal, browserprotocol.AgentControl) (browserprotocol.AgentControlResult, error)
-}
-
 // ContentBackend serves the optional project library through one finite,
 // lazily requested operation union. The JSON payload is decoded by the daemon
 // adapter so this transport package does not import API or kernel DTOs.

@@ -6,8 +6,6 @@ import {
   type AgentUpdateBody,
   type RepositoryItem,
   type RunTelemetry,
-  type AgentControlAction,
-  type AgentControlResultBody,
   type IdlePolicy,
   type IdleWakeOn,
   type SpriteAppearance,
@@ -131,24 +129,12 @@ export type BrowserSessionOptions = {
 type Request = { kind: ServerControlFrame["type"]; resolve: (value: never) => void; reject: (error: unknown) => void };
 type TargetPending = Request & { agentId: string; expectedAgentRevision: bigint; expectedHead: bigint };
 type HumanPending = Request & { requestId: string; expectedRevision: bigint; expectedRunRevision: bigint; runId?: string; yielded?: boolean };
-type AgentControlPending = Request & { operationId: string; taskId: string; runId: string };
 type ConsoleKind = "AGENT_UPDATE_RESULT" | "TASK_UPDATE_RESULT" | "OPERATIONAL_GRAPH" | "RUN_PATHS";
 type ConsolePending = Request & { entityId: string; expectedRevision: bigint };
 const IGNORE = (): void => { /* the session itself owns this request's outcome */ };
 
 export type AgentUpdateResult = Readonly<{ agentId: string; revision: bigint }>;
 export type TaskUpdateResult = Readonly<{ taskId: string; revision: bigint }>;
-export type AgentControlRequest = Readonly<{
-  operationId: string;
-  taskId: string;
-  expectedTaskRevision: bigint;
-  target: TerminalTarget;
-  action: AgentControlAction;
-  instruction?: string;
-  successorTaskId?: string;
-  successorIncarnationId?: string;
-}>;
-export type AgentControlResult = Readonly<{ operationId: string; taskId: string; runId: string; status: AgentControlResultBody["status"]; successorTaskId: string }>;
 /** The project's operational structure with its current runtime reading. */
 export type OperationalGraphView = OperationalGraphBody;
 /** One agent's live run and the repository directories it has changed. */
@@ -258,37 +244,6 @@ export class BrowserSession {
   get capabilities(): CapabilityMask { return this.#capabilities; }
   get pairingBlocked(): boolean { return this.#pairingBlocked; }
   get authAttempted(): boolean { return this.#authAttempted; }
-
-  /** One explicit control against the exact task/run the UI just resolved. */
-  controlAgent(request: AgentControlRequest): Promise<AgentControlResult> {
-    try { this.#ensureLive(); } catch (error) { return Promise.reject(error); }
-    if (!this.#authenticated || (this.#capabilities & CAPABILITIES.human_actions) === 0) return Promise.reject(new SessionError("unauthorized"));
-    const needsTerminalInput = request.action === "message" || request.action === "interrupt";
-    if (needsTerminalInput && (this.#capabilities & CAPABILITIES.terminal_input) === 0) return Promise.reject(new SessionError("unauthorized"));
-    const instruction = request.instruction ?? "";
-    const successorTaskId = request.successorTaskId ?? "";
-    const successorIncarnationId = request.successorIncarnationId ?? "";
-    if (!validDynamicID(request.operationId) || !validDynamicID(request.taskId) || request.expectedTaskRevision < 1n || request.expectedTaskRevision > MAX_SQLITE_INTEGER || !validAgentControlRequest(request.action, instruction, successorTaskId, successorIncarnationId)) return Promise.reject(new SessionError("invalid_request"));
-    let target: TargetAuthority;
-    try { target = this.#targetAuthority(request.target); } catch (error) { return Promise.reject(error); }
-    if (this.#requests.size >= MAX_OUTSTANDING_REQUESTS) return Promise.reject(new SessionError("rate_limited"));
-    const id = this.#nextID("agent-control");
-    let payload: string;
-    try {
-      payload = encodeClientControl({ type: "AGENT_CONTROL", id, body: {
-        operation_id: request.operationId,
-        task_id: request.taskId,
-        run_id: target.descriptor.run_id,
-        expected_task_revision: request.expectedTaskRevision,
-        expected_run_revision: target.descriptor.run_revision,
-        action: request.action,
-        instruction,
-        successor_task_id: successorTaskId,
-        successor_incarnation_id: successorIncarnationId,
-      } });
-    } catch (error) { return Promise.reject(error); }
-    return this.#track(id, { kind: "AGENT_CONTROL_RESULT", operationId: request.operationId, taskId: request.taskId, runId: target.descriptor.run_id }, payload);
-  }
 
   /** Edit one agent's configuration. An omitted member is left alone. */
   updateAgent(request: { agentId: string; expectedRevision: bigint; appearance?: SpriteAppearance; model?: string; reasoningEffort?: string; accountId?: string; paused?: boolean; archived?: boolean; idlePolicy?: IdlePolicy; idleAfterSeconds?: number; idleInstruction?: string; idleWakeOn?: IdleWakeOn }): Promise<AgentUpdateResult> {
@@ -706,10 +661,6 @@ export class BrowserSession {
       this.#pending(frame.id, frame.type);
       this.#settle(frame.id, frame.type === "PUSH_SUBSCRIBE_RESULT" ? undefined : Object.freeze(frame.body)); return;
     }
-    if (frame.type === "AGENT_CONTROL_RESULT") {
-      this.#agentControlResult(frame.body, frame.id);
-      return;
-    }
     if (frame.type === "AGENT_UPDATE_RESULT" || frame.type === "TASK_UPDATE_RESULT" || frame.type === "OPERATIONAL_GRAPH" || frame.type === "RUN_PATHS") {
       this.#consoleResult(frame);
       return;
@@ -1084,12 +1035,6 @@ export class BrowserSession {
     this.#settle(id, Object.freeze({ link: body.link, expiresAtMs: body.expires_at_ms, svg: body.svg }));
   }
 
-  #agentControlResult(body: AgentControlResultBody, id: string): void {
-    const pending = this.#pending<AgentControlPending>(id, "AGENT_CONTROL_RESULT");
-    if (body.operation_id !== pending.operationId || body.task_id !== pending.taskId || body.run_id !== pending.runId) throw new ProtocolError("malformed");
-    this.#settle(id, Object.freeze({ operationId: body.operation_id, taskId: body.task_id, runId: body.run_id, status: body.status, successorTaskId: body.successor_task_id }));
-  }
-
   #mintTarget(descriptor: TerminalTargetDescriptor): TerminalTarget {
     const target = Object.freeze(Object.create(null)) as TerminalTarget;
     TARGET_AUTHORITIES.set(target as object, { owner: this, generation: this.#generationToken, descriptor: Object.freeze({ ...descriptor }) });
@@ -1249,12 +1194,6 @@ function replyID(text: string): string {
   try { const id = (JSON.parse(text) as { id?: unknown } | null)?.id; return typeof id === "string" ? id : ""; } catch { return ""; }
 }
 function bounded(value: string | undefined, maximum: number): boolean { return value !== undefined && new TextEncoder().encode(value).length > maximum; }
-function validAgentControlRequest(action: unknown, instruction: unknown, successorTaskId: unknown, successorIncarnationId: unknown): action is AgentControlAction {
-  if (typeof instruction !== "string" || typeof successorTaskId !== "string" || typeof successorIncarnationId !== "string") return false;
-  if (action === "message") return new TextEncoder().encode(instruction).length >= 1 && new TextEncoder().encode(instruction).length <= MAX_HUMAN_REPLY_BYTES && successorTaskId === "" && successorIncarnationId === "";
-  if (action === "interrupt" || action === "stop") return instruction === "" && successorTaskId === "" && successorIncarnationId === "";
-  return action === "replace" && new TextEncoder().encode(instruction).length >= 1 && new TextEncoder().encode(instruction).length <= MAX_TASK_INSTRUCTION_BYTES && validDynamicID(successorTaskId) && validDynamicID(successorIncarnationId);
-}
 function validDynamicID(value: unknown): value is string { return typeof value === "string" && /^[0-9a-f]{32}$/.test(value) && !/^0+$/.test(value); }
 
 /** Mint one canonical nonzero operation identity for an explicit user action. */

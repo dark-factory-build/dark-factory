@@ -806,6 +806,23 @@ func (daemon *Daemon) taskRead(ctx context.Context, call api.Call, scope *kernel
 	return reply
 }
 
+// taskDetailTextChunk pages task text for factoryctl task read.
+func taskDetailTextChunk(value string, offset uint64) (string, bool) {
+	start := taskDetailRuneOffset(value, offset)
+	end := taskDetailRuneOffset(value[start:], 2048) + start
+	return value[start:end], end < len(value)
+}
+
+func taskDetailRuneOffset(value string, count uint64) int {
+	for offset := range value {
+		if count == 0 {
+			return offset
+		}
+		count--
+	}
+	return len(value)
+}
+
 func (daemon *Daemon) workerOperation(ctx context.Context, call api.Call) api.Reply {
 	input, ok := call.WorkerOperationInput()
 	if !ok {

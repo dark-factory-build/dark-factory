@@ -23,14 +23,15 @@ const (
 	MaxAgentModelBytes  = 128
 	// MaxModelSourceBytes bounds the configuration path an effective model was
 	// read from. It is a local filesystem path, not free text.
-	MaxModelSourceBytes          = 1024
-	MaxTaskTitleBytes            = 1024
-	MaxBlockedReasonBytes        = 200
-	MaxHumanQuestionBytes        = 8192
-	MaxHumanReplyBytes           = 8192
-	MaxFactoryCapacity           = 1024
-	MaxTaskPriority       int64  = 1_000_000
-	MaxSQLiteInteger      uint64 = math.MaxInt64
+	MaxModelSourceBytes            = 1024
+	MaxTaskTitleBytes              = 1024
+	MaxBlockedReasonBytes          = 200
+	MaxHumanQuestionBytes          = 8192
+	MaxHumanReplyBytes             = 8192
+	MaxTaskInstructionBytes        = 32768
+	MaxFactoryCapacity             = 1024
+	MaxTaskPriority         int64  = 1_000_000
+	MaxSQLiteInteger        uint64 = math.MaxInt64
 )
 
 // Decimal is one non-negative SQLite chronology value. JSON represents it as
