@@ -380,7 +380,7 @@ var verifyServiceRelease = func(ctx context.Context, sourceDir, stagedDir string
 }
 
 // ServiceUpgrade stages the verified release binaries in sourceDir as
-// bin/previous and writes the upgrade marker naming them. Nothing launchd
+// bin/staged and writes the upgrade marker naming them. Nothing launchd
 // runs changes: the running build supervises their trial and only then
 // promotes them with PromoteService.
 func ServiceUpgrade(ctx context.Context, home, sourceDir string, expected buildinfo.Identity) error {
@@ -395,19 +395,19 @@ func ServiceUpgrade(ctx context.Context, home, sourceDir string, expected buildi
 		if err := receiptMatchesInstallation(receipt, home, ServiceConfig{Label: receipt.Label}, receipt.PlistPath); err != nil {
 			return ServiceStatus{}, err
 		}
-		previous := filepath.Join(ServiceDirectoryPath(home), "bin", "previous")
-		if err := removeOwnedTree(previous); err != nil {
+		staged := filepath.Join(ServiceDirectoryPath(home), "bin", "staged")
+		if err := removeOwnedTree(staged); err != nil {
 			return ServiceStatus{}, err
 		}
-		if err := os.Mkdir(previous, 0o700); err != nil {
+		if err := os.Mkdir(staged, 0o700); err != nil {
 			return ServiceStatus{}, fmt.Errorf("%w: create package stage: %v", ErrServiceAmbiguous, err)
 		}
 		for _, name := range serviceBinaryNames {
-			if _, err := copyServiceBinary(filepath.Join(sourceDir, name), previous, name); err != nil {
+			if _, err := copyServiceBinary(filepath.Join(sourceDir, name), staged, name); err != nil {
 				return ServiceStatus{}, err
 			}
 		}
-		if err := verifyServiceRelease(ctx, sourceDir, previous, expected); err != nil {
+		if err := verifyServiceRelease(ctx, sourceDir, staged, expected); err != nil {
 			return ServiceStatus{}, err
 		}
 		if err := WriteUpgradeMarker(home, UpgradeMarker{Target: expected.Source()}); err != nil {
@@ -446,12 +446,38 @@ func RestoreUpgradeBackup(home string) error {
 	return os.Rename(UpgradeBackupPath(home), filepath.Join(home, databaseName))
 }
 
-// PromoteService makes the staged bin/previous current in one rename, the
-// commit point, then binds the receipt to it. A crash between the two is
-// repaired by the next boot's RebindServiceReceipt.
+// PromoteService makes the staged bin/current swap the commit point, then
+// moves the old current to bin/previous for rollback. A crash in that move is
+// repaired by the next call without swapping the release back.
 func PromoteService(home string) error {
 	bin := filepath.Join(ServiceDirectoryPath(home), "bin")
-	if err := renameSwap(filepath.Join(bin, "previous"), filepath.Join(bin, "current"), unix.RENAME_SWAP); err != nil {
+	staged := filepath.Join(bin, "staged")
+	previous := filepath.Join(bin, "previous")
+	if _, err := os.Lstat(staged); err == nil {
+		stagedDigest, err := digestServiceFile(filepath.Join(staged, "factoryd"))
+		if err != nil {
+			return err
+		}
+		receipt, err := os.ReadFile(filepath.Join(ServiceDirectoryPath(home), serviceReceiptName))
+		if err != nil && !errors.Is(err, os.ErrNotExist) {
+			return errors.Join(ErrServiceReceipt, err)
+		}
+		if !bytes.Contains(receipt, []byte(`"program_digest":"`+stagedDigest+`"`)) {
+			if err := renameSwap(staged, filepath.Join(bin, "current"), unix.RENAME_SWAP); err != nil {
+				return errors.Join(ErrServiceAmbiguous, err)
+			}
+		} // Otherwise the swap already committed before a crash.
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return errors.Join(ErrServiceAmbiguous, err)
+	}
+	if _, err := os.Lstat(staged); err == nil {
+		if err := removeOwnedTree(previous); err != nil {
+			return err
+		}
+		if err := os.Rename(staged, previous); err != nil {
+			return errors.Join(ErrServiceAmbiguous, err)
+		}
+	} else if !errors.Is(err, os.ErrNotExist) {
 		return errors.Join(ErrServiceAmbiguous, err)
 	}
 	_ = syncServiceDirectory(bin)
@@ -654,7 +680,8 @@ func serviceUninstallLockedAt(ctx context.Context, home, userHome string, config
 		defer func() { _ = directory.Close() }()
 		current := filepath.Join(ServiceDirectoryPath(home), "bin", "current")
 		previous := filepath.Join(ServiceDirectoryPath(home), "bin", "previous")
-		for _, directory := range []string{current, previous} {
+		staged := filepath.Join(ServiceDirectoryPath(home), "bin", "staged")
+		for _, directory := range []string{current, previous, staged} {
 			for _, name := range serviceBinaryNames {
 				if err := removeOwnedFile(directory, name); err != nil {
 					return ServiceStatus{State: ServiceAmbiguous}, err
@@ -666,7 +693,7 @@ func serviceUninstallLockedAt(ctx context.Context, home, userHome string, config
 				}
 			}
 		}
-		for _, path := range []string{current, previous, filepath.Join(ServiceDirectoryPath(home), "bin")} {
+		for _, path := range []string{current, previous, staged, filepath.Join(ServiceDirectoryPath(home), "bin")} {
 			if path == filepath.Join(ServiceDirectoryPath(home), "bin") {
 				if err := removeOwnedTree(filepath.Join(path, ".current.stage")); err != nil {
 					return ServiceStatus{State: ServiceAmbiguous}, err
