@@ -311,6 +311,7 @@ func TestDecideTakesOneActionPerObservation(t *testing.T) {
 		{name: "ejected again names the group", pull: Pull{Group: group}, ops: []Operation{with(allow, func(op *Operation) { op.Enqueues = 2 })}, action: SendBack, note: "run 37527118828 failed"},
 		{name: "ejected again with no group", ops: []Operation{with(allow, func(op *Operation) { op.Enqueues = 2 })}, action: SendBack, note: "no merge-group run that built it was readable"},
 		{name: "failing until the pull changes", ops: []Operation{with(allow, func(op *Operation) { op.Failures = FailuresBeforeEscalation })}, action: Wait},
+		{name: "ejected red head still sends back", pull: Pull{Failing: []string{"ci / go"}}, ops: []Operation{with(allow, func(op *Operation) { op.State, op.Rebased, op.Failures = "ejected", true, FailuresBeforeEscalation })}, action: SendBack, note: "Failing checks: ci / go."},
 	} {
 		test.pull.Head, test.pull.State = head, "open"
 		action, note := Decide(test.pull, test.ops, test.answered)

@@ -1003,6 +1003,47 @@ func TestMergeQueueEjectionWithNoHeadFailureRequeuesOnceThenSendsBack(t *testing
 	}
 }
 
+func TestEjectedFailedChecksReachTheOriginalTaskOnce(t *testing.T) {
+	fixture, project, task, settle := publishedTask(t)
+	settle()
+	customerMode(t, fixture)
+	ctx := context.Background()
+	backend := &publicReviewBackend{pull: &review.Pull{Head: publishedReviewRequest().Head, State: "open", Failing: []string{"ci / go"}, Tests: []string{"--- FAIL: TestReleasedPullsNameTheOutstandingMergesTheCommitShips (0.01s)", "git commit exit status 128"}}}
+	fixture.daemon.reviewBackend = func(string, uint64) review.Backend { return backend }
+	if _, err := reviewNow(ctx, fixture.daemon, project, publishedReviewRequest()); err != nil {
+		t.Fatal(err)
+	}
+	op := waitForDurableReview(t, fixture.store, project, func(op review.Operation) bool { return op.State == "ejected" })
+	// Keep the observation unchanged so reconcilePull does not clear the
+	// accumulated action failures before Decide reaches the red-head guard.
+	op.State, op.Rebased, op.Failures, op.Observation = "ejected", true, review.FailuresBeforeEscalation, backend.pull.Observation()
+	store := durableReviewStore{store: fixture.store, project: project, repository: "team/repo", now: fixture.daemon.now}
+	if err := store.Update(ctx, op); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := fixture.daemon.advanceReviewOperations(ctx, false); err != nil {
+		t.Fatal(err)
+	}
+	current, _, err := fixture.store.Task(ctx, task.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	feedback := kernel.TaskFeedback(current)
+	if current.WorkRevision.Int64() != 2 || current.Status != kernel.TaskQueued || !strings.Contains(feedback, "Failing checks: ci / go.") || !strings.Contains(feedback, "git commit exit status 128") {
+		t.Fatalf("failed checks were not delivered as one actionable correction: task=%+v feedback=%q", current, feedback)
+	}
+	if _, err := fixture.daemon.advanceReviewOperations(ctx, false); err != nil {
+		t.Fatal(err)
+	}
+	current, _, err = fixture.store.Task(ctx, task.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if current.WorkRevision.Int64() != 2 || strings.Count(kernel.TaskFeedback(current), "review-operation:") != 1 {
+		t.Fatalf("failed checks were delivered more than once: task=%+v feedback=%q", current, kernel.TaskFeedback(current))
+	}
+}
+
 // An enqueue the App keeps refusing as UNPROCESSABLE is retried a bounded
 // number of passes, then becomes one escalated overseer item and waits for
 // the pull request to change.
