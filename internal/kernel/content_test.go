@@ -144,6 +144,97 @@ func TestOverseerEnqueuePinsContentAtInitialWorkRevision(t *testing.T) {
 	}
 }
 
+func TestOverseerEnqueueProposalDispatchIsAtomicAndScopedToProposal(t *testing.T) {
+	t.Parallel()
+	store, overseer, _ := runningOrchestratorRun(t)
+	defer store.Close()
+	ctx := context.Background()
+	proposal := func(seed byte) ContentRevision {
+		t.Helper()
+		content, err := store.CreateContent(ctx, knowledgeSpec(t, overseer.ProjectID, seed, ContentObservation, KnowledgeMetadata{Status: "tentative", RecordType: "proposal"}), mustTime(t, int64(seed)))
+		if err != nil {
+			t.Fatal(err)
+		}
+		return content
+	}
+	firstProposal := proposal(130)
+	secondProposal := proposal(131)
+	first, err := store.EnqueueTaskForOverseer(ctx, overseer.CredentialDigest, NewTask{ID: taskID(t, 133), ProjectID: overseer.ProjectID, IncarnationID: incarnationID(t, 134), Title: "first"}, mustTime(t, 140), TaskContentReference{ContentID: firstProposal.ID, ContentRevision: firstProposal.Revision})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Existing proposal acceptance semantics keep one implementation active at a time.
+	_, err = store.EnqueueTaskForOverseer(ctx, overseer.CredentialDigest, NewTask{ID: taskID(t, 136), ProjectID: overseer.ProjectID, IncarnationID: incarnationID(t, 137), Title: "second"}, mustTime(t, 142), TaskContentReference{ContentID: secondProposal.ID, ContentRevision: secondProposal.Revision})
+	if !errors.Is(err, ErrConflict) {
+		t.Fatalf("different active proposal dispatch: %v", err)
+	}
+	if _, err := store.EnqueueTaskForOverseer(ctx, overseer.CredentialDigest, NewTask{ID: taskID(t, 138), ProjectID: overseer.ProjectID, IncarnationID: incarnationID(t, 139), Title: "duplicate"}, mustTime(t, 143), TaskContentReference{ContentID: firstProposal.ID, ContentRevision: firstProposal.Revision}); !errors.Is(err, ErrConflict) {
+		t.Fatalf("duplicate proposal dispatch: %v", err)
+	}
+	cancelled, err := store.UpdateTask(ctx, first.ID, first.Revision, TaskPatch{Cancel: true}, mustTime(t, 144))
+	if err != nil || cancelled.Status != TaskCancelled {
+		t.Fatalf("terminal first task = %+v err=%v", cancelled, err)
+	}
+	if _, err := store.EnqueueTaskForOverseer(ctx, overseer.CredentialDigest, NewTask{ID: taskID(t, 140), ProjectID: overseer.ProjectID, IncarnationID: incarnationID(t, 141), Title: "replacement"}, mustTime(t, 145), TaskContentReference{ContentID: firstProposal.ID, ContentRevision: firstProposal.Revision}); err != nil {
+		t.Fatalf("replacement after terminal task: %v", err)
+	}
+	// A failed pin rolls back the task row as well as its would-be provenance.
+	failedID := taskID(t, 142)
+	missing := contentID(t, 250)
+	if _, err := store.EnqueueTaskForOverseer(ctx, overseer.CredentialDigest, NewTask{ID: failedID, ProjectID: overseer.ProjectID, IncarnationID: incarnationID(t, 143), Title: "atomic"}, mustTime(t, 146), TaskContentReference{ContentID: missing, ContentRevision: mustRevision(t, 1)}); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("invalid provenance pin: %v", err)
+	}
+	if _, found, err := store.Task(ctx, failedID); err != nil || found {
+		t.Fatalf("failed enqueue left task: found=%v err=%v", found, err)
+	}
+}
+
+func TestProposalDispatchStaysBlockedAfterSuccessUntilPullMerges(t *testing.T) {
+	t.Parallel()
+	store, _, project, agent := newAdmissionStore(t, RoleWorker, 4)
+	defer store.Close()
+	ctx := context.Background()
+	proposal := contentSpec(t, project.ID, 150, "accepted implementation")
+	proposal.Kind = ContentObservation
+	proposal.SourceReferences = `{"status":"tentative","record_type":"proposal"}`
+	content, err := store.CreateContent(ctx, proposal, mustTime(t, 40))
+	if err != nil {
+		t.Fatal(err)
+	}
+	first, err := store.EnqueueTask(ctx, NewTask{ID: taskID(t, 151), ProjectID: project.ID, AssignedAgentID: agent.ID, IncarnationID: incarnationID(t, 152), Title: "implementation"}, mustTime(t, 41))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.AttachContentToTask(ctx, first.ID, project.ID, content.ID, content.Revision, mustTime(t, 42)); err != nil {
+		t.Fatal(err)
+	}
+	keys := admissionKeys(t, 153, nil)
+	admission, err := store.AdmitNext(ctx, keys, mustTime(t, 43))
+	if err != nil || !admission.Admitted() {
+		t.Fatalf("admission = %+v, %v", admission, err)
+	}
+	terminal := settleWorkerRunForTest(t, store, *admission.Run, keys, 50)
+	head := changeHead(t, store, terminal.TaskID)
+	pr := ProductionPullRequest{Number: 77, Title: "Implementation", URL: "https://github.com/example/factory/pull/77", Head: head, Branch: "factory/implementation", Base: "main", State: "open", Review: ProductionReview{Head: head, State: "unknown"}}
+	if err := store.RecordPublication(ctx, project.ID, terminal.TaskID, "example/factory", pr, mustTime(t, 80)); err != nil {
+		t.Fatal(err)
+	}
+	second, err := store.EnqueueTask(ctx, NewTask{ID: taskID(t, 154), ProjectID: project.ID, AssignedAgentID: agent.ID, IncarnationID: incarnationID(t, 155), Title: "duplicate"}, mustTime(t, 81))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.AttachContentToTask(ctx, second.ID, project.ID, content.ID, content.Revision, mustTime(t, 82)); !errors.Is(err, ErrConflict) {
+		t.Fatalf("duplicate after success with open pull: %v", err)
+	}
+	pr.State, pr.MergedAt = "merged", "2026-10-18T00:00:00Z"
+	if err := store.RecordProductionObservation(ctx, project.ID, ProductionObservation{Repository: "example/factory", ObservedAt: 90, PullRequests: []ProductionPullRequest{pr}}, mustTime(t, 90)); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.AttachContentToTask(ctx, second.ID, project.ID, content.ID, content.Revision, mustTime(t, 91)); err != nil {
+		t.Fatalf("replacement after merge: %v", err)
+	}
+}
+
 func TestContentDeprecationReplayUsesExpectedRevisionAfterLaterRevision(t *testing.T) {
 	t.Parallel()
 	store, run, _ := runningWorkerRun(t)

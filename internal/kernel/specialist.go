@@ -50,7 +50,7 @@ const (
 	// (hex), implementing an accepted proposal while active: it pins a
 	// proposal revision, or a live decision other than ?3 names it. One
 	// self-generated implementation is active at a time.
-	activeImplementationSQL = `t.project_id = ?1 AND lower(hex(t.id)) <> lower(?4) AND t.status IN ('queued', 'running', 'blocked') AND (
+	activeImplementationSQL = `t.project_id = ?1 AND lower(hex(t.id)) <> lower(?4) AND (t.status IN ('queued', 'running', 'blocked') OR t.status = 'succeeded' AND NOT EXISTS (SELECT 1 FROM publication_tasks AS pt JOIN production_records AS pr ON pr.project_id = pt.project_id AND pr.repository = pt.repository AND pr.kind = 'pull_request' AND pr.identity = CAST(pt.pull_number AS TEXT) WHERE pt.task_id = t.id AND json_extract(pr.document, '$.state') = 'merged')) AND (
 	EXISTS (SELECT 1 FROM task_content_references AS r JOIN project_content_revisions AS p ON p.id = r.content_id AND p.revision = r.content_revision WHERE r.task_id = t.id AND ` + proposalRevisionSQL + `)
 	OR EXISTS (SELECT 1 FROM project_content_revisions AS d WHERE d.project_id = ?1 AND d.id IS NOT ?3 AND d.kind = 'decision' AND d.deprecated = 0
 		AND d.revision = (SELECT MAX(revision) FROM project_content_revisions WHERE id = d.id)
