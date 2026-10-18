@@ -13,7 +13,6 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
-	"sync/atomic"
 	"syscall"
 	"testing"
 	"time"
@@ -21,7 +20,6 @@ import (
 	"github.com/dark-factory-build/dark-factory/internal/api"
 	"github.com/dark-factory-build/dark-factory/internal/install"
 	"github.com/dark-factory-build/dark-factory/internal/kernel"
-	"golang.org/x/sys/unix"
 )
 
 // The trial child is this test binary, re-executed as a staged build.
@@ -214,169 +212,6 @@ func TestStagedBuildThatAnswersAndStopsCleanlyIsPromoted(t *testing.T) {
 	}
 	selfSource = func() string { return "development" }
 	bootUntilSettled(t, home)
-}
-
-// Under launchd the trial serves the canonical socket its supervisor was
-// handed: without it the trial would find that socket live, refuse to bind
-// and never answer. The trial leaves the socket in place for the next build.
-// An attempt read and outcome queued before the trial are refused by it and
-// replay until the build launchd starts next, inheriting the same socket,
-// answers them: never a transport failure.
-func TestStagedBuildServesTheActivatedSocketAndLeavesIt(t *testing.T) {
-	home := stagedHome(t, "serve", "development")
-	path := install.LocalAPISocketPath(home)
-	listener, err := net.ListenUnix("unix", &net.UnixAddr{Name: path, Net: "unix"})
-	if err != nil {
-		t.Fatal(err)
-	}
-	listener.SetUnlinkOnClose(false)
-	if err := os.Chmod(path, 0o600); err != nil {
-		t.Fatal(err)
-	}
-	activated, err := listener.File()
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer activated.Close()
-	if err := listener.Close(); err != nil {
-		t.Fatal(err)
-	}
-	before, err := os.Lstat(path)
-	if err != nil {
-		t.Fatal(err)
-	}
-	original := activatedLocalAPI
-	t.Cleanup(func() { activatedLocalAPI = original })
-	activatedLocalAPI = func() *os.File { return activated }
-	token := filepath.Join(filepath.Dir(home), "attempt.token")
-	if err := os.WriteFile(token, bytes.Repeat([]byte{'Q'}, 32), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	t.Setenv("DARK_FACTORY_ATTEMPT_TOKEN_FILE", token)
-	client, err := api.NewAttemptClientFromEnvironment(path)
-	if err != nil {
-		t.Fatal(err)
-	}
-	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
-	defer cancel()
-	answers := make(chan error, 2)
-	go func() { _, err := client.Task(ctx); answers <- err }()
-	go func() { _, err := client.Succeed(ctx, "queued across the release"); answers <- err }()
-	awaitQueued(t, activated, 2)
-	if err := superviseTrial(home, childArgs(home), install.UpgradeMarker{Target: "development"}); !errors.Is(err, errRestart) || !strings.HasSuffix(err.Error(), ": promoted development") {
-		t.Fatalf("trial = %v", err)
-	}
-	if after, err := os.Lstat(path); err != nil || !os.SameFile(before, after) {
-		t.Fatalf("the trial changed the activated socket: %v, %v", after, err)
-	}
-	successor := exec.Command(filepath.Join(install.ServiceDirectoryPath(home), "bin", "current", "factoryd"), childArgs(home)...)
-	successor.Env = append(os.Environ(), install.LocalAPIInheritEnv+"=4")
-	successor.ExtraFiles, successor.Stderr = []*os.File{nil, activated}, os.Stderr
-	if err := successor.Start(); err != nil {
-		t.Fatal(err)
-	}
-	defer func() {
-		_ = successor.Process.Signal(syscall.SIGTERM)
-		_ = successor.Wait()
-	}()
-	for range 2 {
-		// The successor knows no such attempt: its refusal is its answer.
-		var remote *api.RemoteError
-		if err := <-answers; !errors.As(err, &remote) || remote.Code() != api.RemoteUnauthorized {
-			t.Fatalf("queued attempt call across the release = %v", err)
-		}
-	}
-}
-
-// withRelease runs use against home's store, closed again after.
-func withRelease(t *testing.T, home string, use func(context.Context, *kernel.Store) error) {
-	t.Helper()
-	ctx := context.Background()
-	opened, err := install.OpenOperationalHome(ctx, home)
-	if err != nil {
-		t.Fatal(err)
-	}
-	store, err := opened.OpenStore(ctx)
-	if err == nil {
-		err = use(ctx, store)
-		err = errors.Join(err, store.Close())
-	}
-	if err = errors.Join(err, opened.Close()); err != nil {
-		t.Fatal(err)
-	}
-}
-
-// A release restart's outage runs from when the staging generation stops
-// serving, stamped while its socket is still bound, to when the settling one
-// starts accepting, after its browser and relay are up.
-func TestReleaseOutageStampsTheServingTransitions(t *testing.T) {
-	home := stagedHome(t, "serve", "development")
-	withRelease(t, home, func(ctx context.Context, store *kernel.Store) error {
-		project, err := kernel.ProjectIDFromBytes(bytes.Repeat([]byte{0x33}, kernel.IDBytes))
-		at, atErr := kernel.NewUnixMillis(time.Now().UnixMilli())
-		if err = errors.Join(err, atErr); err == nil {
-			_, err = store.CreateProject(ctx, kernel.NewProject{ID: project, Name: "self", Root: filepath.Join(filepath.Dir(home), "repo")}, at)
-		}
-		if err == nil {
-			err = store.RecordDelivery(ctx, project, "dark-factory-build/dark-factory", kernel.ProductionDelivery{ID: "release:development", Kind: "runtime", Destination: "factoryd", Revision: strings.Repeat("e", 40), State: "running", Phase: "trial", PullRequests: []uint64{}, UpdatedAt: at.Int64()}, at)
-		}
-		return err
-	})
-	hook := startupPhaseHook
-	t.Cleanup(func() { startupPhaseHook = hook })
-	var bound atomic.Bool
-	var browser atomic.Int64
-	startupPhaseHook = func(phase string) {
-		switch phase {
-		case "withdrawn":
-			_, err := os.Lstat(install.LocalAPISocketPath(home))
-			bound.Store(err == nil)
-		case "browser":
-			browser.Store(time.Now().UnixMilli())
-			time.Sleep(2 * time.Millisecond)
-		}
-	}
-	owner, err := openProcess(context.Background(), testConfig(home))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := owner.close(); err != nil {
-		t.Fatal(err)
-	}
-	if !bound.Load() {
-		t.Fatal("the withdrawal was stamped after the socket was withdrawn")
-	}
-	selfSource = func() string { return "development" }
-	bootUntilSettled(t, home)
-	withRelease(t, home, func(ctx context.Context, store *kernel.Store) error {
-		_, delivery, found, err := store.Delivery(ctx, "release:development")
-		if err != nil || !found || delivery.State != "verified" || delivery.WithdrawnAt == 0 || delivery.ServedAt <= browser.Load() || delivery.ServedAt < delivery.WithdrawnAt {
-			t.Errorf("release = %+v, %t, %v; browser bound at %d", delivery, found, err, browser.Load())
-		}
-		return nil
-	})
-}
-
-// awaitQueued waits until n connections wait in listener's backlog: kqueue
-// reports a listening socket's pending connections as its read data.
-func awaitQueued(t *testing.T, listener *os.File, n int64) {
-	t.Helper()
-	queue, err := unix.Kqueue()
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer unix.Close(queue)
-	changes := []unix.Kevent_t{{Ident: uint64(listener.Fd()), Filter: unix.EVFILT_READ, Flags: unix.EV_ADD}}
-	events := make([]unix.Kevent_t, 1)
-	for deadline := time.Now().Add(10 * time.Second); ; changes = nil {
-		count, err := unix.Kevent(queue, changes, events, &unix.Timespec{Nsec: 50e6})
-		if err == nil && count == 1 && events[0].Data >= n {
-			return
-		}
-		if time.Now().After(deadline) {
-			t.Fatalf("%d connections never queued: %v", n, err)
-		}
-	}
 }
 
 func TestPassedTrialRecoveryRestartsAndSettlesWithoutRepeatingPromotion(t *testing.T) {

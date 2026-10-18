@@ -352,7 +352,7 @@ func (store *Store) recordProductionObservation(ctx context.Context, c *sql.Conn
 }
 
 func validProductionDelivery(delivery ProductionDelivery, at UnixMillis) bool {
-	return productionSHA(delivery.Revision) && validOutcomeText(delivery.Kind, 64) && validOutcomeText(delivery.Destination, 256) && validOutcomeText(delivery.State, 64) && productionURL(delivery.URL) && productionNumbers(delivery.PullRequests) && delivery.UpdatedAt >= 0 && delivery.UpdatedAt <= at.Int64()+5000 && validOutcomeText(delivery.Phase, 64) && validOutcomeText(delivery.Reason, 2048) && delivery.Overflow >= 0 && delivery.Group >= 0 && delivery.VerifiedAt >= 0 && delivery.VerifiedAt <= at.Int64()+5000 && delivery.WithdrawnAt >= 0 && delivery.ServedAt >= 0
+	return productionSHA(delivery.Revision) && validOutcomeText(delivery.Kind, 64) && validOutcomeText(delivery.Destination, 256) && validOutcomeText(delivery.State, 64) && productionURL(delivery.URL) && productionNumbers(delivery.PullRequests) && delivery.UpdatedAt >= 0 && delivery.UpdatedAt <= at.Int64()+5000 && validOutcomeText(delivery.Phase, 64) && validOutcomeText(delivery.Reason, 2048) && delivery.Overflow >= 0 && delivery.Group >= 0 && delivery.VerifiedAt >= 0 && delivery.VerifiedAt <= at.Int64()+5000
 }
 
 // RecordDelivery writes one delivery row, such as a runtime release.

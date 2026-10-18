@@ -376,7 +376,7 @@ func TestMigrateServicePlistBringsAPreSocketsInstallationToSockets(t *testing.T)
 	}
 }
 
-func TestServicePlistReadBoundCoversFiveEscapedHomePaths(t *testing.T) {
+func TestServicePlistReadBoundCoversFourEscapedHomePaths(t *testing.T) {
 	fixture := newManageFixture(t)
 	home := "/" + strings.Repeat(`"`, serviceMaxPathBytes-1)
 	body, _, err := ServicePlist(home, fixture.config.Label, "", "", "", "")
@@ -391,7 +391,7 @@ func TestServicePlistReadBoundCoversFiveEscapedHomePaths(t *testing.T) {
 		t.Fatal(err)
 	}
 	if _, _, err := readServicePlist(fixture.plistDir, fixture.config.plistName(), legacyLimit); err == nil {
-		t.Fatal("old plist read bound accepted five escaped home paths")
+		t.Fatal("old plist read bound accepted four escaped home paths")
 	}
 	read, present, err := readServicePlist(fixture.plistDir, fixture.config.plistName(), serviceMaxPlistBytes)
 	if err != nil || !present || !bytes.Equal(read, body) {

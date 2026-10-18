@@ -33,7 +33,7 @@ const serviceStderrLogName = "factoryd.stderr.log"
 const (
 	serviceMaxPathBytes  = 4096
 	serviceMaxLabelBytes = 127
-	serviceMaxPlistBytes = 5*serviceMaxPathBytes*6 + MaxRelayOriginBytes*6 + 4096
+	serviceMaxPlistBytes = 4*serviceMaxPathBytes*6 + MaxRelayOriginBytes*6 + 4096
 )
 
 // MaxRelayOriginBytes is the one bound on ServiceConfig.RelayOrigin, shared
@@ -289,25 +289,15 @@ func ServicePlist(home, label, relayOrigin, developmentBrowserAddress, toolPath,
 	if developmentBrowserAddress != "" {
 		address = "\n        <string>--development-browser-address</string>\n        <string>" + developmentBrowserAddress + "</string>"
 	}
-	// launchd binds the local API socket (owner-only, 384 = 0600) and the
-	// console address for as long as the job is loaded and hands factoryd each
-	// socket, so across a restart or crash the local API queues its callers
-	// and no other local process can serve the paired console origin. An
-	// ephemeral port is no stable origin, and factoryd binds it itself.
-	var escapedSocket bytes.Buffer
-	escapeXML(&escapedSocket, LocalAPISocketPath(home))
-	sockets := `
+	// launchd binds the console address for as long as the job is loaded and
+	// hands factoryd the socket, so across a restart or crash no other local
+	// process can serve the paired console origin. An ephemeral port is no
+	// stable origin, and factoryd binds it itself.
+	sockets := ""
+	if host, port, _ := net.SplitHostPort(cmp.Or(developmentBrowserAddress, DefaultBrowserAddress)); port != "0" {
+		sockets = `
     <key>Sockets</key>
     <dict>
-        <key>` + LocalAPISocketKey + `</key>
-        <dict>
-            <key>SockPathName</key>
-            <string>` + escapedSocket.String() + `</string>
-            <key>SockPathMode</key>
-            <integer>384</integer>
-        </dict>`
-	if host, port, _ := net.SplitHostPort(cmp.Or(developmentBrowserAddress, DefaultBrowserAddress)); port != "0" {
-		sockets += `
         <key>Browser</key>
         <dict>
             <key>SockNodeName</key>
@@ -316,9 +306,9 @@ func ServicePlist(home, label, relayOrigin, developmentBrowserAddress, toolPath,
             <string>` + port + `</string>
             <key>SockFamily</key>
             <string>IPv4</string>
-        </dict>`
+        </dict>
+    </dict>`
 	}
-	sockets += "\n    </dict>"
 	toolchain := ""
 	for _, argument := range [][2]string{{"--tool-path", toolPath}, {"--toolchain-read-roots", toolchainReadRoots}} {
 		if argument[1] == "" {

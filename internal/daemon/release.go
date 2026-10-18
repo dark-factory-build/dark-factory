@@ -253,27 +253,13 @@ func (daemon *Daemon) writeRelease(ctx context.Context, project kernel.ProjectID
 	return err
 }
 
-// WithdrawRelease stamps a staged release, at its trial, with when this
-// generation stopped serving its local API socket: the start of the restart's
-// outage, during which a launchd-owned socket queues connections.
-func (daemon *Daemon) WithdrawRelease(ctx context.Context, at time.Time) error {
-	project, delivery, found, err := daemon.store.LatestRelease(ctx)
-	if err != nil || !found || delivery.State != "running" || delivery.Phase != "trial" {
-		return err
-	}
-	delivery.WithdrawnAt = at.UnixMilli()
-	return daemon.writeRelease(ctx, project, &delivery)
-}
-
-// FinishRelease records the outcome of release:<sha> after the restart, and
-// when this generation bound its local API socket (served). A failure with no
-// reason is a trial whose supervisor died before deciding it.
-func (daemon *Daemon) FinishRelease(ctx context.Context, sha, state, reason string, served time.Time) error {
+// FinishRelease records the outcome of release:<sha> after the restart. A
+// failure with no reason is a trial whose supervisor died before deciding it.
+func (daemon *Daemon) FinishRelease(ctx context.Context, sha, state, reason string) error {
 	project, delivery, found, err := daemon.store.Delivery(ctx, "release:"+sha)
 	if err != nil || !found {
 		return err
 	}
-	delivery.ServedAt = served.UnixMilli()
 	// Only the trial decides a release after the restart; a restored backup
 	// still records the phase before it.
 	delivery.State, delivery.Phase, delivery.Reason = state, "trial", reason
