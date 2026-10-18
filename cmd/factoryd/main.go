@@ -72,18 +72,10 @@ var (
 	selfSource         = func() string { return buildinfo.Current().Source() }
 	promoteService     = install.PromoteService
 	releaseSettledHook = func(string, string) {}
-	// A promoted build's health gate makes, every healthPoll for
-	// healthWindow, the round trip factoryctl status makes, which a durable
-	// validation hold refuses. All three are package-test seams.
-	healthWindow    = 10 * time.Minute
-	healthPoll      = time.Minute
-	healthRoundTrip = func(ctx context.Context, home string) error {
-		client, err := api.NewOperatorClient(install.LocalAPISocketPath(home), install.OperatorTokenPath(home))
-		if err == nil {
-			_, err = client.Health(ctx, "")
-		}
-		return err
-	}
+	// A promoted build's health gate checks every healthPoll for
+	// healthWindow. Both are package-test seams.
+	healthWindow = 10 * time.Minute
+	healthPoll   = time.Minute
 
 	cleanStartupCancellation = errors.New("factoryd: clean startup cancellation")
 	startupPhaseHook         func(string)
@@ -438,9 +430,16 @@ func serve(ctx context.Context, configuration config) error {
 // bin/previous by the trial's own path: a marker naming this build, which the
 // previous build's boot settles failed with the reason (restoring the backup
 // over a store this build migrated), then the swap and a restart. A check that
-// failed because this process began closing decides nothing.
+// failed because this process began closing decides nothing. Its round trip
+// is the one factoryctl status makes, which a durable validation hold refuses.
 func (owner *process) watchRelease(ctx context.Context, home, target string, stopServing context.CancelFunc) {
-	reason := owner.daemon.WatchRelease(ctx, healthWindow, healthPoll, func(ctx context.Context) error { return healthRoundTrip(ctx, home) })
+	reason := owner.daemon.WatchRelease(ctx, healthWindow, healthPoll, func(ctx context.Context) error {
+		client, err := api.NewOperatorClient(install.LocalAPISocketPath(home), install.OperatorTokenPath(home))
+		if err == nil {
+			_, err = client.Health(ctx, "")
+		}
+		return err
+	})
 	owner.lifecycleMu.Lock()
 	closing := owner.closeDone != nil
 	owner.lifecycleMu.Unlock()

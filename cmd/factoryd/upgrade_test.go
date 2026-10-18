@@ -624,9 +624,11 @@ func withRelease(t *testing.T, home string, use func(context.Context, *kernel.St
 	}
 }
 
-// #2051: a promoted build whose local API client round trip fails is rolled back to
-// bin/previous by its health gate, and the previous build's boot records the
-// release failed with that reason; a healthy one keeps serving.
+// #2051: a promoted build whose local API no client accepts (here its socket
+// is no longer owner-only, which the real client refuses as invalid, the
+// outage's own error) is rolled back to bin/previous by its health gate, and
+// the previous build's boot records the release failed with that reason; a
+// healthy one keeps serving.
 func TestHealthGateRollsBack(t *testing.T) {
 	for _, healthy := range []bool{true, false} {
 		home := stagedHome(t, "serve", "development")
@@ -644,19 +646,25 @@ func TestHealthGateRollsBack(t *testing.T) {
 		if err := install.PromoteService(home); err != nil {
 			t.Fatal(err)
 		}
-		window, poll, roundTrip, hook := healthWindow, healthPoll, healthRoundTrip, releaseSettledHook
+		window, poll, hook := healthWindow, healthPoll, releaseSettledHook
 		healthWindow, healthPoll = 500*time.Millisecond, 50*time.Millisecond
-		if !healthy {
-			healthRoundTrip = func(context.Context, string) error { return api.ErrInvalidClient }
+		settled := make(chan error, 1)
+		releaseSettledHook = func(string, string) {
+			var err error
+			if !healthy {
+				err = os.Chmod(install.LocalAPISocketPath(home), 0o644)
+			}
+			settled <- err
 		}
-		settled := make(chan struct{}, 1)
-		releaseSettledHook = func(string, string) { settled <- struct{}{} }
 		selfSource = func() string { return "development" }
 		ctx, cancel := context.WithCancel(context.Background())
 		done := make(chan error, 1)
 		go func() { done <- serve(ctx, testConfig(home)) }()
 		select {
-		case <-settled:
+		case err := <-settled:
+			if err != nil {
+				t.Fatal(err)
+			}
 		case err := <-done:
 			t.Fatalf("boot = %v", err)
 		case <-time.After(5 * time.Second):
@@ -675,7 +683,7 @@ func TestHealthGateRollsBack(t *testing.T) {
 			}
 		}
 		cancel()
-		healthWindow, healthPoll, healthRoundTrip, releaseSettledHook = window, poll, roundTrip, hook
+		healthWindow, healthPoll, releaseSettledHook = window, poll, hook
 		current, _ := os.ReadFile(filepath.Join(install.ServiceDirectoryPath(home), "bin", "current", "factoryd"))
 		if healthy {
 			if err != nil || string(current) == currentProgram {
@@ -690,7 +698,7 @@ func TestHealthGateRollsBack(t *testing.T) {
 		bootUntilSettled(t, home)
 		withRelease(t, home, func(ctx context.Context, store *kernel.Store) error {
 			_, delivery, found, err := store.Delivery(ctx, "release:development")
-			if err != nil || !found || delivery.State != "failed" || !strings.HasPrefix(delivery.Reason, "post-release health: local API round trip: ") {
+			if err != nil || !found || delivery.State != "failed" || delivery.Reason != "post-release health: local API round trip: "+api.ErrInvalidClient.Error() {
 				t.Errorf("rolled back release = %+v, %t, %v", delivery, found, err)
 			}
 			return nil
