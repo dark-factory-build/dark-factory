@@ -10,7 +10,8 @@ import (
 )
 
 const (
-	maxFrameBytes = 1 << 20
+	// Eight MiB of task attachments fit one enqueue_task request base64-encoded.
+	maxFrameBytes = 12 << 20
 	// Four metadata rows fit the frame even when every text byte is JSON-escaped.
 	MaxContentPageItems = 4
 	maxSnapshotEntries  = 4096
@@ -1179,6 +1180,22 @@ type EnqueueTaskInput struct {
 	ConflictPaths   []string                `json:"conflict_paths,omitempty"`
 	// Content pins project content revisions in the enqueue transaction.
 	Content []ContentPinInput `json:"content,omitempty"`
+	// Attachments commit with the task under the kernel's file bounds.
+	Attachments []TaskAttachmentInput `json:"attachments,omitempty"`
+}
+
+type TaskAttachmentInput struct {
+	Name string `json:"name"`
+	Data []byte `json:"data"`
+}
+
+// TaskAttachments is the kernel form of the input's files.
+func (input EnqueueTaskInput) TaskAttachments() []kernel.TaskAttachment {
+	attachments := make([]kernel.TaskAttachment, len(input.Attachments))
+	for i, item := range input.Attachments {
+		attachments[i] = kernel.TaskAttachment{Name: item.Name, Data: item.Data}
+	}
+	return attachments
 }
 
 type ContentPinInput struct {

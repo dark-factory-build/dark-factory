@@ -467,6 +467,9 @@ func validEnqueueTaskInput(input EnqueueTaskInput) bool {
 			return false
 		}
 	}
+	if _, err := kernel.TaskAttachmentInstruction("", input.TaskAttachments()); err != nil {
+		return false
+	}
 	return validID(input.ID) && validID(input.ProjectID) && validOptionalID(input.RepositoryID) && validOptionalID(input.AssignedAgentID) && validID(input.IncarnationID) && validText(input.Title, 1, 1024) && validText(input.Body, 0, 131072) && input.Priority >= -1_000_000 && input.Priority <= 1_000_000 && len(input.Content) <= 8
 }
 

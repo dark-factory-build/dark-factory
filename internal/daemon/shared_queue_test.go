@@ -10,10 +10,9 @@ import (
 	"github.com/dark-factory-build/dark-factory/internal/kernel"
 )
 
-// The console submits shared work from an agent's pane with mode "any": the
-// task is queued for any eligible worker in that agent's project and the pane
-// agent's revision still fences the write.
-func TestBrowserTaskEnqueueAnyWorkerQueuesUnclaimedWork(t *testing.T) {
+// Shared work is queued with no assigned agent for any eligible worker in the
+// project; the wire snapshot serves it separately from claimed tasks.
+func TestSharedTaskSnapshotServesUnclaimedWork(t *testing.T) {
 	fixture := newAdapterFixture(t, kernel.BrowserCapabilityObserve|kernel.BrowserCapabilityHumanActions)
 	ctx := context.Background()
 	projectID, _ := kernel.ProjectIDFromBytes(adapterID(t, 90))
@@ -24,24 +23,11 @@ func TestBrowserTaskEnqueueAnyWorkerQueuesUnclaimedWork(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	agent, err := fixture.store.CreateAgent(ctx, kernel.NewAgent{ID: agentID, ProjectID: project.ID, Name: "pane worker", Role: kernel.RoleWorker, Provider: kernel.ProviderCodex, ToolBudgetLimit: 2}, adapterTime(t, 11))
-	if err != nil {
+	if _, err := fixture.store.CreateAgent(ctx, kernel.NewAgent{ID: agentID, ProjectID: project.ID, Name: "pane worker", Role: kernel.RoleWorker, Provider: kernel.ProviderCodex, ToolBudgetLimit: 2}, adapterTime(t, 11)); err != nil {
 		t.Fatal(err)
 	}
-	connection := fixture.pair(t)
-	request := browserprotocol.TaskEnqueue{TaskID: taskID.String(), IncarnationID: incarnationID.String(), AgentID: agent.ID.String(), ExpectedAgentRevision: browserprotocol.Decimal(agent.Revision.Int64()), Instruction: "Whoever is free: fix the flaky test", Mode: "any"}
-	payload, err := testEncodeTaskEnqueue("enqueue-any", request)
-	if err != nil {
+	if _, err := fixture.store.EnqueueTask(ctx, kernel.NewTask{ID: taskID, ProjectID: project.ID, IncarnationID: incarnationID, Title: "Direct instruction", Body: "Whoever is free: fix the flaky test"}, adapterTime(t, 12)); err != nil {
 		t.Fatal(err)
-	}
-	adapterWrite(t, connection, payload)
-	frame := adapterRead(t, connection)
-	if frame.Type != browserprotocol.TypeTaskEnqueueResult || frame.ID != "enqueue-any" {
-		t.Fatalf("enqueue response = %+v", frame)
-	}
-	result := frame.Body.(browserprotocol.TaskEnqueueResult)
-	if result.TaskID != taskID.String() || result.AgentRevision != request.ExpectedAgentRevision {
-		t.Fatalf("enqueue result = %+v", result)
 	}
 	stored, found, err := fixture.store.Task(ctx, taskID)
 	if err != nil || !found {

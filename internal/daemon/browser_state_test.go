@@ -195,9 +195,9 @@ func TestBrowserStateSnapshotIncludesPublicTaskRecency(t *testing.T) {
 	t.Fatal("task missing from snapshot")
 }
 
-// TASK_ENQUEUE commits the durable task, advances the head, and the very next
+// An enqueue commits the durable task, advances the head, and the very next
 // snapshot contains its public card without its private instruction.
-func TestBrowserTaskEnqueueAppearsInTheNextSnapshotWithoutItsInstruction(t *testing.T) {
+func TestEnqueuedTaskAppearsInTheNextSnapshotWithoutItsInstruction(t *testing.T) {
 	fixture := newAdapterFixture(t, kernel.BrowserCapabilityObserve|kernel.BrowserCapabilityHumanActions)
 	projectID, err := kernel.ProjectIDFromBytes(adapterID(t, 150))
 	if err != nil {
@@ -230,17 +230,8 @@ func TestBrowserTaskEnqueueAppearsInTheNextSnapshotWithoutItsInstruction(t *test
 	}
 
 	const instruction = "ENQUEUE_PRIVATE_SENTINEL"
-	payload, err := testEncodeTaskEnqueue("enqueue", browserprotocol.TaskEnqueue{
-		TaskID: taskID.String(), IncarnationID: incarnationID.String(), AgentID: agent.ID.String(),
-		ExpectedAgentRevision: decimalRevision(agent.Revision), Instruction: instruction,
-	})
-	if err != nil {
+	if _, err := fixture.store.EnqueueTask(context.Background(), kernel.NewTask{ID: taskID, ProjectID: project.ID, AssignedAgentID: agent.ID, IncarnationID: incarnationID, Title: "Direct instruction", Body: instruction}, adapterTime(t, 12)); err != nil {
 		t.Fatal(err)
-	}
-	adapterWrite(t, connection, payload)
-	frame := adapterRead(t, connection)
-	if frame.Type != browserprotocol.TypeTaskEnqueueResult || frame.ID != "enqueue" {
-		t.Fatalf("enqueue response = %+v", frame)
 	}
 
 	after, raw := adapterSnapshot(t, fixture, connection, "state-2")

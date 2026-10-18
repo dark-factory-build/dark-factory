@@ -18,7 +18,7 @@ import {
   encodeServerControl,
 } from "../dist/src/index.js";
 import { settle } from "./remote-fake.mjs";
-import { encodeAgentControlResult, encodeAuthResult, encodeHello, encodeHumanRequestCancelRunResult, encodeHumanRequestDetail, encodeHumanRequestReplyResult, encodePairResult, encodeProjectCreateResult, encodeRemoteInviteResult, encodeRepositories, encodeServerError, encodeStateChanged, encodeStateSnapshot, encodeTaskEnqueueResult, encodeTerminalAttached, encodeTerminalExit, encodeTerminalReset, encodeTerminalTarget } from "./server-frames.mjs";
+import { encodeAgentControlResult, encodeAuthResult, encodeHello, encodeHumanRequestCancelRunResult, encodeHumanRequestDetail, encodeHumanRequestReplyResult, encodePairResult, encodeProjectCreateResult, encodeRemoteInviteResult, encodeRepositories, encodeServerError, encodeStateChanged, encodeStateSnapshot, encodeTerminalAttached, encodeTerminalExit, encodeTerminalReset, encodeTerminalTarget } from "./server-frames.mjs";
 
 const challenge = "11".repeat(32);
 const daemonID = "22".repeat(16);
@@ -253,82 +253,10 @@ test("authenticated HumanRequest methods emit exact frames and correlate results
   session.close();
 });
 
-test("task enqueue carries Library pins only when chosen", async () => {
-  const { session, socket } = await openHumanSession();
-  const pin = { content_id: "ab".repeat(16), revision: 3n };
-  void session.enqueueAgentTask({ agentId: "77".repeat(16), expectedAgentRevision: 7n, instruction: "Use the guide", content: [pin] }).catch(() => undefined);
-  assert.deepEqual(decodeClientControl(socket.sent.at(-1)).body.content, [pin]);
-  void session.enqueueAgentTask({ agentId: "77".repeat(16), expectedAgentRevision: 7n, instruction: "No context", content: [] }).catch(() => undefined);
-  assert.equal("content" in decodeClientControl(socket.sent.at(-1)).body, false);
-  await assert.rejects(session.enqueueAgentTask({ agentId: "77".repeat(16), expectedAgentRevision: 7n, instruction: "Bad pin", content: [{ content_id: "ab".repeat(16), revision: 0n }] }));
-  session.close();
-});
-
-test("authenticated task enqueue mints exact IDs and correlates the durable result", async () => {
-  const { session, socket } = await openHumanSession();
-  const agentId = "77".repeat(16);
-  const pending = session.enqueueAgentTask({ agentId, expectedAgentRevision: 7n, instruction: "Repair the queue" });
-  const frame = decodeClientControl(socket.sent.at(-1));
-  assert.equal(frame.type, "TASK_ENQUEUE");
-  assert.deepEqual({
-    agent_id: frame.body.agent_id,
-    expected_agent_revision: frame.body.expected_agent_revision,
-    instruction: frame.body.instruction,
-  }, {
-    agent_id: agentId,
-    expected_agent_revision: 7n,
-    instruction: "Repair the queue",
-  });
-  assert.match(frame.body.task_id, /^[0-9a-f]{32}$/);
-  assert.match(frame.body.incarnation_id, /^[0-9a-f]{32}$/);
-  assert.notEqual(frame.body.task_id, "00".repeat(16));
-  assert.notEqual(frame.body.incarnation_id, "00".repeat(16));
-  assert.notEqual(frame.body.task_id, frame.body.incarnation_id);
-
-  socket.reply(encodeTaskEnqueueResult(frame.id, {
-    task_id: frame.body.task_id,
-    revision: 1n,
-    agent_revision: 7n,
-  }));
-  const result = await pending;
-  assert.deepEqual(result, { taskId: frame.body.task_id, revision: 1n });
-  assert.equal(Object.isFrozen(result), true);
-
-  const unicodeWhitespace = session.enqueueAgentTask({ agentId, expectedAgentRevision: 7n, instruction: "\u0085" });
-  const unicodeFrame = decodeClientControl(socket.sent.at(-1));
-  assert.equal(unicodeFrame.body.instruction, "\u0085", "wire validation uses the same explicit ASCII blank set as Go");
-  socket.reply(encodeTaskEnqueueResult(unicodeFrame.id, {
-    task_id: unicodeFrame.body.task_id,
-    revision: 1n,
-    agent_revision: 7n,
-  }));
-  await unicodeWhitespace;
-
-  const followUp = session.enqueueAgentTask({ agentId, expectedAgentRevision: 7n, instruction: "Run this after the current task", mode: "queue" });
-  const followUpFrame = decodeClientControl(socket.sent.at(-1));
-  assert.equal(followUpFrame.body.mode, "queue");
-  socket.reply(encodeTaskEnqueueResult(followUpFrame.id, {
-    task_id: followUpFrame.body.task_id,
-    revision: 2n,
-    agent_revision: 7n,
-  }));
-  await followUp;
-
-  // "any" queues the instruction for any eligible worker in the pane agent's project.
-  const shared = session.enqueueAgentTask({ agentId, expectedAgentRevision: 7n, instruction: "Whoever is free: fix the flaky test", mode: "any" });
-  const sharedFrame = decodeClientControl(socket.sent.at(-1));
-  assert.equal(sharedFrame.body.mode, "any");
-  assert.equal(sharedFrame.body.agent_id, agentId);
-  socket.reply(encodeTaskEnqueueResult(sharedFrame.id, { task_id: sharedFrame.body.task_id, revision: 3n, agent_revision: 7n }));
-  await shared;
-  session.close();
-});
-
-test("private repository listing and enqueue selection are exact-correlated", async () => {
+test("private repository listing is exact-correlated", async () => {
   const { session, socket } = await openHumanSession();
   const projectId = "7a".repeat(16);
   const repositoryId = "7b".repeat(16);
-  const agentId = "7c".repeat(16);
   const item = { id: repositoryId, project_id: projectId, name: "Checkout", root: "/private/checkout", base_ref: "main", enabled: true, default: true, revision: 3n, fetch_state: "unchecked", publication_state: "unbound", readiness_message: "Run the operator check." };
 
   const listed = session.getRepositories(projectId);
@@ -336,12 +264,6 @@ test("private repository listing and enqueue selection are exact-correlated", as
   assert.deepEqual(listFrame, { type: "REPOSITORIES_GET", id: listFrame.id, body: { project_id: projectId } });
   socket.reply(encodeRepositories(listFrame.id, { project_id: projectId, items: [item] }));
   assert.deepEqual(await listed, [item]);
-
-  const enqueue = session.enqueueAgentTask({ agentId, expectedAgentRevision: 2n, repositoryId, instruction: "Use the selected checkout" });
-  const enqueueFrame = decodeClientControl(socket.sent.at(-1));
-  assert.equal(enqueueFrame.body.repository_id, repositoryId);
-  socket.reply(encodeTaskEnqueueResult(enqueueFrame.id, { task_id: enqueueFrame.body.task_id, revision: 1n, agent_revision: 2n }));
-  await enqueue;
 
   const project = session.createProject({ name: "New", root: "/private/new" });
   const projectFrame = decodeClientControl(socket.sent.at(-1));
@@ -508,100 +430,6 @@ test("remote invitation correlates its own result and needs bounded human-action
   await assert.rejects(remote.inviteRemote(), (error) => error instanceof SessionError && error.code === "unauthorized");
   assert.equal(remoteSocket.sent.length, sent);
   remote.close();
-});
-
-test("closing rejects an authenticated pending task enqueue and fences its late result", async () => {
-  const { session, socket } = await openHumanSession();
-  const pending = session.enqueueAgentTask({
-    agentId: "7c".repeat(16),
-    expectedAgentRevision: 12n,
-    instruction: "Wait for the durable result",
-  });
-  const frame = decodeClientControl(socket.sent.at(-1));
-  assert.equal(frame.type, "TASK_ENQUEUE");
-  const sent = socket.sent.length;
-
-  session.close();
-  await assert.rejects(pending, (error) => error instanceof SessionError && error.code === "closed");
-  assert.equal(session.status, "closed");
-  assert.equal(socket.sent.length, sent);
-
-  socket.reply(encodeTaskEnqueueResult(frame.id, {
-    task_id: frame.body.task_id,
-    revision: 1n,
-    agent_revision: 12n,
-  }));
-  await tick();
-  assert.equal(session.status, "closed");
-  assert.equal(socket.sent.length, sent, "a late result cannot restart or replay the operation");
-  await assert.rejects(
-    session.enqueueAgentTask({ agentId: "7c".repeat(16), expectedAgentRevision: 12n, instruction: "Do not revive" }),
-    (error) => error instanceof SessionError && error.code === "closed",
-  );
-});
-
-test("task enqueue result mismatches close the generation", async (t) => {
-  for (const mismatch of ["envelope", "task", "agent-revision"]) {
-    await t.test(mismatch, async () => {
-      const errors = [];
-      const { session, socket } = await openHumanSession((error) => errors.push(error));
-      const pending = session.enqueueAgentTask({
-        agentId: "78".repeat(16),
-        expectedAgentRevision: 8n,
-        instruction: "Inspect this",
-      });
-      const frame = decodeClientControl(socket.sent.at(-1));
-      socket.reply(encodeTaskEnqueueResult(
-        mismatch === "envelope" ? "forged-task" : frame.id,
-        {
-          task_id: mismatch === "task" ? "79".repeat(16) : frame.body.task_id,
-          revision: 1n,
-          agent_revision: mismatch === "agent-revision" ? 9n : 8n,
-        },
-      ));
-      await assert.rejects(pending, (error) => error instanceof ProtocolError && error.code === "malformed");
-      assert.equal(session.status, "closed");
-      assert.equal(errors.at(-1) instanceof ProtocolError, true);
-    });
-  }
-});
-
-test("task enqueue requires bounded human-actions authority before sending", async () => {
-  let socket;
-  const session = new BrowserSession({
-    url: "ws://127.0.0.1/browser",
-    host: "127.0.0.1",
-    origin: "https://preview.example",
-    challenge,
-    keyStore: new MemoryKeys(),
-    socketFactory: () => {
-      socket = new Socket((current, frame) => {
-        if (frame.type === "PAIR_PROVE") current.reply(encodePairResult(frame.id, { client_id: clientID, capabilities: CAPABILITIES.observe }));
-        if (frame.type === "STATE_GET") replySnapshot(current, frame, 1n);
-      });
-      return socket;
-    },
-  });
-  await session.connect();
-  await settle();
-  const sent = socket.sent.length;
-  await assert.rejects(
-    session.enqueueAgentTask({ agentId: "7a".repeat(16), expectedAgentRevision: 1n, instruction: "No authority" }),
-    (error) => error instanceof SessionError && error.code === "unauthorized",
-  );
-  assert.equal(socket.sent.length, sent);
-  session.close();
-
-  const authorized = await openHumanSession();
-  const beforeInvalid = authorized.socket.sent.length;
-  for (const instruction of ["   ", "x".repeat(MAX_TASK_INSTRUCTION_BYTES + 1)]) {
-    await assert.rejects(
-      authorized.session.enqueueAgentTask({ agentId: "7b".repeat(16), expectedAgentRevision: 1n, instruction }),
-      (error) => error instanceof SessionError && error.code === "invalid_request",
-    );
-  }
-  assert.equal(authorized.socket.sent.length, beforeInvalid);
-  authorized.session.close();
 });
 
 test("HumanRequest detail operations are bounded and exact-envelope correlated", async (t) => {
@@ -2218,49 +2046,4 @@ test("a refused intake request stays scoped to that request", async () => {
   assert.equal(lastFrame(socket, "INTAKE").type, "INTAKE");
   session.close();
   await assert.rejects(next, (error) => error.code === "closed");
-});
-
-test("task files upload in bounded chunks before atomic enqueue and reject on disconnect", async () => {
-  const { session, socket } = await openHumanSession();
-  const bytes = new Uint8Array(30_000).fill(255);
-  const file = new File([bytes], "screenshot.png", { type: "image/png" });
-  const request = { agentId: "77".repeat(16), expectedAgentRevision: 7n, instruction: "Inspect screenshot", mode: "queue" };
-  const pending = session.enqueueAgentTaskWithFiles(request, [file]);
-  await new Promise((resolve) => setTimeout(resolve, 0));
-  const first = decodeClientControl(socket.sent.at(-1));
-  assert.equal(first.type, "TASK_ATTACHMENT");
-  assert.equal(first.body.offset, 0n);
-  assert.equal(first.body.size, 30_000n);
-  assert.equal(Buffer.from(first.body.data, "base64").length, 24 * 1024);
-  socket.reply(encodeServerControl({ type: "TASK_ATTACHMENT_RESULT", id: first.id, body: { offset: 24576n } }));
-  await new Promise((resolve) => setTimeout(resolve, 0));
-  const second = decodeClientControl(socket.sent.at(-1));
-  assert.equal(second.type, "TASK_ATTACHMENT");
-  assert.equal(second.body.offset, 24576n);
-  assert.deepEqual(Buffer.concat([Buffer.from(first.body.data, "base64"), Buffer.from(second.body.data, "base64")]), Buffer.from(bytes));
-  socket.reply(encodeServerControl({ type: "TASK_ATTACHMENT_RESULT", id: second.id, body: { offset: 30000n } }));
-  await new Promise((resolve) => setTimeout(resolve, 0));
-  const enqueue = decodeClientControl(socket.sent.at(-1));
-  assert.equal(enqueue.type, "TASK_ENQUEUE");
-  assert.equal(enqueue.body.attachment_count, 1);
-  socket.reply(encodeTaskEnqueueResult(enqueue.id, { task_id: enqueue.body.task_id, revision: 1n, agent_revision: 7n }));
-  await pending;
-  const interrupted = session.enqueueAgentTaskWithFiles(request, [file]);
-  const rejected = assert.rejects(interrupted, (error) => error instanceof SessionError);
-  await new Promise((resolve) => setTimeout(resolve, 0));
-  session.close();
-  await rejected;
-});
-
-test("closing during attachment file reading rejects without sending or hanging", async () => {
-  const { session, socket } = await openHumanSession();
-  let release;
-  const file = { name: "x.txt", size: 1, slice() { return { arrayBuffer: () => new Promise((resolve) => { release = resolve; }) }; } };
-  const pending = session.enqueueAgentTaskWithFiles({ agentId: "77".repeat(16), expectedAgentRevision: 7n, instruction: "Read this" }, [file]);
-  const rejected = assert.rejects(pending, (error) => error instanceof SessionError);
-  const sent = socket.sent.length;
-  session.close();
-  release(new Uint8Array([1]).buffer);
-  await rejected;
-  assert.equal(socket.sent.length, sent);
 });

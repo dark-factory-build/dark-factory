@@ -4,10 +4,6 @@
 export const BROWSER_PROTOCOL_NAME = "dark-factory/browser" as const;
 /** The fixed third byte of every binary terminal frame, beside the "DF" magic. */
 export const TERMINAL_FRAME_VERSION = 1 as const;
-export const MAX_TASK_ATTACHMENTS = 8;
-export const MAX_TASK_CONTENT = 8;
-export const MAX_TASK_ATTACHMENT_BYTES = 8 * 1024 * 1024;
-export const TASK_ATTACHMENT_CHUNK_BYTES = 24 * 1024;
 export const MAX_CONTROL_BYTES = 64 * 1024;
 export const MAX_TERMINAL_PAYLOAD = 8 * 1024;
 export const TERMINAL_HEADER_BYTES = 40;
@@ -62,8 +58,6 @@ export const CONTROL_MANIFEST = [
   { type: "HUMAN_REQUEST_DETAIL_GET", direction: "client" }, { type: "HUMAN_REQUEST_DETAIL", direction: "server" },
   { type: "HUMAN_REQUEST_REPLY", direction: "client" }, { type: "HUMAN_REQUEST_REPLY_RESULT", direction: "server" },
   { type: "HUMAN_REQUEST_CANCEL_RUN", direction: "client" }, { type: "HUMAN_REQUEST_CANCEL_RUN_RESULT", direction: "server" },
-  { type: "TASK_ATTACHMENT", direction: "client" }, { type: "TASK_ATTACHMENT_RESULT", direction: "server" },
-  { type: "TASK_ENQUEUE", direction: "client" }, { type: "TASK_ENQUEUE_RESULT", direction: "server" },
   { type: "TERMINAL_TARGET_GET", direction: "client" }, { type: "TERMINAL_TARGET", direction: "server" },
   { type: "TERMINAL_ATTACH", direction: "client" }, { type: "TERMINAL_ATTACHED", direction: "server" },
   { type: "TERMINAL_ACK", direction: "client" },

@@ -139,7 +139,7 @@ You decisions share the side panel. A terminal instruction to a ready agent
 creates durable work; Message steers a running session. Interrupt stops Codex
 generation while preserving the task, while Stop ends it. Send a completed
 result back with feedback or start a separate replacement without losing its
-history. Add to queue can hold later work while an agent is busy.
+history. `factoryctl task add` queues later work while an agent is busy.
 
 Assign work to a named worker or Any eligible worker in the project. Named
 work is taken first; the next free eligible worker then claims shared work.
@@ -159,13 +159,12 @@ objective and acceptance criteria for an overseer; its related work remains
 inspectable after workers finish. `factoryctl dispatch off` stops new admission
 while active processes continue; the Work panel reports the pause.
 
-The Tasks panel's **New task** form accepts pasted images, dropped files, or
-files selected with **Attach files** (up to 8 files and 8 MiB total). Add an
-instruction, review or remove the previews, then submit. Attachments commit
-with the task in the local daemon database and remain there with its history.
-Each attempt gets a fresh copy in its private runtime home, available through
+Tasks are created with `factoryctl task add`; `--file PATH[,PATH...]` attaches
+up to 8 nonempty files and 8 MiB in total, refusing the whole command when a
+file cannot be read or exceeds those bounds. Attachments commit with the task
+in the local daemon database and remain there with its history. Each attempt
+gets a fresh copy in its private runtime home, available through
 `$DARK_FACTORY_TASK_ATTACHMENTS`; uploads do not enter your Git checkout.
-Unsubmitted uploads are temporary and discarded when the connection closes.
 File contents remain unchanged; interpretation depends on the provider's tools.
 
 In **Settings → Attachment storage**, enable **Automatically remove attachments

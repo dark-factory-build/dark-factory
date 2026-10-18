@@ -14,6 +14,7 @@ import (
 
 	"github.com/dark-factory-build/dark-factory/internal/api"
 	"github.com/dark-factory-build/dark-factory/internal/install"
+	"github.com/dark-factory-build/dark-factory/internal/kernel"
 	"github.com/dark-factory-build/dark-factory/internal/runner"
 )
 
@@ -44,6 +45,7 @@ func TestParseExactOperatorCommands(t *testing.T) {
 		{name: "task add full", args: []string{"task", "add", "--project", id, "--agent", id, "--title", "t", "--body", "b", "--priority", "-5"}},
 		{name: "task add supplied identities", args: []string{"task", "add", "--project", id, "--agent", id, "--title", "t", "--task-id", id, "--incarnation-id", strings.Repeat("cd", 16)}},
 		{name: "task add any eligible worker", args: []string{"task", "add", "--project", id, "--agent", "any", "--title", "t"}},
+		{name: "task add with files", args: []string{"task", "add", "--project", id, "--agent", "any", "--title", "t", "--file", "notes.txt,/private/shot.png"}},
 		{name: "status", args: []string{"status"}},
 		{name: "project oversight", args: []string{"status", "--project", id}},
 		{name: "task send back", args: []string{"task", "send-back", "--task", id, "--note", "five findings"}},
@@ -430,6 +432,73 @@ func TestTaskAddMintsDistinctTaskAndIncarnationIdentities(t *testing.T) {
 	}
 	if !strings.Contains(stdout.String(), received.ID) || !strings.Contains(stdout.String(), received.IncarnationID) {
 		t.Fatalf("printed %q", stdout.String())
+	}
+}
+
+// --file is the operator's one attachment path: every file is read whole and
+// sent with the enqueue; an unreadable or out-of-bounds file refuses the whole
+// command before any request.
+func TestTaskAddAttachesFilesWithinBounds(t *testing.T) {
+	fixture := newAPIFixture(t)
+	defer fixture.close(t)
+	id := strings.Repeat("11", 16)
+	dir := t.TempDir()
+	notes, shot := filepath.Join(dir, "notes.txt"), filepath.Join(dir, "shot.png")
+	if err := os.WriteFile(notes, []byte("private notes"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(shot, []byte{0, 255}, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	var received api.EnqueueTaskInput
+	done := serveOne(fixture.listener, func(call api.Call) api.Reply {
+		received, _ = call.EnqueueTaskInput()
+		reply, err := api.NewMutationReply(api.MutationResult{Head: 9, Revision: 1})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return reply
+	})
+	var stdout, stderr bytes.Buffer
+	exit := run(context.Background(), []string{"task", "add", "--project", id, "--agent", "any", "--title", "Inspect", "--file", notes + "," + shot}, webEnvironment(fixture), &stdout, &stderr)
+	awaitServer(t, done)
+	if exit != 0 || stderr.Len() != 0 || len(received.Attachments) != 2 || received.Attachments[0].Name != "notes.txt" || string(received.Attachments[0].Data) != "private notes" || received.Attachments[1].Name != "shot.png" || string(received.Attachments[1].Data) != "\x00\xff" {
+		t.Fatalf("task add = exit %d stderr %q attachments %+v", exit, stderr.String(), received.Attachments)
+	}
+	stderr.Reset()
+	if exit := run(context.Background(), []string{"task", "add", "--project", id, "--agent", "any", "--title", "Inspect", "--file", filepath.Join(dir, "missing.txt")}, webEnvironment(fixture), &stdout, &stderr); exit == 0 || !strings.Contains(stderr.String(), "missing.txt: no such file") {
+		t.Fatalf("missing file: exit %d stderr %q", exit, stderr.String())
+	}
+}
+
+// The file bounds are the kernel's: an unreadable, empty or oversized file
+// names itself, and more than eight files never parse.
+func TestTaskAttachmentsReadFilesWithinBounds(t *testing.T) {
+	dir := t.TempDir()
+	notes, empty, large := filepath.Join(dir, "notes.txt"), filepath.Join(dir, "empty.txt"), filepath.Join(dir, "large.bin")
+	for path, data := range map[string][]byte{notes: []byte("private notes"), empty: nil, large: make([]byte, kernel.MaxTaskAttachmentBytes+1)} {
+		if err := os.WriteFile(path, data, 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	got, err := taskAttachments([]string{notes})
+	if err != nil || len(got) != 1 || got[0].Name != "notes.txt" || string(got[0].Data) != "private notes" {
+		t.Fatalf("read = %+v, %v", got, err)
+	}
+	if got, err := taskAttachments(nil); err != nil || got != nil {
+		t.Fatalf("no files = %+v, %v", got, err)
+	}
+	for _, refused := range []struct{ path, want string }{
+		{filepath.Join(dir, "missing.txt"), "missing.txt: no such file"},
+		{empty, "empty.txt: attachments must be nonempty"},
+		{large, "large.bin: attachments must be nonempty files totalling at most 8 MiB"},
+	} {
+		if _, err := taskAttachments([]string{notes, refused.path}); err == nil || !strings.Contains(err.Error(), refused.want) {
+			t.Fatalf("%s: %v", refused.path, err)
+		}
+	}
+	if _, _, ok := parse([]string{"task", "add", "--project", strings.Repeat("11", 16), "--agent", "any", "--title", "t", "--file", strings.Repeat(notes+",", kernel.MaxTaskAttachments) + notes}); ok {
+		t.Fatal("nine files parsed")
 	}
 }
 

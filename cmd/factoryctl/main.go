@@ -120,9 +120,10 @@ const (
 	factoryctl agent select-model --agent ID --revision REVISION --model TEXT [--reasoning-effort low|medium|high|xhigh|max|ultra]
 	factoryctl agent paths --agent ID
 	factoryctl agent appearance --agent ID --revision REVISION --appearance auto|SKIN/HAIR/HAIR_COLOUR/FACE/OUTFIT/CLOTHES_COLOUR/SHOES/TOOL/HEADWEAR
-  factoryctl task add --project ID [--repository ID] --agent ID|any --title TEXT [--body TEXT] [--priority N] [--content ID:REVISION[,ID:REVISION...]] [--task-id ID --incarnation-id ID]
+  factoryctl task add --project ID [--repository ID] --agent ID|any --title TEXT [--body TEXT] [--priority N] [--content ID:REVISION[,ID:REVISION...]] [--file PATH[,PATH...]] [--task-id ID --incarnation-id ID]
     --agent any queues the task for any eligible worker in the project; the first worker admitted keeps it.
     --content pins up to eight project content revisions before any worker can admit the task.
+    --file attaches up to eight nonempty files, 8 MiB in total; each run reads its copies under $DARK_FACTORY_TASK_ATTACHMENTS.
   factoryctl report [--project ID] [--since 24h|7d] [--by hour|half-day|day]
     Per bucket: runs, failure %, tokens (worker, overseer, specialist), merges and tokens per merge; then the top five tasks and pull requests by tokens.
   factoryctl why --pull N | --task ID [--project ID]
@@ -328,6 +329,7 @@ type attemptCommand struct {
 	cancel              bool
 	retry               bool
 	bodyFile            string
+	files               []string
 	knowledgeSearch     bool
 	knowledgeQuery      string
 	knowledgeRepository string
@@ -1716,7 +1718,7 @@ func parseOperator(args []string) (attemptCommand, bool, bool) {
 	case "account update":
 		command.kind, names = commandAccountUpdate, []string{"--account", "--revision", "--label", "--remove"}
 	case "task add":
-		command.kind, names = commandTaskAdd, []string{"--project", "--repository", "--agent", "--title", "--body", "--priority", "--content", "--task-id", "--incarnation-id"}
+		command.kind, names = commandTaskAdd, []string{"--project", "--repository", "--agent", "--title", "--body", "--priority", "--content", "--file", "--task-id", "--incarnation-id"}
 	case "task send-back":
 		command.kind, names = commandTaskSendBack, []string{"--task", "--head", "--note"}
 	case "task read":
@@ -1789,6 +1791,11 @@ func parseOperator(args []string) (attemptCommand, bool, bool) {
 					return attemptCommand{}, false, false
 				}
 				command.content = append(command.content, api.ContentPinInput{ContentID: id, ContentRevision: revision})
+			}
+		case name == "--file" && command.kind == commandTaskAdd:
+			command.files = strings.Split(value, ",")
+			if len(command.files) > kernel.MaxTaskAttachments || slices.ContainsFunc(command.files, func(path string) bool { return !validOperatorText(path, 1, 4096) }) {
+				return attemptCommand{}, false, false
 			}
 		case name == "--appearance" && command.kind == commandOverseerAgentUpdate:
 			if value == "auto" {
@@ -2605,7 +2612,11 @@ func runOperator(ctx context.Context, command attemptCommand, getenv func(string
 				return writeWebFailure(stderr, "task add", err)
 			}
 		}
-		result, callErr := client.EnqueueTask(callContext, api.EnqueueTaskInput{ID: id, ProjectID: command.project, RepositoryID: command.repository, AssignedAgentID: anyWorkerAgent(command.agent), IncarnationID: incarnation, Title: command.title, Body: command.body, Priority: command.priority, Content: command.content})
+		attachments, err := taskAttachments(command.files)
+		if err != nil {
+			return writeWebFailure(stderr, "task add", err)
+		}
+		result, callErr := client.EnqueueTask(callContext, api.EnqueueTaskInput{ID: id, ProjectID: command.project, RepositoryID: command.repository, AssignedAgentID: anyWorkerAgent(command.agent), IncarnationID: incarnation, Title: command.title, Body: command.body, Priority: command.priority, Content: command.content, Attachments: attachments})
 		if callErr != nil {
 			return writeWebFailure(stderr, "task add", callErr)
 		}
@@ -2944,6 +2955,29 @@ func writeJSON(stdout io.Writer, value any) int {
 		return exitFailure
 	}
 	return 0
+}
+
+// taskAttachments reads each --file whole under the factory's attachment
+// bounds, naming the file a reader cannot send before any request is made.
+func taskAttachments(paths []string) ([]api.TaskAttachmentInput, error) {
+	var attachments []api.TaskAttachmentInput
+	total := 0
+	for _, path := range paths {
+		file, err := os.Open(path)
+		if err != nil {
+			return nil, err
+		}
+		data, err := io.ReadAll(io.LimitReader(file, kernel.MaxTaskAttachmentBytes+1))
+		file.Close()
+		if err != nil {
+			return nil, fmt.Errorf("read %s: %w", path, err)
+		}
+		if total += len(data); len(data) == 0 || total > kernel.MaxTaskAttachmentBytes {
+			return nil, fmt.Errorf("%s: attachments must be nonempty files totalling at most %d MiB", path, kernel.MaxTaskAttachmentBytes>>20)
+		}
+		attachments = append(attachments, api.TaskAttachmentInput{Name: filepath.Base(path), Data: data})
+	}
+	return attachments, nil
 }
 
 func writeWebFailure(stderr io.Writer, subject string, err error) int {

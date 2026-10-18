@@ -29,7 +29,7 @@ function stateAt(head, overrides = {}) {
   return { ...fixtureState, head: BigInt(head), ...overrides };
 }
 
-function terminalHarness({ closeStatus = false, fail, failError = new SessionError("connection"), attachImpl, detachImpl, acquireImpl, enqueueImpl, controlImpl } = {}) {
+function terminalHarness({ closeStatus = false, fail, failError = new SessionError("connection"), attachImpl, detachImpl, acquireImpl, controlImpl } = {}) {
   let attachReset = false;
   const snapshots = [];
   const calls = [];
@@ -50,11 +50,6 @@ function terminalHarness({ closeStatus = false, fail, failError = new SessionErr
     }),
     replyHumanRequest: async () => ({ status: "resolved" }),
     cancelHumanRequest: async () => ({ request_id: request.id }),
-    enqueueAgentTask: async (value) => {
-      calls.push({ kind: "enqueue", value });
-      if (enqueueImpl !== undefined) return enqueueImpl(value);
-      return { taskId: "51".repeat(16), revision: 1n };
-    },
     controlAgent: async (value) => {
       calls.push({ kind: "control", value });
       if (controlImpl !== undefined) return controlImpl(value);
@@ -1256,7 +1251,7 @@ test("an external archive and paused restore retain selection", async () => {
   context.clientOptions().onState(stateAt(22, { tasks, agents: new Map(agents).set(agent.id, restored) }));
   assert.equal(context.latest().selectedAgent.id, agent.id);
   assert.equal(context.latest().terminal.paused, true);
-  assert.equal(context.calls.some((call) => call.kind === "resolve" || call.kind === "enqueue"), false);
+  assert.equal(context.calls.some((call) => call.kind === "resolve"), false);
   context.controller.close();
 });
 

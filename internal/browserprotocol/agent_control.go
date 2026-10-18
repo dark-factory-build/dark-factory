@@ -2,6 +2,8 @@ package browserprotocol
 
 import "fmt"
 
+const MaxTaskInstructionBytes = 32768
+
 // AgentControl targets one observed task/run pair. Replacement IDs belong to
 // the caller so retrying a lost response cannot create a second successor.
 type AgentControl struct {

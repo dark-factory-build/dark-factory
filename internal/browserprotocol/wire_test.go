@@ -76,7 +76,7 @@ func TestControlFixturesRoundTrip(t *testing.T) {
 
 func decodeFixtureControl(name string, data []byte) (ControlFrame, error) {
 	switch name {
-	case "attachment_retention", "task_attachment", "pair_prove", "auth_prove", "state_get", "state_watch", "human_request_detail_get", "task_enqueue", "project_create", "repositories_get", "repository_mutate", "terminal_target_get":
+	case "attachment_retention", "pair_prove", "auth_prove", "state_get", "state_watch", "human_request_detail_get", "project_create", "repositories_get", "repository_mutate", "terminal_target_get":
 		return DecodeClientControl(data)
 	default:
 		return DecodeServerControl(data)
@@ -123,14 +123,6 @@ func encodeDecoded(frame ControlFrame) ([]byte, error) {
 		return EncodeProjectContent(frame.ID, value)
 	case ProjectContentResult:
 		return EncodeProjectContentResult(frame.ID, value)
-	case TaskAttachmentChunk:
-		return EncodeTaskAttachment(frame.ID, value)
-	case TaskAttachmentResult:
-		return EncodeTaskAttachmentResult(frame.ID, value)
-	case TaskEnqueue:
-		return EncodeTaskEnqueue(frame.ID, value)
-	case TaskEnqueueResult:
-		return EncodeTaskEnqueueResult(frame.ID, value)
 	case AgentUpdate:
 		return encodeControl(TypeAgentUpdate, frame.ID, value)
 	case AttachmentRetention:
@@ -617,7 +609,7 @@ func TestManifestMatchesImplementedRegistry(t *testing.T) {
 	}
 	// The manifest carries a stable name, not a generation: the contract is
 	// unversioned by owner decision on 4 September 2026.
-	if manifest.Name != "dark-factory/browser" || len(manifest.Control) != 71 || len(manifest.Terminal.Opcodes) != 2 {
+	if manifest.Name != "dark-factory/browser" || len(manifest.Control) != 67 || len(manifest.Terminal.Opcodes) != 2 {
 		t.Fatalf("manifest registry incomplete: %+v", manifest)
 	}
 	capabilityNames := []string{"observe", "private_human_request_detail", "human_actions", "terminal_input", "administration"}
@@ -745,7 +737,7 @@ func TestManifestMatchesImplementedRegistry(t *testing.T) {
 			t.Fatalf("manifest fixture not exercised: %q", entry.Fixture)
 		}
 	}
-	for _, name := range []string{"hello", "pair_prove", "pair_result", "auth_prove", "auth_result", "state_get", "state_snapshot", "state_watch", "state_changed", "human_request_detail_get", "human_request_detail", "task_enqueue", "task_enqueue_result", "error"} {
+	for _, name := range []string{"hello", "pair_prove", "pair_result", "auth_prove", "auth_result", "state_get", "state_snapshot", "state_watch", "state_changed", "human_request_detail_get", "human_request_detail", "error"} {
 		if len(fixtureBytes(t, name+".json")) == 0 {
 			t.Fatal("empty fixture")
 		}

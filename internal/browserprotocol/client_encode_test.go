@@ -19,12 +19,6 @@ func DecodeServerControl(data []byte) (ControlFrame, error) { return decodeContr
 func EncodeAgentControl(id string, value AgentControl) ([]byte, error) {
 	return encodeControl(TypeAgentControl, id, value)
 }
-func EncodeTaskAttachment(id string, value TaskAttachmentChunk) ([]byte, error) {
-	return encodeControl(TypeTaskAttachment, id, value)
-}
-func EncodeTaskEnqueue(id string, value TaskEnqueue) ([]byte, error) {
-	return encodeControl(TypeTaskEnqueue, id, value)
-}
 func EncodeProjectContent(id string, value ProjectContent) ([]byte, error) {
 	return encodeControl(TypeProjectContent, id, value)
 }

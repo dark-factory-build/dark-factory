@@ -8,22 +8,28 @@ import (
 	"testing"
 )
 
+// attachedTask is the operator enqueue with files: the one path that stores
+// task attachments.
+func attachedTask(t *testing.T, agent Agent, task, incarnation byte, body string, files ...TaskAttachment) NewTask {
+	t.Helper()
+	return NewTask{ID: taskID(t, task), ProjectID: agent.ProjectID, AssignedAgentID: agent.ID, IncarnationID: incarnationID(t, incarnation), Title: "Direct instruction", Body: body, Attachments: files}
+}
+
 func TestTaskAttachmentsAtomicReplayAndReopen(t *testing.T) {
 	t.Parallel()
 	store, path, _, agent := newAdmissionStore(t, RoleOrchestrator, 2)
 	ctx := context.Background()
-	client := terminalTargetClient(t, store, browserTestID(t, 180), BrowserCapabilityObserve|BrowserCapabilityHumanActions)
 	id := taskID(t, 181)
 	files := []TaskAttachment{{Name: "../Screenshot.png", Data: []byte{0, 1, 255}}}
-	enqueue := func(files []TaskAttachment) (BrowserTaskEnqueue, error) {
-		return store.EnqueueTaskForBrowserAgentRepositoryMode(ctx, client.ID, id, incarnationID(t, 182), agent.ID, agent.Revision, RepositoryID{}, "Inspect this", BrowserEnqueueQueue, mustTime(t, 102), nil, files...)
+	enqueue := func(files []TaskAttachment) (Task, error) {
+		return store.EnqueueTask(ctx, attachedTask(t, agent, 181, 182, "Inspect this", files...), mustTime(t, 102))
 	}
 	result, err := enqueue(files)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if result.Task.Body != "Inspect this" {
-		t.Fatal(result.Task.Body)
+	if result.Body != "Inspect this" {
+		t.Fatal(result.Body)
 	}
 	if _, err := enqueue(files); err != nil {
 		t.Fatalf("exact replay: %v", err)
@@ -32,8 +38,11 @@ func TestTaskAttachmentsAtomicReplayAndReopen(t *testing.T) {
 	if _, err := enqueue(changed); !errors.Is(err, ErrConflict) {
 		t.Fatalf("changed bytes replay: %v", err)
 	}
+	if _, err := enqueue(nil); !errors.Is(err, ErrConflict) {
+		t.Fatalf("replay without files: %v", err)
+	}
 	editedBody := "Updated instruction without attachment paths"
-	if _, err := store.UpdateTask(ctx, id, result.Task.Revision, TaskPatch{Body: &editedBody}, mustTime(t, 103)); err != nil {
+	if _, err := store.UpdateTask(ctx, id, result.Revision, TaskPatch{Body: &editedBody}, mustTime(t, 103)); err != nil {
 		t.Fatal(err)
 	}
 	if err := store.Close(); err != nil {
@@ -49,7 +58,7 @@ func TestTaskAttachmentsAtomicReplayAndReopen(t *testing.T) {
 		t.Fatalf("reopened attachments: %+v, %v", got, err)
 	}
 	badID := taskID(t, 183)
-	_, err = store.EnqueueTaskForBrowserAgentRepositoryMode(ctx, client.ID, badID, incarnationID(t, 184), agent.ID, agent.Revision, RepositoryID{}, "bad", BrowserEnqueueQueue, mustTime(t, 103), nil, TaskAttachment{Name: "empty.txt"})
+	_, err = store.EnqueueTask(ctx, attachedTask(t, agent, 183, 184, "bad", TaskAttachment{Name: "empty.txt"}), mustTime(t, 103))
 	if !errors.Is(err, ErrInvalidValue) {
 		t.Fatalf("empty file accepted: %v", err)
 	}
@@ -74,13 +83,12 @@ func TestAttachmentCleanupAndCompactionPreserveHistory(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
 	store, path, _, agent := newAdmissionStore(t, RoleWorker, 1)
-	client := terminalTargetClient(t, store, browserTestID(t, 180), BrowserCapabilityHumanActions|BrowserCapabilityObserve)
 	id := taskID(t, 181)
-	created, err := store.EnqueueTaskForBrowserAgentRepositoryMode(ctx, client.ID, id, incarnationID(t, 182), agent.ID, agent.Revision, RepositoryID{}, "Inspect file", BrowserEnqueueQueue, mustTime(t, 102), nil, TaskAttachment{Name: "large.png", Data: make([]byte, 2<<20)})
+	created, err := store.EnqueueTask(ctx, attachedTask(t, agent, 181, 182, "Inspect file", TaskAttachment{Name: "large.png", Data: make([]byte, 2<<20)}), mustTime(t, 102))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := store.RemoveTaskAttachments(ctx, id, created.Task.Revision); !errors.Is(err, ErrConflict) {
+	if _, err := store.RemoveTaskAttachments(ctx, id, created.Revision); !errors.Is(err, ErrConflict) {
 		t.Fatalf("queued cleanup: %v", err)
 	}
 	if _, err := store.CompactStorage(ctx); !errors.Is(err, ErrConflict) {
@@ -96,7 +104,7 @@ func TestAttachmentCleanupAndCompactionPreserveHistory(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := store.RemoveTaskAttachments(ctx, id, created.Task.Revision); !errors.Is(err, ErrRevisionConflict) {
+	if _, err := store.RemoveTaskAttachments(ctx, id, created.Revision); !errors.Is(err, ErrRevisionConflict) {
 		t.Fatalf("stale cleanup: %v", err)
 	}
 	if _, err := store.writer.ExecContext(ctx, `PRAGMA wal_checkpoint(TRUNCATE)`); err != nil {
@@ -168,9 +176,8 @@ func TestAutomaticAttachmentRetention(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
 	store, path, _, agent := newAdmissionStore(t, RoleWorker, 1)
-	client := terminalTargetClient(t, store, browserTestID(t, 180), BrowserCapabilityHumanActions|BrowserCapabilityObserve)
 	id := taskID(t, 181)
-	created, err := store.EnqueueTaskForBrowserAgentRepositoryMode(ctx, client.ID, id, incarnationID(t, 182), agent.ID, agent.Revision, RepositoryID{}, "Inspect", BrowserEnqueueQueue, mustTime(t, 102), nil, TaskAttachment{Name: "test.png", Data: []byte("image")})
+	created, err := store.EnqueueTask(ctx, attachedTask(t, agent, 181, 182, "Inspect", TaskAttachment{Name: "test.png", Data: []byte("image")}), mustTime(t, 102))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -206,7 +213,7 @@ func TestAutomaticAttachmentRetention(t *testing.T) {
 		t.Fatal(err)
 	}
 	check(false)
-	cancelled, err := store.UpdateTask(ctx, id, created.Task.Revision, TaskPatch{Cancel: true}, mustTime(t, 103))
+	cancelled, err := store.UpdateTask(ctx, id, created.Revision, TaskPatch{Cancel: true}, mustTime(t, 103))
 	if err != nil {
 		t.Fatal(err)
 	}
