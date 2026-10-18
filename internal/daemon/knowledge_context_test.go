@@ -78,7 +78,7 @@ func TestKnowledgeRelevanceWindowFindsOlderLessons(t *testing.T) {
 	for i := 0; i < 300; i++ {
 		seedContextKnowledgeNamedAt(t, f, active.run.ProjectID, fmt.Sprintf("%032x", 1000+i), kernel.ContentLesson, kernel.KnowledgeMetadata{Status: "current", Evidence: []string{"irrelevant"}}, "unrelated lesson", "Unrelated guidance", int64(2000+i))
 	}
-	repository, found, err := f.store.TaskRepository(ctx, active.run.TaskID)
+	repository, found, err := f.store.ContentRepository(ctx, relevant[0].ID, relevant[0].Revision)
 	if err != nil || !found {
 		t.Fatalf("task repository: %v", err)
 	}
