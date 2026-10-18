@@ -356,6 +356,73 @@ func TestPrerequisiteWaitsForItsProducerToMergeAtItsExactHead(t *testing.T) {
 	}
 }
 
+func TestRetryBlockedMissingPrerequisiteAfterProductionObservation(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	blocked, _ := NewBlockedProposal("missing prerequisite: producer is not in the assigned base")
+	store, finalizing := finalizingReleasedRun(t, RoleWorker, blocked)
+	defer store.Close()
+	consumer, err := finalizeTestRun(t, store, finalizing, 60)
+	if err != nil {
+		t.Fatal(err)
+	}
+	producerAgent, err := store.CreateAgent(ctx, NewAgent{ID: agentID(t, 247), ProjectID: consumer.ProjectID, Name: "producer", Role: RoleOrchestrator, Provider: ProviderCodex, ToolBudgetLimit: 5}, mustTime(t, 61))
+	if err != nil {
+		t.Fatal(err)
+	}
+	producerTask, err := store.EnqueueTask(ctx, NewTask{ID: taskID(t, 248), ProjectID: consumer.ProjectID, AssignedAgentID: producerAgent.ID, IncarnationID: incarnationID(t, 249), Title: "producer"}, mustTime(t, 62))
+	if err != nil {
+		t.Fatal(err)
+	}
+	keys := admissionKeys(t, 250, nil)
+	admitted, err := store.AdmitNext(ctx, keys, mustTime(t, 63))
+	if err != nil || !admitted.Admitted() || admitted.Run.TaskID != producerTask.ID {
+		t.Fatalf("producer admission = %+v, %v", admitted, err)
+	}
+	activateAllResourcesUnique(t, store, *admitted.Run, 64, 640)
+	session := terminalSessionForRunTest(t, store, admitted.Run.ID)
+	currentRun, found, err := store.Run(ctx, admitted.Run.ID)
+	if err != nil || !found {
+		t.Fatalf("producer run after activation = %+v, %t, %v", currentRun, found, err)
+	}
+	running, err := store.ActivateRun(ctx, admitted.Run.ID, session.ID, currentRun.Revision, session.Revision, mustTime(t, 70))
+	if err != nil {
+		t.Fatalf("activate producer run: %v (admitted=%d current=%d session=%d)", err, admitted.Run.Revision.Int64(), currentRun.Revision.Int64(), session.Revision.Int64())
+	}
+	success, _ := NewSuccessProposal("producer result")
+	finalizing, err = store.ProposeAttemptOutcome(ctx, keys.AttemptDigest, success, mustTime(t, 71))
+	if err != nil {
+		t.Fatal(err)
+	}
+	finalizing = observeMissingProcessExits(t, store, running.ID, 72)
+	for _, resource := range resourcesForRunTest(t, store, running.ID) {
+		if resource.State != ResourceReleased {
+			if _, err := store.ReleaseResource(ctx, running.ID, resource.ID, resource.Revision, resource.Identity, mustTime(t, 73)); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+	closeTerminalSessionAtCurrent(t, store, running.ID, 74)
+	producer, found, err := store.Run(ctx, running.ID)
+	if err != nil || !found {
+		t.Fatalf("producer run = %+v, %t, %v", producer, found, err)
+	}
+	if _, err := finalizeTestRun(t, store, producer, 75); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.RecordProductionObservation(ctx, consumer.ProjectID, ProductionObservation{Repository: "example/factory", ObservedAt: 71, PullRequests: []ProductionPullRequest{{Number: 7, Title: "merged producer", Head: "", State: "merged"}}}, mustTime(t, 71)); err != nil {
+		t.Fatal(err)
+	}
+	corruptSQL(t, store, `INSERT INTO task_prerequisites(task_id, upstream_task_id, upstream_work_revision) VALUES (?, ?, 1)`, consumer.TaskID.Bytes(), producerTask.ID.Bytes())
+	if retried, err := store.RetryBlockedMissingPrerequisites(ctx, consumer.ProjectID, mustTime(t, 72)); err != nil || retried != 1 {
+		t.Fatalf("automatic retry = %d, %v", retried, err)
+	}
+	current, found, err := store.Task(ctx, consumer.TaskID)
+	if err != nil || !found || current.Status != TaskQueued {
+		t.Fatalf("consumer after automatic retry = %+v, %t, %v", current, found, err)
+	}
+}
+
 // A Change reclaimed before its consumer was added has lost the head and base
 // its prerequisite is judged by, so the prerequisite is refused, not stranded.
 func TestPrerequisiteOnAReclaimedProducerChangeIsRefused(t *testing.T) {
