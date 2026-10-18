@@ -1733,22 +1733,22 @@ func kernelAttemptResult(record *runner.AttemptResultRecord, runID kernel.RunID,
 		if err != nil {
 			return kernel.AttemptResult{}, err
 		}
-		return kernel.NewInnerConvergedAttemptResult(runID, attemptDigest, proofDigest, runtimeIdentity, processIdentity, exit)
+		return kernel.NewInnerConvergedAttemptResult(runID, attemptDigest, proofDigest, runtimeIdentity, processIdentity, exit.WithAborted(value.Aborted()))
 	default:
 		return kernel.AttemptResult{}, errInvalidContract
 	}
 }
 
 // terminalExitEvent maps the authenticated converged result to the exact wire
-// exit for browser observers. The abort flag is daemon protocol state and is
-// applied by the owner loop, never taken from the artifact.
+// exit for browser observers. The runner's own attribution of the exit comes
+// with it; the owner loop adds this daemon's delivered termination.
 func terminalExitEvent(record *runner.AttemptResultRecord) (TerminalEvent, error) {
 	value := record.Result()
 	if code, ok := value.Code(); ok {
-		return TerminalEvent{Kind: TerminalEventExit, ExitCode: code}, nil
+		return TerminalEvent{Kind: TerminalEventExit, ExitCode: code, Aborted: value.Aborted()}, nil
 	}
 	if signal, ok := value.Signal(); ok {
-		return TerminalEvent{Kind: TerminalEventExit, ExitSignal: signal}, nil
+		return TerminalEvent{Kind: TerminalEventExit, ExitSignal: signal, Aborted: value.Aborted()}, nil
 	}
 	return TerminalEvent{}, errInvalidContract
 }

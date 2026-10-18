@@ -77,13 +77,94 @@ func TestTerminateConvergesQueuedNaturalExit(t *testing.T) {
 	waitOwnedGroupWithoutLiveMembers(t, child.Identity())
 
 	exit, err := child.Terminate(time.Second)
-	if err != nil || exit.Code != 23 || exit.Signal != 0 {
+	if err != nil || exit.Code != 23 || exit.Signal != 0 || exit.Aborted {
 		t.Fatalf("queued natural exit=%+v err=%v", exit, err)
 	}
 	assertWaitedAndAbsent(t, child)
 	if _, err := child.Terminate(time.Second); !errors.Is(err, ErrState) {
 		t.Fatalf("second termination performed work: %v", err)
 	}
+}
+
+// The exit a provider reaches because the runner terminated it is the
+// runner's, whatever status its TERM handler picks. The handler here exits
+// the instant the signal lands (the shell is blocked in a builtin read, with
+// no child to wait for), so nothing read after the signal could see it alive:
+// the status alone has to carry the attribution.
+func TestTerminateAttributesHandledAndDefaultTERMExits(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		trap       string
+		wantCode   int
+		wantSignal int
+	}{
+		{name: "handler-exits-zero", trap: "trap 'exit 0' TERM;", wantCode: 0},
+		{name: "handler-exits-nonzero", trap: "trap 'exit 3' TERM;", wantCode: 3},
+		{name: "default-disposition", wantCode: -1, wantSignal: int(unix.SIGTERM)},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newFixture(t)
+			child, _ := startControlledNaturalExitAfter(t, f, tc.trap, 23)
+			installOwnedChildSafetyCleanup(t, child)
+			exit, err := child.Terminate(time.Second)
+			if err != nil || exit.Code != tc.wantCode || exit.Signal != tc.wantSignal || !exit.Aborted {
+				t.Fatalf("terminated exit=%+v err=%v, want code=%d signal=%d aborted", exit, err, tc.wantCode, tc.wantSignal)
+			}
+			assertWaitedAndAbsent(t, child)
+		})
+	}
+}
+
+// A provider that signals itself ended on its own: the same SIGTERM status
+// as a termination, with no termination to attribute it to, through either
+// path that can reap it.
+func TestSelfSignalledExitIsNotRunnerAborted(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		reap func(*OwnedChild) (Exit, error)
+	}{
+		{name: "terminate", reap: func(child *OwnedChild) (Exit, error) { return child.Terminate(time.Second) }},
+		{name: "finish-after-exit", reap: func(child *OwnedChild) (Exit, error) { return child.FinishAfterExit(time.Second) }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newFixture(t)
+			child := f.start("/bin/sh", []string{"-c", "kill -TERM $$"}, nil, outputFile(t, filepath.Join(f.root, "out")))
+			if _, err := child.Activate(); err != nil {
+				t.Fatal(err)
+			}
+			installOwnedChildSafetyCleanup(t, child)
+			waitOwnedGroupWithoutLiveMembers(t, child.Identity())
+			exit, err := tc.reap(child)
+			if err != nil || exit.Code != -1 || exit.Signal != int(unix.SIGTERM) || exit.Aborted {
+				t.Fatalf("self-signalled exit=%+v err=%v", exit, err)
+			}
+			assertWaitedAndAbsent(t, child)
+		})
+	}
+}
+
+// Attribution is decided at the signal, not at the reap: a termination whose
+// group convergence fails leaves the exit unreaped, and the retried cleanup
+// that finally waits it still reports the runner's termination.
+func TestRetriedCleanupKeepsTerminationAttribution(t *testing.T) {
+	f := newFixture(t)
+	child, _ := startControlledNaturalExitAfter(t, f, "", 23)
+	installOwnedChildSafetyCleanup(t, child)
+	child.testConvergence = func() error {
+		return fmt.Errorf("%w: injected group convergence failure", ErrUnresolved)
+	}
+	if _, err := child.Terminate(time.Second); !errors.Is(err, ErrUnresolved) {
+		t.Fatalf("failed convergence termination=%v", err)
+	}
+	if child.state != stateExited || !child.exitObserved || child.cmd.ProcessState != nil {
+		t.Fatalf("failed convergence invented Wait: state=%d observed=%t process_state=%v", child.state, child.exitObserved, child.cmd.ProcessState)
+	}
+	child.testConvergence = nil
+	exit, err := child.FinishAfterExit(time.Second)
+	if err != nil || exit.Code != -1 || exit.Signal != int(unix.SIGTERM) || !exit.Aborted {
+		t.Fatalf("retried reap exit=%+v err=%v", exit, err)
+	}
+	assertWaitedAndAbsent(t, child)
 }
 
 func TestTerminateDischargesEPERMOnlyAfterExactNaturalExit(t *testing.T) {
@@ -106,7 +187,7 @@ func TestTerminateDischargesEPERMOnlyAfterExactNaturalExit(t *testing.T) {
 	if setupErr != nil {
 		t.Fatalf("race setup: %v", setupErr)
 	}
-	if err != nil || exit.Code != 23 || exit.Signal != 0 {
+	if err != nil || exit.Code != 23 || exit.Signal != 0 || exit.Aborted {
 		t.Fatalf("exact exit did not discharge EPERM: exit=%+v err=%v", exit, err)
 	}
 	if got := calls.Load(); got != 1 {
@@ -468,6 +549,14 @@ func releaseUnreadReadinessAfter(t *testing.T, daemon *os.File, delay time.Durat
 
 func startControlledNaturalExit(t *testing.T, f *fixture, code int) (*OwnedChild, *os.File) {
 	t.Helper()
+	return startControlledNaturalExitAfter(t, f, "", code)
+}
+
+// startControlledNaturalExitAfter runs prelude (shell text such as a trap)
+// before the child blocks in a builtin read, where a trapped signal is handled
+// the instant it lands.
+func startControlledNaturalExitAfter(t *testing.T, f *fixture, prelude string, code int) (*OwnedChild, *os.File) {
+	t.Helper()
 	fifo := filepath.Join(f.root, "natural-exit.fifo")
 	if err := unix.Mkfifo(fifo, 0o600); err != nil {
 		t.Fatal(err)
@@ -478,7 +567,7 @@ func startControlledNaturalExit(t *testing.T, f *fixture, code int) (*OwnedChild
 	}
 	t.Cleanup(func() { _ = release.Close() })
 	ready := filepath.Join(f.root, "natural-exit.ready")
-	command := fmt.Sprintf("printf ready > %q; IFS= read -r _ < %q; exit %d", ready, fifo, code)
+	command := fmt.Sprintf("%s printf ready > %q; IFS= read -r _ < %q; exit %d", prelude, ready, fifo, code)
 	child := f.start("/bin/sh", []string{"-c", command}, nil, outputFile(t, filepath.Join(f.root, "out")))
 	if _, err := child.Activate(); err != nil {
 		t.Fatal(err)

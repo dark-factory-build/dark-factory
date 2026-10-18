@@ -841,6 +841,14 @@ const (
 type AttemptResultExit struct {
 	kind  attemptResultExitKind
 	value int64
+	// aborted: the runner terminated the provider for factoryd (a stop,
+	// restart or lost daemon), so the exit is not the provider's own.
+	aborted bool
+}
+
+func (exit AttemptResultExit) WithAborted(aborted bool) AttemptResultExit {
+	exit.aborted = aborted
+	return exit
 }
 
 func NewAttemptResultExitCode(code int64) (AttemptResultExit, error) {

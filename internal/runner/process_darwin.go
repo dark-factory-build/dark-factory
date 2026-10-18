@@ -813,8 +813,8 @@ func (c *OwnedChild) FinishAfterExit(timeout time.Duration) (Exit, error) {
 	return c.exit, nil
 }
 
-func exitFromWait(ps *os.ProcessState, err error) Exit {
-	e := Exit{Code: -1}
+func exitFromWait(ps *os.ProcessState, err error, aborted bool) Exit {
+	e := Exit{Code: -1, Aborted: aborted}
 	if ps == nil {
 		e.LaunchErr = fmt.Sprint(err)
 		return e
@@ -839,7 +839,9 @@ func (c *OwnedChild) waitOnce() error {
 	}
 	err := c.cmd.Wait()
 	c.state = stateWaited
-	c.exit = exitFromWait(c.cmd.ProcessState, err)
+	// Aborted was decided when this owner signalled the live child; the reap,
+	// however many cleanup retries it takes, only learns the status.
+	c.exit = exitFromWait(c.cmd.ProcessState, err, c.exit.Aborted)
 	return err
 }
 
@@ -885,6 +887,17 @@ func (c *OwnedChild) Terminate(timeout time.Duration) (Exit, error) {
 		timeout = defaultStopTimeout
 	}
 	var signalFailure error
+	// An exit already queued on the owned kqueue happened before this
+	// termination: the child ended on its own and the exit is its own. Only a
+	// TERM delivered to a still-live child makes the exit that follows ours,
+	// whatever status a handler chooses for it. Reading the queue before the
+	// signal cannot race a handler, which does not run until the signal lands.
+	// ponytail: a child that exits between this read and the kill is still
+	// attributed to us; closing that window needs exit ordering kqueue does not
+	// report.
+	if err := c.refreshExit(); err != nil {
+		return Exit{}, err
+	}
 	if !c.exitObserved {
 		if err := c.signalGroup(unix.SIGTERM); err != nil {
 			// The exact child can exit between signalOwnedGroup's census and
@@ -893,6 +906,8 @@ func (c *OwnedChild) Terminate(timeout time.Duration) (Exit, error) {
 			if _, exitErr := c.waitForExit(timeout); exitErr != nil {
 				return Exit{}, errors.Join(signalFailure, exitErr)
 			}
+		} else {
+			c.exit.Aborted = true
 		}
 	}
 	withSignalFailure := func(err error) error {

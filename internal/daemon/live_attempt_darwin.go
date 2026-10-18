@@ -458,9 +458,9 @@ func (attempt *liveAttempt) handleRunningCommand(command liveAttemptCommand) (bo
 			return false, nil
 		}
 		exit := *command.exit
-		// The daemon's own delivered termination is the only abort authority;
-		// the artifact deliberately carries no abort context, and a moot
-		// terminate against an already-converged runner is not an abort.
+		// Either authority aborts: the runner's own attribution in the exit, or
+		// this daemon's delivered termination. A moot terminate against an
+		// already-converged runner is neither.
 		exit.Aborted = exit.Aborted || attempt.terminationDelivered
 		attempt.broadcast(exit)
 		attempt.closeSubscribers(ErrTerminalClosed)

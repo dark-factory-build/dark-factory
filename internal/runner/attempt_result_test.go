@@ -126,7 +126,7 @@ func TestAttemptResultForgedProofOnlyCreatesFailClosedConflict(t *testing.T) {
 func ptrNotice(value AttemptResultNotice) *AttemptResultNotice { return &value }
 
 func TestAttemptResultConvergedCodeAndSignalAreClosed(t *testing.T) {
-	for _, exit := range []Exit{{Code: 0}, {Code: -1, Signal: int(unix.SIGTERM)}} {
+	for _, exit := range []Exit{{Code: 0}, {Code: -1, Signal: int(unix.SIGTERM)}, {Code: 0, Aborted: true}, {Code: -1, Signal: int(unix.SIGTERM), Aborted: true}} {
 		t.Run(exitName(exit), func(t *testing.T) {
 			_, dir := openAttemptResultTestDir(t, true)
 			result, err := innerConvergedResult("attempt-converged", testResultProof(), Identity{PID: 23, PGID: 23, Birth: Birth{Seconds: 4, Microseconds: 5}}, exit)
@@ -138,7 +138,7 @@ func TestAttemptResultConvergedCodeAndSignalAreClosed(t *testing.T) {
 				t.Fatal(err)
 			}
 			loaded, err := AuthenticateAttemptResult(dir, "attempt-converged", ptrNotice(record.Notice()))
-			if err != nil || loaded.Result() != publicAttemptResult(result) || !loaded.innerActivated {
+			if err != nil || loaded.Result() != publicAttemptResult(result) || !loaded.innerActivated || loaded.Result().Aborted() != exit.Aborted {
 				t.Fatalf("converged result = %+v, %v", loaded, err)
 			}
 		})
@@ -146,10 +146,14 @@ func TestAttemptResultConvergedCodeAndSignalAreClosed(t *testing.T) {
 }
 
 func exitName(exit Exit) string {
+	name := "code"
 	if exit.Signal != 0 {
-		return "signal"
+		name = "signal"
 	}
-	return "code"
+	if exit.Aborted {
+		name += "-aborted"
+	}
+	return name
 }
 
 func TestAttemptResultRejectsMalformedOversizeAndAmbiguousJSON(t *testing.T) {
