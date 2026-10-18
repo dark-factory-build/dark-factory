@@ -213,7 +213,7 @@ func (o *terminalOwner) awaitProviderExec(stagePTY *ptyStageSink) error {
 				return err
 			}
 			if validProviderErrorFrame(frame) {
-				return fmt.Errorf("runner: provider exec: %s", frame.Payload)
+				return fmt.Errorf("%w: %s", errProviderRefused, frame.Payload)
 			}
 			if validProviderHandoffCheck(frame) {
 				// The worker has completed every provider check and is paused
