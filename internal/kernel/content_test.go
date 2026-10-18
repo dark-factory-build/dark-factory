@@ -171,11 +171,9 @@ func TestOverseerEnqueueProposalDispatchIsAtomicAndScopedToProposal(t *testing.T
 	if _, err := store.EnqueueTaskForOverseer(ctx, overseer.CredentialDigest, NewTask{ID: taskID(t, 138), ProjectID: overseer.ProjectID, IncarnationID: incarnationID(t, 139), Title: "duplicate"}, mustTime(t, 143), TaskContentReference{ContentID: firstProposal.ID, ContentRevision: firstProposal.Revision}); !errors.Is(err, ErrConflict) {
 		t.Fatalf("duplicate proposal dispatch: %v", err)
 	}
-	if _, err := store.writer.ExecContext(ctx, `UPDATE tasks SET status = 'cancelled', completed_at_ms = 144, updated_at_ms = 144 WHERE id = ?`, first.ID.Bytes()); err != nil {
-		t.Fatal(err)
-	}
-	if current, found, err := store.Task(ctx, first.ID); err != nil || !found || current.Status != TaskCancelled {
-		t.Fatalf("terminal first task = %+v found=%v err=%v", current, found, err)
+	cancelled, err := store.UpdateTask(ctx, first.ID, first.Revision, TaskPatch{Cancel: true}, mustTime(t, 144))
+	if err != nil || cancelled.Status != TaskCancelled {
+		t.Fatalf("terminal first task = %+v err=%v", cancelled, err)
 	}
 	if _, err := store.EnqueueTaskForOverseer(ctx, overseer.CredentialDigest, NewTask{ID: taskID(t, 140), ProjectID: overseer.ProjectID, IncarnationID: incarnationID(t, 141), Title: "replacement"}, mustTime(t, 145), TaskContentReference{ContentID: firstProposal.ID, ContentRevision: firstProposal.Revision}); err != nil {
 		t.Fatalf("replacement after terminal task: %v", err)
@@ -188,6 +186,52 @@ func TestOverseerEnqueueProposalDispatchIsAtomicAndScopedToProposal(t *testing.T
 	}
 	if _, found, err := store.Task(ctx, failedID); err != nil || found {
 		t.Fatalf("failed enqueue left task: found=%v err=%v", found, err)
+	}
+}
+
+func TestProposalDispatchStaysBlockedAfterSuccessUntilPullMerges(t *testing.T) {
+	t.Parallel()
+	store, _, project, agent := newAdmissionStore(t, RoleWorker, 4)
+	defer store.Close()
+	ctx := context.Background()
+	proposal := contentSpec(t, project.ID, 150, "accepted implementation")
+	proposal.Kind = ContentObservation
+	proposal.SourceReferences = `{"status":"tentative","record_type":"proposal"}`
+	content, err := store.CreateContent(ctx, proposal, mustTime(t, 40))
+	if err != nil {
+		t.Fatal(err)
+	}
+	first, err := store.EnqueueTask(ctx, NewTask{ID: taskID(t, 151), ProjectID: project.ID, AssignedAgentID: agent.ID, IncarnationID: incarnationID(t, 152), Title: "implementation"}, mustTime(t, 41))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.AttachContentToTask(ctx, first.ID, project.ID, content.ID, content.Revision, mustTime(t, 42)); err != nil {
+		t.Fatal(err)
+	}
+	keys := admissionKeys(t, 153, nil)
+	admission, err := store.AdmitNext(ctx, keys, mustTime(t, 43))
+	if err != nil || !admission.Admitted() {
+		t.Fatalf("admission = %+v, %v", admission, err)
+	}
+	terminal := settleWorkerRunForTest(t, store, *admission.Run, keys, 50)
+	head := changeHead(t, store, terminal.TaskID)
+	pr := ProductionPullRequest{Number: 77, Title: "Implementation", URL: "https://github.com/example/factory/pull/77", Head: head, Branch: "factory/implementation", Base: "main", State: "open", Review: ProductionReview{Head: head, State: "unknown"}}
+	if err := store.RecordPublication(ctx, project.ID, terminal.TaskID, "example/factory", pr, mustTime(t, 80)); err != nil {
+		t.Fatal(err)
+	}
+	second, err := store.EnqueueTask(ctx, NewTask{ID: taskID(t, 154), ProjectID: project.ID, AssignedAgentID: agent.ID, IncarnationID: incarnationID(t, 155), Title: "duplicate"}, mustTime(t, 81))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.AttachContentToTask(ctx, second.ID, project.ID, content.ID, content.Revision, mustTime(t, 82)); !errors.Is(err, ErrConflict) {
+		t.Fatalf("duplicate after success with open pull: %v", err)
+	}
+	pr.State, pr.MergedAt = "merged", "2026-10-18T00:00:00Z"
+	if err := store.RecordProductionObservation(ctx, project.ID, ProductionObservation{Repository: "example/factory", ObservedAt: 90, PullRequests: []ProductionPullRequest{pr}}, mustTime(t, 90)); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.AttachContentToTask(ctx, second.ID, project.ID, content.ID, content.Revision, mustTime(t, 91)); err != nil {
+		t.Fatalf("replacement after merge: %v", err)
 	}
 }
 
