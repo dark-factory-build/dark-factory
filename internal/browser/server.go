@@ -144,9 +144,6 @@ func Listen(config Config) (*Server, error) {
 
 func start(backend Backend, origins map[string]struct{}, console []byte, listener net.Listener, clock func() time.Time) *Server {
 	ctx, cancel := context.WithCancel(context.Background())
-	// The listener's own origin is the desktop console page it serves at "/".
-	host := listener.Addr().String()
-	origins["http://"+host] = struct{}{}
 	server := &Server{
 		now:                clock,
 		backend:            backend,
@@ -154,7 +151,7 @@ func start(backend Backend, origins map[string]struct{}, console []byte, listene
 		taskBackend:        func() TaskBackend { value, _ := backend.(TaskBackend); return value }(),
 		consoleBackend:     func() ConsoleBackend { value, _ := backend.(ConsoleBackend); return value }(),
 		githubBackend:      func() GitHubBackend { value, _ := backend.(GitHubBackend); return value }(),
-		host:               host,
+		host:               listener.Addr().String(),
 		origins:            origins,
 		console:            console,
 		terminalAckTimeout: time.Duration(browserprotocol.TerminalAckTimeoutMS) * time.Millisecond,
@@ -325,10 +322,6 @@ func (server *Server) handle(writer http.ResponseWriter, request *http.Request) 
 	}
 	if request.URL.Path == ConsolePath {
 		server.handleConsole(writer, request)
-		return
-	}
-	if request.URL.Path == "/" {
-		server.handleShell(writer, request)
 		return
 	}
 	if request.URL.Path != Path || request.URL.EscapedPath() != Path || request.URL.RawQuery != "" {

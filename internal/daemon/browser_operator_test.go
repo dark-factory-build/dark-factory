@@ -34,7 +34,7 @@ func TestWebOperatorOpenStatusListAndRevoke(t *testing.T) {
 		t.Fatal(err)
 	}
 	parsed, err := url.Parse(link)
-	if err != nil || parsed.Scheme != "http" || parsed.Host != fixture.runtime.Addr() || parsed.Path != "/" || parsed.RawQuery != "" || !strings.HasPrefix(parsed.Fragment, "df_pair=") {
+	if err != nil || parsed.Scheme != "https" || parsed.Host != "app.darkfactory.build" || parsed.Path != "/" || parsed.RawQuery != "" || !strings.HasPrefix(parsed.Fragment, "df_pair=") {
 		t.Fatalf("launch URL = %q, err=%v", link, err)
 	}
 	rawChallenge, err := hex.DecodeString(strings.TrimPrefix(parsed.Fragment, "df_pair="))
@@ -137,7 +137,7 @@ func TestOnlyTheOperatorAPIMintsABrowserPairing(t *testing.T) {
 	done := fixture.serve(t)
 	link, err := operator.WebPair(ctx)
 	waitDispatch(t, done)
-	challenge, found := strings.CutPrefix(link, "http://"+address+"/#df_pair=")
+	challenge, found := strings.CutPrefix(link, webProductionOrigin+"/#df_pair=")
 	if raw, decodeErr := hex.DecodeString(challenge); err != nil || !found || decodeErr != nil || len(raw) != 32 {
 		t.Fatalf("web_pair = %v (link well-formed: %t)", err, found && decodeErr == nil)
 	}

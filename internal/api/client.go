@@ -120,7 +120,7 @@ func (client *OperatorClient) WebPair(ctx context.Context) (string, error) {
 	if err := client.client.call(ctx, "web_pair", struct{}{}, &result); err != nil {
 		return "", err
 	}
-	if !strings.HasPrefix(result.Link, "http://127.0.0.1:") {
+	if !strings.HasPrefix(result.Link, "https://") {
 		return "", ErrProtocol
 	}
 	return result.Link, nil

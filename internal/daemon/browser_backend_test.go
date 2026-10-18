@@ -773,7 +773,7 @@ func TestBrowserCloseLinearizesOpenAndClearsChallenges(t *testing.T) {
 	}
 	close(releaseClock)
 	opened := <-openDone
-	if opened.err != nil || !strings.HasPrefix(opened.link, "http://"+runtime.Addr()+"/#df_pair=") {
+	if opened.err != nil || !strings.HasPrefix(opened.link, adapterOrigin+"/#df_pair=") {
 		t.Fatalf("gated open = %+v, want a launch link", opened)
 	}
 	if err := <-closeDone; err != nil {
