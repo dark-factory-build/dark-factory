@@ -257,6 +257,9 @@ func TestFailedCheckRecoveryAfterRepeatedReconcileFailures(t *testing.T) {
 	if disposition := fixture.sweep(t); disposition.Action != RecoveredResultConsumed || disposition.Err != nil {
 		t.Fatalf("disposition = %+v", disposition)
 	}
+	if err := fixture.daemon.ContinueUnsettledRun(ctx, fixture.parent, fixture.changeParent, fixture.run.ID); err != nil {
+		t.Fatal(err)
+	}
 	repository := filepath.Join(filepath.Dir(filepath.Dir(fixture.parentPath)), "repo")
 	if err := os.WriteFile(filepath.Join(repository, "main.txt"), []byte("main\n"), 0o644); err != nil {
 		t.Fatal(err)
