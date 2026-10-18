@@ -71,7 +71,7 @@ var v40Continuations = []string{
 
 func legacySchemaStatements(version int) []string {
 	statements := slices.DeleteFunc(slices.Clone(schemaStatements), func(statement string) bool {
-		return statement == archivedTasksTable && version < v44UserVersion || statement == archiveBatchesTable && version < v42UserVersion || strings.HasPrefix(statement, "CREATE TABLE provider_adoptions ") && version < userVersion
+		return statement == archivedTasksTable && version < v44UserVersion || statement == archiveBatchesTable && version < v42UserVersion || statement == providerAdoptionsTable && version < userVersion
 	})
 	restoreProjectCeilings := func() {
 		for index, statement := range statements {
@@ -83,7 +83,10 @@ func legacySchemaStatements(version int) []string {
 			}
 		}
 	}
-	if version == v45UserVersion || version == v44UserVersion {
+	if version == v45UserVersion {
+		return statements
+	}
+	if version == v44UserVersion {
 		restoreProjectCeilings()
 		return statements
 	}
@@ -199,7 +202,7 @@ func migrateFrom(ctx context.Context, connection *sql.Conn, version int) error {
 	if err := validateSchemaVersion(ctx, connection, version, legacySchemaStatements(version)); err != nil {
 		return err
 	}
-	if version < userVersion {
+	if version < v45UserVersion {
 		for _, statement := range []string{
 			"ALTER TABLE projects DROP COLUMN run_budget_limit",
 			"ALTER TABLE projects DROP COLUMN runs_used",
@@ -254,15 +257,7 @@ func migrateFrom(ctx context.Context, connection *sql.Conn, version int) error {
 		statements = append([]string{archiveBatchesTable}, statements...)
 	}
 	if version < userVersion {
-		statements = append(statements, `CREATE TABLE provider_adoptions (
-    provider TEXT PRIMARY KEY CHECK (provider IN ('claude_code', 'codex')),
-    active_version TEXT NOT NULL CHECK (length(CAST(active_version AS BLOB)) BETWEEN 1 AND 128),
-    active_commitment TEXT NOT NULL CHECK (length(CAST(active_commitment AS BLOB)) BETWEEN 1 AND 4096),
-    candidate_version TEXT CHECK (candidate_version IS NULL OR length(CAST(candidate_version AS BLOB)) BETWEEN 1 AND 128),
-    candidate_commitment TEXT CHECK (candidate_commitment IS NULL OR length(CAST(candidate_commitment AS BLOB)) BETWEEN 1 AND 4096),
-    updated_at_ms INTEGER NOT NULL CHECK (updated_at_ms >= 0),
-    CHECK ((candidate_version IS NULL) = (candidate_commitment IS NULL))
-) STRICT, WITHOUT ROWID`)
+		statements = append(statements, providerAdoptionsTable)
 	}
 	for _, statement := range statements {
 		if _, err := connection.ExecContext(ctx, statement); err != nil {

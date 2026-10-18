@@ -84,18 +84,20 @@ func downgradeHome(t *testing.T, store *Store, version int, extra ...string) {
 	t.Helper()
 	var statements []string
 	if version < userVersion {
-		statements = []string{
-			"ALTER TABLE projects ADD COLUMN run_budget_limit INTEGER NOT NULL DEFAULT 0 CHECK (run_budget_limit >= 0)",
-			"ALTER TABLE projects ADD COLUMN runs_used INTEGER NOT NULL DEFAULT 0 CHECK (runs_used >= 0)",
-			"ALTER TABLE projects ADD COLUMN max_run_seconds INTEGER NOT NULL DEFAULT 0 CHECK (max_run_seconds BETWEEN 0 AND 86400)",
-			"ALTER TABLE project_tokens ADD COLUMN token_limit INTEGER NOT NULL DEFAULT 0 CHECK (token_limit >= 0)",
-			fmt.Sprintf("PRAGMA user_version = %d", version),
-		}
+		statements = []string{fmt.Sprintf("PRAGMA user_version = %d", version)}
 		if version < v44UserVersion {
 			statements = append(statements, "DROP TABLE archived_tasks")
 		}
 		if version < userVersion {
 			statements = append(statements, "DROP TABLE provider_adoptions")
+		}
+		if version < v45UserVersion {
+			statements = append([]string{
+				"ALTER TABLE projects ADD COLUMN run_budget_limit INTEGER NOT NULL DEFAULT 0 CHECK (run_budget_limit >= 0)",
+				"ALTER TABLE projects ADD COLUMN runs_used INTEGER NOT NULL DEFAULT 0 CHECK (runs_used >= 0)",
+				"ALTER TABLE projects ADD COLUMN max_run_seconds INTEGER NOT NULL DEFAULT 0 CHECK (max_run_seconds BETWEEN 0 AND 86400)",
+				"ALTER TABLE project_tokens ADD COLUMN token_limit INTEGER NOT NULL DEFAULT 0 CHECK (token_limit >= 0)",
+			}, statements...)
 		}
 		if version < v43UserVersion {
 			statements = append([]string{"ALTER TABLE intake_acceptances DROP COLUMN author_type", "ALTER TABLE intake_acceptances DROP COLUMN author_login"}, statements...)
@@ -297,7 +299,7 @@ func TestSchemaDigestsArePinned(t *testing.T) {
 		t.Errorf("current schema digest = %s", got)
 	}
 	sum = sha256.Sum256([]byte(strings.Join(legacySchemaStatements(v45UserVersion), "\n")))
-	if got := hex.EncodeToString(sum[:]); got != "a5fd7c65ec3fdbe957980b5b936a6967a9e06440c6984bdef6ec33073e46ef14" {
+	if got := hex.EncodeToString(sum[:]); got != "8ec2d351c12a13ad9ba03cea5d5dd2194366ee7a916f790fcc60fdcf4294639f" {
 		t.Errorf("v45 schema digest = %s", got)
 	}
 	sum = sha256.Sum256([]byte(strings.Join(legacySchemaStatements(v43UserVersion), "\n")))
