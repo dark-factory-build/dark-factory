@@ -253,6 +253,81 @@ func (store *Store) ProductionRevision() uint64 {
 	return store.productionRevision.Load()
 }
 
+// RetryBlockedMissingPrerequisites requeues blocked worker consumers whose
+// prerequisites are now installed. The production observation that discovers
+// a merged producer is the wake edge; RetryTask supplies the normal guarded
+// retry transition and keeps each task to one retry for that blocked revision.
+func (store *Store) RetryBlockedMissingPrerequisites(ctx context.Context, project ProjectID, at UnixMillis) (int, error) {
+	if project.zero() {
+		return 0, ErrInvalidValue
+	}
+	read, err := store.beginRead(ctx)
+	if err != nil {
+		return 0, err
+	}
+	rows, err := read.connection.QueryContext(ctx, `SELECT t.id, t.revision
+		FROM tasks AS t
+		LEFT JOIN agents AS a ON a.id = t.assigned_agent_id
+		WHERE t.project_id = ? AND t.status = 'blocked'
+		  AND t.blocked_reason LIKE 'missing prerequisite:%'
+		  AND (a.id IS NULL OR a.role = 'worker')
+		  AND EXISTS (SELECT 1 FROM task_prerequisites WHERE task_id = t.id)
+		  AND NOT EXISTS (
+			SELECT 1 FROM task_prerequisites AS pending
+			WHERE pending.task_id = t.id AND pending.consumed_run_id IS NULL
+			  AND NOT EXISTS (`+prerequisiteSourceRun+`)
+		  )
+		ORDER BY t.updated_at_ms, t.id`, project.Bytes())
+	if err != nil {
+		read.Close()
+		return 0, err
+	}
+	type candidate struct {
+		id       TaskID
+		revision Revision
+	}
+	var candidates []candidate
+	for rows.Next() {
+		var raw []byte
+		var revision int64
+		if err := rows.Scan(&raw, &revision); err != nil {
+			rows.Close()
+			read.Close()
+			return 0, err
+		}
+		id, err := TaskIDFromBytes(raw)
+		if err != nil {
+			rows.Close()
+			read.Close()
+			return 0, err
+		}
+		rev, err := NewRevision(revision)
+		if err != nil {
+			rows.Close()
+			read.Close()
+			return 0, err
+		}
+		candidates = append(candidates, candidate{id: id, revision: rev})
+	}
+	err = rows.Err()
+	rows.Close()
+	read.Close()
+	if err != nil {
+		return 0, err
+	}
+	retried := 0
+	for _, candidate := range candidates {
+		if _, err := store.RetryTask(ctx, nil, candidate.id, candidate.revision, AgentID{}, at, 0); err != nil {
+			if errors.Is(err, ErrConflict) || errors.Is(err, ErrRevisionConflict) {
+				continue
+			}
+			return retried, err
+		}
+		retried++
+	}
+	return retried, nil
+}
+
 func (store *Store) recordProductionObservation(ctx context.Context, c *sql.Conn, project ProjectID, observation ProductionObservation, at UnixMillis) error {
 	observation.Repository = strings.ToLower(observation.Repository)
 	if err := migrateProductionRuntimeRecords(ctx, c, project, observation.Repository); err != nil {
