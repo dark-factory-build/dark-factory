@@ -117,10 +117,16 @@ func runReleaseIdentities(ctx context.Context, directory string, expected buildi
 	return nil
 }
 
-// RemoveUpgrade forgets a settled upgrade: the marker and the backup.
-func RemoveUpgrade(home string) error {
+// RemoveUpgrade forgets a settled upgrade: the marker and, unless kept for a
+// verified release's health gate to roll back over, the backup. A kept backup
+// lasts until the next boot or release removes or replaces it.
+func RemoveUpgrade(home string, keepBackup bool) error {
 	var result error
-	for _, path := range []string{filepath.Join(ServiceDirectoryPath(home), upgradeMarkerName), UpgradeBackupPath(home)} {
+	paths := []string{filepath.Join(ServiceDirectoryPath(home), upgradeMarkerName), UpgradeBackupPath(home)}
+	if keepBackup {
+		paths = paths[:1]
+	}
+	for _, path := range paths {
 		if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
 			result = errors.Join(result, err)
 		}
