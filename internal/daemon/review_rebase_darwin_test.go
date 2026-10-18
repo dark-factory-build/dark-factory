@@ -261,11 +261,6 @@ func TestFailedCheckRecoveryAfterRepeatedReconcileFailures(t *testing.T) {
 		t.Fatal(err)
 	}
 	repository := filepath.Join(filepath.Dir(filepath.Dir(fixture.parentPath)), "repo")
-	if err := os.WriteFile(filepath.Join(repository, "main.txt"), []byte("main\n"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	settlementGit(t, g, repository, "add", "main.txt")
-	settlementGit(t, g, repository, "commit", "-q", "-m", "main moved")
 	origin := filepath.Join(filepath.Dir(repository), "origin.git")
 	settlementGit(t, g, repository, "clone", "-q", "--bare", repository, origin)
 	settlementGit(t, g, origin, "update-ref", "refs/heads/main", "HEAD")
