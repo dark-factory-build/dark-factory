@@ -429,7 +429,8 @@ func serve(ctx context.Context, configuration config) error {
 // watchRelease rolls a promoted build whose health gate fails back to
 // bin/previous by the trial's own path: a marker naming this build, which the
 // previous build's boot settles failed with the reason (restoring the backup
-// over a store this build migrated), then the swap and a restart. A check that
+// over a store this build migrated), then bin/previous staged again and
+// promoted, which keeps this build as bin/previous, and a restart. A check that
 // failed because this process began closing decides nothing. Its round trip
 // is the one factoryctl status makes, which a durable validation hold refuses.
 func (owner *process) watchRelease(ctx context.Context, home, target string, stopServing context.CancelFunc) {
@@ -447,7 +448,12 @@ func (owner *process) watchRelease(ctx context.Context, home, target string, sto
 		return
 	}
 	reason = "post-release health: " + reason
+	bin := filepath.Join(install.ServiceDirectoryPath(home), "bin")
 	err := install.WriteUpgradeMarker(home, install.UpgradeMarker{Target: target, Reason: reason})
+	// A rollback interrupted after this rename finds bin/previous already staged.
+	if _, staged := os.Lstat(filepath.Join(bin, "staged")); err == nil && errors.Is(staged, os.ErrNotExist) {
+		err = os.Rename(filepath.Join(bin, "previous"), filepath.Join(bin, "staged"))
+	}
 	if err == nil {
 		err = promoteService(home)
 	}
