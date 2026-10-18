@@ -63,7 +63,7 @@ func TestSignalOwnedGroupForgivesEPERMOnlyWithConvergedCensus(t *testing.T) {
 		observed = unix.Kill(-leader.PGID, unix.Signal(0))
 		return observed
 	}
-	if err := signalOwnedGroup(leader, unix.SIGTERM); err != nil {
+	if err := signalOwnedGroup(leader, unix.SIGTERM); !errors.Is(err, errGroupConverged) {
 		t.Fatalf("converged zombie-leader group = %v (kernel reported %v)", err, observed)
 	}
 	if !errors.Is(observed, unix.EPERM) {
