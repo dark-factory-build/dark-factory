@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"os/exec"
+	"path/filepath"
 	"strings"
 
 	"github.com/dark-factory-build/dark-factory/internal/kernel"
@@ -34,6 +35,15 @@ func RunProviderSelfCheck(ctx context.Context, spec SupervisorSpec, repository s
 		return ProviderSelfCheckResult{Detail: "provider self-check requires a native provider"}
 	}
 	task := `Run this provider self-check exactly. Read payload.txt from the checkout and verify it contains exact source. Create exactly one file named ` + providerSelfCheckFile + ` containing exactly "provider self-check\n". Stage and commit only that file with commit message ` + providerSelfCheckCommit + ` and git -c commit.gpgSign=false. Then use the configured factory_attempt MCP tool to call attempt succeed with result "provider-self-check". Do not call factoryctl from the shell, do not modify any other file, and do not claim success if any step fails.`
+	var commit string
+	spec.beforeChangeSettlement = func(ctx context.Context, run kernel.Run, changeParent string) error {
+		if run.ChangeID == nil {
+			return errors.New("provider self-check: isolated run has no Change")
+		}
+		var err error
+		commit, err = verifyProviderSelfCheckCommit(ctx, spec.GitExecutable, filepath.Join(changeParent, run.ChangeID.String()), spec.BaseRevision)
+		return err
+	}
 	run, err := RunIsolated(ctx, spec, repository, provider, task)
 	if err != nil {
 		return ProviderSelfCheckResult{Detail: boundedSelfCheckDetail(err.Error())}
@@ -41,9 +51,8 @@ func RunProviderSelfCheck(ctx context.Context, spec SupervisorSpec, repository s
 	if run.Phase != kernel.RunTerminal || run.Terminal == nil || run.Terminal.Kind() != kernel.OutcomeSucceeded || run.Terminal.Result() != "provider-self-check" {
 		return ProviderSelfCheckResult{Detail: selfCheckTerminalDetail(run)}
 	}
-	commit, err := verifyProviderSelfCheckCommit(ctx, spec.GitExecutable, repository, spec.BaseRevision)
-	if err != nil {
-		return ProviderSelfCheckResult{Detail: boundedSelfCheckDetail(err.Error())}
+	if commit == "" {
+		return ProviderSelfCheckResult{Detail: "provider self-check: missing verified Change commit"}
 	}
 	return ProviderSelfCheckResult{Passed: true, Detail: "provider self-check passed", Commit: commit}
 }
@@ -52,25 +61,14 @@ func verifyProviderSelfCheckCommit(ctx context.Context, git, repository, base st
 	if git == "" || repository == "" || base == "" {
 		return "", errors.New("provider self-check: invalid repository contract")
 	}
-	objects, err := selfCheckGitOutput(ctx, git, "-C", repository, "fsck", "--no-reflogs", "--unreachable", "--no-progress")
+	head, err := selfCheckGitOutput(ctx, git, "-C", repository, "rev-parse", "--verify", "HEAD^{commit}")
 	if err != nil {
-		return "", fmt.Errorf("provider self-check object lookup: %w", err)
+		return "", fmt.Errorf("provider self-check head lookup: %w", err)
 	}
-	var commit string
-	for _, line := range strings.Split(strings.TrimSpace(objects), "\n") {
-		fields := strings.Fields(line)
-		if len(fields) == 3 && fields[0] == "unreachable" && fields[1] == "commit" {
-			subject, showErr := selfCheckGitOutput(ctx, git, "-C", repository, "show", "-s", "--format=%s", fields[2])
-			if showErr == nil && strings.TrimSpace(subject) == providerSelfCheckCommit {
-				if commit != "" {
-					return "", errors.New("provider self-check: multiple self-check commits")
-				}
-				commit = fields[2]
-			}
-		}
-	}
-	if commit == "" {
-		return "", errors.New("provider self-check: bounded commit not found")
+	commit := strings.TrimSpace(head)
+	subject, err := selfCheckGitOutput(ctx, git, "-C", repository, "show", "-s", "--format=%s", commit)
+	if err != nil || strings.TrimSpace(subject) != providerSelfCheckCommit {
+		return "", errors.New("provider self-check: commit message mismatch")
 	}
 	names, err := selfCheckGitOutput(ctx, git, "-C", repository, "diff-tree", "--no-commit-id", "--name-only", "-r", commit)
 	if err != nil {

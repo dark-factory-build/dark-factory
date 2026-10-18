@@ -565,6 +565,33 @@ func runSupervisorClaudeFixture() error {
 		}
 		task = "fetched " + fetched.Task
 	}
+	if strings.Contains(task, "Run this provider self-check exactly.") {
+		mode := os.Getenv("DARK_FACTORY_SELF_CHECK_MODE")
+		switch mode {
+		case "checkout-read-failure", "attempt-api-failure":
+			return nil
+		case "commit-failure":
+			_, err := client.Succeed(ctx, "provider-self-check")
+			return err
+		case "noisy":
+			fmt.Print(strings.Repeat("provider self-check output\n", 8192))
+		}
+		payload, err := os.ReadFile("payload.txt")
+		if err != nil || string(payload) != "exact source\n" {
+			return fmt.Errorf("self-check payload: %v", err)
+		}
+		if err := os.WriteFile(providerSelfCheckFile, []byte("provider self-check\n"), 0o644); err != nil {
+			return err
+		}
+		if output, err := exec.Command("git", "add", providerSelfCheckFile).CombinedOutput(); err != nil {
+			return fmt.Errorf("self-check git add: %v: %s", err, output)
+		}
+		if output, err := exec.Command("git", "-c", "commit.gpgSign=false", "commit", "-m", providerSelfCheckCommit).CombinedOutput(); err != nil {
+			return fmt.Errorf("self-check git commit: %v: %s", err, output)
+		}
+		_, err = client.Succeed(ctx, "provider-self-check")
+		return err
+	}
 	result := fmt.Sprint(strings.Count(task, "Codify the operator scripts and the deploy order. "))
 	if strings.HasPrefix(task, "fetched ") && strings.Contains(task, "Retained Change rebase context (bounded):") {
 		result += " fetched with conflict context"
