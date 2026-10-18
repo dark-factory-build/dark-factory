@@ -306,7 +306,7 @@ func Decide(pull Pull, ops []Operation, answered bool) (Action, string) {
 	conflict := strings.EqualFold(pull.MergeStateStatus, "DIRTY") || pull.Mergeable != nil && !*pull.Mergeable
 	action, note := Enqueue, ""
 	switch {
-	case op.Failures >= FailuresBeforeEscalation:
+	case op.Failures >= FailuresBeforeEscalation && !conflict && len(pull.Failing) == 0:
 		return Wait, ""
 	case !op.Rebased && (conflict || len(pull.Failing) > 0):
 		action = Rebase
