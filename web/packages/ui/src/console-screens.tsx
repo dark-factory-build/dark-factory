@@ -1,10 +1,8 @@
-import { useMemo, useState } from "react";
+import { useMemo } from "react";
 import type { AgentItem, HumanRequestItem, OperationalGraphView, StateView, TaskItem } from "@dark-factory/client";
 import {
   agentStatus,
   agentActivity,
-  agentCurrentTask,
-  isSpecialist,
   projectGraph,
   projectFloor,
   projectProposals,
@@ -14,7 +12,7 @@ import { FactoryScene, AgentSprite } from "./factory-scene/factory-scene.js";
 import { projectCrates, type ProductionContraption } from "./production-view.js";
 import type { ProjectContentCall } from "./factory-app-controller.js";
 import type { SceneUnit, SceneMachine } from "./factory-scene/scene.js";
-import { SectionHeader, Status } from "./console-kit.js";
+import { Status } from "./console-kit.js";
 
 function shortID(value: string): string {
   return value.slice(0, 8);
@@ -165,90 +163,4 @@ export function FactoryFloor({
 
 export function rankLabel(role: AgentItem["role"] | "specialist"): string {
   return role === "orchestrator" ? "Overseer" : role === "specialist" ? "Specialist" : "Worker";
-}
-
-/** Agents grouped by rank, oversight first. */
-export function AgentList({
-  state,
-  selectedAgentId,
-  ready,
-  onSelectAgent,
-}: {
-  state: StateView | undefined;
-  selectedAgentId?: string;
-  ready: boolean;
-  onSelectAgent?: (agent: AgentItem) => void;
-}) {
-  if (state === undefined) return <p className="dfFactoryConsole__empty">waiting for the factory</p>;
-  const agents = [...state.agents.values()].filter((agent) => !agent.archived);
-  return (
-    <div className="dfAgentList">
-      {agents.length === 0 ? <p className="dfFactoryConsole__empty">no agents</p> : null}
-      {(["orchestrator", "specialist", "worker"] as const).map((role) => {
-        const members = agents.filter((agent) => role === "specialist" ? isSpecialist(agent) : agent.role === role && !isSpecialist(agent));
-        if (members.length === 0) return null;
-        return (
-          <section key={role} aria-label={rankLabel(role)}>
-            <SectionHeader title={rankLabel(role)} count={members.length} />
-            <ul className="dfConsoleRows">
-              {members.map((agent) => (
-                <li key={agent.id}>
-                  <AgentRow
-                    agent={agent}
-                    state={state}
-                    selected={selectedAgentId === agent.id}
-                    ready={ready}
-                    onSelectAgent={onSelectAgent}
-                  />
-                </li>
-              ))}
-            </ul>
-          </section>
-        );
-      })}
-    </div>
-  );
-}
-
-function AgentRow({
-  agent,
-  state,
-  selected,
-  ready,
-  onSelectAgent,
-}: {
-  agent: AgentItem;
-  state: StateView;
-  selected: boolean;
-  ready: boolean;
-  onSelectAgent?: (agent: AgentItem) => void;
-}) {
-  const activity = agentStatus(agent, state);
-  const task = agentCurrentTask(agent, state);
-  let queued = 0;
-  for (const item of state.tasks.values()) if (item.assigned_agent_id === agent.id && item.status === "queued") queued += 1;
-  const label = `${agent.name}: ${activity} · ${projectLabel(state, agent.project_id)}`;
-  const cells = (
-    <>
-      <AgentSprite agent={agent} activity={agentActivity(agent, state)} />
-      <span className="dfConsoleRow__title">{agent.name} · {projectLabel(state, agent.project_id)}</span>
-      <span className="dfAgentList__provider">{agent.effective_model === "" ? agent.provider : `${agent.provider} · ${agent.effective_model}`}</span>
-      <span className="dfAgentList__activity"><Status stage={activity} /></span>
-      <span className="dfConsoleRow__agent">{task?.title ?? "no current task"}</span>
-      <span className="dfAgentList__count">{queued} queued</span>
-    </>
-  );
-  if (onSelectAgent === undefined) return <span className="dfConsoleRow" aria-label={label}>{cells}</span>;
-  return (
-    <button
-      type="button"
-      className="dfConsoleRow dfAgentList__row"
-      aria-label={label}
-      aria-pressed={selected}
-      disabled={!ready}
-      onClick={() => onSelectAgent(agent)}
-    >
-      {cells}
-    </button>
-  );
 }

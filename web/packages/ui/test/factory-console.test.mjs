@@ -82,6 +82,9 @@ const withAgent = (agent) => render({
   selectedAgent: { id: agent.id, name: agent.name, revision: agent.revision },
 });
 
+// The selectable sprite of a non-archived agent on the floor.
+const workerSprite = (tree, id) => tree.root.findByProps({ "data-worker-id": id }).find((node) => node.type === "g" && node.props.role === "button");
+
 const inheritingAgent = () => fixtureState.agents.get("23".repeat(16));
 
 test("error banner keeps its centered layout after the paragraph reset", () => {
@@ -146,22 +149,6 @@ test("read-only decisions retain disabled suggestions and explain their status",
 
   const deliveryUnknown = render({ selectedHumanRequest: selectedRequest({ request: { ...fixtureState.humanRequests.get(ids.request), status: "delivery_unknown" }, canReply: false }) });
   assert.match(deliveryUnknown, /This decision is delivery unknown\./);
-});
-
-test("the sidebar roster groups agents while the floor stays visible", () => {
-  const floor = render();
-  assert.match(floor, /aria-label="Dark Factory operational floor"/);
-
-  const agents = render({ detail: "agent" }).split('class="dfAgentList"')[1];
-  assert.match(agents, /aria-label="Overseer"/);
-  // Rank is the served role, oversight first, and nothing invents a new field.
-  const overseer = agents.indexOf('aria-label="Overseer"');
-  const worker = agents.indexOf('aria-label="Worker"');
-  assert.ok(overseer > -1 && worker > overseer);
-  assert.ok(agents.indexOf("Dispatch Lead") < agents.indexOf("Builder One"));
-  assert.match(agents, /Builder One[\s\S]*?claude_code[\s\S]*?needs you/);
-  assert.match(agents, /Builder Two[\s\S]*?1 queued/);
-  assert.equal(agents.includes("rank"), false);
 });
 
 test("viewed geometry is independent of worker activity and population", () => {
@@ -357,7 +344,7 @@ test("the console never shows a kernel-grammar or retired vocabulary word", () =
       assert.equal(forbidden.test(markup), false, `${name}: ${forbidden}`);
     }
   }
-  assert.match(render({ detail: "agent" }), />Overseer</);
+  assert.match(render({ detail: "agent", selectedAgent: agentSelection(ids.orchestrator) }), />Overseer · /);
 });
 
 test("protocol errors remain finite and never expose their message", () => {
@@ -377,7 +364,7 @@ test("unknown and inherited error codes use a finite fallback", () => {
 test("Work keeps every served item reachable", () => {
   const emptyState = baseState({ projects: new Map(), agents: new Map(), tasks: new Map(), humanRequests: new Map() });
   assert.match(render({ state: emptyState }), /No open work/);
-  assert.match(render({ state: emptyState, detail: "agent" }), /no agents/);
+  assert.match(render({ state: emptyState, detail: "agent" }), /No open work/, "no agent to show leaves Work, never an empty sidebar");
 
   const agents = new Map();
   const tasks = new Map();
@@ -397,8 +384,6 @@ test("Work keeps every served item reachable", () => {
   assert.equal((markup.match(/\+1 more/g) ?? []).length, 0);
   assert.doesNotMatch(markup, /9 items/);
   assert.match(markup, /Task 8/);
-  assert.equal((render({ state: bounded, detail: "agent" }).match(/dfAgentList__row/g) ?? []).length, 0, "no handler, no button");
-  assert.equal((render({ state: bounded, detail: "agent", onSelectAgent: () => {} }).match(/dfAgentList__row/g) ?? []).length, 9);
 });
 
 test("Work keeps running tasks visible beside queued ones", () => {
@@ -497,9 +482,9 @@ test("a terminal blocked task is neither building nor current agent work", () =>
     tasks: new Map([[ids.task, { ...fixtureState.tasks.get(ids.task), status: "blocked" }]]),
     humanRequests: new Map(),
   });
-  const markup = render({ state, detail: "agent" });
-  assert.match(markup, /aria-label="Builder One: ready · North Workshop"/);
-  assert.equal(markup.includes('aria-label="Builder One: busy"'), false);
+  const markup = render({ state, graphs: fixtureGraphs });
+  assert.match(markup, /aria-label="Builder One, worker, waiting, ready in resting area"/);
+  assert.equal(markup.includes('aria-label="Builder One, worker, busy'), false);
 });
 
 test("the production console exposes no speculative or unsupported surface", () => {
@@ -519,7 +504,6 @@ test("an unavailable snapshot is explicit and does not invent runtime state", ()
   assert.match(markup, /Work <\/button>/);
   assert.equal(markup.includes("NO QUEUED TASKS"), false);
   assert.equal(markup.includes("all quiet"), false);
-  assert.match(render({ state: undefined, status: "syncing", detail: "agent" }), /waiting for the factory/);
 });
 
 test("HumanRequest delivery states remain visibly distinct", () => {
@@ -728,10 +712,10 @@ test("agent panels render plain portraits without appearance editing", () => {
   }
 });
 
-test("the floor stays on the left and the agent roster lives in the sidebar", () => {
-  const floor = render({ detail: "agent" });
+test("the floor is the only agent picker: no Agents view, roster or All agents control", () => {
+  const floor = render({ detail: "agent", onDetail() {}, onSelectAgent() {} });
   assert.doesNotMatch(floor, /aria-label="Left view"/);
-  assert.ok(floor.indexOf('aria-label="Agents"') > floor.indexOf('aria-label="Selected detail"'));
+  assert.doesNotMatch(floor, /aria-label="Agents"|dfAgentList|All agents|>Agents</);
   assert.match(floor, /aria-label="Factory floor"/);
   assert.match(floor, /aria-label="Pull request progress"/);
 });
@@ -800,17 +784,15 @@ test("request, reply, cancel, and summary collapse forward only presentation int
 
 test("agent and question terminal actions expose only current public intent", async () => {
   const request = fixtureState.humanRequests.get(ids.request);
-  // Oversight is listed first, so the first row is the orchestrator's.
   const agent = fixtureState.agents.get(ids.orchestrator);
   const calls = [];
   let renderer;
   await act(async () => { renderer = create(createElement(FactoryConsole, {
-    status: "ready", state: baseState(), detail: "agent", selectedHumanRequest: selectedRequest(),
+    status: "ready", state: baseState(), graphs: fixtureGraphs, detail: "agent", selectedHumanRequest: selectedRequest(),
     onSelectAgent: (value) => calls.push(["agent", value]),
     onOpenTerminalForHumanRequest: (value) => calls.push(["request", value]),
   })); });
-  const row = renderer.root.findAllByType("button").find((element) => typeof element.props.className === "string" && element.props.className.includes("dfAgentList__row"));
-  await act(async () => { row.props.onClick(); });
+  await act(async () => { workerSprite(renderer, agent.id).props.onClick(); });
   await act(async () => { renderer.root.findAllByType("button").filter((element) => element.props.children === "Open terminal").at(-1).props.onClick(); });
   assert.equal(calls[0][0], "agent");
   assert.equal(calls[0][1].id, agent.id);
@@ -825,30 +807,24 @@ test("agent and question terminal actions expose only current public intent", as
 });
 
 test("the console shows the model an agent will actually run with", () => {
-  // An agent that names no model still runs with one. The row and the panel
-  // header say which, so a blank is never read as "no model".
-  const rows = render({ detail: "agent" });
-  assert.match(rows, /codex · gpt-6-astra/);
-  assert.match(rows, /claude_code · claude-opus-5/);
+  // An agent that names no model still runs with one. The panel header says
+  // which, so a blank is never read as "no model".
   assert.match(withAgent(inheritingAgent()), /Builder Two[\s\S]*?codex · gpt-6-astra/);
   // The provider with no model says nothing extra rather than a dangling dot.
   assert.match(withAgent(shellAgent), /Shell Hand[\s\S]*?shell/);
 });
 
-test("archived workers stay out of the agent list and stale selection has no panel", async () => {
+test("archived workers stay off the floor and stale selection has no panel", async () => {
   const previousAct = globalThis.IS_REACT_ACT_ENVIRONMENT;
   globalThis.IS_REACT_ACT_ENVIRONMENT = true;
   const worker = { ...fixtureState.agents.get(ids.agent), archived: true, paused: true };
   const state = baseState({ agents: new Map([[worker.id, worker]]) });
   try {
     let renderer;
-    await act(async () => { renderer = create(createElement(FactoryConsole, { status: "ready", state, detail: "agent", onSelectAgent() {} })); });
-    assert.equal(renderer.root.findAllByType("button").some((button) => String(button.props.className).includes("dfAgentList__row")), false);
-    const list = renderer.root.findByProps({ className: "dfAgentList" });
-    assert.equal(list.findAllByProps({ children: "Show archived" }).length, 0);
+    await act(async () => { renderer = create(createElement(FactoryConsole, { status: "ready", state, graphs: fixtureGraphs, detail: "agent", onSelectAgent() {} })); });
+    assert.equal(renderer.root.findAllByProps({ "data-worker-id": worker.id }).length, 0);
     await act(async () => { renderer.update(createElement(FactoryConsole, { status: "ready", state, detail: "agent", selectedAgent: { id: worker.id, name: worker.name, revision: worker.revision } })); });
     const text = JSON.stringify(renderer.toJSON());
-    assert.equal(renderer.root.findAllByProps({ className: "dfAgentList__row" }).length, 0);
     assert.equal(text.includes("Restore paused"), false);
     assert.equal(renderer.root.findAllByProps({ "aria-label": `Agent ${worker.name}` }).length, 0);
     assert.equal(renderer.root.findAllByProps({ "aria-label": "Terminal" }).length, 0);
@@ -918,34 +894,33 @@ test("mobile navigation switches presentation without mutating work", () => {
   const nav = elements.find((element) => element.props["aria-label"] === "Console views");
   const buttons = nav.props.children.filter((element) => element.type === "button" || element.type.name === "IconButton");
   assert.equal(buttons[0].props["aria-pressed"], true);
-  assert.deepEqual(buttons.map(textOf), ["Floor", "Agents", "Work"]);
+  assert.deepEqual(buttons.map(textOf), ["Floor", "Work"]);
   buttons.find((button) => textOf(button) === "Work").props.onClick();
   assert.deepEqual(calls, ["work"]);
   assert.equal(elements.find((element) => element.type === "main").props["data-mobile-view"], "floor");
 });
 
 
-test("mobile Agents opens the sidebar roster and selection keeps the floor mounted", async () => {
+test("a floor sprite is keyboard-selectable and opens its Agent panel while the floor stays mounted", async () => {
   let tree;
   function Harness() {
-    const [detail, setDetail] = useState("work");
+    const [detail, setDetail] = useState("floor");
     const [selectedAgent, setAgent] = useState();
-    return createElement(FactoryConsole, { status: "ready", state: fixtureState, detail, onDetail: setDetail, selectedAgent,
+    return createElement(FactoryConsole, { status: "ready", state: fixtureState, graphs: fixtureGraphs, detail, onDetail: setDetail, selectedAgent,
       onSelectAgent: (agent) => { setAgent(agent); setDetail("agent"); } });
   }
   await act(async () => { tree = create(createElement(Harness)); });
   const floor = tree.root.findByProps({ className: "dfFactoryFloor__map" });
-  const nav = tree.root.findByProps({ "aria-label": "Console views" });
-  await act(async () => nav.findAllByType("button")[1].props.onClick());
+  const agent = fixtureState.agents.get(ids.agent);
+  const sprite = workerSprite(tree, agent.id);
+  assert.equal(sprite.props.tabIndex, 0);
+  let prevented = false;
+  await act(async () => sprite.props.onKeyDown({ key: "Enter", preventDefault() { prevented = true; } }));
+  assert.equal(prevented, true);
+  assert.equal(tree.root.findByType(FactoryConsole).props.selectedAgent.id, agent.id);
   assert.equal(tree.root.findByType("main").props["data-mobile-view"], "detail");
-  assert.equal(nav.findAllByType("button")[1].props["aria-pressed"], true);
-  const roster = tree.root.findByProps({ className: "dfAgentList" });
-  await act(async () => roster.findAllByType("button")[0].props.onClick());
-  assert.ok(tree.root.findByType(FactoryConsole).props.selectedAgent);
-  assert.equal(tree.root.findAllByProps({ className: "dfAgentList" }).length, 0);
-  await act(async () => tree.root.findAllByType("button").find((button) => button.props.children === "All agents").props.onClick());
-  assert.equal(tree.root.findAllByProps({ className: "dfAgentList" }).length, 1);
-  await act(async () => nav.findAllByType("button")[0].props.onClick());
+  assert.equal(tree.root.findAllByProps({ "aria-label": `Agent ${agent.name}` }).length, 1);
+  await act(async () => tree.root.findByProps({ "aria-label": "Console views" }).findAllByType("button")[0].props.onClick());
   assert.equal(tree.root.findByType("main").props["data-mobile-view"], "floor");
   assert.equal(tree.root.findByProps({ className: "dfFactoryFloor__map" }), floor);
   await act(async () => tree.unmount());
@@ -1174,13 +1149,12 @@ test("Work lists and counts only the chosen project's requests", async () => {
 });
 
 
-test("a specialist is grouped and states what it is doing and owes, with no browser lifecycle controls", () => {
+test("a specialist states what it is doing and owes, with no browser lifecycle controls", () => {
   const worker = fixtureState.agents.get(ids.agent);
   const specialist = { ...worker, id: "5a".repeat(16), name: "Doc Watcher", archived: false, idle_policy: "standing_instruction", idle_after_seconds: 600, idle_instruction: "Keep the docs true to the code.\nSecond line stays out.", idle_run_budget: 4, idle_runs_used: 1, idle_wake_on: "failures",
     specialist: { next_review_at_ms: 1750000000000, next_reason: "events", waiting: "capacity", quiet_reviews: 0, open_proposals: 1, open_proposal_limit: 3, last_review_task_id: "" } };
   const state = baseState({ agents: new Map([...fixtureState.agents, [specialist.id, specialist]]), humanRequests: new Map() });
   const markup = renderToStaticMarkup(createElement(FactoryConsole, { status: "ready", detail: "agent", state, selectedAgent: { id: specialist.id, name: specialist.name, revision: specialist.revision } }));
-  assert.match(renderToStaticMarkup(createElement(FactoryConsole, { status: "ready", detail: "agent", state })), /<section aria-label="Specialist">/, "its own group");
   assert.match(markup, /waiting: waiting for a free background slot/);
   assert.match(markup, /aria-label="Remit">Keep the docs true to the code\.</);
   assert.match(markup, /Next review .*\(events\) or sooner on failures/);
