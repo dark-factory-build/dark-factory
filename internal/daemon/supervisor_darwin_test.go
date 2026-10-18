@@ -566,7 +566,8 @@ func runSupervisorClaudeFixture() error {
 		task = "fetched " + fetched.Task
 	}
 	if strings.Contains(task, "Run this provider self-check exactly.") {
-		mode := os.Getenv("DARK_FACTORY_SELF_CHECK_MODE")
+		modeBytes, _ := os.ReadFile(".provider-self-check-mode")
+		mode := strings.TrimSpace(string(modeBytes))
 		switch mode {
 		case "checkout-read-failure", "attempt-api-failure":
 			return nil

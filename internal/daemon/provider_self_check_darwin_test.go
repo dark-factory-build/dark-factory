@@ -68,6 +68,11 @@ func TestRunProviderSelfCheckUsesRunIsolated(t *testing.T) {
 			if err := os.WriteFile(filepath.Join(repository, "payload.txt"), []byte("exact source\n"), 0o644); err != nil {
 				t.Fatal(err)
 			}
+			if test.mode != "" {
+				if err := os.WriteFile(filepath.Join(repository, ".provider-self-check-mode"), []byte(test.mode+"\n"), 0o644); err != nil {
+					t.Fatal(err)
+				}
+			}
 			supervisorGit(t, git, "-C", repository, "add", "payload.txt")
 			supervisorGit(t, git, "-C", repository, "commit", "-m", "base")
 			base := strings.TrimSpace(supervisorGitOutput(t, git, "-C", repository, "rev-parse", "HEAD"))
@@ -85,7 +90,6 @@ func TestRunProviderSelfCheckUsesRunIsolated(t *testing.T) {
 				copySupervisorExecutable(t, executable, filepath.Join(tools, "claude"))
 				toolPath = tools + ":" + toolPath
 			}
-			t.Setenv("DARK_FACTORY_SELF_CHECK_MODE", test.mode)
 			result := RunProviderSelfCheck(context.Background(), SupervisorSpec{
 				GitExecutable: git, BaseRevision: base, RunnerExecutable: executable, FactoryctlExecutable: factoryctl,
 				ToolPath: toolPath, AccountHome: root,
