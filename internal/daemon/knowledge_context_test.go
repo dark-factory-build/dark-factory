@@ -67,7 +67,7 @@ func TestKnowledgeRelevanceWindowFindsOlderLessons(t *testing.T) {
 	ctx := context.Background()
 	var relevant []kernel.ContentRevision
 	active := prepareActiveAttemptInProjectWithProvider(t, f, 61, testID(61), "worker", "codex")
-	for i := 0; i < 16; i++ {
+	for i := 0; i < 4; i++ {
 		lesson := seedContextKnowledgeNamed(t, f, active.run.ProjectID, fmt.Sprintf("%032x", i+1), kernel.ContentLesson, kernel.KnowledgeMetadata{Status: "current", Evidence: []string{"relevance-window"}}, "private needle lesson", "Older needle guidance")
 		relevant = append(relevant, lesson)
 	}

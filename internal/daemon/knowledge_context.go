@@ -177,7 +177,7 @@ func (daemon *Daemon) knowledgeContext(ctx context.Context, run kernel.Run, task
 		// library grows.
 		terms := map[string]bool{}
 		for _, word := range strings.Fields(strings.ToLower(taskText)) {
-			if len(word) >= 4 && !terms[word] && len(terms) < 8 {
+			if len(word) >= 4 && len(word) <= 1024 && !terms[word] && len(terms) < 8 {
 				terms[word] = true
 				page, e := daemon.store.SearchKnowledge(ctx, run.ProjectID, repository.ID, kernel.KnowledgeQuery{Query: word, Limit: 16})
 				if e != nil {
