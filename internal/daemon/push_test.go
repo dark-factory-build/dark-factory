@@ -120,6 +120,25 @@ func TestParsePushKeysRefusesAMismatchedPair(t *testing.T) {
 	}
 }
 
+func TestHealthAlertNotifiesOnceAndClearsOnRecovery(t *testing.T) {
+	store := newPushStore(t.TempDir())
+	if alert, err := store.healthAlert("merge-stall", "2026-10-18", true); err != nil || !alert {
+		t.Fatalf("first alert = %v, %v", alert, err)
+	}
+	if alert, err := store.healthAlert("merge-stall", "2026-10-18", true); err != nil || alert {
+		t.Fatalf("repeat alert = %v, %v", alert, err)
+	}
+	if alert, err := store.healthAlert("merge-stall", "2026-10-18", false); err != nil || alert {
+		t.Fatalf("recovery alert = %v, %v", alert, err)
+	}
+	if alert, err := store.healthAlert("merge-stall", "2026-10-18", true); err != nil || alert {
+		t.Fatalf("same-day recovered alert = %v, %v", alert, err)
+	}
+	if alert, err := store.healthAlert("merge-stall", "2026-10-19", true); err != nil || !alert {
+		t.Fatalf("next-day alert = %v, %v", alert, err)
+	}
+}
+
 func TestNotifyPushWakesLiveClientsAndForgetsTheRest(t *testing.T) {
 	store, err := createTestStore(context.Background(), filepath.Join(t.TempDir(), "kernel.sqlite"), kernel.FactoryConfig{Capacity: 2}, adapterTime(t, 1))
 	if err != nil {

@@ -28,6 +28,7 @@ import (
 // factory through the relay, and the relay directory is the one home member
 // whose contents the home census leaves alone.
 const pushSubscriptionsFileName = "push-subscriptions.json"
+const pushAlertsFileName = "push-alerts.json"
 
 // pushStore is the durable set of device subscriptions, one per paired
 // browser client. It is not authority: a device that loses it re-registers on
@@ -48,6 +49,51 @@ var pushFileMu sync.Mutex
 
 func newPushStore(relayDirectory string) *pushStore {
 	return &pushStore{path: filepath.Join(relayDirectory, pushSubscriptionsFileName)}
+}
+
+type pushAlertState struct {
+	SentDay string `json:"sent_day,omitempty"`
+	Active  bool   `json:"active"`
+}
+
+func (store *pushStore) alertPath() string {
+	return filepath.Join(filepath.Dir(store.path), pushAlertsFileName)
+}
+
+// healthAlert records the level-triggered condition and returns whether this
+// transition may notify. The day stamp is the durable daily rate limit;
+// Active is cleared by recovery so a healthy period is visible after restart.
+func (store *pushStore) healthAlert(condition, day string, active bool) (bool, error) {
+	if store == nil {
+		return false, nil
+	}
+	pushFileMu.Lock()
+	defer pushFileMu.Unlock()
+	states := map[string]pushAlertState{}
+	data, err := os.ReadFile(store.alertPath())
+	if err == nil {
+		if err := json.Unmarshal(data, &states); err != nil {
+			return false, err
+		}
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return false, err
+	}
+	state := states[condition]
+	alert := active && state.SentDay != day
+	state.Active = active
+	if alert {
+		state.SentDay = day
+	}
+	states[condition] = state
+	data, err = json.Marshal(states)
+	if err != nil {
+		return false, err
+	}
+	temporary := store.alertPath() + ".tmp"
+	if err := os.WriteFile(temporary, data, 0o600); err != nil {
+		return false, err
+	}
+	return alert, os.Rename(temporary, store.alertPath())
 }
 
 func (store *pushStore) load() (map[string]browserprotocol.PushSubscribe, error) {
@@ -212,6 +258,33 @@ func (daemon *Daemon) notifyPush(ctx context.Context, client *http.Client) {
 			delete(subscriptions, id)
 		}
 	})
+}
+
+func (daemon *Daemon) checkFactoryAlerts(ctx context.Context) {
+	now := daemon.now()
+	at, err := kernel.NewUnixMillis(now.UnixMilli())
+	if err != nil {
+		return
+	}
+	signal, err := daemon.store.AlertSignals(ctx, at.Int64())
+	if err != nil {
+		return
+	}
+	daemon.browserMu.Lock()
+	store := daemon.push
+	daemon.browserMu.Unlock()
+	if store == nil {
+		return
+	}
+	stall := signal.ReadyWork && (signal.LastMergeAtMS == 0 || now.UnixMilli()-signal.LastMergeAtMS >= 6*time.Hour.Milliseconds())
+	failure := signal.RunsLastHour >= 10 && signal.FailuresLastHour*2 > signal.RunsLastHour
+	day := now.UTC().Format("2006-01-02")
+	for condition, active := range map[string]bool{"merge-stall": stall, "run-failure": failure} {
+		alert, err := store.healthAlert(condition, day, active)
+		if err == nil && alert {
+			go daemon.notifyPush(context.WithoutCancel(ctx), daemon.observed(pushClient))
+		}
+	}
 }
 
 // pushClient bounds one push delivery; every service answers within a second
