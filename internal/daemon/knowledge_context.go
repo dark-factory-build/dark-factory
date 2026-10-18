@@ -172,8 +172,24 @@ func (daemon *Daemon) knowledgeContext(ctx context.Context, run kernel.Run, task
 				candidates = append(candidates, item)
 			}
 		}
-		// ponytail: inspect at most 256 recent entries; explicit attachments remain
-		// first. Add an indexed relevance query if larger libraries miss useful notes.
+		// Inspect a bounded relevance window before the recent fallback; explicit
+		// attachments remain first. The fallback keeps launch cost bounded as the
+		// library grows.
+		terms := map[string]bool{}
+		for _, word := range strings.Fields(strings.ToLower(taskText)) {
+			if len(word) >= 4 && len(word) <= 1024 && !terms[word] && len(terms) < 8 {
+				terms[word] = true
+				page, e := daemon.store.SearchKnowledge(ctx, run.ProjectID, repository.ID, kernel.KnowledgeQuery{Query: word, Limit: 16})
+				if e != nil {
+					return nil, e
+				}
+				for _, item := range page.Items {
+					if knowledgeApplicable(item, run.TaskID, run.ChangeID) {
+						candidates = append(candidates, item)
+					}
+				}
+			}
+		}
 		for offset := 0; offset < 256; {
 			page, e := daemon.store.SearchKnowledge(ctx, run.ProjectID, repository.ID, kernel.KnowledgeQuery{Offset: offset, Limit: 64})
 			if e != nil {

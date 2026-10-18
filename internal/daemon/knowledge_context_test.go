@@ -5,6 +5,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/json"
+	"fmt"
 	"github.com/dark-factory-build/dark-factory/internal/change"
 	"os"
 	"os/exec"
@@ -34,11 +35,19 @@ func contentAccesses(ctx context.Context, store *kernel.Store, project kernel.Pr
 }
 
 func seedContextKnowledge(t *testing.T, f *dispatchFixture, project kernel.ProjectID, seed byte, kind kernel.ContentKind, metadata kernel.KnowledgeMetadata, body string) kernel.ContentRevision {
+	return seedContextKnowledgeNamed(t, f, project, testID(seed), kind, metadata, "retained lesson", body)
+}
+
+func seedContextKnowledgeNamed(t *testing.T, f *dispatchFixture, project kernel.ProjectID, id string, kind kernel.ContentKind, metadata kernel.KnowledgeMetadata, title, body string) kernel.ContentRevision {
+	return seedContextKnowledgeNamedAt(t, f, project, id, kind, metadata, title, body, 1000)
+}
+
+func seedContextKnowledgeNamedAt(t *testing.T, f *dispatchFixture, project kernel.ProjectID, id string, kind kernel.ContentKind, metadata kernel.KnowledgeMetadata, title, body string, at int64) kernel.ContentRevision {
 	t.Helper()
 	if kind == kernel.ContentLesson && metadata.Verification == "" {
 		metadata.Verification = "go test ./internal/daemon"
 	}
-	id, err := decodeID(testID(seed), kernel.ContentIDFromBytes)
+	contentID, err := decodeID(id, kernel.ContentIDFromBytes)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -46,15 +55,60 @@ func seedContextKnowledge(t *testing.T, f *dispatchFixture, project kernel.Proje
 	if err != nil {
 		t.Fatal(err)
 	}
-	spec, err := f.daemon.writeContentSource(context.Background(), kernel.NewContent{ID: id, ProjectID: project, Kind: kind, Title: "retained lesson", Description: "Use the exact source revision", Author: "operator:local", SourceReferences: string(encoded), Body: body}, 1)
+	spec, err := f.daemon.writeContentSource(context.Background(), kernel.NewContent{ID: contentID, ProjectID: project, Kind: kind, Title: title, Description: "Use the exact source revision", Author: "operator:local", SourceReferences: string(encoded), Body: body}, 1)
 	if err != nil {
 		t.Fatal(err)
 	}
-	item, err := f.store.CreateContent(context.Background(), spec, mustKernelTime(t, 1000))
+	item, err := f.store.CreateContent(context.Background(), spec, mustKernelTime(t, at))
 	if err != nil {
 		t.Fatal(err)
 	}
 	return item
+}
+
+func TestKnowledgeRelevanceWindowFindsOlderLessons(t *testing.T) {
+	f := newDispatchFixture(t)
+	ctx := context.Background()
+	var relevant []kernel.ContentRevision
+	active := prepareActiveAttemptInProjectWithProvider(t, f, 61, testID(61), "worker", "codex")
+	for i := 0; i < 4; i++ {
+		lesson := seedContextKnowledgeNamed(t, f, active.run.ProjectID, fmt.Sprintf("%032x", i+1), kernel.ContentLesson, kernel.KnowledgeMetadata{Status: "current", Evidence: []string{"relevance-window"}}, "private needle lesson", "Older needle guidance")
+		relevant = append(relevant, lesson)
+	}
+	for i := 0; i < 300; i++ {
+		seedContextKnowledgeNamedAt(t, f, active.run.ProjectID, fmt.Sprintf("%032x", 1000+i), kernel.ContentLesson, kernel.KnowledgeMetadata{Status: "current", Evidence: []string{"irrelevant"}}, "unrelated lesson", "Unrelated guidance", int64(2000+i))
+	}
+	repository, found, err := f.store.ContentRepository(ctx, relevant[0].ID, relevant[0].Revision)
+	if err != nil || !found {
+		t.Fatalf("task repository: %v", err)
+	}
+	for offset := 0; offset < 256; offset += 64 {
+		page, err := f.store.SearchKnowledge(ctx, active.run.ProjectID, repository.ID, kernel.KnowledgeQuery{Offset: offset, Limit: 64})
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, lesson := range relevant {
+			for _, item := range page.Items {
+				if item.ID == lesson.ID {
+					t.Fatalf("relevant lesson %s remained inside the old 256-record window", lesson.ID)
+				}
+			}
+		}
+	}
+	done := f.serve(t)
+	assignment, err := active.client.Task(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	waitDispatch(t, done)
+	for _, lesson := range relevant {
+		if !strings.Contains(assignment.Task, lesson.ID.String()) {
+			t.Fatalf("older relevant lesson %s was not selected: %s", lesson.ID, assignment.Task)
+		}
+	}
+	if strings.Contains(assignment.Task, "Unrelated guidance") {
+		t.Fatalf("irrelevant lessons crowded the bounded selection: %s", assignment.Task)
+	}
 }
 
 func TestKnowledgeReachesFreshProviderTaskAndPinsExplicitRevision(t *testing.T) {
