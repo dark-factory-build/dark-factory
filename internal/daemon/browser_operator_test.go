@@ -1,15 +1,24 @@
 package daemon
 
 import (
+	"bytes"
 	"context"
+	"crypto/ed25519"
+	"encoding/base64"
 	"encoding/hex"
+	"io"
 	"net/http"
 	"net/url"
+	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/dark-factory-build/dark-factory/internal/api"
+	"github.com/dark-factory-build/dark-factory/internal/browser"
+	"github.com/dark-factory-build/dark-factory/internal/browserprotocol"
 	"github.com/dark-factory-build/dark-factory/internal/kernel"
+	"github.com/dark-factory-build/dark-factory/internal/relayhost"
 )
 
 func TestProductionBrowserPairingUsesExactlyImplementedCapabilities(t *testing.T) {
@@ -143,5 +152,74 @@ func TestOnlyTheOperatorAPIMintsABrowserPairing(t *testing.T) {
 	}
 	if status, err := fixture.daemon.WebStatus(ctx); err != nil || status.ActiveChallenges != 1 {
 		t.Fatalf("web_pair status = %+v, %v", status, err)
+	}
+}
+
+// The local pairing link pins the key of the console this daemon signs: the
+// home's identity, which the served bundle carries. The hosted origin then
+// redeems the link's challenge (the hosted console is the one trusted origin).
+func TestLocalPairingPinsTheSignedConsoleKeyAndRedeemsFromTheHostedOrigin(t *testing.T) {
+	bundle := []byte("console bundle")
+	previous := consoleBundle
+	consoleBundle = func() []byte { return bundle }
+	t.Cleanup(func() { consoleBundle = previous })
+	clock := time.UnixMilli(2_000)
+	store, err := createTestStore(context.Background(), filepath.Join(t.TempDir(), "kernel.sqlite"), kernel.FactoryConfig{DispatchEnabled: true, Capacity: 8}, adapterTime(t, 1))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	daemon, err := newDaemon(store, func() time.Time { return clock })
+	if err != nil {
+		t.Fatal(err)
+	}
+	daemon.home = t.TempDir()
+	runtime, err := daemon.ListenBrowser("127.0.0.1:0", []string{webProductionOrigin})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = daemon.Close() })
+	ctx := context.Background()
+
+	link, err := daemon.OpenBrowser(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	fragment, found := strings.CutPrefix(link, webProductionOrigin+"/#df_pair=")
+	pair, key, hasKey := strings.Cut(fragment, "&df_key=")
+	challenge, decodeErr := hex.DecodeString(pair)
+	if !found || !hasKey || decodeErr != nil || len(challenge) != browserprotocol.ChallengeSize {
+		t.Fatalf("pairing link = %q", link)
+	}
+	pinned, err := base64.RawURLEncoding.DecodeString(key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	identity, err := relayhost.LoadOrCreate(daemon.home)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(pinned, identity.PublicKey()) {
+		t.Fatal("df_key is not the home's console signing key")
+	}
+
+	request, err := http.NewRequest(http.MethodGet, "http://"+runtime.server.Addr()+browser.ConsolePath, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	request.Header.Set("Origin", webProductionOrigin)
+	response, err := http.DefaultClient.Do(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	served, err := io.ReadAll(response.Body)
+	_ = response.Body.Close()
+	if err != nil || response.StatusCode != http.StatusOK || len(served) <= ed25519.PublicKeySize+ed25519.SignatureSize || !bytes.Equal(served[:ed25519.PublicKeySize], pinned) {
+		t.Fatalf("served console %d bytes, status %d, err %v", len(served), response.StatusCode, err)
+	}
+
+	frame, _ := provePairWithChallenge(t, &adapterFixture{server: runtime.server}, challenge)
+	if frame.Type != browserprotocol.TypePairResult || frame.ID != "pair" {
+		t.Fatalf("redeeming the link from the hosted origin = %+v", frame)
 	}
 }
