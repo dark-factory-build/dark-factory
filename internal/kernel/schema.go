@@ -9,7 +9,7 @@ import (
 
 const (
 	applicationID = 0x4446474f
-	userVersion   = 45
+	userVersion   = 46
 
 	// SQLite reserves the exact lower-case "sqlite_" prefix. Use a literal,
 	// binary prefix test: LIKE would treat '_' as a wildcard and hide names
@@ -196,6 +196,15 @@ var schemaStatements = []string{
     updated_at_ms INTEGER NOT NULL CHECK (updated_at_ms >= created_at_ms)
 ) STRICT, WITHOUT ROWID`,
 	`CREATE UNIQUE INDEX accounts_provider_home_unique ON accounts(provider, home)`,
+	`CREATE TABLE provider_adoptions (
+    provider TEXT PRIMARY KEY CHECK (provider IN ('claude_code', 'codex')),
+    active_version TEXT NOT NULL CHECK (length(CAST(active_version AS BLOB)) BETWEEN 1 AND 128),
+    active_commitment TEXT NOT NULL CHECK (length(CAST(active_commitment AS BLOB)) BETWEEN 1 AND 4096),
+    candidate_version TEXT CHECK (candidate_version IS NULL OR length(CAST(candidate_version AS BLOB)) BETWEEN 1 AND 128),
+    candidate_commitment TEXT CHECK (candidate_commitment IS NULL OR length(CAST(candidate_commitment AS BLOB)) BETWEEN 1 AND 4096),
+    updated_at_ms INTEGER NOT NULL CHECK (updated_at_ms >= 0),
+    CHECK ((candidate_version IS NULL) = (candidate_commitment IS NULL))
+) STRICT, WITHOUT ROWID`,
 	`CREATE TABLE agents (
     id BLOB PRIMARY KEY CHECK (length(id) = 16),
     project_id BLOB NOT NULL CHECK (length(project_id) = 16) REFERENCES projects(id),

@@ -9,7 +9,7 @@ import (
 	"strings"
 )
 
-// Open migrates the seven earlier versions. v44 adds archived_tasks and v42
+// Open migrates the eight earlier versions. v46 adds provider_adoptions, v44 adds archived_tasks and v42
 // archive_batches, which the transaction itself proves, and neither moves
 // history; v43 persists intake author identity; v41 folds the
 // continuations table onto the human request each row awaited; v40 drops
@@ -27,6 +27,7 @@ const (
 	v42UserVersion = 42
 	v43UserVersion = 43
 	v44UserVersion = 44
+	v45UserVersion = 45
 )
 
 var browserSecurityEventStatements = []string{
@@ -70,7 +71,7 @@ var v40Continuations = []string{
 
 func legacySchemaStatements(version int) []string {
 	statements := slices.DeleteFunc(slices.Clone(schemaStatements), func(statement string) bool {
-		return statement == archivedTasksTable && version < v44UserVersion || statement == archiveBatchesTable && version < v42UserVersion
+		return statement == archivedTasksTable && version < v44UserVersion || statement == archiveBatchesTable && version < v42UserVersion || strings.HasPrefix(statement, "CREATE TABLE provider_adoptions ") && version < userVersion
 	})
 	restoreProjectCeilings := func() {
 		for index, statement := range statements {
@@ -82,7 +83,7 @@ func legacySchemaStatements(version int) []string {
 			}
 		}
 	}
-	if version == v44UserVersion {
+	if version == v45UserVersion || version == v44UserVersion {
 		restoreProjectCeilings()
 		return statements
 	}
@@ -169,7 +170,7 @@ func (store *Store) migrateLegacy(ctx context.Context, path string, recheck func
 	switch version {
 	case userVersion:
 		return connection.Close()
-	case v37UserVersion, v38UserVersion, v39UserVersion, v40UserVersion, v41UserVersion, v42UserVersion, v43UserVersion, v44UserVersion:
+	case v37UserVersion, v38UserVersion, v39UserVersion, v40UserVersion, v41UserVersion, v42UserVersion, v43UserVersion, v44UserVersion, v45UserVersion:
 	default:
 		cause := ErrForeignDatabase
 		if appID == applicationID && version > userVersion {
@@ -251,6 +252,17 @@ func migrateFrom(ctx context.Context, connection *sql.Conn, version int) error {
 	}
 	if version < v42UserVersion {
 		statements = append([]string{archiveBatchesTable}, statements...)
+	}
+	if version < userVersion {
+		statements = append(statements, `CREATE TABLE provider_adoptions (
+    provider TEXT PRIMARY KEY CHECK (provider IN ('claude_code', 'codex')),
+    active_version TEXT NOT NULL CHECK (length(CAST(active_version AS BLOB)) BETWEEN 1 AND 128),
+    active_commitment TEXT NOT NULL CHECK (length(CAST(active_commitment AS BLOB)) BETWEEN 1 AND 4096),
+    candidate_version TEXT CHECK (candidate_version IS NULL OR length(CAST(candidate_version AS BLOB)) BETWEEN 1 AND 128),
+    candidate_commitment TEXT CHECK (candidate_commitment IS NULL OR length(CAST(candidate_commitment AS BLOB)) BETWEEN 1 AND 4096),
+    updated_at_ms INTEGER NOT NULL CHECK (updated_at_ms >= 0),
+    CHECK ((candidate_version IS NULL) = (candidate_commitment IS NULL))
+) STRICT, WITHOUT ROWID`)
 	}
 	for _, statement := range statements {
 		if _, err := connection.ExecContext(ctx, statement); err != nil {

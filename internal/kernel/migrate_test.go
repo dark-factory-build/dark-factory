@@ -14,7 +14,7 @@ import (
 	"testing"
 )
 
-// A current home opens untouched; a v44 home preserves archived_tasks, a v43
+// A current home opens untouched; a v45 home gains provider adoption state, a v44 home preserves archived_tasks, a v43
 // home (without archived_tasks), a v42 one (also without the intake author columns), a v41 one (also without
 // archive_batches), a v40
 // one (also with a continuations table), a v39 one (also with
@@ -24,7 +24,7 @@ import (
 // record a transient failure.
 func TestCurrentAndLegacyHomesOpenWithEveryRow(t *testing.T) {
 	t.Parallel()
-	for _, version := range []int{userVersion, v44UserVersion, v43UserVersion, v42UserVersion, v41UserVersion, v40UserVersion, v39UserVersion, v38UserVersion, v37UserVersion} {
+	for _, version := range []int{userVersion, v45UserVersion, v44UserVersion, v43UserVersion, v42UserVersion, v41UserVersion, v40UserVersion, v39UserVersion, v38UserVersion, v37UserVersion} {
 		t.Run(fmt.Sprintf("v%d", version), func(t *testing.T) { testHomeOpensWithEveryRow(t, version) })
 	}
 }
@@ -93,6 +93,9 @@ func downgradeHome(t *testing.T, store *Store, version int, extra ...string) {
 		}
 		if version < v44UserVersion {
 			statements = append(statements, "DROP TABLE archived_tasks")
+		}
+		if version < userVersion {
+			statements = append(statements, "DROP TABLE provider_adoptions")
 		}
 		if version < v43UserVersion {
 			statements = append([]string{"ALTER TABLE intake_acceptances DROP COLUMN author_type", "ALTER TABLE intake_acceptances DROP COLUMN author_login"}, statements...)
@@ -290,8 +293,12 @@ func snapshotRows(t *testing.T, ctx context.Context, connection *sql.Conn) map[s
 func TestSchemaDigestsArePinned(t *testing.T) {
 	t.Parallel()
 	sum := sha256.Sum256([]byte(strings.Join(schemaStatements, "\n")))
-	if got := hex.EncodeToString(sum[:]); got != "8ec2d351c12a13ad9ba03cea5d5dd2194366ee7a916f790fcc60fdcf4294639f" {
+	if got := hex.EncodeToString(sum[:]); got != "af90593f8cef04f89f5aae304c001520c901eaee79c87f1de40691c595a41c38" {
 		t.Errorf("current schema digest = %s", got)
+	}
+	sum = sha256.Sum256([]byte(strings.Join(legacySchemaStatements(v45UserVersion), "\n")))
+	if got := hex.EncodeToString(sum[:]); got != "a5fd7c65ec3fdbe957980b5b936a6967a9e06440c6984bdef6ec33073e46ef14" {
+		t.Errorf("v45 schema digest = %s", got)
 	}
 	sum = sha256.Sum256([]byte(strings.Join(legacySchemaStatements(v43UserVersion), "\n")))
 	if got := hex.EncodeToString(sum[:]); got != "dd3a34e6e1e9838d35ab3f58a3f721ab50aae9fdba643f5deb63ea4cc27d7622" {
