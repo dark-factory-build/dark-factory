@@ -137,3 +137,14 @@ func (daemon *Daemon) intakeSync() map[string]api.IntakeSync {
 	}
 	return sync
 }
+
+func (daemon *Daemon) intakeReadyWork() bool {
+	daemon.intakeMu.Lock()
+	defer daemon.intakeMu.Unlock()
+	for _, poll := range daemon.intakePolls {
+		if poll != nil && len(poll.sync.Waiting) > 0 {
+			return true
+		}
+	}
+	return false
+}

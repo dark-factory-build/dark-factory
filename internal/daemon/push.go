@@ -53,7 +53,6 @@ func newPushStore(relayDirectory string) *pushStore {
 
 type pushAlertState struct {
 	SentDay string `json:"sent_day,omitempty"`
-	Active  bool   `json:"active"`
 }
 
 func (store *pushStore) alertPath() string {
@@ -80,7 +79,6 @@ func (store *pushStore) healthAlert(condition, day string, active bool) (bool, e
 	}
 	state := states[condition]
 	alert := active && state.SentDay != day
-	state.Active = active
 	if alert {
 		state.SentDay = day
 	}
@@ -276,14 +274,20 @@ func (daemon *Daemon) checkFactoryAlerts(ctx context.Context) {
 	if store == nil {
 		return
 	}
-	stall := signal.ReadyWork && (signal.LastMergeAtMS == 0 || now.UnixMilli()-signal.LastMergeAtMS >= 6*time.Hour.Milliseconds())
-	failure := signal.RunsLastHour >= 10 && signal.FailuresLastHour*2 > signal.RunsLastHour
+	conditions := factoryAlertConditions(signal, daemon.intakeReadyWork(), now.UnixMilli())
 	day := now.UTC().Format("2006-01-02")
-	for condition, active := range map[string]bool{"merge-stall": stall, "run-failure": failure} {
+	for condition, active := range conditions {
 		alert, err := store.healthAlert(condition, day, active)
 		if err == nil && alert {
 			go daemon.notifyPush(context.WithoutCancel(ctx), daemon.observed(pushClient))
 		}
+	}
+}
+
+func factoryAlertConditions(signal kernel.AlertSignals, intakeReady bool, nowMS int64) map[string]bool {
+	return map[string]bool{
+		"merge-stall": (signal.ReadyWork || intakeReady) && (signal.LastMergeAtMS == 0 || nowMS-signal.LastMergeAtMS >= 6*time.Hour.Milliseconds()),
+		"run-failure": signal.RunsLastHour >= 10 && signal.FailuresLastHour*2 > signal.RunsLastHour,
 	}
 }
 

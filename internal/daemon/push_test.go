@@ -122,20 +122,23 @@ func TestParsePushKeysRefusesAMismatchedPair(t *testing.T) {
 
 func TestHealthAlertNotifiesOnceAndClearsOnRecovery(t *testing.T) {
 	store := newPushStore(t.TempDir())
-	if alert, err := store.healthAlert("merge-stall", "2026-10-18", true); err != nil || !alert {
-		t.Fatalf("first alert = %v, %v", alert, err)
-	}
-	if alert, err := store.healthAlert("merge-stall", "2026-10-18", true); err != nil || alert {
-		t.Fatalf("repeat alert = %v, %v", alert, err)
-	}
-	if alert, err := store.healthAlert("merge-stall", "2026-10-18", false); err != nil || alert {
-		t.Fatalf("recovery alert = %v, %v", alert, err)
-	}
-	if alert, err := store.healthAlert("merge-stall", "2026-10-18", true); err != nil || alert {
-		t.Fatalf("same-day recovered alert = %v, %v", alert, err)
-	}
-	if alert, err := store.healthAlert("merge-stall", "2026-10-19", true); err != nil || !alert {
-		t.Fatalf("next-day alert = %v, %v", alert, err)
+	now := time.Date(2026, 10, 18, 12, 0, 0, 0, time.UTC)
+	bad := factoryAlertConditions(kernel.AlertSignals{ReadyWork: true, LastMergeAtMS: now.Add(-7 * time.Hour).UnixMilli(), RunsLastHour: 10, FailuresLastHour: 6}, false, now.UnixMilli())
+	good := factoryAlertConditions(kernel.AlertSignals{ReadyWork: false, LastMergeAtMS: now.UnixMilli(), RunsLastHour: 10, FailuresLastHour: 4}, false, now.UnixMilli())
+	for condition := range bad {
+		if !bad[condition] || good[condition] {
+			t.Fatalf("condition %q bad=%v good=%v", condition, bad[condition], good[condition])
+		}
+		alert, err := store.healthAlert(condition, "2026-10-18", bad[condition])
+		if err != nil || !alert {
+			t.Fatalf("first %s alert = %v, %v", condition, alert, err)
+		}
+		if alert, err = store.healthAlert(condition, "2026-10-18", bad[condition]); err != nil || alert {
+			t.Fatalf("repeat %s alert = %v, %v", condition, alert, err)
+		}
+		if alert, err = store.healthAlert(condition, "2026-10-18", good[condition]); err != nil || alert {
+			t.Fatalf("recovery %s alert = %v, %v", condition, alert, err)
+		}
 	}
 }
 
