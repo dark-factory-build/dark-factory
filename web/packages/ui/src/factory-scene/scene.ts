@@ -109,21 +109,6 @@ export function recordedEffort(telemetry: RunTelemetry): string {
 
 export type ScenePoint = Readonly<{ x: number; y: number }>;
 
-/** One change request on the outbound line, at the station its records put it. */
-export type SceneCrate = Readonly<{
-  /** The production key, which is also its proposal's id. */
-  id: string;
-  number: number;
-  title: string;
-  station: 0 | 1 | 2 | 3;
-  /** The recorded stages, as the Work row names them. */
-  stage: string;
-  fault: boolean;
-  taskIds: readonly string[];
-}>;
-
-export const LINE_STATIONS = ["Review", "Checks", "Merge queue", "Shipped"] as const;
-
 export type SceneRect = Readonly<{ x: number; y: number; width: number; height: number }>;
 
 /** How a machine is pictured. A shape is chosen from the node kind, never its name. */

@@ -208,10 +208,8 @@ test("thirty proposals draw no floor selection controls", async () => {
     const header = () => tree.root.findByProps({ className: "dfFactoryEntityTools" });
     assert.equal(header().findAllByProps({ type: "search" }).length, 0);
     assert.deepEqual(header().findAllByType("button").map(text), []);
-    const line = header().findByProps({ "data-work-line": "" });
-    assert.deepEqual(line.findAllByType("span").map((node) => text(node)), ["Review —", "Checks —", "Merge queue —", "Shipped —"]);
-    assert.equal(line.findAllByType("details").length, 0);
-    assert.equal(line.findAll((node) => node.props["data-crate"] !== undefined || node.props["data-lit"] !== undefined).length, 0);
+    assert.equal(header().findAll((node) => node.props["data-work-line"] !== undefined).length, 0, "no pull-request strip");
+    assert.deepEqual(header().children, [], "with no notice the bar is empty, so it reserves no height");
     assert.equal(header().findAllByType("button").length, 0);
     assert.equal(JSON.stringify(tree.toJSON()).includes("Clear PR"), false);
   } finally { if (tree) await act(async () => tree.unmount()); }

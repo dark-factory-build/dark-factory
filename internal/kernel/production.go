@@ -1164,8 +1164,8 @@ const productionRows = `SELECT repository, kind, identity, visual_id, document, 
  LEFT JOIN project_repositories r ON r.id = b.repository_id
  WHERE c.project_id = ? AND NOT EXISTS (SELECT 1 FROM publication_tasks p WHERE p.change_id = c.id)`
 
-// ProductionRecent matches the floor's SHIPPED window: work settled longer ago
-// is history, not production.
+// ProductionRecent bounds what production still shows: work settled longer
+// ago is history, not production.
 const ProductionRecent = 24 * time.Hour
 
 // Production reads what is relevant now, defined by state rather than a count:

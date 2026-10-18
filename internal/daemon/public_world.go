@@ -74,7 +74,7 @@ func (backend *browserBackend) PublicWorld(ctx context.Context, rawProject strin
 		}
 		workers = append(workers, worker)
 	}
-	crates, ledger, err := daemon.publicWork(ctx, projectID)
+	ledger, err := daemon.publicWork(ctx, projectID)
 	if err != nil {
 		return nil, err
 	}
@@ -82,7 +82,7 @@ func (backend *browserBackend) PublicWorld(ctx context.Context, rawProject strin
 	if err != nil {
 		return nil, err
 	}
-	world := opgraph.Public(daemon.liveGraph(projectID, graph), secret, workers, crates, named, daemon.now().UnixMilli())
+	world := opgraph.Public(daemon.liveGraph(projectID, graph), secret, workers, named, daemon.now().UnixMilli())
 	world.Ledger = ledger
 	encoded, err := json.Marshal(world)
 	// Past the relay's bound, the oldest merges are listed no more, then the

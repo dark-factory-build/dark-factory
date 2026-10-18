@@ -7,7 +7,6 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
-	"os"
 	"slices"
 	"strconv"
 	"strings"
@@ -18,39 +17,6 @@ import (
 	"github.com/dark-factory-build/dark-factory/internal/opgraph"
 	"github.com/dark-factory-build/dark-factory/internal/relayhost"
 )
-
-// The console (projectCrates in production-view.ts) reads the same fixture.
-func TestPublicCratesMatchTheConsoleRule(t *testing.T) {
-	body, err := os.ReadFile("../../web/fixtures/production-crates.json")
-	if err != nil {
-		t.Fatal(err)
-	}
-	var fixture struct {
-		Now     int64                     `json:"now"`
-		Records []kernel.ProductionRecord `json:"records"`
-		Crates  [][3]any                  `json:"crates"`
-	}
-	if err := json.Unmarshal(body, &fixture); err != nil {
-		t.Fatal(err)
-	}
-	var got, want []string
-	for _, crate := range publicCrates(fixture.Records, fixture.Now) {
-		got = append(got, fmt.Sprintf("%s %d %v", crate.Key[strings.LastIndex(crate.Key, "#")+1:], crate.Station, crate.Fault))
-	}
-	for _, crate := range fixture.Crates {
-		want = append(want, fmt.Sprintf("%v %v %v", crate[0], crate[1], crate[2]))
-	}
-	slices.Sort(got)
-	slices.Sort(want)
-	if !slices.Equal(got, want) {
-		t.Fatalf("crates = %v, want %v", got, want)
-	}
-	// Order of records is no input.
-	slices.Reverse(fixture.Records)
-	if again := publicCrates(fixture.Records, fixture.Now); len(again) != len(want) {
-		t.Fatalf("reversed records gave %d crates", len(again))
-	}
-}
 
 func TestPublicLedgerWindowsClockAndPrivacy(t *testing.T) {
 	now := time.Date(2026, 10, 8, 12, 30, 0, 0, time.UTC)
@@ -166,9 +132,8 @@ func TestPublicRepositoryIsWhatAnAnonymousReaderSees(t *testing.T) {
 }
 
 // A busy month in two repositories: the public one's work is published within
-// the relay's bound, the private one's titles never, and crates carry no
-// number or title.
-func TestPublicWorldCarriesTheWorkLineAndOnlyPublicLedgerWithinTheBound(t *testing.T) {
+// the relay's bound, the private one's titles never.
+func TestPublicWorldCarriesOnlyPublicLedgerWithinTheBound(t *testing.T) {
 	ctx := context.Background()
 	fixture := newAdapterFixture(t, kernel.BrowserCapabilityObserve)
 	project := relaySeedProject(t, fixture, 3, "busy project")
@@ -221,14 +186,8 @@ func TestPublicWorldCarriesTheWorkLineAndOnlyPublicLedgerWithinTheBound(t *testi
 	if err := json.Unmarshal(encoded, &world); err != nil {
 		t.Fatal(err)
 	}
-	// Crates: every open pull request of both repositories, plus the last day's merges.
-	if len(world.Crates) != 4*perDay {
-		t.Fatalf("%d crates", len(world.Crates))
-	}
-	var crates bytes.Buffer
-	_ = json.NewEncoder(&crates).Encode(world.Crates)
-	if bytes.Contains(crates.Bytes(), []byte("change")) || bytes.Contains(crates.Bytes(), []byte("repo")) || bytes.Contains(crates.Bytes(), []byte(`"number"`)) {
-		t.Fatalf("crates carry more than an id, a station and a fault: %s", crates.Bytes()[:200])
+	if bytes.Contains(encoded, []byte(`"crates"`)) {
+		t.Fatal("the public world still publishes a work line; the Work list is where pull requests show")
 	}
 	ledger := world.Ledger
 	if ledger == nil || ledger.OpenCount != perDay || ledger.MergedCount != 7*perDay || len(ledger.Clock) != 21 || ledger.Clock[20].Hours[13] != 0 {

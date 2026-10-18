@@ -26,7 +26,10 @@ test("the floor controls wrap instead of becoming horizontal overflow", () => {
   const css = readFileSync(new URL("../src/factory-console.css", import.meta.url), "utf8");
   assert.doesNotMatch(page, /<summary>Search<\/summary>/);
   assert.doesNotMatch(page, /dfFloorMenu|<details/);
-  assert.match(css, /\.dfFactoryEntityTools \{[^}]*flex-wrap: wrap;[^}]*min-height: 2\.75rem;[^}]*overflow: visible;[^}]*white-space: normal;/);
+  assert.match(css, /\.dfFactoryEntityTools \{[^}]*flex-wrap: wrap;[^}]*overflow: visible;[^}]*white-space: normal;/);
+  assert.match(css, /\.dfFactoryEntityTools:empty \{ display: none; \}/, "no notice, no bar: the floor has the pane");
+  assert.doesNotMatch(css, /min-height: 2\.75rem|dfWorkLine/);
+  assert.doesNotMatch(page, /data-work-line|Pull request progress/);
   assert.doesNotMatch(css, /dfFloorMenu/);
 });
 

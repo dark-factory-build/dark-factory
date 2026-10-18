@@ -9,7 +9,7 @@ import {
   type RunPathSample,
 } from "./console-view.js";
 import { FactoryScene, AgentSprite } from "./factory-scene/factory-scene.js";
-import { projectCrates, type ProductionContraption } from "./production-view.js";
+import type { ProductionContraption } from "./production-view.js";
 import type { ProjectContentCall } from "./factory-app-controller.js";
 import { Status } from "./console-kit.js";
 
@@ -81,12 +81,10 @@ const NO_CHANGES: readonly ProductionContraption[] = [];
 
 /** The operational floor: observation and navigation; every action opens an existing control. */
 export function FactoryFloor({
-  changes = NO_CHANGES, changesRead = false, state, graphs, graphErrors, runPaths, lastRunPaths, selectedAgentId, onSelectAgent,
+  changes = NO_CHANGES, state, graphs, graphErrors, runPaths, lastRunPaths, selectedAgentId, onSelectAgent,
   onSelectHumanRequest, selectedTaskId, onSelectTask, onOpenTasks, connected = true, projectId,
 }: {
   changes?: readonly ProductionContraption[];
-  /** Whether `changes` were read on this connection; until then the work line has nothing to look at. */
-  changesRead?: boolean;
   state: StateView | undefined;
   graphs: ReadonlyMap<string, OperationalGraphView> | undefined;
   graphErrors?: ReadonlyMap<string, string>;
@@ -106,7 +104,6 @@ export function FactoryFloor({
   const prepared = useMemo(() => projectGraph(graphs, projects), [graphs, projects]);
   const scene = useMemo(() => projectFloor(state, prepared, runPaths, lastRunPaths), [state, prepared, runPaths, lastRunPaths]);
   const proposed = useMemo(() => projectProposals(prepared, changes), [prepared, changes]);
-  const crates = useMemo(() => changesRead ? projectCrates(changes) : undefined, [changes, changesRead]);
   const peerQuestions = useMemo(() => [...(state?.peerQuestions?.values() ?? [])], [state]);
   const unavailable = projects.flatMap((id) => graphs?.get(id)?.sources.filter((source) => source.kind === "unavailable") ?? []);
   const refused = projects.flatMap((id) => { const code = graphErrors?.get(id); return code === undefined ? [] : [`${state?.projects.get(id)?.name ?? id} · ${code}`]; });
@@ -116,7 +113,6 @@ export function FactoryFloor({
         {refused.length > 0 ? <p className="dfFactoryEntityTools__notice" role="status">Plant unavailable: {refused.join(", ")}; retrying.</p> : null}
         {unavailable.length > 0 ? <p className="dfFactoryEntityTools__notice" role="status">Source unavailable for {unavailable.map((source) => source.name).join(", ")}; those units cannot be inferred.</p> : null}
       </>}
-      crates={crates}
       selectedWorkerId={selectedAgentId}
       selectedTaskId={selectedTaskId}
       graph={scene.graph}
