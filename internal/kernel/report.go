@@ -148,6 +148,18 @@ func (store *Store) Report(ctx context.Context, project *ProjectID, since, bucke
 	return lines, nil
 }
 
+// RunOutcomes counts the runs admitted since since (Unix ms) that ended, and
+// those that failed.
+func (store *Store) RunOutcomes(ctx context.Context, since int64) (ended, failed int64, err error) {
+	tx, err := store.beginRead(ctx)
+	if err != nil {
+		return 0, 0, err
+	}
+	defer tx.Close()
+	err = tx.connection.QueryRowContext(ctx, `SELECT COUNT(terminal_kind), COALESCE(SUM(terminal_kind = 'failed'), 0) FROM runs WHERE admitted_at_ms >= ?`, since).Scan(&ended, &failed)
+	return ended, failed, err
+}
+
 // Why says, one line each, where a pull request (pull > 0) or a task stands
 // and whom it waits on: its exact head, checks, review at that head, merge
 // queue, task, the reconciler's last action and why, then "waits on". It reads

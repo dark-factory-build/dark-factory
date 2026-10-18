@@ -72,6 +72,18 @@ var (
 	selfSource         = func() string { return buildinfo.Current().Source() }
 	promoteService     = install.PromoteService
 	releaseSettledHook = func(string, string) {}
+	// A promoted build's health gate makes, every healthPoll for
+	// healthWindow, the round trip factoryctl status makes, which a durable
+	// validation hold refuses. All three are package-test seams.
+	healthWindow    = 10 * time.Minute
+	healthPoll      = time.Minute
+	healthRoundTrip = func(ctx context.Context, home string) error {
+		client, err := api.NewOperatorClient(install.LocalAPISocketPath(home), install.OperatorTokenPath(home))
+		if err == nil {
+			_, err = client.Health(ctx, "")
+		}
+		return err
+	}
 
 	cleanStartupCancellation = errors.New("factoryd: clean startup cancellation")
 	startupPhaseHook         func(string)
@@ -365,6 +377,8 @@ func serve(ctx context.Context, configuration config) error {
 		<-limit.Done()
 		return owner.close()
 	}
+	watch, stopServing := context.WithCancel(ctx)
+	defer stopServing()
 	// Only bin/current boots under launchd, so a marker naming this build
 	// means its trial promoted it; any other marker is a release that did not.
 	if marker, upgrading, err := install.ReadUpgradeMarker(configuration.home); upgrading || err != nil {
@@ -393,6 +407,7 @@ func serve(ctx context.Context, configuration config) error {
 		if !resumed {
 			if marker.Target == selfSource() {
 				owner.settleRelease(ctx, configuration.home, marker.Target, "verified", "")
+				go owner.watchRelease(watch, configuration.home, marker.Target, stopServing)
 			} else {
 				owner.settleRelease(ctx, configuration.home, marker.Target, "failed", marker.Reason)
 			}
@@ -402,18 +417,48 @@ func serve(ctx context.Context, configuration config) error {
 			// only closes so launchd starts bin/current.
 			return errors.Join(owner.close(), fmt.Errorf("%w: resumed %s", errRestart, resumedTarget))
 		}
-	} else if err := errors.Join(install.RemoveUpgrade(configuration.home), owner.daemon.FailInterruptedRelease(ctx)); err != nil {
+	} else if err := errors.Join(install.RemoveUpgrade(configuration.home, false), owner.daemon.FailInterruptedRelease(ctx)); err != nil {
 		// A backup never outlives its release, nor a record its process.
 		daemon.LogFactoryd(recoveryLog, "factoryd: settling an interrupted release: %v\n", err)
 	}
-	if err := owner.wait(ctx); err != nil {
+	if err := owner.wait(watch); err != nil {
 		return err
 	}
-	// A release staged another build and shut this one down.
+	// A release staged another build and shut this one down, or the health
+	// gate rolled this one back.
 	if marker, ok, _ := install.ReadUpgradeMarker(configuration.home); ok && marker.Target != selfSource() {
 		return superviseTrial(configuration.home, configuration.args, marker)
+	} else if ok {
+		return fmt.Errorf("%w: %s", errRestart, marker.Reason)
 	}
 	return nil
+}
+
+// watchRelease rolls a promoted build whose health gate fails back to
+// bin/previous by the trial's own path: a marker naming this build, which the
+// previous build's boot settles failed with the reason (restoring the backup
+// over a store this build migrated), then the swap and a restart. A check that
+// failed because this process began closing decides nothing.
+func (owner *process) watchRelease(ctx context.Context, home, target string, stopServing context.CancelFunc) {
+	reason := owner.daemon.WatchRelease(ctx, healthWindow, healthPoll, func(ctx context.Context) error { return healthRoundTrip(ctx, home) })
+	owner.lifecycleMu.Lock()
+	closing := owner.closeDone != nil
+	owner.lifecycleMu.Unlock()
+	if reason == "" || closing {
+		return
+	}
+	reason = "post-release health: " + reason
+	err := install.WriteUpgradeMarker(home, install.UpgradeMarker{Target: target, Reason: reason})
+	if err == nil {
+		err = promoteService(home)
+	}
+	if err != nil {
+		daemon.LogFactoryd(recoveryLog, "factoryd: rolling back release %s failed: %v\n", target, err)
+		return
+	}
+	daemon.LogFactoryd(recoveryLog, "factoryd: rolling back release %s: %s\n", target, reason)
+	owner.daemon.AlertOwner(ctx)
+	stopServing()
 }
 
 // superviseTrial runs the staged build as a child against this home, which
@@ -490,7 +535,7 @@ func processStart(pid int) int64 {
 // settleRelease forgets the upgrade first: while its marker remains, the next
 // boot still decides the release, so nothing is recorded.
 func (owner *process) settleRelease(ctx context.Context, home, target, state, reason string) {
-	err := install.RemoveUpgrade(home)
+	err := install.RemoveUpgrade(home, state == "verified")
 	if _, present, readErr := install.ReadUpgradeMarker(home); present || readErr != nil {
 		daemon.LogFactoryd(recoveryLog, "factoryd: forgetting release %s failed: %v\n", target, errors.Join(err, readErr))
 		return

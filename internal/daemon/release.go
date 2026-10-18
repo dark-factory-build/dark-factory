@@ -271,6 +271,42 @@ func (daemon *Daemon) FinishRelease(ctx context.Context, sha, state, reason stri
 	return daemon.writeRelease(ctx, project, &delivery)
 }
 
+// WatchRelease is a promoted build's health gate (#2051): its trial proved it
+// starts, not that a client can use its local API or that its runs succeed.
+// Every poll for window it makes a client's round trip on the local API and
+// counts the runs admitted since it started that ended. It returns why the
+// build is unhealthy, or "" once the window passes or another release starts,
+// since bin/previous is then no longer the build to roll back to.
+func (daemon *Daemon) WatchRelease(ctx context.Context, window, poll time.Duration, roundTrip func(context.Context) error) string {
+	since := time.Now().UnixMilli()
+	for deadline := time.Now().Add(window); time.Now().Before(deadline); {
+		select {
+		case <-ctx.Done():
+			return ""
+		case <-time.After(poll):
+		}
+		if daemon.releaseBusy.Load() {
+			return ""
+		}
+		err := roundTrip(ctx)
+		ended, failed, runsErr := daemon.store.RunOutcomes(ctx, since)
+		switch {
+		case ctx.Err() != nil:
+			return ""
+		case err != nil:
+			return "local API round trip: " + err.Error()
+		case runsErr == nil && ended >= 5 && failed*2 > ended:
+			return fmt.Sprintf("%d of %d runs since the restart failed", failed, ended)
+		}
+	}
+	return ""
+}
+
+// AlertOwner wakes the owner's subscribed devices.
+func (daemon *Daemon) AlertOwner(ctx context.Context) {
+	daemon.notifyPush(ctx, daemon.observed(pushClient))
+}
+
 const releaseInterrupted = "interrupted by a factoryd restart"
 
 // interruptRelease fails a release a restart cut short, which the release
@@ -328,7 +364,7 @@ func (daemon *Daemon) release(project kernel.ProjectID, root string, source chan
 	ctx := daemon.cleanupCtx
 	fail := func(reason string) {
 		// Nothing was staged, so the backup has no release to outlive.
-		_ = install.RemoveUpgrade(daemon.home)
+		_ = install.RemoveUpgrade(daemon.home, false)
 		daemon.releaseHold.Store(false)
 		daemon.releaseBusy.Store(false)
 		delivery.State, delivery.Reason = "failed", reason

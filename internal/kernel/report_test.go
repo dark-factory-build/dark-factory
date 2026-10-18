@@ -388,4 +388,10 @@ func TestWhyNamesTheAgentOfAProviderExitRun(t *testing.T) {
 	if err != nil || len(lines) < 2 || lines[1] != "run: terminal failed agent="+run.AgentID.String()+" at "+time.UnixMilli(mustTime(t, 70).Int64()).UTC().Format(time.RFC3339)+" provider exited before an attempt outcome" {
 		t.Fatalf("why provider exit = %q, %v", lines, err)
 	}
+	// #2051's health gate counts the ended runs admitted since its restart.
+	for since, want := range map[int64]int64{0: 1, time.Now().UnixMilli(): 0} {
+		if ended, failed, err := store.RunOutcomes(ctx, since); err != nil || ended != want || failed != want {
+			t.Fatalf("run outcomes since %d = %d, %d, %v; want %d failed of %d", since, ended, failed, err, want, want)
+		}
+	}
 }

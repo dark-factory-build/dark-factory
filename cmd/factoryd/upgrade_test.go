@@ -605,3 +605,95 @@ func TestBootFailsAReleaseItsPreviousProcessLeftRunning(t *testing.T) {
 		t.Fatalf("serve = %v", err)
 	}
 }
+
+// withRelease runs use against home's store, closed again after.
+func withRelease(t *testing.T, home string, use func(context.Context, *kernel.Store) error) {
+	t.Helper()
+	ctx := context.Background()
+	opened, err := install.OpenOperationalHome(ctx, home)
+	if err != nil {
+		t.Fatal(err)
+	}
+	store, err := opened.OpenStore(ctx)
+	if err == nil {
+		err = use(ctx, store)
+		err = errors.Join(err, store.Close())
+	}
+	if err = errors.Join(err, opened.Close()); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// #2051: a promoted build whose local API client round trip fails is rolled back to
+// bin/previous by its health gate, and the previous build's boot records the
+// release failed with that reason; a healthy one keeps serving.
+func TestHealthGateRollsBack(t *testing.T) {
+	for _, healthy := range []bool{true, false} {
+		home := stagedHome(t, "serve", "development")
+		withRelease(t, home, func(ctx context.Context, store *kernel.Store) error {
+			project, err := kernel.ProjectIDFromBytes(bytes.Repeat([]byte{0x34}, kernel.IDBytes))
+			at, atErr := kernel.NewUnixMillis(time.Now().UnixMilli())
+			if err = errors.Join(err, atErr); err == nil {
+				_, err = store.CreateProject(ctx, kernel.NewProject{ID: project, Name: "self", Root: filepath.Join(filepath.Dir(home), "repo")}, at)
+			}
+			if err == nil {
+				err = store.RecordDelivery(ctx, project, "dark-factory-build/dark-factory", kernel.ProductionDelivery{ID: "release:development", Kind: "runtime", Destination: "factoryd", Revision: strings.Repeat("e", 40), State: "running", Phase: "trial", PullRequests: []uint64{}, UpdatedAt: at.Int64()}, at)
+			}
+			return err
+		})
+		if err := install.PromoteService(home); err != nil {
+			t.Fatal(err)
+		}
+		window, poll, roundTrip, hook := healthWindow, healthPoll, healthRoundTrip, releaseSettledHook
+		healthWindow, healthPoll = 500*time.Millisecond, 50*time.Millisecond
+		if !healthy {
+			healthRoundTrip = func(context.Context, string) error { return api.ErrInvalidClient }
+		}
+		settled := make(chan struct{}, 1)
+		releaseSettledHook = func(string, string) { settled <- struct{}{} }
+		selfSource = func() string { return "development" }
+		ctx, cancel := context.WithCancel(context.Background())
+		done := make(chan error, 1)
+		go func() { done <- serve(ctx, testConfig(home)) }()
+		select {
+		case <-settled:
+		case err := <-done:
+			t.Fatalf("boot = %v", err)
+		case <-time.After(5 * time.Second):
+			t.Fatal("the boot never settled the release")
+		}
+		var err error
+		if healthy {
+			time.Sleep(time.Second)
+			cancel()
+			err = <-done
+		} else {
+			select {
+			case err = <-done:
+			case <-time.After(10 * time.Second):
+				t.Fatal("the health gate never rolled back")
+			}
+		}
+		cancel()
+		healthWindow, healthPoll, healthRoundTrip, releaseSettledHook = window, poll, roundTrip, hook
+		current, _ := os.ReadFile(filepath.Join(install.ServiceDirectoryPath(home), "bin", "current", "factoryd"))
+		if healthy {
+			if err != nil || string(current) == currentProgram {
+				t.Fatalf("healthy build: serve = %v, rolled back %t", err, string(current) == currentProgram)
+			}
+			continue
+		}
+		if !errors.Is(err, errRestart) || string(current) != currentProgram {
+			t.Fatalf("unhealthy build: serve = %v, rolled back %t", err, string(current) == currentProgram)
+		}
+		selfSource = func() string { return runningSource }
+		bootUntilSettled(t, home)
+		withRelease(t, home, func(ctx context.Context, store *kernel.Store) error {
+			_, delivery, found, err := store.Delivery(ctx, "release:development")
+			if err != nil || !found || delivery.State != "failed" || !strings.HasPrefix(delivery.Reason, "post-release health: local API round trip: ") {
+				t.Errorf("rolled back release = %+v, %t, %v", delivery, found, err)
+			}
+			return nil
+		})
+	}
+}
