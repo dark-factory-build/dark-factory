@@ -658,13 +658,6 @@ func (listener *Listener) Accept() (*Connection, error) {
 	return result, nil
 }
 
-// Retire has every connection dropped from now on read as lost to a restart.
-func (listener *Listener) Retire() {
-	if listener != nil {
-		listener.authority.Retire()
-	}
-}
-
 // Close closes the retained authority. A replacement at the recorded name is
 // left untouched and makes the authority's stable result uncertain.
 func (listener *Listener) Close() error {

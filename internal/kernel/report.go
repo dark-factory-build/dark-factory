@@ -128,25 +128,18 @@ func (store *Store) Report(ctx context.Context, project *ProjectID, since, bucke
 		lines = append(lines, fmt.Sprintf("failure %s x%d last=%s %s: repository=%s run=%s %s", age, entry.count, time.UnixMilli(entry.last).UTC().Format("2006-01-02T15:04Z"), entry.signature, entry.repository, entry.url, entry.example))
 	}
 	lines = append(lines, fmt.Sprintf("lessons=%d reads=%d citations=%d stale=%d", lessons, reads, citations, stale))
-	// Each release updated in the window, served or not; a served one's local
-	// API outage runs from the staging generation's socket withdrawal to that
-	// bind, and is unknown when the staging generation recorded no withdrawal.
-	rows, err = read.connection.QueryContext(ctx, `SELECT identity, state, phase, reason, COALESCE(' served=' || strftime('%Y-%m-%dT%H:%MZ', served / 1000, 'unixepoch') || ' outage=' || IIF(withdrawn BETWEEN 1 AND served, '', 'unknown'), ''), IIF(withdrawn BETWEEN 1 AND served, served - withdrawn, -1)
-		FROM (SELECT identity, observed_at_ms, json_extract(document, '$.state') AS state, COALESCE(json_extract(document, '$.phase'), '-') AS phase, COALESCE(json_extract(document, '$.reason'), '-') AS reason, json_extract(document, '$.served_at') AS served, json_extract(document, '$.withdrawn_at') AS withdrawn
-		FROM `+archived.table("production_records")+` WHERE (?1 IS NULL OR project_id = ?1) AND kind = 'delivery' AND identity LIKE 'release:%' AND observed_at_ms >= ?2) ORDER BY observed_at_ms`, scope, since)
+	// Each release updated in the window reports its state, phase and reason.
+	rows, err = read.connection.QueryContext(ctx, `SELECT identity, COALESCE(json_extract(document, '$.state'), '-'), COALESCE(json_extract(document, '$.phase'), '-'), COALESCE(json_extract(document, '$.reason'), '-')
+		FROM `+archived.table("production_records")+` WHERE (?1 IS NULL OR project_id = ?1) AND kind = 'delivery' AND identity LIKE 'release:%' AND observed_at_ms >= ?2 ORDER BY observed_at_ms`, scope, since)
 	if err != nil {
 		return nil, err
 	}
 	for rows.Next() {
-		var release, state, phase, reason, served string
-		var outage int64
-		if err := rows.Scan(&release, &state, &phase, &reason, &served, &outage); err != nil {
+		var release, state, phase, reason string
+		if err := rows.Scan(&release, &state, &phase, &reason); err != nil {
 			return nil, errors.Join(err, rows.Close())
 		}
-		if outage >= 0 {
-			served += (time.Duration(outage) * time.Millisecond).String()
-		}
-		lines = append(lines, fmt.Sprintf("restart %s %s phase=%s%s reason=%s", release[:min(len(release), 20)], state, phase, served, oneLine(reason, 160)))
+		lines = append(lines, fmt.Sprintf("restart %s %s phase=%s reason=%s", release[:min(len(release), 20)], state, phase, oneLine(reason, 160)))
 	}
 	if err := errors.Join(rows.Err(), rows.Close()); err != nil {
 		return nil, err

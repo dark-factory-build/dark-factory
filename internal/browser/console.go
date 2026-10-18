@@ -14,8 +14,7 @@ const ConsolePath = "/console.js"
 // shell is the desktop console page served at "/": same-origin, so the
 // browser asks no loopback permission. It skips the 32-byte key and 64-byte
 // signature ahead of the gzipped bundle (relayhost.SignConsole); the daemon
-// that signed it served this page, so there is no other key to check. Under
-// launchd no other process can hold this origin (Config.Socket).
+// that signed it served this page, so there is no other key to check.
 const shell = `<!doctype html><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Dark Factory</title><style>body{margin:0;background:#070a09}</style><div id="root"></div><script type="module">
 const signed = await (await fetch("/console.js")).blob();
 const source = await new Response(signed.slice(96).stream().pipeThrough(new DecompressionStream("gzip"))).blob();

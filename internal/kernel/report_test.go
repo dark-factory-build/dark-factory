@@ -169,21 +169,20 @@ func TestReportIncludesFailedMergeGroupCheck(t *testing.T) {
 
 // Every release updated in the window reports its state, phase and reason: a
 // build that failed before serving, a rolled-back trial, and one still
-// running. A served one reports its local API outage, unknown when its staging
-// generation recorded no withdrawal (an older build, or one that died).
+// running.
 func TestReportNamesEachReleaseOutcome(t *testing.T) {
 	t.Parallel()
 	store, _, project, _ := newAdmissionStore(t, RoleOrchestrator, 1)
 	defer store.Close()
 	for _, release := range []ProductionDelivery{
-		{Revision: strings.Repeat("a", 40), State: "verified", WithdrawnAt: 1_000, ServedAt: 2_000},
-		{Revision: strings.Repeat("b", 40), State: "verified", WithdrawnAt: 10_000, ServedAt: 22_500},
-		{Revision: strings.Repeat("c", 40), State: "failed", Phase: "trial", Reason: "the new build was not promoted (answered false): it exited", WithdrawnAt: 30_000, ServedAt: 40_000},
-		{Revision: strings.Repeat("d", 40), State: "running", Phase: "trial", WithdrawnAt: 50_000},
+		{Revision: strings.Repeat("a", 40), State: "verified", UpdatedAt: 2_000},
+		{Revision: strings.Repeat("b", 40), State: "verified", UpdatedAt: 22_500},
+		{Revision: strings.Repeat("c", 40), State: "failed", Phase: "trial", Reason: "the new build was not promoted (answered false): it exited", UpdatedAt: 40_000},
+		{Revision: strings.Repeat("d", 40), State: "running", Phase: "trial", UpdatedAt: 50_000},
 		{Revision: strings.Repeat("e", 40), State: "failed", Phase: "build", Reason: "go build: exit status 1\n" + strings.Repeat("x", 300), UpdatedAt: 60_000},
 	} {
 		release.ID, release.Kind, release.Destination, release.PullRequests = "release:"+release.Revision, "runtime", "factoryd", []uint64{}
-		if err := store.RecordDelivery(context.Background(), project.ID, "example/factory", release, mustTime(t, max(release.ServedAt, release.WithdrawnAt, release.UpdatedAt))); err != nil {
+		if err := store.RecordDelivery(context.Background(), project.ID, "example/factory", release, mustTime(t, release.UpdatedAt)); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -195,8 +194,8 @@ func TestReportNamesEachReleaseOutcome(t *testing.T) {
 		}
 	}
 	want := []string{
-		"restart release:bbbbbbbbbbbb verified phase=- served=1970-01-01T00:00Z outage=12.5s reason=-",
-		"restart release:cccccccccccc failed phase=trial served=1970-01-01T00:00Z outage=10s reason=the new build was not promoted (answered false): it exited",
+		"restart release:bbbbbbbbbbbb verified phase=- reason=-",
+		"restart release:cccccccccccc failed phase=trial reason=the new build was not promoted (answered false): it exited",
 		"restart release:dddddddddddd running phase=trial reason=-",
 		"restart release:eeeeeeeeeeee failed phase=build reason=go build: exit status 1 " + strings.Repeat("x", 136),
 	}

@@ -783,9 +783,8 @@ func (client client) call(ctx context.Context, method string, params, output any
 		ctx, cancel = context.WithTimeout(ctx, timeout)
 	}
 	defer cancel()
-	// An attempt outlives factoryd generations. A restart drains in-flight
-	// requests as unavailable and either unbinds the socket or, under launchd,
-	// queues new connections for the next generation, so the call waits the
+	// An attempt outlives factoryd generations. A restart unbinds the socket
+	// and drains in-flight requests as unavailable, so the call waits the
 	// restart out instead of handing the run a blocker. A mutation's
 	// unavailable reply may follow its commit, so only reads replay it. A reply
 	// lost to a restart is replayed for a read and for an outcome: a committed
@@ -845,16 +844,8 @@ func (client client) exchange(ctx context.Context, method string, encoded []byte
 	payload[0] = client.domain
 	copy(payload[1:requestPrelude], client.token.bearer[:])
 	copy(payload[requestPrelude:], encoded)
-	// A request or reply cut off because its daemon generation retired is a
-	// restart, not this daemon's answer, so call may replay it.
-	restarted := func(err error) error {
-		if after, inspectErr := inspectSocket(client.socketPath); errors.Is(err, ErrTransport) && (inspectErr != nil || !after.same(before)) {
-			return lost{err}
-		}
-		return err
-	}
 	if err := writeFrame(connection, payload); err != nil {
-		return restarted(classifyTransport(ctx))
+		return classifyTransport(ctx)
 	}
 	outcomeReceipt := client.domain == attemptDomain && outcomeMethod(method)
 	unix, ok := connection.(*net.UnixConn)
@@ -870,7 +861,13 @@ func (client client) exchange(ctx context.Context, method string, encoded []byte
 	}
 	response, err := readFrame(connection)
 	if err != nil {
-		return restarted(classifyFrameError(ctx, err))
+		err = classifyFrameError(ctx, err)
+		// A reply lost because its daemon generation unbound the socket is a
+		// restart, not this daemon's answer, so call may replay it.
+		if after, inspectErr := inspectSocket(client.socketPath); errors.Is(err, ErrTransport) && (inspectErr != nil || !after.same(before)) {
+			return lost{err}
+		}
+		return err
 	}
 	if len(response) < responsePrelude || response[0] != client.domain {
 		return ErrProtocol
@@ -935,7 +932,7 @@ func verifySocketConnection(connection net.Conn, expected socketRecord) error {
 		return err
 	}
 	current, err := inspectSocket(connection.RemoteAddr().String())
-	if err != nil || !current.bound(expected) {
+	if err != nil || !current.same(expected) {
 		return ErrInvalidClient
 	}
 	return nil
@@ -943,7 +940,7 @@ func verifySocketConnection(connection net.Conn, expected socketRecord) error {
 
 func (client client) revalidate(before socketRecord) error {
 	after, err := inspectSocket(client.socketPath)
-	if err != nil || !after.bound(before) {
+	if err != nil || !after.same(before) {
 		return ErrInvalidClient
 	}
 	latest, err := loadToken(client.tokenPath)

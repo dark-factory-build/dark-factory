@@ -88,13 +88,9 @@ type ProductionDelivery struct {
 	PullRequests []uint64 `json:"pull_requests"`
 	VerifiedAt   int64    `json:"verified_at,omitempty"`
 	UpdatedAt    int64    `json:"updated_at,omitempty"`
-	// A release restart's local API outage: when the staging generation
-	// stopped serving its socket and when the one that settles it served.
-	WithdrawnAt int64  `json:"withdrawn_at,omitempty"`
-	ServedAt    int64  `json:"served_at,omitempty"`
-	Phase       string `json:"phase,omitempty"`
-	Reason      string `json:"reason,omitempty"`
-	Overflow    int    `json:"overflow,omitempty"`
+	Phase        string   `json:"phase,omitempty"`
+	Reason       string   `json:"reason,omitempty"`
+	Overflow     int      `json:"overflow,omitempty"`
 	// Group is the process group of a release's running build or deploy
 	// command, which the next factoryd stops if this one dies first.
 	Group int `json:"group,omitempty"`

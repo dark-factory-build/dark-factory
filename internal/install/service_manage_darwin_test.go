@@ -289,94 +289,7 @@ func TestServiceUninstallAcceptsAReceiptBoundPriorPlist(t *testing.T) {
 	}
 }
 
-// A release replaces only binaries, so an installation from before the
-// console Sockets keeps its plist, and the port unheld, until a build that
-// launchd started without the socket migrates the plist and reloads the job.
-func TestMigrateServicePlistBringsAPreSocketsInstallationToSockets(t *testing.T) {
-	fixture := newManageFixture(t)
-	fixture.install(t, (&recordedLaunchctl{results: append(fixture.printAbsent(), launchctlResult{status: 0}, fixture.printRunning(77))}).run)
-	receiptPath := filepath.Join(ServiceDirectoryPath(fixture.home), serviceReceiptName)
-	current, err := os.ReadFile(fixture.plistPath())
-	if err != nil {
-		t.Fatal(err)
-	}
-	currentReceipt, err := os.ReadFile(receiptPath)
-	if err != nil {
-		t.Fatal(err)
-	}
-	// Byte for byte what ServicePlist rendered before Sockets existed.
-	sockets := bytes.Index(current, []byte("\n    <key>Sockets</key>"))
-	if sockets < 0 {
-		t.Fatal("current plist holds no Sockets")
-	}
-	prior := append(current[:sockets:sockets], "\n</dict>\n</plist>\n"...)
-	priorDigest := sha256.Sum256(prior)
-	receipt, _, err := readServiceReceipt(fixture.home)
-	if err != nil {
-		t.Fatal(err)
-	}
-	receipt.PlistDigest = hex.EncodeToString(priorDigest[:])
-	priorReceipt, err := encodeServiceReceipt(receipt)
-	if err != nil {
-		t.Fatal(err)
-	}
-	var reloads []string
-	restore := reloadService
-	t.Cleanup(func() { reloadService = restore })
-	reloadService = func(domain, label, plistPath string) error {
-		reloads = append(reloads, domain+" "+label+" "+plistPath)
-		return nil
-	}
-	for _, write := range []struct{ plist, receipt []byte }{{prior, priorReceipt}, {current, priorReceipt}} {
-		if err := errors.Join(os.WriteFile(fixture.plistPath(), write.plist, 0o600), os.WriteFile(receiptPath, write.receipt, 0o600)); err != nil {
-			t.Fatal(err)
-		}
-		if err := receiptMatchesInstallation(receipt, fixture.home, fixture.config, fixture.plistPath()); !errors.Is(err, ErrServiceForeign) {
-			t.Fatalf("this build accepted the prior receipt: %v", err)
-		}
-		if err := MigrateServicePlist(context.Background(), fixture.home); err != nil {
-			t.Fatal(err)
-		}
-		plist, _ := os.ReadFile(fixture.plistPath())
-		rebound, _ := os.ReadFile(receiptPath)
-		if !bytes.Equal(plist, current) || !bytes.Equal(rebound, currentReceipt) {
-			t.Fatalf("migrated plist %s receipt %s", plist, rebound)
-		}
-	}
-	// Done means activated, not rendered: a boot after both writes whose
-	// reload was interrupted, so launchd still holds the pre-Sockets
-	// definition, rewrites nothing and reloads again.
-	if err := MigrateServicePlist(context.Background(), fixture.home); err != nil {
-		t.Fatal(err)
-	}
-	plist, _ := os.ReadFile(fixture.plistPath())
-	rebound, _ := os.ReadFile(receiptPath)
-	want := fmt.Sprintf("gui/%d %s %s", os.Geteuid(), fixture.config.Label, fixture.plistPath())
-	if !bytes.Equal(plist, current) || !bytes.Equal(rebound, currentReceipt) || len(reloads) != 3 || reloads[0] != want || reloads[1] != want || reloads[2] != want {
-		t.Fatalf("reloads = %q, want three of %q", reloads, want)
-	}
-	if !ServiceHoldsBrowser(fixture.home) || ServiceHoldsBrowser(filepath.Join(fixture.root, "absent")) {
-		t.Fatal("ServiceHoldsBrowser misread the installation")
-	}
-	ephemeral := receipt
-	ephemeral.DevelopmentBrowserAddress = "127.0.0.1:0"
-	if body, err := encodeServiceReceipt(ephemeral); err != nil || os.WriteFile(receiptPath, body, 0o600) != nil || ServiceHoldsBrowser(fixture.home) {
-		t.Fatal("an ephemeral console address is held by launchd")
-	}
-	reloads = reloads[:2]
-	foreign := bytes.Replace(prior, []byte("<integer>63</integer>"), []byte("<integer>18</integer>"), 1)
-	if err := errors.Join(os.WriteFile(fixture.plistPath(), foreign, 0o600), os.WriteFile(receiptPath, priorReceipt, 0o600)); err != nil {
-		t.Fatal(err)
-	}
-	if err := MigrateServicePlist(context.Background(), fixture.home); !errors.Is(err, ErrServiceForeign) || len(reloads) != 2 {
-		t.Fatalf("foreign plist = %v %q", err, reloads)
-	}
-	if plist, _ := os.ReadFile(fixture.plistPath()); !bytes.Equal(plist, foreign) {
-		t.Fatal("a foreign plist was replaced")
-	}
-}
-
-func TestServicePlistReadBoundCoversFiveEscapedHomePaths(t *testing.T) {
+func TestServicePlistReadBoundCoversFourEscapedHomePaths(t *testing.T) {
 	fixture := newManageFixture(t)
 	home := "/" + strings.Repeat(`"`, serviceMaxPathBytes-1)
 	body, _, err := ServicePlist(home, fixture.config.Label, "", "", "", "")
@@ -391,7 +304,7 @@ func TestServicePlistReadBoundCoversFiveEscapedHomePaths(t *testing.T) {
 		t.Fatal(err)
 	}
 	if _, _, err := readServicePlist(fixture.plistDir, fixture.config.plistName(), legacyLimit); err == nil {
-		t.Fatal("old plist read bound accepted five escaped home paths")
+		t.Fatal("old plist read bound accepted four escaped home paths")
 	}
 	read, present, err := readServicePlist(fixture.plistDir, fixture.config.plistName(), serviceMaxPlistBytes)
 	if err != nil || !present || !bytes.Equal(read, body) {

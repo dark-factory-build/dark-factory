@@ -54,9 +54,6 @@ type Config struct {
 	Backend        Backend
 	// Console is the signed console bundle served at ConsolePath; nil serves none.
 	Console []byte
-	// Socket, when set, is the listening socket for Address that launchd holds
-	// across factoryd restarts; nil binds Address here.
-	Socket *os.File
 }
 
 // Observer is an optional Backend capability: the daemon watching its own
@@ -138,14 +135,7 @@ func Listen(config Config) (*Server, error) {
 	if err != nil {
 		return nil, err
 	}
-	var listener net.Listener
-	if config.Socket != nil {
-		if listener, err = net.FileListener(config.Socket); err == nil && listener.Addr().String() != config.Address {
-			err = errors.Join(fmt.Errorf("socket is %s", listener.Addr()), listener.Close())
-		}
-	} else {
-		listener, err = net.Listen("tcp4", config.Address)
-	}
+	listener, err := net.Listen("tcp4", config.Address)
 	if err != nil {
 		return nil, fmt.Errorf("browser: listen: %w", err)
 	}

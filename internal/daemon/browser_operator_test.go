@@ -77,7 +77,7 @@ func TestWebOperatorOpenStatusListAndRevoke(t *testing.T) {
 
 func TestWebStatusKeepsTheRelayBoundLoopbackListener(t *testing.T) {
 	fixture := newAdapterFixture(t, kernel.BrowserCapabilityObserve)
-	other, err := fixture.daemon.ListenBrowser("127.0.0.1:0", nil, []string{adapterOrigin})
+	other, err := fixture.daemon.ListenBrowser("127.0.0.1:0", []string{adapterOrigin})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -99,7 +99,7 @@ func TestWebStatusKeepsTheRelayBoundLoopbackListener(t *testing.T) {
 // mints a challenge, while the operator-domain web_pair call does.
 func TestOnlyTheOperatorAPIMintsABrowserPairing(t *testing.T) {
 	fixture := newDispatchFixture(t)
-	runtime, err := fixture.daemon.ListenBrowser("127.0.0.1:0", nil, []string{webProductionOrigin})
+	runtime, err := fixture.daemon.ListenBrowser("127.0.0.1:0", []string{webProductionOrigin})
 	if err != nil {
 		t.Fatal(err)
 	}
