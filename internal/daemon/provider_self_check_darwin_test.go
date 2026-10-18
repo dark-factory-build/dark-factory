@@ -68,12 +68,13 @@ func TestRunProviderSelfCheckUsesRunIsolated(t *testing.T) {
 			if err := os.WriteFile(filepath.Join(repository, "payload.txt"), []byte("exact source\n"), 0o644); err != nil {
 				t.Fatal(err)
 			}
+			supervisorGit(t, git, "-C", repository, "add", "payload.txt")
 			if test.mode != "" {
 				if err := os.WriteFile(filepath.Join(repository, ".provider-self-check-mode"), []byte(test.mode+"\n"), 0o644); err != nil {
 					t.Fatal(err)
 				}
+				supervisorGit(t, git, "-C", repository, "add", ".provider-self-check-mode")
 			}
-			supervisorGit(t, git, "-C", repository, "add", "payload.txt")
 			supervisorGit(t, git, "-C", repository, "commit", "-m", "base")
 			base := strings.TrimSpace(supervisorGitOutput(t, git, "-C", repository, "rev-parse", "HEAD"))
 			executable := supervisorTestExecutable(t)
