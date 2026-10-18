@@ -28,6 +28,7 @@ import (
 // factory through the relay, and the relay directory is the one home member
 // whose contents the home census leaves alone.
 const pushSubscriptionsFileName = "push-subscriptions.json"
+const pushAlertsFileName = "push-alerts.json"
 
 // pushStore is the durable set of device subscriptions, one per paired
 // browser client. It is not authority: a device that loses it re-registers on
@@ -48,6 +49,48 @@ var pushFileMu sync.Mutex
 
 func newPushStore(relayDirectory string) *pushStore {
 	return &pushStore{path: filepath.Join(relayDirectory, pushSubscriptionsFileName)}
+}
+
+type pushAlertState struct {
+	SentDay string `json:"sent_day,omitempty"`
+}
+
+func (store *pushStore) alertPath() string {
+	return filepath.Join(filepath.Dir(store.path), pushAlertsFileName)
+}
+
+// healthAlert records the day of the last notification and returns whether
+// this condition may notify again.
+func (store *pushStore) healthAlert(condition, day string, active bool) (bool, error) {
+	if store == nil {
+		return false, nil
+	}
+	pushFileMu.Lock()
+	defer pushFileMu.Unlock()
+	states := map[string]pushAlertState{}
+	data, err := os.ReadFile(store.alertPath())
+	if err == nil {
+		if err := json.Unmarshal(data, &states); err != nil {
+			return false, err
+		}
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return false, err
+	}
+	state := states[condition]
+	if !active || state.SentDay == day {
+		return false, nil
+	}
+	state.SentDay = day
+	states[condition] = state
+	data, err = json.Marshal(states)
+	if err != nil {
+		return false, err
+	}
+	temporary := store.alertPath() + ".tmp"
+	if err := os.WriteFile(temporary, data, 0o600); err != nil {
+		return false, err
+	}
+	return true, os.Rename(temporary, store.alertPath())
 }
 
 func (store *pushStore) load() (map[string]browserprotocol.PushSubscribe, error) {
@@ -212,6 +255,39 @@ func (daemon *Daemon) notifyPush(ctx context.Context, client *http.Client) {
 			delete(subscriptions, id)
 		}
 	})
+}
+
+func (daemon *Daemon) checkFactoryAlerts(ctx context.Context) {
+	now := daemon.now()
+	at, err := kernel.NewUnixMillis(now.UnixMilli())
+	if err != nil {
+		return
+	}
+	signal, err := daemon.store.AlertSignals(ctx, at.Int64())
+	if err != nil {
+		return
+	}
+	daemon.browserMu.Lock()
+	store := daemon.push
+	daemon.browserMu.Unlock()
+	if store == nil {
+		return
+	}
+	conditions := factoryAlertConditions(signal, daemon.intakeReadyWork(), now.UnixMilli())
+	day := now.UTC().Format("2006-01-02")
+	for condition, active := range conditions {
+		alert, err := store.healthAlert(condition, day, active)
+		if err == nil && alert {
+			go daemon.notifyPush(context.WithoutCancel(ctx), daemon.observed(pushClient))
+		}
+	}
+}
+
+func factoryAlertConditions(signal kernel.AlertSignals, intakeReady bool, nowMS int64) map[string]bool {
+	return map[string]bool{
+		"merge-stall": (signal.ReadyWork || intakeReady) && (signal.LastMergeAtMS == 0 || nowMS-signal.LastMergeAtMS >= 6*time.Hour.Milliseconds()),
+		"run-failure": signal.RunsLastHour >= 10 && signal.FailuresLastHour*2 > signal.RunsLastHour,
+	}
 }
 
 // pushClient bounds one push delivery; every service answers within a second

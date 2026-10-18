@@ -225,6 +225,7 @@ func (daemon *Daemon) RunScheduler(ctx context.Context, spec SupervisorSpec) err
 				}
 			}
 			if !stopping && paused == 0 {
+				daemon.checkFactoryAlerts(ownedCtx)
 				daemon.tickMergePipeline(ownedCtx)
 				daemon.tickIntake(ownedCtx)
 				daemon.tickRelease(ownedCtx)
