@@ -363,9 +363,10 @@ func why(ctx context.Context, c *sql.Conn, archived history, project *ProjectID,
 		if json.Unmarshal([]byte(operation), op) != nil {
 			return nil, ErrCorruptState
 		}
-		// A verdict's detail is its review of record (daemon review.go), already printed.
-		if op.Detail != "" && op.Detail != pr.Review.Findings {
-			lines = append(lines, "review detail: "+oneLine(op.Detail, 16000))
+		// A verdict's detail is its review of record (daemon review.go keeps its
+		// first 16,000 bytes), already printed.
+		if detail := oneLine(op.Detail, 16000); detail != "" && detail != oneLine(pr.Review.Findings, 16000) {
+			lines = append(lines, "review detail: "+detail)
 		}
 		if op.Conversation != "" {
 			lines = append(lines, "pull request comments: "+oneLine(op.Conversation, 16000))

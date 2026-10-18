@@ -3,6 +3,7 @@ package kernel
 import (
 	"context"
 	"slices"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -151,16 +152,27 @@ func TestWhyPrintsTheReviewOfRecordOnce(t *testing.T) {
 	}
 	head := strings.Repeat("a", 40)
 	findings := "review found a regression " + strings.Repeat("x", 3000)
-	for detail, printed := range map[string]bool{findings: false, "Not reviewed: its checks failed.": true} {
-		pr := ProductionPullRequest{Number: 12, Title: "Evidence", URL: "https://github.com/example/factory/pull/12", Head: head, Branch: "feature/evidence", Base: "main", State: "open", Review: ProductionReview{Head: head, State: "block", Findings: findings}}
-		operation := review.Operation{ID: "op12", Request: review.Request{Repository: "example/factory", PullNumber: 12, Head: head}, State: "completed", Detail: detail}
-		if err := store.RecordPublicationWithReviewOperation(ctx, project.ID, task.ID, "example/factory", pr, operation.ID, operation, mustTime(t, 5)); err != nil {
+	long := "review found a regression " + strings.Repeat("y", 20000)
+	for at, c := range []struct {
+		findings, detail string
+		printed          bool
+	}{
+		{findings, findings, false},
+		{findings, "Not reviewed: its checks failed.", true},
+		// The daemon keeps only the first 16,000 bytes of a long verdict as
+		// the review of record (review.go), so the texts differ yet render alike.
+		{strings.ToValidUTF8(long[:16000], ""), long, false},
+	} {
+		number := uint64(12 + at) // a stored review of record at the same head wins
+		pr := ProductionPullRequest{Number: number, Title: "Evidence", URL: "https://github.com/example/factory/pull/12", Head: head, Branch: "feature/evidence", Base: "main", State: "open", Review: ProductionReview{Head: head, State: "block", Findings: c.findings}}
+		operation := review.Operation{ID: "op" + strconv.FormatUint(number, 10), Request: review.Request{Repository: "example/factory", PullNumber: number, Head: head}, State: "completed", Detail: c.detail}
+		if err := store.RecordPublicationWithReviewOperation(ctx, project.ID, task.ID, "example/factory", pr, operation.ID, operation, mustTime(t, int64(5+at))); err != nil {
 			t.Fatal(err)
 		}
-		lines, err := store.Why(ctx, &project.ID, 12, TaskID{})
+		lines, err := store.Why(ctx, &project.ID, number, TaskID{})
 		joined := strings.Join(lines, "\n")
-		if err != nil || strings.Count(joined, "review found a regression") != 1 || strings.Contains(joined, "review detail: "+detail) != printed {
-			t.Fatalf("why with detail %.20q = %q, %v", detail, lines, err)
+		if err != nil || strings.Count(joined, "review found a regression") != 1 || strings.Contains(joined, "review detail: ") != c.printed {
+			t.Fatalf("why with detail %.20q = %.300q, %v", c.detail, lines, err)
 		}
 	}
 }
