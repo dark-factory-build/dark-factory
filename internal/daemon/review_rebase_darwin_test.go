@@ -314,19 +314,36 @@ func TestFailedCheckRecoveryAfterRepeatedReconcileFailures(t *testing.T) {
 		t.Fatalf("failed actions changed worker task: %+v err=%v", before, err)
 	}
 	fixture.daemon.changeParent.Store(parent)
-	for range 2 {
+	var after kernel.Task
+	for pass := 0; pass < review.FailuresBeforeEscalation; pass++ {
 		if _, err := fixture.daemon.advanceReviewOperations(ctx, false); err != nil {
 			t.Fatal(err)
 		}
+		var found bool
+		after, found, err = fixture.store.Task(ctx, changeState.TaskID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if found && after.WorkRevision.Int64() == 2 && after.Status == kernel.TaskQueued {
+			break
+		}
 	}
-	after, _, err := fixture.store.Task(ctx, changeState.TaskID)
-	if err != nil {
-		t.Fatal(err)
+	if after.WorkRevision.Int64() != 2 {
+		t.Fatalf("recovery did not advance task once: work revision=%d task=%+v", after.WorkRevision.Int64(), after)
+	}
+	if after.Status != kernel.TaskQueued {
+		t.Fatalf("recovery task is not queued/actionable: status=%s task=%+v", after.Status, after)
 	}
 	op := lastDurableReview(t, fixture.store, changeState.ProjectID)
 	feedback, marker := kernel.TaskFeedback(after), "review-operation: "+op.ID+"\n"
-	if after.WorkRevision.Int64() != 2 || after.Status != kernel.TaskQueued || strings.Count(feedback, marker) != 1 || !strings.Contains(feedback, "Failing checks: ci / required") || !strings.Contains(feedback, "--- FAIL: TestCorrection") {
-		t.Fatalf("recovery task=%+v operation=%+v feedback=%q", after, op, feedback)
+	if strings.Count(feedback, marker) != 1 {
+		t.Fatalf("recovery feedback marker count=%d, want one: feedback=%q operation=%+v", strings.Count(feedback, marker), feedback, op)
+	}
+	if !strings.Contains(feedback, "Failing checks: ci / required") {
+		t.Fatalf("recovery feedback lost failed-check text: %q", feedback)
+	}
+	if !strings.Contains(feedback, "--- FAIL: TestCorrection") {
+		t.Fatalf("recovery feedback lost failed-test text: %q", feedback)
 	}
 }
 
