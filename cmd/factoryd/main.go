@@ -33,7 +33,7 @@ import (
 )
 
 const (
-	defaultBrowserAddress = install.DefaultBrowserAddress
+	defaultBrowserAddress = daemon.DefaultBrowserAddress
 	defaultBrowserOrigin  = "https://app.darkfactory.build"
 	defaultGitExecutable  = change.TrustedGitExecutable
 	defaultToolPath       = "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin"
@@ -342,24 +342,6 @@ func serve(ctx context.Context, configuration config) error {
 			return errors.New("invalid factoryd configuration")
 		}
 	}
-	// launchd owns an installed job's console address. Started without that
-	// socket (an install from before Sockets, or an interrupted reload), this
-	// process never binds the paired origin itself: it has launchd reload the
-	// job with the socket, before anything else, and waits to be booted out.
-	if browserSocket == nil && os.Getenv(trialEnv) == "" && install.ServiceHoldsBrowser(configuration.home) {
-		if os.Getppid() != 1 {
-			return errors.New("factoryd: the installed service's launchd job holds the console address; use factoryctl service start")
-		}
-		if err := install.MigrateServicePlist(ctx, configuration.home); err != nil {
-			return err
-		}
-		select {
-		case <-ctx.Done():
-			return nil
-		case <-time.After(time.Minute):
-			return errors.New("factoryd: launchd did not reload the job with its console socket")
-		}
-	}
 	owner, err := openProcess(ctx, configuration)
 	// A store a newer build migrated, under a marker naming another build
 	// (or one torn unreadable), is a failed trial's migration; the backup is
@@ -442,9 +424,6 @@ func superviseTrial(home string, args []string, marker install.UpgradeMarker) er
 	child := exec.CommandContext(ctx, filepath.Join(install.ServiceDirectoryPath(home), "bin", "previous", "factoryd"), args...)
 	child.Env = append(os.Environ(), trialEnv+"=1")
 	child.Stderr = recoveryLog
-	if browserSocket != nil {
-		child.ExtraFiles = []*os.File{browserSocket}
-	}
 	// Its own process group, recorded in the marker: launchd does not end a
 	// child whose supervisor died, so the next boot does.
 	child.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
@@ -634,12 +613,9 @@ func openProcess(ctx context.Context, configuration config) (_ *process, resultE
 		return nil, err
 	}
 	startupPhase("listener")
-	// A trial under a supervisor without the console socket proves no bind:
-	// it would only take the paired origin and release it again.
-	if browserSocket != nil || !trial || !install.ServiceHoldsBrowser(configuration.home) {
-		if owner.browser, err = owner.daemon.ListenBrowser(configuration.browserAddress, browserSocket, configuration.browserOrigins); err != nil {
-			return nil, err
-		}
+	owner.browser, err = owner.daemon.ListenBrowser(configuration.browserAddress, configuration.browserOrigins)
+	if err != nil {
+		return nil, err
 	}
 	startupPhase("browser")
 	if trial {
