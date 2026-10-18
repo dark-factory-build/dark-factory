@@ -579,7 +579,9 @@ func runSupervisorClaudeFixture() error {
 				return fmt.Errorf("self-check commit failed: %s", output)
 			}
 		case "noisy":
-			if err := exec.Command("sh", "-c", "yes 0123456789abcdef | head -n 65536").Run(); err != nil {
+			noise := exec.Command("sh", "-c", "yes 0123456789abcdef | head -n 65536")
+			noise.Stdout, noise.Stderr = os.Stdout, os.Stderr
+			if err := noise.Run(); err != nil {
 				return fmt.Errorf("self-check noisy output: %w", err)
 			}
 		}
@@ -636,9 +638,9 @@ func runSupervisorClaudeFixture() error {
 }
 
 func runSelfCheckMCP(ctx context.Context, forged bool) error {
-	factoryctl := os.Getenv("DARK_FACTORY_FACTORYCTL")
-	if factoryctl == "" {
-		return errors.New("self-check MCP command is not configured")
+	commandArgs, err := selfCheckMCPCommand()
+	if err != nil {
+		return err
 	}
 	env := os.Environ()
 	var forgedPath string
@@ -669,7 +671,7 @@ func runSelfCheckMCP(ctx context.Context, forged bool) error {
 	input := "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"initialize\"}\n" +
 		"{\"jsonrpc\":\"2.0\",\"method\":\"notifications/initialized\"}\n" +
 		"{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"tools/call\",\"params\":{\"name\":\"factory\",\"arguments\":{\"argv\":[\"attempt\",\"succeed\",\"--result\",\"provider-self-check\"]}}}\n"
-	command := exec.CommandContext(ctx, factoryctl, "attempt", "mcp")
+	command := exec.CommandContext(ctx, commandArgs[0], commandArgs[1:]...)
 	command.Env = env
 	command.Stdin = strings.NewReader(input)
 	output, err := command.Output()
@@ -692,6 +694,29 @@ func runSelfCheckMCP(ctx context.Context, forged bool) error {
 		return errors.New("self-check attempt API rejected MCP call")
 	}
 	return nil
+}
+
+func selfCheckMCPCommand() ([]string, error) {
+	for i, arg := range os.Args {
+		if arg != "--mcp-config" || i+1 >= len(os.Args) {
+			continue
+		}
+		var config struct {
+			MCPServers map[string]struct {
+				Command string   `json:"command"`
+				Args    []string `json:"args"`
+			} `json:"mcpServers"`
+		}
+		if err := json.Unmarshal([]byte(os.Args[i+1]), &config); err != nil {
+			return nil, fmt.Errorf("self-check MCP config: %w", err)
+		}
+		server, ok := config.MCPServers["factory_attempt"]
+		if !ok || server.Command == "" {
+			return nil, errors.New("self-check MCP command is not configured")
+		}
+		return append([]string{server.Command}, server.Args...), nil
+	}
+	return nil, errors.New("self-check MCP config is not provided")
 }
 
 // Claude receives a task longer than a terminal line whole in its prompt, as
