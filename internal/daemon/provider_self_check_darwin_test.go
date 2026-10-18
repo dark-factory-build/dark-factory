@@ -5,6 +5,7 @@ package daemon
 import (
 	"context"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"runtime"
 	"strings"
@@ -62,6 +63,7 @@ func TestRunProviderSelfCheckUsesRunIsolated(t *testing.T) {
 				t.Fatal(err)
 			}
 			t.Cleanup(func() { _ = os.RemoveAll(root) })
+			factoryctl := buildSelfCheckFactoryctl(t, root)
 			git := supervisorNativeGit(t)
 			repository := filepath.Join(root, "repository")
 			supervisorGit(t, git, "init", repository)
@@ -80,10 +82,6 @@ func TestRunProviderSelfCheckUsesRunIsolated(t *testing.T) {
 			supervisorGit(t, git, "-C", repository, "commit", "-m", "base")
 			base := strings.TrimSpace(supervisorGitOutput(t, git, "-C", repository, "rev-parse", "HEAD"))
 			executable := supervisorTestExecutable(t)
-			factoryctl, err := filepath.EvalSymlinks(executable)
-			if err != nil {
-				t.Fatal(err)
-			}
 			toolPath := filepath.Join(runtime.GOROOT(), "bin") + ":/usr/bin:/bin"
 			if test.tools {
 				tools := filepath.Join(root, "tools")
@@ -102,4 +100,21 @@ func TestRunProviderSelfCheckUsesRunIsolated(t *testing.T) {
 			}
 		})
 	}
+}
+
+func buildSelfCheckFactoryctl(t *testing.T, root string) string {
+	t.Helper()
+	workingDirectory, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	workingDirectory = filepath.Clean(filepath.Join(workingDirectory, "../.."))
+	factoryctl := filepath.Join(root, "factoryctl")
+	command := exec.Command("go", "build", "-o", factoryctl, "./cmd/factoryctl")
+	command.Dir = workingDirectory
+	command.Env = append(os.Environ(), "GOTOOLCHAIN=local")
+	if output, err := command.CombinedOutput(); err != nil {
+		t.Fatalf("build factoryctl: %v: %s", err, output)
+	}
+	return factoryctl
 }
