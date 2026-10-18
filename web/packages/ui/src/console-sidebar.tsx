@@ -49,9 +49,8 @@ export function AgentPanel({
   const current = state === undefined ? undefined : agentCurrentTask(agent, state);
   const queued = state === undefined ? [] : [...state.tasks.values()]
     .filter((task) => task.assigned_agent_id === agent.id && task.status === "queued");
-  const archived = agent.archived === true;
   const specialist = isSpecialist(agent);
-  const queueHint = !archived && agent.paused
+  const queueHint = agent.paused
     ? "Queue paused"
     : current === undefined && queued.length > 0
       ? "Queued · waiting for capacity"
@@ -67,13 +66,13 @@ export function AgentPanel({
         </div>
       </div>
 
-      {specialist && state !== undefined ? <SpecialistSummary agent={agent} state={state} /> : <p className="dfConsoleSidebar__status"><Status stage={archived ? "archived" : activity} /></p>}
+      {specialist && state !== undefined ? <SpecialistSummary agent={agent} state={state} /> : <p className="dfConsoleSidebar__status"><Status stage={activity} /></p>}
       {queueHint === undefined || specialist ? null : <p className="dfConsoleSidebar__inherit">{queueHint}</p>}
       {effort === "" ? null : <p className="dfConsoleSidebar__inherit" aria-label={`Recorded by the agent: ${effort}`}>{effort}</p>}
 
-      {archived ? null : <section className="dfConsoleSidebar__section dfConsoleSidebar__terminalSlot" aria-label="Terminal">
+      <section className="dfConsoleSidebar__section dfConsoleSidebar__terminalSlot" aria-label="Terminal">
         {terminalContent ?? <p className="dfFactoryConsole__empty">Opening terminal…</p>}
-      </section>}
+      </section>
     </section>
   );
 }

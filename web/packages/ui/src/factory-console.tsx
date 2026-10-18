@@ -147,6 +147,7 @@ export function FactoryConsole({
   const rows = useMemo(() => workRows(scopedState, inProgressItems, sources), [scopedState, inProgressItems, sources]);
   const waiting = rows.filter(needsYou).length;
   const agent = selectedAgent === undefined ? undefined : scopedState?.agents.get(selectedAgent.id);
+  const liveAgent = agent?.archived === true ? undefined : agent;
   const selectedDetail = (detail === "floor" ? "work" : detail) ?? (selectedAgent === undefined ? "work" : "agent");
   // Work's inbox is the daemon's last intake poll: re-read that local list (never the backlog) while Work is shown.
   useEffect(() => {
@@ -202,7 +203,7 @@ export function FactoryConsole({
             <IconButton icon="list" aria-pressed={detail !== "floor" && selectedDetail === "work"} disabled={!ready || onDetail === undefined} onClick={showWork}>Work <Badge n={waiting} /></IconButton>
           </nav>
           <section className="dfConsoleLayout__left dfFactoryConsole__section" aria-label="Factory floor">
-            <FactoryFloor changes={productionItems} changesRead={productionData.read} onProjectContent={onProjectContent} onOpenTasks={ready ? openWork : undefined} projectId={projectId} selectedTaskId={selectedTask?.id} onSelectTask={ready ? goTask : undefined} selectedAgentId={selectedDetail === "agent" ? selectedAgent?.id : undefined} state={scopedState} graphs={graphs} graphErrors={graphErrors} onAddTask={ready ? onAddTask : undefined} runPaths={runPaths} lastRunPaths={lastRunPaths} onSelectAgent={ready ? chooseAgent : undefined} onSelectHumanRequest={ready ? selectRequest : undefined} connected={ready} />
+            <FactoryFloor changes={productionItems} changesRead={productionData.read} onProjectContent={onProjectContent} onOpenTasks={ready ? openWork : undefined} projectId={projectId} selectedTaskId={selectedTask?.id} onSelectTask={ready ? goTask : undefined} selectedAgentId={selectedDetail === "agent" ? liveAgent?.id : undefined} state={scopedState} graphs={graphs} graphErrors={graphErrors} onAddTask={ready ? onAddTask : undefined} runPaths={runPaths} lastRunPaths={lastRunPaths} onSelectAgent={ready ? chooseAgent : undefined} onSelectHumanRequest={ready ? selectRequest : undefined} connected={ready} />
           </section>
 
           <aside className="dfConsoleSidebar" aria-label="Selected detail">
@@ -234,17 +235,17 @@ export function FactoryConsole({
               />
             </div>
             <div hidden={selectedDetail !== "agent"}>
-              <div hidden={agent !== undefined && !browsingAgents} aria-label="Agents">
-                {selectedDetail !== "agent" || agent !== undefined && !browsingAgents ? null : <AgentList state={scopedState} selectedAgentId={selectedAgent?.id} ready={ready} onSelectAgent={ready ? chooseAgent : undefined} />}
+              <div hidden={liveAgent !== undefined && !browsingAgents} aria-label="Agents">
+                {selectedDetail !== "agent" || liveAgent !== undefined && !browsingAgents ? null : <AgentList state={scopedState} selectedAgentId={liveAgent?.id} ready={ready} onSelectAgent={ready ? chooseAgent : undefined} />}
               </div>
-              <div hidden={agent === undefined || browsingAgents}>
+              <div hidden={liveAgent === undefined || browsingAgents}>
               <button type="button" disabled={!ready} onClick={showAgents}>All agents</button>
-              {agent === undefined ? null : <AgentPanel
-                key={agent.id}
-                agent={agent}
+              {liveAgent === undefined ? null : <AgentPanel
+                key={liveAgent.id}
+                agent={liveAgent}
                 state={scopedState}
                 terminalContent={terminalContent}
-                telemetry={agentTelemetry(agent, scopedState, runPaths)}
+                telemetry={agentTelemetry(liveAgent, scopedState, runPaths)}
               />}
               </div>
             </div>

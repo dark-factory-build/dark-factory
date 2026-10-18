@@ -835,7 +835,7 @@ test("the console shows the model an agent will actually run with", () => {
   assert.match(withAgent(shellAgent), /Shell Hand[\s\S]*?shell/);
 });
 
-test("archived workers stay selectable from the archived view as a readout", async () => {
+test("archived workers stay out of the agent list and stale selection has no panel", async () => {
   const previousAct = globalThis.IS_REACT_ACT_ENVIRONMENT;
   globalThis.IS_REACT_ACT_ENVIRONMENT = true;
   const worker = { ...fixtureState.agents.get(ids.agent), archived: true, paused: true };
@@ -844,13 +844,13 @@ test("archived workers stay selectable from the archived view as a readout", asy
     let renderer;
     await act(async () => { renderer = create(createElement(FactoryConsole, { status: "ready", state, detail: "agent", onSelectAgent() {} })); });
     assert.equal(renderer.root.findAllByType("button").some((button) => String(button.props.className).includes("dfAgentList__row")), false);
-    const archived = renderer.root.findByProps({ type: "checkbox" });
-    await act(async () => { archived.props.onChange({ currentTarget: { checked: true } }); });
-    assert.equal(renderer.root.findAllByType("button").some((button) => String(button.props.className).includes("dfAgentList__row")), true);
+    const list = renderer.root.findByProps({ className: "dfAgentList" });
+    assert.equal(list.findAllByProps({ children: "Show archived" }).length, 0);
     await act(async () => { renderer.update(createElement(FactoryConsole, { status: "ready", state, detail: "agent", selectedAgent: { id: worker.id, name: worker.name, revision: worker.revision } })); });
     const text = JSON.stringify(renderer.toJSON());
-    assert.match(text, /archived/);
+    assert.equal(renderer.root.findAllByProps({ className: "dfAgentList__row" }).length, 0);
     assert.equal(text.includes("Restore paused"), false);
+    assert.equal(renderer.root.findAllByProps({ "aria-label": `Agent ${worker.name}` }).length, 0);
     assert.equal(renderer.root.findAllByProps({ "aria-label": "Terminal" }).length, 0);
     assert.equal(text.includes("Queue paused"), false);
     await act(async () => { renderer.unmount(); });
