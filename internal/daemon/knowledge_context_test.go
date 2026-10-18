@@ -39,6 +39,10 @@ func seedContextKnowledge(t *testing.T, f *dispatchFixture, project kernel.Proje
 }
 
 func seedContextKnowledgeNamed(t *testing.T, f *dispatchFixture, project kernel.ProjectID, id string, kind kernel.ContentKind, metadata kernel.KnowledgeMetadata, title, body string) kernel.ContentRevision {
+	return seedContextKnowledgeNamedAt(t, f, project, id, kind, metadata, title, body, 1000)
+}
+
+func seedContextKnowledgeNamedAt(t *testing.T, f *dispatchFixture, project kernel.ProjectID, id string, kind kernel.ContentKind, metadata kernel.KnowledgeMetadata, title, body string, at int64) kernel.ContentRevision {
 	t.Helper()
 	if kind == kernel.ContentLesson && metadata.Verification == "" {
 		metadata.Verification = "go test ./internal/daemon"
@@ -55,7 +59,7 @@ func seedContextKnowledgeNamed(t *testing.T, f *dispatchFixture, project kernel.
 	if err != nil {
 		t.Fatal(err)
 	}
-	item, err := f.store.CreateContent(context.Background(), spec, mustKernelTime(t, 1000))
+	item, err := f.store.CreateContent(context.Background(), spec, mustKernelTime(t, at))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -72,7 +76,22 @@ func TestKnowledgeRelevanceWindowFindsOlderLessons(t *testing.T) {
 		relevant = append(relevant, lesson)
 	}
 	for i := 0; i < 300; i++ {
-		seedContextKnowledgeNamed(t, f, active.run.ProjectID, fmt.Sprintf("%032x", 1000+i), kernel.ContentLesson, kernel.KnowledgeMetadata{Status: "current", Evidence: []string{"irrelevant"}}, "unrelated lesson", "Unrelated guidance")
+		seedContextKnowledgeNamedAt(t, f, active.run.ProjectID, fmt.Sprintf("%032x", 1000+i), kernel.ContentLesson, kernel.KnowledgeMetadata{Status: "current", Evidence: []string{"irrelevant"}}, "unrelated lesson", "Unrelated guidance", int64(2000+i))
+	}
+	repository, found, err := f.store.TaskRepository(ctx, active.run.TaskID)
+	if err != nil || !found {
+		t.Fatalf("task repository: %v", err)
+	}
+	page, err := f.store.SearchKnowledge(ctx, active.run.ProjectID, repository.ID, kernel.KnowledgeQuery{Limit: 256})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, lesson := range relevant {
+		for _, item := range page.Items {
+			if item.ID == lesson.ID {
+				t.Fatalf("relevant lesson %s remained inside the old 256-record window", lesson.ID)
+			}
+		}
 	}
 	done := f.serve(t)
 	assignment, err := active.client.Task(ctx)
