@@ -303,7 +303,11 @@ func TestFailedCheckRecoveryAfterRepeatedReconcileFailures(t *testing.T) {
 	if parent == nil {
 		t.Fatal("missing configured Change parent")
 	}
-	fixture.daemon.changeParent.Store(nil)
+	gitExecutable := fixture.daemon.gitExecutable.Load()
+	if gitExecutable == nil {
+		t.Fatal("missing configured Git executable")
+	}
+	fixture.daemon.gitExecutable.Store(nil)
 	for range review.FailuresBeforeEscalation {
 		if _, err := fixture.daemon.advanceReviewOperations(ctx, false); err != nil {
 			t.Fatal(err)
@@ -313,7 +317,7 @@ func TestFailedCheckRecoveryAfterRepeatedReconcileFailures(t *testing.T) {
 	if err != nil || before.WorkRevision.Int64() != 1 {
 		t.Fatalf("failed actions changed worker task: %+v err=%v", before, err)
 	}
-	fixture.daemon.changeParent.Store(parent)
+	fixture.daemon.gitExecutable.Store(gitExecutable)
 	var after kernel.Task
 	for pass := 0; pass < review.FailuresBeforeEscalation; pass++ {
 		if _, err := fixture.daemon.advanceReviewOperations(ctx, false); err != nil {
