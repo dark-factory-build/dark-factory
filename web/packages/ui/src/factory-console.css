@@ -514,15 +514,11 @@
   border-bottom: 1px solid var(--df-console-rule);
 }
 
-.dfConsoleSidebar__status { margin: 0.75rem 0 0; color: var(--df-console-accent); font-size: var(--df-text-sm); }
-
 .dfConsoleSidebar__section {
   margin-top: 1.25rem;
   padding-top: 1rem;
   border-top: 1px solid var(--df-console-rule);
 }
-
-.dfConsoleSidebar__inherit { color: var(--df-console-muted); font-size: var(--df-text-xs); overflow-wrap: anywhere; }
 
 .dfFactoryConsole__header select,
 .dfConsoleSidebar :where(input[type="text"], input:not([type]), select) {

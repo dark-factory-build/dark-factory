@@ -74,18 +74,8 @@ const runSample = (agentId, paths, taskId = ids.task, taskRevision = fixtureStat
   paths,
 });
 
-const shellAgent = { id: ids.agent, project_id: ids.project, name: "Shell Hand", role: "worker", provider: "shell", paused: true, model: "", reasoning_effort: "", effective_model: "", effective_reasoning_effort: "", model_source: "", revision: 10n };
-
-const withAgent = (agent) => render({
-  detail: "agent",
-  state: baseState({ agents: new Map([[agent.id, agent]]) }),
-  selectedAgent: { id: agent.id, name: agent.name, revision: agent.revision },
-});
-
 // The selectable sprite of a non-archived agent on the floor.
 const workerSprite = (tree, id) => tree.root.findByProps({ "data-worker-id": id }).find((node) => node.type === "g" && node.props.role === "button");
-
-const inheritingAgent = () => fixtureState.agents.get("23".repeat(16));
 
 test("error banner keeps its centered layout after the paragraph reset", () => {
   const css = readFileSync(new URL("../src/factory-console.css", import.meta.url), "utf8");
@@ -302,7 +292,7 @@ test("hostile names and titles are escaped as text and private detail is absent"
     tasks: new Map([[ids.task, { id: ids.task, project_id: ids.project, assigned_agent_id: ids.agent, title: hostile, status: "running", priority: 10, revision: 12n }]]),
   });
   for (const view of VIEWS) {
-    // The second pass renders the selected agent, so the hostile model reaches
+    // The second pass renders the selected agent, so the hostile name reaches
     // its heading rather than being dropped with the whole panel.
     for (const props of [{ view }, { view, selectedAgent: agentSelection() }]) {
       const markup = render({ state: hostileState, ...props });
@@ -311,7 +301,7 @@ test("hostile names and titles are escaped as text and private detail is absent"
     }
   }
   assert.match(render({ state: hostileState }), /&lt;img src=x onerror=alert\(1\)&gt;/);
-  assert.match(render({ state: hostileState, detail: "agent", selectedAgent: agentSelection() }), /claude_code · &lt;img src=x onerror=alert\(1\)&gt;/);
+  assert.match(render({ state: hostileState, detail: "agent", selectedAgent: agentSelection() }), /<h2>&lt;img src=x onerror=alert\(1\)&gt;<\/h2>/);
 });
 
 test("the console never shows a kernel-grammar or retired vocabulary word", () => {
@@ -344,7 +334,6 @@ test("the console never shows a kernel-grammar or retired vocabulary word", () =
       assert.equal(forbidden.test(markup), false, `${name}: ${forbidden}`);
     }
   }
-  assert.match(render({ detail: "agent", selectedAgent: agentSelection(ids.orchestrator) }), />Overseer · /);
 });
 
 test("protocol errors remain finite and never expose their message", () => {
@@ -590,18 +579,17 @@ test("opening a selected question restores that agent's terminal panel", async (
   }
 });
 
-test("selecting an agent shows its status and terminal with no configuration controls", () => {
+test("selecting an agent shows its sprite, name and terminal with no status readout or configuration controls", () => {
   const markup = render({
     detail: "agent",
     selectedAgent: agentSelection(),
     onSelectAgent: () => {},
     onEditTask: () => {},
   });
-  assert.match(markup, /aria-label="Agent Builder One"/);
-  assert.match(markup, /Builder One[\s\S]*?claude_code · claude-opus-5/);
-  assert.match(markup, /class="dfConsoleSidebar__status"/);
+  assert.match(markup, /aria-label="Agent Builder One"[\s\S]*?<h2>Builder One<\/h2>/);
   assert.match(markup, /<section class="dfConsoleSidebar__section dfConsoleSidebar__terminalSlot" aria-label="Terminal">/);
-  for (const absent of ['aria-label="Agent controls"', 'aria-label="Agent configuration"', ">Settings<", ">Pause<", ">Resume<"]) assert.equal(markup.includes(absent), false, absent);
+  // The floor tooltip and the terminal's own state carry what the agent is doing; the panel repeats none of it.
+  for (const absent of ['aria-label="Agent controls"', 'aria-label="Agent configuration"', ">Settings<", ">Pause<", ">Resume<", "dfConsoleSidebar__status", "dfConsoleSidebar__inherit", "dfFactoryConsole__eyebrow", "claude_code · ", "claude-opus-5", "tokens", "tool call"]) assert.equal(markup.includes(absent), false, absent);
   assert.equal(markup.includes("aria-label=\"Agent queue\""), false);
   assert.match(markup, /dfConsoleLayout__left/);
   assert.equal(markup.includes("dfConsoleLayout__right"), false);
@@ -610,31 +598,6 @@ test("selecting an agent shows its status and terminal with no configuration con
   const readOnly = render({ selectedAgent: agentSelection() });
   assert.equal(readOnly.includes('name="instruction"'), false);
   assert.equal(readOnly.includes("Open terminal"), false);
-});
-
-test("the agent panel shows recorded effort only for the current run that recorded it", () => {
-  const telemetry = { tokens_in: 12000, tokens_out: 400, cost_micro_usd: 310000, tool_calls: 18, api_requests: 9, quiet_seconds: 4 };
-  assert.equal(fixtureState.tasks.get(ids.task).assigned_agent_id, ids.agent);
-  assert.equal(fixtureState.tasks.get(ids.task).status, "running");
-  const withTelemetry = render({ selectedAgent: agentSelection(), runPaths: new Map([[ids.agent, { ...runSample(ids.agent, []), telemetry }]]) });
-  assert.match(withTelemetry, /aria-label="Agent Builder One"[\s\S]*>12\.4k tokens · \$0\.31 · 18 tool calls</);
-  for (const runPaths of [undefined, new Map([[ids.agent, runSample(ids.agent, [])]]), new Map([[ids.agent, { ...runSample(ids.agent, [], ids.task, 99n), telemetry }]])]) {
-    assert.doesNotMatch(render({ selectedAgent: agentSelection(), runPaths }), /tokens|tool call/);
-  }
-});
-
-test("a paused agent with queued work says the queue is paused", () => {
-  const task = [...fixtureState.tasks.values()].find((item) => item.status === "queued");
-  const selected = fixtureState.agents.get(task.assigned_agent_id);
-  const agent = { ...selected, paused: true };
-  const agents = new Map(fixtureState.agents);
-  agents.set(agent.id, agent);
-  const markup = render({
-    state: baseState({ agents }),
-    selectedAgent: { id: agent.id, name: agent.name, revision: agent.revision },
-  });
-  assert.match(markup, />Queue paused</);
-  assert.equal(markup.includes("Queued · waiting for capacity"), false);
 });
 
 test("unclaimed shared work waits under its project until an eligible worker claims it", () => {
@@ -807,14 +770,6 @@ test("agent and question terminal actions expose only current public intent", as
   assert.match(markup, /&lt;raw-output&gt;/);
   assert.equal(markup.includes("runId"), false);
   assert.equal(markup.includes("sessionId"), false);
-});
-
-test("the console shows the model an agent will actually run with", () => {
-  // An agent that names no model still runs with one. The panel header says
-  // which, so a blank is never read as "no model".
-  assert.match(withAgent(inheritingAgent()), /Builder Two[\s\S]*?codex · gpt-6-astra/);
-  // The provider with no model says nothing extra rather than a dangling dot.
-  assert.match(withAgent(shellAgent), /Shell Hand[\s\S]*?shell/);
 });
 
 test("archived workers stay off the floor and stale selection has no panel", async () => {
@@ -1112,19 +1067,17 @@ test("Work lists and counts only the chosen project's requests", async () => {
 });
 
 
-test("a specialist states what it is doing and owes, with no browser lifecycle controls", () => {
+test("a selected specialist gets its terminal; its remit and schedule stay on the floor tooltip, with no browser lifecycle controls", () => {
   const worker = fixtureState.agents.get(ids.agent);
   const specialist = { ...worker, id: "5a".repeat(16), name: "Doc Watcher", archived: false, idle_policy: "standing_instruction", idle_after_seconds: 600, idle_instruction: "Keep the docs true to the code.\nSecond line stays out.", idle_run_budget: 4, idle_runs_used: 1, idle_wake_on: "failures",
     specialist: { next_review_at_ms: 1750000000000, next_reason: "events", waiting: "capacity", quiet_reviews: 0, open_proposals: 1, open_proposal_limit: 3, last_review_task_id: "" } };
   const state = baseState({ agents: new Map([...fixtureState.agents, [specialist.id, specialist]]), humanRequests: new Map() });
-  const markup = renderToStaticMarkup(createElement(FactoryConsole, { status: "ready", detail: "agent", state, selectedAgent: { id: specialist.id, name: specialist.name, revision: specialist.revision } }));
-  assert.match(markup, /waiting: waiting for a free background slot/);
-  assert.match(markup, /aria-label="Remit">Keep the docs true to the code\.</);
-  assert.match(markup, /Next review .*\(events\) or sooner on failures/);
-  assert.doesNotMatch(markup, /aria-label="Contributions"/);
-  assert.match(markup, /aria-label="Terminal"/);
-  for (const absent of [">Pause<", ">Resume<", "Stop specialist", "Archive worker", 'aria-label="Agent configuration"']) assert.equal(markup.includes(absent), false, absent);
-  const running = baseState({ agents: state.agents, humanRequests: new Map(), tasks: new Map([...fixtureState.tasks, ["c1".repeat(16), { ...fixtureState.tasks.get(ids.task), id: "c1".repeat(16), title: "Standing instruction", status: "running", assigned_agent_id: specialist.id }]]) });
-  const live = renderToStaticMarkup(createElement(FactoryConsole, { status: "ready", detail: "agent", state: running, selectedAgent: { id: specialist.id, name: specialist.name, revision: specialist.revision } }));
-  assert.match(live, /reviewing: Keep the docs true to the code\./, "a running review is its remit at work");
+  const markup = renderToStaticMarkup(createElement(FactoryConsole, { status: "ready", detail: "agent", state, graphs: fixtureGraphs, selectedAgent: { id: specialist.id, name: specialist.name, revision: specialist.revision } }));
+  const panel = markup.match(/aria-label="Agent Doc Watcher"[\s\S]*?aria-label="Terminal"/)?.[0] ?? "";
+  assert.match(panel, /<h2>Doc Watcher<\/h2>/);
+  assert.doesNotMatch(panel, /waiting:|Keep the docs|Next review/, "the panel repeats nothing the floor already says");
+  const tooltip = markup.match(/data-tooltip="Doc Watcher · [^"]*"/)?.[0] ?? "";
+  assert.match(tooltip, /waiting: waiting for a free background slot/);
+  assert.match(tooltip, /Next review .*\(events\) or sooner on failures/);
+  for (const absent of [">Pause<", ">Resume<", "Stop specialist", "Archive worker", 'aria-label="Agent configuration"', 'aria-label="Contributions"', 'aria-label="Remit"', "dfConsoleSidebar__status"]) assert.equal(markup.includes(absent), false, absent);
 });

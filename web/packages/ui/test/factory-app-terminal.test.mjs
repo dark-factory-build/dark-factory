@@ -1,6 +1,10 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+import { createElement } from "react";
+import { renderToStaticMarkup } from "react-dom/server";
 import { ProtocolError, SessionError } from "@dark-factory/client";
+import { FactoryConsole } from "../dist/src/index.js";
+import { TerminalContent, TerminalPanel } from "../dist/src/factory-app.js";
 import { FactoryAppController } from "../dist/src/factory-app-controller.js";
 import { fixtureState } from "../../../fixtures/state.mjs";
 
@@ -562,6 +566,32 @@ test("an agent without active work remains selected without terminal discovery",
   assert.equal(context.latest().selectedAgent.id, secondAgent.id);
   assert.equal(context.latest().terminal.phase, "idle");
   assert.equal(context.sessionCloses(), 0);
+});
+
+test("a paused or capacity-queued selection says its state once, inside its still-usable terminal panel", async () => {
+  // Dispatch Lead is paused with no work; Builder Two has only queued work. Both
+  // reach the console the way FactoryApp composes it: the controller's own
+  // terminal view, wrapped in TerminalPanel and TerminalContent.
+  for (const [selected, line, flag] of [[secondAgent, ">Paused<", "paused"], [thirdAgent, "Queued · waiting for capacity", "queued"]]) {
+    const context = terminalHarness();
+    context.controller.start();
+    context.ready();
+    context.controller.selectAgent(selected);
+    const token = {};
+    context.controller.beginTerminalSurface(token);
+    context.controller.setTerminalSurface(token, { write: async () => {}, abort: () => {} });
+    await flush();
+    const snapshot = context.latest();
+    assert.equal(snapshot.selectedAgent.id, selected.id);
+    assert.equal(snapshot.terminal.phase, "idle");
+    assert.equal(snapshot.terminal[flag], true);
+    assert.equal(context.targetGates.length, 0, "idle work has no terminal to discover");
+    const markup = renderToStaticMarkup(createElement(FactoryConsole, { ...snapshot, detail: "agent", terminalContent: createElement(TerminalPanel, { terminal: snapshot.terminal }, createElement(TerminalContent, { terminal: snapshot.terminal, controller: context.controller })) }));
+    const panel = markup.match(new RegExp(`<section class="dfConsoleSidebar__panel" aria-label="Agent ${selected.name}">[\\s\\S]*`))?.[0] ?? "";
+    assert.match(panel, new RegExp(`<h2>${selected.name}</h2>[\\s\\S]*aria-label="Terminal">[\\s\\S]*aria-label="Agent console for ${selected.name}"[\\s\\S]*role="application" aria-label="Agent terminal"[\\s\\S]*dfFactoryConsole__instructionState">`), "sprite, name, then the terminal surface with its state line");
+    assert.equal(markup.split(line).length - 1, 1, `${line} appears once in the whole console`);
+    for (const absent of ["Queue paused", "dfConsoleSidebar__status", "dfConsoleSidebar__inherit"]) assert.equal(markup.includes(absent), false, absent);
+  }
 });
 
 test("a blocked task presents the configured agent as idle without terminal discovery", async () => {

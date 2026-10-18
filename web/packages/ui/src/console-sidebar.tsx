@@ -1,10 +1,8 @@
 import { useEffect, useState, type ReactNode } from "react";
-import { MAX_TASK_ATTACHMENTS, MAX_TASK_ATTACHMENT_BYTES, type IntakeView, type IntakeBody, type DiscoveredAccount, type AgentItem, type GitHubConnectionBody, type GitHubDelegationBody, type HumanRequestItem, type ProjectItem, type RunTelemetry, type RepositoryView, type StateView, type TaskItem } from "@dark-factory/client";
+import { MAX_TASK_ATTACHMENTS, MAX_TASK_ATTACHMENT_BYTES, type IntakeView, type IntakeBody, type DiscoveredAccount, type AgentItem, type GitHubConnectionBody, type GitHubDelegationBody, type HumanRequestItem, type ProjectItem, type RepositoryView, type StateView, type TaskItem } from "@dark-factory/client";
 import type { FactoryEditView, FactoryHumanRequestView } from "./factory-app-controller.js";
-import { rankLabel } from "./console-screens.js";
 import { AgentSprite } from "./factory-scene/factory-scene.js";
-import { telemetryLine } from "./factory-scene/scene.js";
-import { agentStatus, agentCurrentTask, agentActivity, isSpecialist, specialistStatus, type WorkRow } from "./console-view.js";
+import { agentActivity, type WorkRow } from "./console-view.js";
 import { productionStages } from "./production-view.js";
 import { AnswerControls } from "./console-interactions.js";
 import { IconButton } from "./icons.js";
@@ -30,63 +28,29 @@ export function editErrorCopy(edit: FactoryEditView | undefined): string | undef
   return EDIT_ERRORS.get(edit.error.code) ?? "The edit did not complete.";
 }
 
-/** One agent: what it is doing and what it owes. */
+/** One agent: its sprite, its name and its terminal. The floor tooltip and the terminal's own state say what it is doing. */
 export function AgentPanel({
   agent,
   state,
   terminalContent,
-  telemetry,
 }: {
   agent: AgentItem;
   state: StateView | undefined;
   /** The selected agent's mounted terminal and durable composer. */
   terminalContent?: ReactNode;
-  /** What the current run's agent CLI recorded; absent when it recorded nothing. */
-  telemetry?: RunTelemetry;
 }) {
-  const effort = telemetry === undefined ? "" : telemetryLine(telemetry);
-  const activity = state === undefined ? "ready" : agentStatus(agent, state);
-  const current = state === undefined ? undefined : agentCurrentTask(agent, state);
-  const queued = state === undefined ? [] : [...state.tasks.values()]
-    .filter((task) => task.assigned_agent_id === agent.id && task.status === "queued");
-  const specialist = isSpecialist(agent);
-  const queueHint = agent.paused
-    ? "Queue paused"
-    : current === undefined && queued.length > 0
-      ? "Queued · waiting for capacity"
-      : undefined;
   return (
     <section className="dfConsoleSidebar__panel" aria-label={`Agent ${agent.name}`}>
       <div className="dfConsoleSidebar__heading">
         <AgentSprite agent={agent} activity={state === undefined ? "waiting" : agentActivity(agent, state)} />
-        <div>
-          <p className="dfFactoryConsole__eyebrow">{rankLabel(specialist ? "specialist" : agent.role)} · {agent.provider}{agent.effective_model === "" ? "" : ` · ${agent.effective_model}`}</p>
-          <h2>{agent.name}</h2>
-          <p className="dfConsoleItem__meta">{state?.projects.get(agent.project_id)?.name ?? agent.project_id}</p>
-        </div>
+        <h2>{agent.name}</h2>
       </div>
-
-      {specialist && state !== undefined ? <SpecialistSummary agent={agent} state={state} /> : <p className="dfConsoleSidebar__status"><Status stage={activity} /></p>}
-      {queueHint === undefined || specialist ? null : <p className="dfConsoleSidebar__inherit">{queueHint}</p>}
-      {effort === "" ? null : <p className="dfConsoleSidebar__inherit" aria-label={`Recorded by the agent: ${effort}`}>{effort}</p>}
 
       <section className="dfConsoleSidebar__section dfConsoleSidebar__terminalSlot" aria-label="Terminal">
         {terminalContent ?? <p className="dfFactoryConsole__empty">Opening terminal…</p>}
       </section>
     </section>
   );
-}
-
-/** What a specialist is doing, owes and has done; nothing here is inferred beyond what the factory serves. */
-function SpecialistSummary({ agent, state }: {
-  agent: AgentItem; state: StateView;
-}) {
-  const { stage, text, next, remit } = specialistStatus(agent, state);
-  return <>
-    <p className="dfConsoleSidebar__status"><Status stage={stage}>{text}</Status></p>
-    {remit === "" ? null : <p className="dfConsoleItem__meta" aria-label="Remit">{remit}</p>}
-    {next === "" ? null : <p className="dfConsoleSidebar__inherit">{next}</p>}
-  </>;
 }
 
 /** One Work row: title, then chips, then meta, always the same shape; the title button stretches over the whole row. */

@@ -140,7 +140,3 @@ export function FactoryFloor({
     />
   </div>;
 }
-
-export function rankLabel(role: AgentItem["role"] | "specialist"): string {
-  return role === "orchestrator" ? "Overseer" : role === "specialist" ? "Specialist" : "Worker";
-}
