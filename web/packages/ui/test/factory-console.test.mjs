@@ -960,9 +960,6 @@ test("floor preparation survives draft and live snapshot updates and relayouts o
   await act(async () => { renderer.update(createElement(DraftFloor, { state: fresh, connected: false })); });
   await act(async () => { renderer.update(createElement(DraftFloor, { state: fresh, connected: true })); });
   assert.equal(layout(), originalLayout);
-  await act(async () => { renderer.root.findAllByProps({ "aria-label": "Inspect kernel" })[0].props.onClick(); });
-  assert.equal(reads, preparedReads, "entity selection reuses the projection");
-  assert.equal(layout(), originalLayout);
   // A new answer with moved readings and the same digest replaces the graph but never relayouts.
   const hot = { ...fixtureGraph, nodes: fixtureGraph.nodes.map((node) => node.kind === "ingress" && node.observation === "observed" ? { ...node, rate_per_hour: 999 } : node) };
   graphs = new Map(graphs).set(ids.project, hot);
@@ -1036,33 +1033,16 @@ test("floor project changes clear task selection", async () => {
   await act(async () => tree.unmount());
 });
 
-test("one machine inspector investigates once", async (t) => {
-  const warnings = [];
-  t.mock.method(console, "error", (...args) => warnings.push(args.join(" ")));
-  const store = fixtureGraph.nodes.find((node) => node.label === "state.db"), tasks = [];
-  const props = { state: fixtureState, graphs: fixtureGraphs,
-    onAddTask: async (...args) => { tasks.push(args); return true; } };
+test("the floor reads a machine from its tooltip and offers no inspector or Investigate control", async () => {
+  const store = fixtureGraph.nodes.find((node) => node.label === "state.db");
   let renderer;
-  await act(async () => { renderer = create(createElement(FactoryFloor, props)); });
-  const inspector = () => renderer.root.findAllByProps({ "aria-label": "Machine inspector" });
-  const click = async (label) => { await act(async () => renderer.root.findAllByType("button").find((button) => button.children.join("") === label).props.onClick()); };
-  await act(async () => renderer.root.findByProps({ "aria-label": `Inspect ${store.label}` }).props.onClick());
-  assert.equal(inspector().length, 1);
-  assert.equal(inspector()[0].findAllByType("details").length, 0, "the inspector has no evidence drill-down");
-  await click("Investigate");
-  assert.equal(tasks.length, 1);
-  assert.equal(tasks[0][0].project_id, ids.project);
-  assert.equal(tasks[0][2], "any");
-  assert.match(tasks[0][1], /Investigate the store "state\.db" in kernel/);
-  assert.ok(tasks[0][1].includes(`(operational node ${store.id}).`), "the instruction names the node");
-  assert.match(tasks[0][1], /Observation: unobserved;/);
-  assert.match(tasks[0][1], /Nothing observes this component/);
-  assert.ok(renderer.root.findAllByType("button").some((button) => button.props.disabled && button.children.join("") === "Investigation queued"), "asking twice is not possible");
-  const other = fixtureGraph.nodes.find((node) => node.label === "web");
-  await act(async () => renderer.root.findByProps({ "aria-label": `Inspect ${other.label}` }).props.onClick());
-  assert.equal(inspector().length, 1);
-  assert.ok(renderer.root.findAllByType("button").some((button) => button.children.join("") === "Investigate"), "the old investigation does not follow the new machine");
-  assert.ok(!warnings.some((message) => message.includes("same key")), "inspectors must have distinct reconciliation identities");
+  await act(async () => { renderer = create(createElement(FactoryFloor, { state: fixtureState, graphs: fixtureGraphs })); });
+  const station = renderer.root.findByProps({ "aria-label": store.label });
+  assert.equal(station.props.tabIndex, 0, "the station is reachable by keyboard");
+  assert.match(station.props["data-tooltip"], /^state\.db\nstore in kernel\nNo telemetry: activity unknown/, "the tooltip is the machine's truthful reading");
+  assert.equal(station.props.onClick, undefined, "a station opens nothing");
+  assert.equal(renderer.root.findAllByProps({ "aria-label": "Machine inspector" }).length, 0);
+  assert.equal(renderer.root.findAllByType("button").filter((button) => /Investigate|Close/.test(button.children.join(""))).length, 0);
   await act(async () => renderer.unmount());
 });
 

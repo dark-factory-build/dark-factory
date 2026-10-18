@@ -11,7 +11,6 @@ import {
 import { FactoryScene, AgentSprite } from "./factory-scene/factory-scene.js";
 import { projectCrates, type ProductionContraption } from "./production-view.js";
 import type { ProjectContentCall } from "./factory-app-controller.js";
-import type { SceneUnit, SceneMachine } from "./factory-scene/scene.js";
 import { Status } from "./console-kit.js";
 
 function shortID(value: string): string {
@@ -80,9 +79,9 @@ export function StageMeter({ stage }: { stage: TaskItem["status"] }) {
 
 const NO_CHANGES: readonly ProductionContraption[] = [];
 
-/** The operational floor; every action opens an existing inspector or control. */
+/** The operational floor: observation and navigation; every action opens an existing control. */
 export function FactoryFloor({
-  changes = NO_CHANGES, changesRead = false, state, graphs, graphErrors, onAddTask, runPaths, lastRunPaths, selectedAgentId, onSelectAgent,
+  changes = NO_CHANGES, changesRead = false, state, graphs, graphErrors, runPaths, lastRunPaths, selectedAgentId, onSelectAgent,
   onSelectHumanRequest, selectedTaskId, onSelectTask, onOpenTasks, connected = true, projectId,
 }: {
   changes?: readonly ProductionContraption[];
@@ -91,7 +90,6 @@ export function FactoryFloor({
   state: StateView | undefined;
   graphs: ReadonlyMap<string, OperationalGraphView> | undefined;
   graphErrors?: ReadonlyMap<string, string>;
-  onAddTask?: (agent: AgentItem, instruction: string, mode: "queue" | "any") => Promise<boolean>;
   runPaths?: ReadonlyMap<string, RunPathSample>;
   lastRunPaths?: ReadonlyMap<string, RunPathSample>;
   selectedAgentId?: string;
@@ -110,32 +108,14 @@ export function FactoryFloor({
   const proposed = useMemo(() => projectProposals(prepared, changes), [prepared, changes]);
   const crates = useMemo(() => changesRead ? projectCrates(changes) : undefined, [changes, changesRead]);
   const peerQuestions = useMemo(() => [...(state?.peerQuestions?.values() ?? [])], [state]);
-  const projectOf = (nodeId: string) => projects.find((id) => graphs?.get(id)?.nodes.some((node) => node.id === nodeId || nodeId.startsWith(`${node.id}:`)));
   const unavailable = projects.flatMap((id) => graphs?.get(id)?.sources.filter((source) => source.kind === "unavailable") ?? []);
   const refused = projects.flatMap((id) => { const code = graphErrors?.get(id); return code === undefined ? [] : [`${state?.projects.get(id)?.name ?? id} · ${code}`]; });
-  const investigate = onAddTask === undefined || state === undefined ? undefined : (machine: SceneMachine, unit?: SceneUnit) => {
-    const project = projectOf(machine.id) ?? projectId;
-    const agent = [...state.agents.values()].filter((candidate) => !candidate.archived && candidate.project_id === project).sort((left, right) => Number(left.role === "orchestrator") - Number(right.role === "orchestrator") || left.id.localeCompare(right.id))[0];
-    if (agent === undefined) return;
-    // Only the node's identity, static label and counts: runtime-only values
-    // come from unauthenticated local senders and never enter instructions.
-    const reading = machine.reading;
-    const label = reading.evidence === "runtime" ? `runtime-only ${machine.kind}` : machine.label;
-    void onAddTask(agent, [
-      `Investigate the ${machine.kind} "${label}"${unit !== undefined && unit.id !== machine.id ? ` in ${unit.label}` : ""} (operational node ${machine.represented?.join(", ") ?? machine.id}).`,
-      `Observation: ${reading.observation}; state: ${reading.state}; evidence: ${reading.evidence}; ${reading.ratePerHour} events/hour; ${reading.errorPermille / 10}% errors; p95 ${reading.latencyMs} ms.`,
-      reading.evidence === "runtime" ? "The code does not explain this runtime activity. Find what serves it and make the static model and the code agree, or report why it cannot be explained."
-        : reading.observation === "unobserved" ? "Nothing observes this component. Find a way to observe it with the project's existing tooling, or report why it cannot be observed."
-        : "Find the cause, fix it, and report what changed. Use the factory's ordinary change, review and release path.",
-    ].join("\n"), "any");
-  };
   return <div className="dfFactoryFloor">
     <FactoryScene
       tools={<>
         {refused.length > 0 ? <p className="dfFactoryEntityTools__notice" role="status">Plant unavailable: {refused.join(", ")}; retrying.</p> : null}
         {unavailable.length > 0 ? <p className="dfFactoryEntityTools__notice" role="status">Source unavailable for {unavailable.map((source) => source.name).join(", ")}; those units cannot be inferred.</p> : null}
       </>}
-      onInvestigate={investigate}
       crates={crates}
       selectedWorkerId={selectedAgentId}
       selectedTaskId={selectedTaskId}

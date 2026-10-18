@@ -39,9 +39,6 @@ export type FactorySceneProps = Readonly<{
   /** Change requests represented by the public stage counts. */
   crates?: readonly SceneCrate[];
   tools?: ReactNode;
-  /** Queue an investigation of a machine as an ordinary task. */
-  onInvestigate?: (machine: SceneMachine, unit?: SceneUnit) => void;
-  onSelectEntity?: (entityId: string | undefined) => void;
   graph: SceneGraph;
   /** Current project scope, when the floor has one. */
   projectId?: string;
@@ -471,8 +468,7 @@ export function offeredFixtures({ appearance = DEFAULT_SCENE_APPEARANCE, onOpenT
 }
 
 /** A disposable SVG projection of the operational world and current factory state. */
-export function FactoryScene({ crates, tools, onInvestigate, onSelectEntity, graph, workers, appearance = DEFAULT_SCENE_APPEARANCE, selectedWorkerId, onSelectWorker, tasks = [], peerQuestions = NO_QUESTIONS, selectedTaskId, onSelectTask, onOpenTasks, onSelectHumanRequest, projectId, connected = true, reading = false, unavailable }: FactorySceneProps) {
-  const [selectedId, setSelectedId] = useState<string>();
+export function FactoryScene({ crates, tools, graph, workers, appearance = DEFAULT_SCENE_APPEARANCE, selectedWorkerId, onSelectWorker, tasks = [], peerQuestions = NO_QUESTIONS, selectedTaskId, onSelectTask, onOpenTasks, onSelectHumanRequest, projectId, connected = true, reading = false, unavailable }: FactorySceneProps) {
   const mapElement = useRef<HTMLDivElement>(null);
   const floorElement = useRef<SVGSVGElement>(null);
   // Scene pixels per scene unit; undefined fits the whole floor to its pane.
@@ -485,7 +481,6 @@ export function FactoryScene({ crates, tools, onInvestigate, onSelectEntity, gra
   // The overview's window follows scrolling without rerendering the floor.
   const viewElement = useRef<SVGRectElement>(null);
   const anchor = useRef<{ x: number; y: number; px: number; py: number }>(undefined);
-  const selectEntity = (id: string | undefined) => { setSelectedId(id); onSelectEntity?.(id); };
   const [tooltip, setTooltip] = useState<{ text: string; x: number; y: number; top: number; bottom: number; room: number }>();
   const tooltipElement = useRef<HTMLDivElement>(null);
   useLayoutEffect(() => {
@@ -530,9 +525,6 @@ export function FactoryScene({ crates, tools, onInvestigate, onSelectEntity, gra
     const flow = flowAt.get(run.key), reading = run.kind === "intake" ? unitOf.get(run.to)?.reading : flow?.reading;
     return reading === undefined || run.kind === "intake" && reading.state === "unknown" ? [] : [{ ...run, reading, kind: run.kind === "intake" ? "intake" : flow!.kind }];
   });
-  // Selecting a unit's main machine lights every machine it owns and every belt touching them, wherever they stand.
-  const litUnit = selectedId !== undefined && unitOf.get(selectedId)?.id === selectedId ? selectedId : undefined;
-  const members = new Set(litUnit === undefined ? [] : layout.stations.filter((station) => station.unit === litUnit).map((station) => station.entityId));
   const queued = tasks.filter((order) => order.status === "queued" && fromTray(order)).length;
   // The implements are always there, but only the tray is live: it shows the queue and opens the console's Work view. Shelf and coffee are scenery.
   const implementsShown = nook.furniture;
@@ -542,9 +534,6 @@ export function FactoryScene({ crates, tools, onInvestigate, onSelectEntity, gra
   const animate = connected && appearance.animation !== "off";
   // Changeovers are dated against the graph's own observation time, never the viewer's clock.
   const observedAt = graph.observedAt ?? 0;
-  // A folded member is inspected through its fold.
-  const fold = selectedId === undefined || machines.has(selectedId) ? undefined : [...machines.values()].find((machine) => machine.represented?.includes(selectedId));
-  const selected = selectedId === undefined ? undefined : machines.get(selectedId) ?? fold;
   // Where the pane and the floor are, in client pixels, and how many pixels a scene unit is.
   const frame = () => {
     const map = mapElement.current, floor = floorElement.current;
@@ -663,7 +652,7 @@ export function FactoryScene({ crates, tools, onInvestigate, onSelectEntity, gra
       </g>)}</g>
 
       <g aria-hidden="true" pointerEvents="none">
-        {belts.map((belt) => <Belt key={belt.key} belt={belt} lit={members.has(belt.from) || members.has(belt.to)} />)}
+        {belts.map((belt) => <Belt key={belt.key} belt={belt} />)}
         {/* Where belts share a port they join, a dot; where they cross, always square-on, one bridges the other. */}
         {[...junctions(belts), ...runs.junctions].map((point) => <circle key={`${point.x} ${point.y}`} data-junction="" cx={point.x} cy={point.y} r="2.5" className="dfPlant__junction" />)}
         {runs.crossings.map((crossing) => <g key={`${crossing.x} ${crossing.y}`} data-crossing={crossing.over} transform={`translate(${crossing.x} ${crossing.y})${crossing.over === "v" ? " rotate(90)" : ""}`}>
@@ -671,16 +660,15 @@ export function FactoryScene({ crates, tools, onInvestigate, onSelectEntity, gra
         </g>)}
       </g>
 
+      {/* A station is read, never opened: its tooltip is the whole reading, on hover, click or keyboard focus. */}
       {layout.stations.map((station) => {
         const machine = machines.get(station.entityId) ?? station.machine, unit = unitOf.get(station.entityId), deployed = station.unit === station.entityId ? unit?.reading.deployedAt : undefined;
         return <g key={station.entityId} data-entity-id={station.entityId} data-observation={machine.reading.observation} data-state={machine.reading.state} data-shape={station.shape} data-unit={station.unit}
-          data-tooltip={machineInfo(machine, unit)}
-          {...sceneAction(() => selectEntity(station.entityId))} aria-label={`Inspect ${machine.label}`} className="dfFactoryScene__target">
+          data-tooltip={machineInfo(machine, unit)} role="img" tabIndex={0} aria-label={machine.label} className="dfFactoryScene__target">
           <rect className="dfFactoryScene__focus" x={station.x - 4} y={station.y - 14} width={station.shape === "gate" ? 130 : station.width + 8} height={station.height + 18} fill="transparent" />
-          <Station item={station} machine={machine} selected={selectedId === station.entityId || selectedId !== undefined && station.representedIds?.includes(selectedId) === true} close={close} />
+          <Station item={station} machine={machine} close={close} />
           {/* A recent deploy is a quiet tag on the machine, not a warning. */}
           {deployed === undefined || observedAt - deployed > DAY ? null : <text data-changeover={deployed} x={station.x + 4} y={station.y + 10} className="dfPlant__small" fontSize="7">deployed</text>}
-          {members.has(station.entityId) && station.entityId !== litUnit ? <rect data-unit-member={litUnit} className="dfFactoryScene__selection" x={station.x - 4} y={station.y - 4} width={station.width + 8} height={station.height + 8} /> : null}
         </g>;
       })}
 
@@ -714,7 +702,6 @@ export function FactoryScene({ crates, tools, onInvestigate, onSelectEntity, gra
       {zoom === undefined || mapHidden ? null : <PlantMap layout={layout} width={sceneWidth} height={sceneHeight} machines={machines} graph={graph} placements={placements} workers={workers} viewElement={viewElement} onCentre={centreOn} pane={pane} />}
     </div>}
     </div>
-    {selected === undefined ? null : <MachineInspector key={selectedId} machine={selected} unit={unitOf.get(selected.id)} onInvestigate={onInvestigate} onClose={() => selectEntity(undefined)} />}
     </div>
   );
 }
@@ -799,7 +786,7 @@ function machineInfo(machine: SceneMachine, unit?: SceneUnit) {
 }
 
 /** One machine, pictured by its kind; its observation and state are its paint, lamp and motion. */
-function Station({ item, machine, selected, close }: { item: SceneStation; machine: SceneMachine; selected: boolean; close: boolean }) {
+function Station({ item, machine, close }: { item: SceneStation; machine: SceneMachine; close: boolean }) {
   const { x, y, width: w, height: h } = item, reading = machine.reading;
   // A cell's body is its base; every other station carries its lamp at the top.
   const ly = item.shape === "cell" ? y + h - 7 : y + 3;
@@ -841,7 +828,7 @@ function Station({ item, machine, selected, close }: { item: SceneStation; machi
       <text x={x + w + 6} y={y + 23} className="dfPlant__small" fontSize="7">{reading.evidence === "runtime" ? "seen, not in code" : reading.ratePerHour > 0 ? `${rate(reading.ratePerHour)} · measured from our side` : reading.observation === "unobserved" ? "not connected" : reading.observation === "quiet" ? "no calls in 15 min" : "outside · can't see inside"}</text></g>; break;
     default: body = <g><rect x={x} y={y} width={w} height={h} className="crate" /><text x={x + w / 2} y={y + h / 2 + 3} textAnchor="middle" className="qmark" fontSize="8">?</text></g>;
   }
-  return <g className={`s-${reading.observation} op-${reading.state}${selected ? " dfPlant--selected" : ""}`}>{label}{body}{plaque}{scrap}{stale}{tag}</g>;
+  return <g className={`s-${reading.observation} op-${reading.state}`}>{label}{body}{plaque}{scrap}{stale}{tag}</g>;
 }
 
 type BeltRun = Readonly<{ key: string; from: string; to: string; kind: string; points: readonly ScenePoint[]; link: boolean; stubs?: readonly (BeltStub | undefined)[] }>;
@@ -853,16 +840,16 @@ type BeltRoute = BeltRun & Readonly<{ reading: SceneReading }>;
  * an empty belt. Every belt lies on a dark casing, so where two cross one
  * plainly passes over the other.
  */
-function Belt({ belt, lit }: { belt: BeltRoute; lit: boolean }) {
+function Belt({ belt }: { belt: BeltRoute }) {
   const d = `M${belt.points.map((point) => `${point.x} ${point.y}`).join(" L")}`;
-  const reading = belt.reading, casing = <path d={d} className={lit ? "dfPlant__casing dfPlant__casing--lit" : "dfPlant__casing"} />;
+  const reading = belt.reading, casing = <path d={d} className="dfPlant__casing" />;
   // A connection the belts could not lay is an overhead link: faint, dashed, round machines and labels, never a belt.
   if (belt.stubs !== undefined) return <g data-belt={belt.kind} data-stub="" data-observation={reading.observation}>{belt.stubs.map((stub, index) => stub === undefined ? null : <g key={index}>
     <title>{`Connected to ${stub.name}`}</title>
-    <path d={`M${stub.points.map((point) => `${point.x} ${point.y}`).join(" L")}`} className={lit ? "dfPlant__link dfPlant__link--lit" : "dfPlant__link"} />
+    <path d={`M${stub.points.map((point) => `${point.x} ${point.y}`).join(" L")}`} className="dfPlant__link" />
     {stub.text === undefined ? null : <text data-stub-name="" x={stub.text.x} y={stub.text.y + 6} className="dfPlant__small" fontSize="6">{stub.text.value}</text>}
   </g>)}</g>;
-  if (belt.link) return <path d={d} className={lit ? "dfPlant__link dfPlant__link--lit" : "dfPlant__link"} data-belt={belt.kind} data-link="" data-observation={reading.observation} />;
+  if (belt.link) return <path d={d} className="dfPlant__link" data-belt={belt.kind} data-link="" data-observation={reading.observation} />;
   if (reading.observation === "unobserved" || reading.observation === "stale" || reading.observation === "opaque" && reading.ratePerHour === 0 || reading.observation === "partial" && reading.state === "unknown") {
     return <g data-belt={belt.kind} data-observation={reading.observation}>{casing}<path d={d} className="b-inf" /></g>;
   }
@@ -913,23 +900,4 @@ function tint(hue: number, alpha = .13) {
 function kindText(machine: SceneMachine, unit?: SceneUnit) {
   return machine.represented !== undefined ? `${machine.represented.length} ${machine.kind} nodes`
     : unit?.id === machine.id && unit.runtime !== undefined ? `${RUNTIME_TEXT[unit.runtime]} unit` : machine.kind;
-}
-
-/** The inspector reads the machine as the floor shows it; a fold lists its members by name. */
-function MachineInspector({ machine, unit, onInvestigate, onClose }: {
-  machine: SceneMachine; unit?: SceneUnit; onInvestigate?: (machine: SceneMachine, unit?: SceneUnit) => void;
-  onClose: () => void;
-}) {
-  const [asked, setAsked] = useState(false);
-  const reading = machine.reading;
-  const worth = reading.state === "failing" || reading.state === "degraded" || reading.evidence === "runtime" || reading.evidence === "contradicted" || reading.observation === "unobserved";
-  return <section className="dfMachineInspector" aria-label="Machine inspector">
-    <h3>{machine.label}</h3>
-    <p>{machine.represented === undefined ? kindText(machine, unit) : `${machine.represented.length} folded ${machine.kind} nodes`}{unit !== undefined && unit.id !== machine.id ? ` in ${unit.label}` : ""}</p>
-    <p className={`dfPlantReading s-${reading.observation} op-${reading.state}`}>{OBSERVATION_TEXT[reading.observation]}{reading.state === "unknown" ? "" : ` · ${reading.state}`}{reading.ratePerHour > 0 ? ` · ${rate(reading.ratePerHour)}` : ""}{reading.errorPermille > 0 ? ` · ${reading.errorPermille / 10}% errors` : ""}{reading.latencyMs > 0 ? ` · p95 ${reading.latencyMs} ms` : ""}</p>
-    <p>{EVIDENCE_TEXT[reading.evidence]}</p>
-    {onInvestigate && worth ? <button type="button" disabled={asked} onClick={() => { setAsked(true); onInvestigate(machine, unit); }}>{asked ? "Investigation queued" : "Investigate"}</button> : null}
-    <button type="button" onClick={onClose}>Close</button>
-    {machine.represented === undefined ? null : <ul className="dfMachineInspector__members" aria-label="Folded routes">{machine.represented.map((id, index) => <li key={id}>{machine.routes?.[index] ?? id}</li>)}</ul>}
-  </section>;
 }

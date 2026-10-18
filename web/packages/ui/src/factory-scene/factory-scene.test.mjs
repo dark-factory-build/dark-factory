@@ -889,7 +889,7 @@ test("a unit's main machine truncates a full-width name while keeping its access
     const shown = markup.match(/data-shape="line"[\s\S]*?class="dfPlant__label" font-size="8">([^<]+)<\/text>/)?.[1];
     assert.ok(shown?.endsWith("…"), "the visible name fits under its machine");
     assert.ok([...new Intl.Segmenter(undefined, { granularity: "grapheme" }).segment(shown)].length < 30);
-    assert.match(markup, new RegExp(`aria-label="Inspect ${label}`), "full name remains accessible");
+    assert.match(markup, new RegExp(`aria-label="${label}"`), "full name remains accessible");
     assert.doesNotMatch(markup, new RegExp(`>${label}</text>`));
   }
 });
@@ -1183,29 +1183,30 @@ test("fit shows the whole floor in the pane without relaying it out, the overvie
   }
 });
 
-test("a fold's inspector names its routes as plain text and investigates the fold", async () => {
+test("a station is read from its tooltip, by pointer or keyboard, and opens no inspector", async () => {
   globalThis.IS_REACT_ACT_ENVIRONMENT = true;
   const folded = sceneGraph([unit("api", { machines: [machine("api:docks", "ingress", { label: "3 routes", represented: ["n0", "n1", "n2"], routes: ["/a", "/b", "/c"], reading: { ...busy, state: "failing" } })] })]);
-  const investigated = [];
+  const priorWindow = globalThis.window;
+  globalThis.window = { innerWidth: 1200, innerHeight: 800 };
   let renderer;
   try {
-    await act(async () => { renderer = create(createElement(FactoryScene, { graph: folded, appearance: scenic, workers: [], onInvestigate: (value) => investigated.push(value.represented) })); });
-    await act(async () => renderer.root.findByProps({ "aria-label": "Inspect 3 routes" }).props.onClick());
-    const inspector = renderer.root.findByProps({ "aria-label": "Machine inspector" });
-    assert.match(JSON.stringify(inspector.findByType("h3").children), /3 routes/);
-    const list = inspector.findByProps({ "aria-label": "Folded routes" });
-    assert.deepEqual(list.findAllByType("li").map((item) => item.children.join("")), ["/a", "/b", "/c"]);
-    assert.equal(list.findAllByType("button").length, 0, "members are names, not drill-downs");
-    assert.doesNotMatch(JSON.stringify(renderer.toJSON()), /Evidence|Back to folded routes/);
-    const buttons = inspector.findAllByType("button");
-    assert.equal(buttons.some((button) => button.children.join("") === "Focus on floor"), false);
-    assert.equal(buttons.some((button) => button.children.join("") === "Discuss this machine"), false);
-    await act(async () => inspector.findAllByType("button").find((button) => button.children.join("") === "Investigate").props.onClick());
-    assert.deepEqual(investigated, [["n0", "n1", "n2"]]);
-    await act(async () => inspector.findAllByType("button").find((button) => button.children.join("") === "Close").props.onClick());
-    assert.equal(renderer.root.findAllByProps({ "aria-label": "Machine inspector" }).length, 0);
+    await act(async () => { renderer = create(createElement(FactoryScene, { graph: folded, appearance: scenic, workers: [] })); });
+    const station = renderer.root.findByProps({ "aria-label": "3 routes" });
+    assert.equal(station.props.tabIndex, 0, "keyboard users reach the station");
+    assert.equal(station.props.role, "img", "a station is a picture to read, not a control");
+    assert.equal(station.props.onClick, undefined);
+    assert.match(station.props["data-tooltip"], /^3 routes\n\/a\n\/b\n\/c\n3 ingress nodes in api\nObserved · failing/, "the tooltip carries the fold's routes and reading");
+    const target = { closest: () => ({ getAttribute: () => station.props["data-tooltip"], querySelector: () => null, getBoundingClientRect: () => ({ left: 10, top: 10, bottom: 30, height: 20 }) }) };
+    for (const show of ["onFocus", "onClick"]) {
+      await act(async () => renderer.root.findByProps({ "aria-label": "Scrollable factory floor" }).props[show]({ target }));
+      assert.equal(renderer.root.findByProps({ role: "tooltip" }).children.join(""), station.props["data-tooltip"], `${show} shows the reading`);
+    }
+    const markup = JSON.stringify(renderer.toJSON());
+    assert.doesNotMatch(markup, /Machine inspector|Investigate|Folded routes|dfMachineInspector/);
+    assert.equal(renderer.root.findAllByType("section").length, 0, "nothing overlays the floor");
   } finally {
     await act(async () => renderer?.unmount());
+    globalThis.window = priorWindow;
   }
 });
 

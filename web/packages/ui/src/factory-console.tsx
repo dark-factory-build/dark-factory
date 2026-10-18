@@ -1,8 +1,8 @@
-import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import { useEffect, useMemo, useState, type ReactNode } from "react";
 import type { AgentItem, TaskItem } from "@dark-factory/client";
 import { type FactoryAgentSelection, type FactoryAppSnapshot, type FactoryHumanRequestView } from "./factory-app-controller.js";
 import { FactoryFloor } from "./console-screens.js";
-import { AgentPanel, HumanRequestPanel, WorkPanel, editErrorCopy, type TaskEdit, type TaskScope, type AddTask } from "./console-sidebar.js";
+import { AgentPanel, HumanRequestPanel, WorkPanel, editErrorCopy, type TaskEdit, type AddTask } from "./console-sidebar.js";
 import type { ProjectContentCall } from "./factory-app-controller.js";
 import { useProduction } from "./production-data.js";
 import { deriveProductionView, inProgressProduction } from "./production-view.js";
@@ -66,10 +66,6 @@ const ERROR_LABELS = new Map<string, string>([
   ["unsupported", "The factory does not support this request yet."],
 ]);
 
-const text = (value: unknown) => typeof value === "string" ? value : "";
-const asTask = (v: Record<string, unknown>, project: string): TaskItem => ({ id: text(v.task_id) || text(v.id), project_id: text(v.project_id) || project, assigned_agent_id: text(v.assigned_agent_id), title: text(v.title) || "Untitled task", status: text(v.status) as TaskItem["status"] || "blocked", blocked_reason: text(v.blocked_reason) || undefined, priority: Number(v.priority) || 0, revision: BigInt(text(v.revision) || "0"), updated_at_ms: text(v.updated_at_ms) ? BigInt(text(v.updated_at_ms)) : undefined });
-const pullRequestHref = (item: { repository: string; pullRequest?: { number: number; url?: string } }) => item.pullRequest?.url || (item.pullRequest ? `https://github.com/${item.repository}/pull/${item.pullRequest.number}` : undefined);
-
 /** One screen: a factory or agent list beside one operator detail panel. */
 export function FactoryConsole({
   status,
@@ -126,7 +122,7 @@ export function FactoryConsole({
   const inProgressItems = useMemo(() => productionItems.filter(inProgressProduction), [productionItems]);
   const showWork = () => { onDetail?.("work"); };
   const openWork = (id: string | undefined) => { selectProject(id); showWork(); };
-  // Routes into Work from outside it (floor, Library, Settings) reset the view first so the answer form or task is never hidden.
+  // Routes into Work from the floor reset the view first so the answer form or task is never hidden.
   const selectRequest = pickRequest === undefined ? undefined : (request: Parameters<typeof pickRequest>[0]) => { openWork(request.project_id); pickRequest(request); };
   const goTask = selectTask === undefined ? undefined : (id: string) => { openWork(projectId); selectTask(id); };
   const sources = projectId === undefined ? undefined : intake?.get(projectId)?.sources;
@@ -179,7 +175,7 @@ export function FactoryConsole({
             <IconButton icon="list" aria-pressed={detail !== "floor" && selectedDetail === "work"} disabled={!ready || onDetail === undefined} onClick={showWork}>Work <Badge n={waiting} /></IconButton>
           </nav>
           <section className="dfConsoleLayout__left dfFactoryConsole__section" aria-label="Factory floor">
-            <FactoryFloor changes={productionItems} changesRead={productionData.read} onProjectContent={onProjectContent} onOpenTasks={ready ? openWork : undefined} projectId={projectId} selectedTaskId={selectedTask?.id} onSelectTask={ready ? goTask : undefined} selectedAgentId={selectedDetail === "agent" ? liveAgent?.id : undefined} state={scopedState} graphs={graphs} graphErrors={graphErrors} onAddTask={ready ? onAddTask : undefined} runPaths={runPaths} lastRunPaths={lastRunPaths} onSelectAgent={ready ? onSelectAgent : undefined} onSelectHumanRequest={ready ? selectRequest : undefined} connected={ready} />
+            <FactoryFloor changes={productionItems} changesRead={productionData.read} onProjectContent={onProjectContent} onOpenTasks={ready ? openWork : undefined} projectId={projectId} selectedTaskId={selectedTask?.id} onSelectTask={ready ? goTask : undefined} selectedAgentId={selectedDetail === "agent" ? liveAgent?.id : undefined} state={scopedState} graphs={graphs} graphErrors={graphErrors} runPaths={runPaths} lastRunPaths={lastRunPaths} onSelectAgent={ready ? onSelectAgent : undefined} onSelectHumanRequest={ready ? selectRequest : undefined} connected={ready} />
           </section>
 
           <aside className="dfConsoleSidebar" aria-label="Selected detail">
