@@ -59,6 +59,7 @@ test internal/daemon/browser_agent_control_darwin_test.go shared L08
 test internal/daemon/browser_source_darwin_test.go shared L08
 test internal/daemon/github_quota_darwin_test.go shared L08
 test internal/daemon/handover_darwin_test.go shared L08
+test internal/daemon/isolated_run_darwin_test.go shared L08
 test internal/daemon/knowledge_context_darwin_test.go shared L08
 test internal/daemon/legacy_git_retry_darwin_test.go shared L08
 test internal/daemon/live_attempt_darwin_test.go shared L08

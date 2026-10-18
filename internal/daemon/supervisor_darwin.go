@@ -14,12 +14,15 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 	"unicode/utf8"
 
+	"github.com/dark-factory-build/dark-factory/internal/api"
 	"github.com/dark-factory-build/dark-factory/internal/change"
 	"github.com/dark-factory-build/dark-factory/internal/changeworker"
+	"github.com/dark-factory-build/dark-factory/internal/install"
 	"github.com/dark-factory-build/dark-factory/internal/kernel"
 	"github.com/dark-factory-build/dark-factory/internal/provider"
 	"github.com/dark-factory-build/dark-factory/internal/runner"
@@ -225,6 +228,105 @@ func (owner *supervisorAttemptOwner) closeWithEvidence() error {
 		return errors.Join(closeErr, owner.outerRunnerEvidence())
 	}
 	return closeErr
+}
+
+// RunIsolated runs one provider attempt through RunNext against a throwaway
+// operational home: its own Store, attempt API, runtime parent and Change
+// parent beneath runner.ShortTempDir, removed before it returns. spec supplies
+// the executables, tool path and account; its home-bound members are replaced.
+// The Change is cut from repository at spec.BaseRevision and keeps its private
+// Git administration in that repository, so pass a disposable checkout. ctx
+// bounds the run, and the caller's own factory state is never touched.
+func RunIsolated(ctx context.Context, spec SupervisorSpec, repository string, providerKind kernel.Provider, task string) (_ kernel.Run, resultErr error) {
+	root, err := os.MkdirTemp(runner.ShortTempDir(), "df-run-")
+	if err != nil {
+		return kernel.Run{}, err
+	}
+	defer func() { resultErr = errors.Join(resultErr, os.RemoveAll(root)) }()
+	homePath := filepath.Join(root, "home")
+	if _, err := install.Init(ctx, homePath); err != nil {
+		return kernel.Run{}, err
+	}
+	home, err := install.OpenOperationalHome(ctx, homePath)
+	if err != nil {
+		return kernel.Run{}, err
+	}
+	defer func() { resultErr = errors.Join(resultErr, home.Close()) }()
+	store, err := home.OpenStore(ctx)
+	if err != nil {
+		return kernel.Run{}, err
+	}
+	daemon, err := NewDaemon(store)
+	if err != nil {
+		return kernel.Run{}, err
+	}
+	defer func() { resultErr = errors.Join(resultErr, daemon.Close()) }()
+	// The throwaway Store holds exactly this one project, agent and task.
+	raw := bytes.Repeat([]byte{1}, kernel.IDBytes)
+	projectID, projectErr := kernel.ProjectIDFromBytes(raw)
+	agentID, agentErr := kernel.AgentIDFromBytes(raw)
+	taskID, taskErr := kernel.TaskIDFromBytes(raw)
+	incarnationID, incarnationErr := kernel.IncarnationIDFromBytes(raw)
+	at, atErr := daemon.timestamp()
+	if err := errors.Join(projectErr, agentErr, taskErr, incarnationErr, atErr, store.InitializeRepositoryBase(ctx, spec.BaseRevision)); err != nil {
+		return kernel.Run{}, err
+	}
+	if _, err := store.CreateProject(ctx, kernel.NewProject{ID: projectID, Name: "isolated", Root: repository}, at); err != nil {
+		return kernel.Run{}, err
+	}
+	if _, err := store.CreateAgent(ctx, kernel.NewAgent{ID: agentID, ProjectID: projectID, Name: "isolated", Role: kernel.RoleWorker, Provider: providerKind, ToolBudgetLimit: 1_000_000_000}, at); err != nil {
+		return kernel.Run{}, err
+	}
+	if _, err := store.EnqueueTask(ctx, kernel.NewTask{ID: taskID, ProjectID: projectID, AssignedAgentID: agentID, IncarnationID: incarnationID, Title: "isolated run", Body: task, Priority: 1}, at); err != nil {
+		return kernel.Run{}, err
+	}
+	factory, err := store.Factory(ctx)
+	if err == nil {
+		_, err = store.SetDispatch(ctx, factory.Revision, true, at)
+	}
+	if err != nil {
+		return kernel.Run{}, err
+	}
+	runtimes, err := home.Runtimes()
+	if err != nil {
+		return kernel.Run{}, err
+	}
+	parent, err := OpenRuntimeParent(ctx, runtimes, install.RuntimesPath(homePath))
+	if err != nil {
+		return kernel.Run{}, err
+	}
+	defer func() { resultErr = errors.Join(resultErr, parent.Close()) }()
+	authority, err := home.OpenLocalAPI(ctx)
+	if err != nil {
+		return kernel.Run{}, err
+	}
+	defer func() { resultErr = errors.Join(resultErr, authority.Close()) }()
+	listener, err := api.Listen(authority)
+	if err != nil {
+		return kernel.Run{}, err
+	}
+	var handlers sync.WaitGroup
+	handlers.Add(1)
+	go func() {
+		defer handlers.Done()
+		for {
+			connection, err := listener.Accept()
+			if err != nil {
+				return
+			}
+			handlers.Add(1)
+			go func() {
+				defer handlers.Done()
+				_ = daemon.HandleConnection(ctx, connection)
+			}()
+		}
+	}()
+	defer func() {
+		resultErr = errors.Join(resultErr, listener.Close())
+		handlers.Wait()
+	}()
+	spec.RuntimeParent, spec.ChangeParent, spec.AttemptSocket = parent, install.ChangesPath(homePath), install.LocalAPISocketPath(homePath)
+	return daemon.RunNext(ctx, spec)
 }
 
 func (daemon *Daemon) runNext(ctx context.Context, spec SupervisorSpec) (resultRun kernel.Run, resultErr error) {
