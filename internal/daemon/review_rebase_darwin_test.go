@@ -262,11 +262,12 @@ func TestFailedCheckRecoveryAfterRepeatedReconcileFailures(t *testing.T) {
 	}
 	repository := filepath.Join(filepath.Dir(filepath.Dir(fixture.parentPath)), "repo")
 	origin := filepath.Join(filepath.Dir(repository), "origin.git")
+	settlementGit(t, g, repository, "update-ref", "refs/heads/main", local)
 	settlementGit(t, g, repository, "clone", "-q", "--bare", repository, origin)
-	settlementGit(t, g, origin, "update-ref", "refs/heads/main", "HEAD")
+	settlementGit(t, g, origin, "update-ref", "refs/heads/main", local)
 	settlementGit(t, g, repository, "remote", "add", "origin", origin)
 	settlementGit(t, g, repository, "config", "protocol.file.allow", "always")
-	source, err := inspectRegisteredRepository(ctx, repository, "HEAD")
+	source, err := inspectRegisteredRepository(ctx, repository, "main")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -274,7 +275,7 @@ func TestFailedCheckRecoveryAfterRepeatedReconcileFailures(t *testing.T) {
 	if err := fixture.store.BindRepositorySource(ctx, kernel.RepositoryID(changeState.ProjectID), source); err != nil {
 		t.Fatal(err)
 	}
-	if err := fixture.store.InitializeRepositoryBase(ctx, "HEAD"); err != nil {
+	if err := fixture.store.InitializeRepositoryBase(ctx, "main"); err != nil {
 		t.Fatal(err)
 	}
 	pr := kernel.ProductionPullRequest{Number: 12, Title: "Ship it", URL: "https://github.com/team/repo/pull/12", Head: local, Branch: "factory/" + changeState.ID.String()[:12], Base: "main", State: "open", Review: kernel.ProductionReview{Head: local, State: "unknown"}}
