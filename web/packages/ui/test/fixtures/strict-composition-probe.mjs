@@ -39,17 +39,10 @@ try {
   const pressed = renderer.root.findByProps({ "aria-label": "Console views" }).findAllByType("button").filter((button) => button.props["aria-pressed"] === true).map((button) => button.props["aria-label"] ?? button.props.title ?? String(button.props.children));
   assert.equal(pressed.length, 1);
   assert.match(pressed[0], /Work/, `right panel is ${pressed[0]}`);
-  // The sidebar roster is the keyboard-reachable terminal entry.
-  const agentRow = () => renderer.root.findAllByType("button").find((button) => typeof button.props.className === "string" && button.props.className.includes("dfAgentList__row"));
-  const open = async () => {
-    const agents = renderer.root.findAllByType("button").find((button) => [].concat(button.props.children).includes("Agents"));
-    assert.ok(agents, "public FactoryApp must expose the Agents view");
-    await act(async () => { agents.props.onClick(); });
-    const row = agentRow();
-    assert.ok(row, "public FactoryApp must expose a selectable agent");
-    await act(async () => { row.props.onClick(); });
-  };
-  await open();
+  // A floor sprite is the keyboard-reachable terminal entry.
+  const sprite = renderer.root.findAll((node) => node.type === "g" && node.props.role === "button" && node.parent?.props["data-worker-id"] !== undefined)[0];
+  assert.ok(sprite, "public FactoryApp must expose a selectable agent on the floor");
+  await act(async () => { sprite.props.onKeyDown({ key: " ", preventDefault() {} }); });
   await waitFor(() => globalThis.__darkFactoryStrictProbe.acquires === 1 && globalThis.__darkFactoryStrictProbe.terminals - globalThis.__darkFactoryStrictProbe.disposes === 1, "first terminal did not become live");
 
   assert.equal(counters.clients, 2, "StrictMode must create two public app sessions");

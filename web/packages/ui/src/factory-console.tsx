@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import type { AgentItem, TaskItem } from "@dark-factory/client";
 import { type FactoryAgentSelection, type FactoryAppSnapshot, type FactoryHumanRequestView } from "./factory-app-controller.js";
-import { AgentList, FactoryFloor } from "./console-screens.js";
+import { FactoryFloor } from "./console-screens.js";
 import { AgentPanel, HumanRequestPanel, WorkPanel, editErrorCopy, type TaskEdit, type TaskScope, type AddTask } from "./console-sidebar.js";
 import type { ProjectContentCall } from "./factory-app-controller.js";
 import { useProduction } from "./production-data.js";
@@ -107,13 +107,6 @@ export function FactoryConsole({
 }: FactoryConsoleProps) {
   // This is browser presentation only: it deliberately shares neither the
   // controller nor its durable/runtime settings path.
-  const [browsingAgents, setBrowsingAgents] = useState(false);
-  useEffect(() => { setBrowsingAgents(false); }, [selectedAgent?.id]);
-  const chooseAgent = onSelectAgent === undefined ? undefined : (agent: AgentItem) => {
-    setBrowsingAgents(false);
-    onSelectAgent(agent);
-  };
-  const showAgents = () => { setBrowsingAgents(true); onDetail?.("agent"); };
   const [dispatchPending, setDispatchPending] = useState(false);
   const [dispatchNotice, setDispatchNotice] = useState("");
   const [dispatchError, setDispatchError] = useState("");
@@ -148,7 +141,7 @@ export function FactoryConsole({
   const waiting = rows.filter(needsYou).length;
   const agent = selectedAgent === undefined ? undefined : scopedState?.agents.get(selectedAgent.id);
   const liveAgent = agent?.archived === true ? undefined : agent;
-  const selectedDetail = (detail === "floor" ? "work" : detail) ?? (selectedAgent === undefined ? "work" : "agent");
+  const selectedDetail = liveAgent !== undefined && (detail ?? "agent") === "agent" ? "agent" : "work";
   // Work's inbox is the daemon's last intake poll: re-read that local list (never the backlog) while Work is shown.
   useEffect(() => {
     if (!ready || projectId === undefined || onLoadIntake === undefined) return;
@@ -199,11 +192,10 @@ export function FactoryConsole({
         <div className="dfConsoleLayout">
           <nav className="dfConsoleViewToggle" aria-label="Console views">
             <button type="button" aria-pressed={detail === "floor"} disabled={!ready || onDetail === undefined} onClick={() => { onDetail?.("floor"); }}>Floor</button>
-            <button type="button" aria-pressed={detail !== "floor" && selectedDetail === "agent"} disabled={!ready || onDetail === undefined} onClick={showAgents}>Agents</button>
             <IconButton icon="list" aria-pressed={detail !== "floor" && selectedDetail === "work"} disabled={!ready || onDetail === undefined} onClick={showWork}>Work <Badge n={waiting} /></IconButton>
           </nav>
           <section className="dfConsoleLayout__left dfFactoryConsole__section" aria-label="Factory floor">
-            <FactoryFloor changes={productionItems} changesRead={productionData.read} onProjectContent={onProjectContent} onOpenTasks={ready ? openWork : undefined} projectId={projectId} selectedTaskId={selectedTask?.id} onSelectTask={ready ? goTask : undefined} selectedAgentId={selectedDetail === "agent" ? liveAgent?.id : undefined} state={scopedState} graphs={graphs} graphErrors={graphErrors} onAddTask={ready ? onAddTask : undefined} runPaths={runPaths} lastRunPaths={lastRunPaths} onSelectAgent={ready ? chooseAgent : undefined} onSelectHumanRequest={ready ? selectRequest : undefined} connected={ready} />
+            <FactoryFloor changes={productionItems} changesRead={productionData.read} onProjectContent={onProjectContent} onOpenTasks={ready ? openWork : undefined} projectId={projectId} selectedTaskId={selectedTask?.id} onSelectTask={ready ? goTask : undefined} selectedAgentId={selectedDetail === "agent" ? liveAgent?.id : undefined} state={scopedState} graphs={graphs} graphErrors={graphErrors} onAddTask={ready ? onAddTask : undefined} runPaths={runPaths} lastRunPaths={lastRunPaths} onSelectAgent={ready ? onSelectAgent : undefined} onSelectHumanRequest={ready ? selectRequest : undefined} connected={ready} />
           </section>
 
           <aside className="dfConsoleSidebar" aria-label="Selected detail">
@@ -234,21 +226,15 @@ export function FactoryConsole({
                 intake={projectId === undefined ? undefined : { state: intake?.get(projectId)?.state, failed: intakeErrors?.has(projectId) === true, busy: intakePending?.has(projectId) === true }}
               />
             </div>
-            <div hidden={selectedDetail !== "agent"}>
-              <div hidden={liveAgent !== undefined && !browsingAgents} aria-label="Agents">
-                {selectedDetail !== "agent" || liveAgent !== undefined && !browsingAgents ? null : <AgentList state={scopedState} selectedAgentId={liveAgent?.id} ready={ready} onSelectAgent={ready ? chooseAgent : undefined} />}
-              </div>
-              <div hidden={liveAgent === undefined || browsingAgents}>
-              <button type="button" disabled={!ready} onClick={showAgents}>All agents</button>
-              {liveAgent === undefined ? null : <AgentPanel
+            {liveAgent === undefined ? null : <div hidden={selectedDetail !== "agent"}>
+              <AgentPanel
                 key={liveAgent.id}
                 agent={liveAgent}
                 state={scopedState}
                 terminalContent={terminalContent}
                 telemetry={agentTelemetry(liveAgent, scopedState, runPaths)}
-              />}
-              </div>
-            </div>
+              />
+            </div>}
           </aside>
         </div>
       </main>
