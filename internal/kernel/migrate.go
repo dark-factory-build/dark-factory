@@ -9,7 +9,7 @@ import (
 	"strings"
 )
 
-// Open migrates the seven earlier versions. v44 adds archived_tasks and v42
+// Open migrates the eight earlier versions. v46 adds provider_adoptions, v44 adds archived_tasks and v42
 // archive_batches, which the transaction itself proves, and neither moves
 // history; v43 persists intake author identity; v41 folds the
 // continuations table onto the human request each row awaited; v40 drops
@@ -27,6 +27,7 @@ const (
 	v42UserVersion = 42
 	v43UserVersion = 43
 	v44UserVersion = 44
+	v45UserVersion = 45
 )
 
 var browserSecurityEventStatements = []string{
@@ -70,7 +71,7 @@ var v40Continuations = []string{
 
 func legacySchemaStatements(version int) []string {
 	statements := slices.DeleteFunc(slices.Clone(schemaStatements), func(statement string) bool {
-		return statement == archivedTasksTable && version < v44UserVersion || statement == archiveBatchesTable && version < v42UserVersion
+		return statement == archivedTasksTable && version < v44UserVersion || statement == archiveBatchesTable && version < v42UserVersion || statement == providerAdoptionsTable && version < userVersion
 	})
 	restoreProjectCeilings := func() {
 		for index, statement := range statements {
@@ -81,6 +82,9 @@ func legacySchemaStatements(version int) []string {
 				statements[index] = strings.Replace(statement, "    revision INTEGER NOT NULL CHECK (revision >= 1),", "    run_budget_limit INTEGER NOT NULL DEFAULT 0 CHECK (run_budget_limit >= 0),\n    runs_used INTEGER NOT NULL DEFAULT 0 CHECK (runs_used >= 0),\n    max_run_seconds INTEGER NOT NULL DEFAULT 0 CHECK (max_run_seconds BETWEEN 0 AND 86400),\n    revision INTEGER NOT NULL CHECK (revision >= 1),", 1)
 			}
 		}
+	}
+	if version == v45UserVersion {
+		return statements
 	}
 	if version == v44UserVersion {
 		restoreProjectCeilings()
@@ -169,7 +173,7 @@ func (store *Store) migrateLegacy(ctx context.Context, path string, recheck func
 	switch version {
 	case userVersion:
 		return connection.Close()
-	case v37UserVersion, v38UserVersion, v39UserVersion, v40UserVersion, v41UserVersion, v42UserVersion, v43UserVersion, v44UserVersion:
+	case v37UserVersion, v38UserVersion, v39UserVersion, v40UserVersion, v41UserVersion, v42UserVersion, v43UserVersion, v44UserVersion, v45UserVersion:
 	default:
 		cause := ErrForeignDatabase
 		if appID == applicationID && version > userVersion {
@@ -198,7 +202,7 @@ func migrateFrom(ctx context.Context, connection *sql.Conn, version int) error {
 	if err := validateSchemaVersion(ctx, connection, version, legacySchemaStatements(version)); err != nil {
 		return err
 	}
-	if version < userVersion {
+	if version < v45UserVersion {
 		for _, statement := range []string{
 			"ALTER TABLE projects DROP COLUMN run_budget_limit",
 			"ALTER TABLE projects DROP COLUMN runs_used",
@@ -251,6 +255,9 @@ func migrateFrom(ctx context.Context, connection *sql.Conn, version int) error {
 	}
 	if version < v42UserVersion {
 		statements = append([]string{archiveBatchesTable}, statements...)
+	}
+	if version < userVersion {
+		statements = append(statements, providerAdoptionsTable)
 	}
 	for _, statement := range statements {
 		if _, err := connection.ExecContext(ctx, statement); err != nil {

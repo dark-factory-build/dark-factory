@@ -9,7 +9,7 @@ import (
 
 const (
 	applicationID = 0x4446474f
-	userVersion   = 45
+	userVersion   = 46
 
 	// SQLite reserves the exact lower-case "sqlite_" prefix. Use a literal,
 	// binary prefix test: LIKE would treat '_' as a wildcard and hide names
@@ -24,6 +24,16 @@ const (
 	projectSpecialistColumns = `, specialist_runs INTEGER NOT NULL DEFAULT 1 CHECK (specialist_runs BETWEEN 0 AND 16), specialist_open_proposals INTEGER NOT NULL DEFAULT 3 CHECK (specialist_open_proposals BETWEEN 0 AND 32)`
 	humanContinuationColumns = `, continuation TEXT CHECK (continuation IS NULL OR continuation = 'waiting' AND status = 'open' OR continuation IN ('queued', 'resolved', 'cancelled') AND status IN ('resolved', 'stale')), continuation_reply TEXT CHECK ((continuation_reply IS NOT NULL) = (continuation IS NOT NULL AND continuation IN ('queued', 'resolved')) AND length(CAST(continuation_reply AS BLOB)) BETWEEN 1 AND 8192)`
 )
+
+const providerAdoptionsTable = `CREATE TABLE provider_adoptions (
+    provider TEXT PRIMARY KEY CHECK (provider IN ('claude_code', 'codex')),
+    active_version TEXT NOT NULL CHECK (length(CAST(active_version AS BLOB)) BETWEEN 1 AND 128),
+    active_commitment TEXT NOT NULL CHECK (length(CAST(active_commitment AS BLOB)) BETWEEN 1 AND 4096),
+    candidate_version TEXT CHECK (candidate_version IS NULL OR length(CAST(candidate_version AS BLOB)) BETWEEN 1 AND 128),
+    candidate_commitment TEXT CHECK (candidate_commitment IS NULL OR length(CAST(candidate_commitment AS BLOB)) BETWEEN 1 AND 4096),
+    updated_at_ms INTEGER NOT NULL CHECK (updated_at_ms >= 0),
+    CHECK ((candidate_version IS NULL) = (candidate_commitment IS NULL))
+) STRICT, WITHOUT ROWID`
 
 var schemaStatements = []string{
 	`CREATE TABLE content_accesses (
@@ -196,6 +206,7 @@ var schemaStatements = []string{
     updated_at_ms INTEGER NOT NULL CHECK (updated_at_ms >= created_at_ms)
 ) STRICT, WITHOUT ROWID`,
 	`CREATE UNIQUE INDEX accounts_provider_home_unique ON accounts(provider, home)`,
+	providerAdoptionsTable,
 	`CREATE TABLE agents (
     id BLOB PRIMARY KEY CHECK (length(id) = 16),
     project_id BLOB NOT NULL CHECK (length(project_id) = 16) REFERENCES projects(id),
