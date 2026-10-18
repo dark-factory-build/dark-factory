@@ -17,20 +17,6 @@ type AttachmentRetentionResult struct {
 	Enabled Bool `json:"enabled"`
 }
 
-type FactoryDispatch struct {
-	ExpectedRevision Decimal `json:"expected_revision"`
-	Enabled          Bool    `json:"enabled"`
-}
-
-type FactoryDispatchResult struct {
-	Revision Decimal `json:"revision"`
-	Enabled  Bool    `json:"enabled"`
-}
-
-func EncodeFactoryDispatchResult(id string, value FactoryDispatchResult) ([]byte, error) {
-	return encodeControl(TypeFactoryDispatchResult, id, value)
-}
-
 func EncodeAttachmentRetentionResult(id string, value AttachmentRetentionResult) ([]byte, error) {
 	return encodeControl(TypeAttachmentRetentionResult, id, value)
 }
@@ -583,14 +569,6 @@ func validConsoleControl(kind MessageType, body any) error {
 		}
 	case AttachmentRetention, AttachmentRetentionResult:
 		return nil
-	case FactoryDispatch:
-		if value.ExpectedRevision == 0 {
-			return bad()
-		}
-	case FactoryDispatchResult:
-		if value.Revision == 0 {
-			return bad()
-		}
 	case ProjectLimits:
 		if validateDynamicID(value.ProjectID) != nil || value.ExpectedRevision == 0 || value.MaxRunSeconds > 86400 {
 			return bad()

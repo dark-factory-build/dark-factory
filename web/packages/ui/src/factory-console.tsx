@@ -19,7 +19,6 @@ export type FactoryConsoleProps = FactoryAppSnapshot & {
   onDetail?: (detail: ConsoleDetail) => void;
   selectedAgent?: FactoryAgentSelection;
   onSelectAgent?: (agent: AgentItem) => void;
-  onSetDispatch?: (expectedRevision: bigint, enabled: boolean) => Promise<{ revision: bigint; enabled: boolean }>;
   onProjectContent?: ProjectContentCall;
   onEditTask?: (task: TaskItem, change: TaskEdit) => Promise<boolean>;
   onAddTask?: AddTask;
@@ -88,7 +87,6 @@ export function FactoryConsole({
   selectedHumanRequest,
   selectedAgent,
   onSelectAgent,
-  onSetDispatch,
   onProjectContent,
   onEditTask,
   onAddTask,
@@ -105,11 +103,6 @@ export function FactoryConsole({
   onIntakeAction,
   terminalContent,
 }: FactoryConsoleProps) {
-  // This is browser presentation only: it deliberately shares neither the
-  // controller nor its durable/runtime settings path.
-  const [dispatchPending, setDispatchPending] = useState(false);
-  const [dispatchNotice, setDispatchNotice] = useState("");
-  const [dispatchError, setDispatchError] = useState("");
   const [chosenProjectId, setProjectId] = useState<string>();
   const projectId = chosenProjectId !== undefined && state?.projects.has(chosenProjectId) ? chosenProjectId : state?.projects.size === 1 ? [...state.projects.keys()][0] : undefined;
   const selectProject = (next: string | undefined) => {
@@ -163,13 +156,6 @@ export function FactoryConsole({
             <option value="">All projects</option>
             {[...state?.projects.values() ?? []].sort((a, b) => a.name.localeCompare(b.name) || a.id.localeCompare(b.id)).map((project) => <option key={project.id} value={project.id}>{project.name}</option>)}
           </select></label>}
-          <div className="dfConsoleBar__actions">
-            <IconButton icon={state?.factory.dispatch_enabled ? "pause" : "play"} disabled={!ready || state === undefined || onSetDispatch === undefined || dispatchPending} title={onSetDispatch === undefined ? "Administrator access is required to change new-work admission." : "Controls admission of new work. Active processes continue."} onClick={() => {
-              if (state === undefined || onSetDispatch === undefined || dispatchPending) return;
-              setDispatchPending(true); setDispatchError(""); setDispatchNotice("");
-              void onSetDispatch(state.factory.revision, !state.factory.dispatch_enabled).then((result) => setDispatchNotice(result.enabled ? "New work resumed." : "New work paused. Active processes continue."), () => setDispatchError("The admission change could not be confirmed. Check connection and administrator access, then refresh before retrying.")).finally(() => setDispatchPending(false));
-            }}>{dispatchPending ? "Waiting…" : state?.factory.dispatch_enabled ? "Pause new work" : state ? "Resume new work" : "New work"}</IconButton>
-          </div>
           <div
             className={ready || error !== undefined ? "dfFactoryConsole__visuallyHidden" : "dfFactoryConsole__connection"}
             aria-label={`Connection status: ${STATUS_LABELS[status]}`}
@@ -181,8 +167,6 @@ export function FactoryConsole({
           </div>
         </header>
 
-        {dispatchNotice === "" ? null : <p className="dfConsoleSidebar__status" role="status">{dispatchNotice}</p>}
-        {dispatchError === "" ? null : <p role="alert">{dispatchError}</p>}
         {error === undefined ? null : (
           <p className="dfFactoryConsole__error" role="alert">
             {ERROR_LABELS.get(error.code) ?? "The connection could not continue."}

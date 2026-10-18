@@ -158,8 +158,8 @@ export type OperationalGraphView = OperationalGraphBody;
 /** One agent's live run and the repository directories it has changed. */
 export type RunPathsView = Readonly<{ agentId: string; runId: string; paths: readonly string[]; telemetry?: Readonly<RunTelemetry> }>;
 /** `agentId` is the scope id: the agent, or the project for a project-scoped list. */
-type AccountKind = "FACTORY_DISPATCH_RESULT" | "PROJECT_CONTENT_RESULT" | "ACCOUNTS" | "ACCOUNT_LINK_RESULT" | "BROWSER_CLIENTS" | "BROWSER_CLIENT_REVOKE_RESULT" | "PROJECT_CREATE_RESULT" | "REPOSITORIES";
-type AccountCorrelation = { operation?: ProjectContentOperation; accountId?: string; entityId?: string; expectedRevision?: bigint; enabled?: boolean };
+type AccountKind = "PROJECT_CONTENT_RESULT" | "ACCOUNTS" | "ACCOUNT_LINK_RESULT" | "BROWSER_CLIENTS" | "BROWSER_CLIENT_REVOKE_RESULT" | "PROJECT_CREATE_RESULT" | "REPOSITORIES";
+type AccountCorrelation = { operation?: ProjectContentOperation; accountId?: string; entityId?: string; expectedRevision?: bigint };
 type AccountPending = Request & AccountCorrelation;
 
 /** One identity the factory has granted and not revoked. */
@@ -170,7 +170,6 @@ export type BrowserClientsView = Readonly<{ clients: readonly BrowserClientView[
 export type DiscoveredAccountView = AccountsBody["accounts"][number];
 export type AccountLinkResult = Readonly<{ accountId: string; revision: bigint }>;
 export type AccountUpdateResult = Readonly<{ accountId: string; revision: bigint }>;
-export type FactoryDispatchResult = Readonly<{ revision: bigint; enabled: boolean }>;
 export type RepositoryView = Readonly<RepositoryItem>;
 export type ProjectCreateResult = Readonly<{ projectId: string; revision: bigint }>;
 export type IntakeView = Readonly<IntakeResultBody>;
@@ -408,12 +407,6 @@ export class BrowserSession {
   }
 
   /** Private, cursor-paged completed work for one agent. */
-  /** Enable or pause factory scheduling at an exact durable factory revision. */
-  async setDispatch(request: { expectedRevision: bigint; enabled: boolean }): Promise<FactoryDispatchResult> {
-    if (request.expectedRevision < 1n || request.expectedRevision > MAX_SQLITE_INTEGER) return Promise.reject(new SessionError("invalid_request"));
-    return this.#accountRequest<FactoryDispatchResult>("FACTORY_DISPATCH_RESULT", CAPABILITIES.administration, "factory-dispatch", (id) => encodeClientControl({ type: "FACTORY_DISPATCH", id, body: { expected_revision: request.expectedRevision, enabled: request.enabled } }), { expectedRevision: request.expectedRevision, enabled: request.enabled });
-  }
-
   projectContent(operation: ProjectContentOperation, input: ProjectContentInput): Promise<ProjectContentOutput> {
     try { projectContentOperation(operation); } catch (error) { return Promise.reject(error); }
     const write = operation === "create" || operation === "revise" || operation === "deprecate" || operation === "outcome_write";
@@ -777,7 +770,7 @@ export class BrowserSession {
       this.#inviteResult(frame.body, frame.id);
       return;
     }
-    if (frame.type === "FACTORY_DISPATCH_RESULT" || frame.type === "PROJECT_CONTENT_RESULT" || frame.type === "ACCOUNTS" || frame.type === "ACCOUNT_LINK_RESULT" || frame.type === "BROWSER_CLIENTS" || frame.type === "BROWSER_CLIENT_REVOKE_RESULT" || frame.type === "PROJECT_CREATE_RESULT" || frame.type === "REPOSITORIES") {
+    if (frame.type === "PROJECT_CONTENT_RESULT" || frame.type === "ACCOUNTS" || frame.type === "ACCOUNT_LINK_RESULT" || frame.type === "BROWSER_CLIENTS" || frame.type === "BROWSER_CLIENT_REVOKE_RESULT" || frame.type === "PROJECT_CREATE_RESULT" || frame.type === "REPOSITORIES") {
       this.#accountResult(frame);
       return;
     }
@@ -1106,12 +1099,8 @@ export class BrowserSession {
     return this.#track(id, { kind, ...correlation }, payload);
   }
 
-  #accountResult(frame: Extract<ServerControlFrame, { type: "FACTORY_DISPATCH_RESULT" | "PROJECT_CONTENT_RESULT" | "ACCOUNTS" | "ACCOUNT_LINK_RESULT" | "BROWSER_CLIENTS" | "BROWSER_CLIENT_REVOKE_RESULT" | "PROJECT_CREATE_RESULT" | "REPOSITORIES" }>): void {
+  #accountResult(frame: Extract<ServerControlFrame, { type: "PROJECT_CONTENT_RESULT" | "ACCOUNTS" | "ACCOUNT_LINK_RESULT" | "BROWSER_CLIENTS" | "BROWSER_CLIENT_REVOKE_RESULT" | "PROJECT_CREATE_RESULT" | "REPOSITORIES" }>): void {
     const pending = this.#pending<AccountPending>(frame.id, frame.type);
-    if (frame.type === "FACTORY_DISPATCH_RESULT") {
-      if (pending.expectedRevision === undefined || pending.enabled === undefined || frame.body.revision !== pending.expectedRevision + 1n || frame.body.enabled !== pending.enabled) throw new ProtocolError("malformed");
-      this.#requests.delete(frame.id); pending.resolve(Object.freeze(frame.body) as never); return;
-    }
     if (frame.type === "PROJECT_CONTENT_RESULT") {
       if (pending.operation !== frame.body.operation) throw new ProtocolError("malformed");
       this.#requests.delete(frame.id);

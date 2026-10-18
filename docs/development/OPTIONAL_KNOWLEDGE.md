@@ -80,8 +80,8 @@ selected overseer. Delegated tasks retain their mission association; standalone
 tasks remain valid. Mission details show durable related work and link to the
 owner's existing controls. Task success does not accept the mission: acceptance
 still requires the outcome's reason, authorized judgment, and conclusion.
-Its task tray, whose pile shows the queue, opens the existing **Tasks** panel. **Pause new work** changes admission
-only; active processes continue. Mission creation and admission changes wait for
+Its task tray, whose pile shows the queue, opens the existing **Tasks** panel. Admission is changed with
+`factoryctl dispatch on|off` only; active processes continue. Mission creation waits for
 daemon acknowledgement.
 
 
