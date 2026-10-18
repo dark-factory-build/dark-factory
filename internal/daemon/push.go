@@ -59,9 +59,8 @@ func (store *pushStore) alertPath() string {
 	return filepath.Join(filepath.Dir(store.path), pushAlertsFileName)
 }
 
-// healthAlert records the level-triggered condition and returns whether this
-// transition may notify. The day stamp is the durable daily rate limit;
-// Active is cleared by recovery so a healthy period is visible after restart.
+// healthAlert records the day of the last notification and returns whether
+// this condition may notify again.
 func (store *pushStore) healthAlert(condition, day string, active bool) (bool, error) {
 	if store == nil {
 		return false, nil
@@ -78,10 +77,10 @@ func (store *pushStore) healthAlert(condition, day string, active bool) (bool, e
 		return false, err
 	}
 	state := states[condition]
-	alert := active && state.SentDay != day
-	if alert {
-		state.SentDay = day
+	if !active || state.SentDay == day {
+		return false, nil
 	}
+	state.SentDay = day
 	states[condition] = state
 	data, err = json.Marshal(states)
 	if err != nil {
@@ -91,7 +90,7 @@ func (store *pushStore) healthAlert(condition, day string, active bool) (bool, e
 	if err := os.WriteFile(temporary, data, 0o600); err != nil {
 		return false, err
 	}
-	return alert, os.Rename(temporary, store.alertPath())
+	return true, os.Rename(temporary, store.alertPath())
 }
 
 func (store *pushStore) load() (map[string]browserprotocol.PushSubscribe, error) {

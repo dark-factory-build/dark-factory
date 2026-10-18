@@ -142,6 +142,148 @@ func TestHealthAlertNotifiesOnceAndClearsOnRecovery(t *testing.T) {
 	}
 }
 
+func TestFactoryAlertsReadDurableSignalsAndPushOnce(t *testing.T) {
+	ctx := context.Background()
+	now := time.UnixMilli(10_000_000)
+	store, err := createTestStore(ctx, filepath.Join(t.TempDir(), "kernel.sqlite"), kernel.FactoryConfig{DispatchEnabled: true, Capacity: 20}, adapterTime(t, 1))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	daemon, err := newDaemon(store, func() time.Time { return now })
+	if err != nil {
+		t.Fatal(err)
+	}
+	daemon.push = newPushStore(t.TempDir())
+
+	projectID, _ := kernel.ProjectIDFromBytes(bytes.Repeat([]byte{0x71}, kernel.IDBytes))
+	if _, err := store.CreateProject(ctx, kernel.NewProject{ID: projectID, Name: "alerts", Root: "/alerts"}, adapterTime(t, 2)); err != nil {
+		t.Fatal(err)
+	}
+	sourceID, _ := kernel.IntakeSourceIDFromBytes(bytes.Repeat([]byte{0x72}, kernel.IDBytes))
+	source, err := store.CreateIntakeSource(ctx, kernel.NewIntakeSource{ID: sourceID, ProjectID: projectID, TargetRepositoryID: kernel.RepositoryID(projectID), GitHubRepositoryID: 42, GitHubRepositoryName: "team/issues", LabelFilter: "factory:ready", Policy: kernel.IntakePolicyManual, PollSeconds: 60, AdmissionLimit: 20}, adapterTime(t, 3))
+	if err != nil {
+		t.Fatal(err)
+	}
+	snapshot := kernel.IntakeIssueSnapshot{GitHubRepositoryID: 42, IssueNumber: 7, NodeID: "I_alert", Title: "Alert work", Body: "Do it", AuthorLogin: "owner", AuthorType: kernel.GitHubAuthorUser}
+	accepted, err := store.AcceptIntakeSnapshot(ctx, source.ID, snapshot, adapterTime(t, 4), source.Revision)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.ImportIntakeAcceptance(ctx, accepted.ID, adapterTime(t, 5), source); err != nil {
+		t.Fatal(err)
+	}
+
+	failure, _ := kernel.NewFailureProposal(kernel.FailureInternal, "alert test")
+	terminalAt := mustKernelTime(t, now.UnixMilli())
+	runs := make([]kernel.Run, 0, 10)
+	for index := byte(0); index < 10; index++ {
+		seed := byte(20 + index*10)
+		run := adapterRunningRoleProviderRun(t, store, seed, kernel.RoleOrchestrator, kernel.ProviderCodex)
+		runs = append(runs, run)
+	}
+	for _, run := range runs {
+		failed, err := store.FailRun(ctx, run.ID, run.Revision, failure, terminalAt)
+		if err != nil {
+			t.Fatal(err)
+		}
+		resources, err := store.Resources(ctx, failed.ID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var runtime, runner, provider, group kernel.Resource
+		for _, resource := range resources {
+			switch resource.Kind {
+			case kernel.ResourceRuntimeRoot:
+				runtime = resource
+			case kernel.ResourceRunnerProcess:
+				runner = resource
+			case kernel.ResourceProviderProcess:
+				provider = resource
+			case kernel.ResourceProviderGroup:
+				group = resource
+			}
+		}
+		failed, _, _, err = store.MarkProviderResourcesUnresolved(ctx, failed.ID, provider.ID, group.ID, failed.Revision, provider.Revision, group.Revision, provider.Identity, "test recovery", terminalAt)
+		if err != nil {
+			t.Fatal(err)
+		}
+		providerRevision, _ := kernel.NewRevision(provider.Revision.Int64() + 1)
+		groupRevision, _ := kernel.NewRevision(group.Revision.Int64() + 1)
+		failed, _, _, err = store.RecordRecoveredProviderAbsence(ctx, failed.ID, provider.ID, group.ID, failed.Revision, providerRevision, groupRevision, provider.Identity, terminalAt)
+		if err != nil {
+			t.Fatal(err)
+		}
+		failed, _, err = store.RecordRecoveredRunnerAbsence(ctx, failed.ID, runner.ID, failed.Revision, runner.Revision, runner.Identity, terminalAt)
+		if err != nil {
+			current, _, _ := store.Resource(ctx, runner.ID)
+			t.Fatalf("runner recovery: %v run=%+v resource=%+v", err, failed, current)
+		}
+		session, found, err := store.TerminalSessionForRun(ctx, failed.ID)
+		if err != nil || !found {
+			t.Fatalf("terminal session = %+v, found=%v, err=%v", session, found, err)
+		}
+		failed, _, err = store.CloseTerminalAfterRecoveredAbsence(ctx, failed.ID, failed.Revision, session.Revision, terminalAt)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := store.ReleaseResource(ctx, failed.ID, runtime.ID, runtime.Revision, runtime.Identity, terminalAt); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := store.FinalizeRun(ctx, failed.ID, failed.Revision, terminalAt); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	key, _, _ := devicePushKeys(t)
+	public := base64.RawURLEncoding.EncodeToString(elliptic.Marshal(elliptic.P256(), key.X, key.Y))
+	der, _ := x509.MarshalPKCS8PrivateKey(key)
+	private := base64.RawURLEncoding.EncodeToString(der)
+	boot, _ := kernel.BootIDFromBytes(bytes.Repeat([]byte{0x73}, kernel.IDBytes))
+	clientID, _ := kernel.BrowserClientIDFromBytes(bytes.Repeat([]byte{0x74}, kernel.IDBytes))
+	challenge := bytes.Repeat([]byte{0x75}, browserprotocol.ChallengeSize)
+	if _, err := store.CreateBrowserPairingChallenge(ctx, kernel.HashBrowserChallenge(challenge), boot, adapterOrigin, kernel.BrowserCapabilityObserve, adapterTime(t, 6), adapterTime(t, 100)); err != nil {
+		t.Fatal(err)
+	}
+	client, err := store.RedeemBrowserPairingChallenge(ctx, kernel.HashBrowserChallenge(challenge), boot, adapterOrigin, clientID, elliptic.Marshal(elliptic.P256(), key.X, key.Y), adapterTime(t, 8))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var hits atomic.Int32
+	service := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { hits.Add(1); w.WriteHeader(http.StatusCreated) }))
+	defer service.Close()
+	if err := daemon.push.update(func(subscriptions map[string]browserprotocol.PushSubscribe) {
+		subscriptions[client.ID.String()] = browserprotocol.PushSubscribe{Endpoint: service.URL, PublicKey: public, PrivateKey: private}
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	daemon.checkFactoryAlerts(ctx)
+	deadline := time.After(3 * time.Second)
+	for hits.Load() < 2 {
+		select {
+		case <-deadline:
+			t.Fatalf("push hits = %d, want two conditions", hits.Load())
+		case <-time.After(10 * time.Millisecond):
+		}
+	}
+	daemon.checkFactoryAlerts(ctx)
+	time.Sleep(50 * time.Millisecond)
+	if hits.Load() != 2 {
+		t.Fatalf("duplicate push hits = %d", hits.Load())
+	}
+
+	if err := store.RecordProductionObservation(ctx, projectID, kernel.ProductionObservation{Repository: "team/repo", ObservedAt: terminalAt.Int64(), PullRequests: []kernel.ProductionPullRequest{{Number: 1, Title: "merged", URL: "https://github.com/team/repo/pull/1", Head: "1111111111111111111111111111111111111111", Branch: "factory/alert", Base: "main", BaseSHA: "2222222222222222222222222222222222222222", State: "merged", MergedAt: now.UTC().Format(time.RFC3339)}}}, terminalAt); err != nil {
+		t.Fatal(err)
+	}
+	now = now.Add(2 * time.Hour)
+	daemon.checkFactoryAlerts(ctx)
+	time.Sleep(50 * time.Millisecond)
+	if hits.Load() != 2 {
+		t.Fatalf("recovery push hits = %d", hits.Load())
+	}
+}
+
 func TestNotifyPushWakesLiveClientsAndForgetsTheRest(t *testing.T) {
 	store, err := createTestStore(context.Background(), filepath.Join(t.TempDir(), "kernel.sqlite"), kernel.FactoryConfig{Capacity: 2}, adapterTime(t, 1))
 	if err != nil {
