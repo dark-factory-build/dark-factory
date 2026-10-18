@@ -2060,7 +2060,15 @@ func TestSupervisorCancellationStillJoinsAndCleansOwnedProcesses(t *testing.T) {
 	if !errors.Is(err, context.Canceled) {
 		t.Fatalf("RunNext cancellation = %v", err)
 	}
+	// factoryd stopped a live provider: the run carries that cause, not a
+	// provider exit, and its task is queued again once.
+	if run.Proposal == nil || run.Proposal.Code() != kernel.FailureTransient || run.Proposal.Detail() != kernel.ProviderStoppedRunDetail {
+		t.Fatalf("cancelled run proposal = %+v, want transient %q", run.Proposal, kernel.ProviderStoppedRunDetail)
+	}
 	fixture.assertTerminal(t, run, kernel.OutcomeFailed)
+	if task, _, err := fixture.store.Task(context.Background(), run.TaskID); err != nil || task.WorkRevision.Int64() != 2 {
+		t.Fatalf("cancelled task = %+v, %v, want work revision 2", task, err)
+	}
 	fixture.assertOneWitness(t)
 	fixture.assertReleased(t, run)
 }
@@ -2847,6 +2855,11 @@ func (fixture *supervisorFixture) assertTerminal(t *testing.T, run kernel.Run, k
 		want = kernel.TaskBlocked
 	case kernel.OutcomeCancelled:
 		want = kernel.TaskCancelled
+	case kernel.OutcomeFailed:
+		if run.Proposal.Code() == kernel.FailureTransient {
+			// A run factoryd stopped (or that never started) is queued again once.
+			want = kernel.TaskQueued
+		}
 	}
 	if task.Status != want {
 		t.Fatalf("task status = %s, want %s", task.Status.String(), want.String())

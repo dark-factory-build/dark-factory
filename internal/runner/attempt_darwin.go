@@ -1187,7 +1187,7 @@ func runAttempt(daemon, dir, lifetime *os.File, cfg attemptConfig, workerConfig 
 			// Forward the bounded refusal before waiting for child cleanup, so the
 			// daemon can revoke this attempt and persist the actual failure cause.
 			writeErr := writeControlFrame(daemon, frame, maxFrameBytes)
-			return finishAttemptFailure(child, dir, cfg, &reads, errors.Join(fmt.Errorf("runner: worker %s: %s", step.report, frame.Payload), writeErr))
+			return finishAttemptFailure(child, dir, cfg, &reads, errors.Join(fmt.Errorf("%w: worker %s: %s", errProviderRefused, step.report, frame.Payload), writeErr))
 		}
 		if err != nil || source != sourceWorker || !validCheckpointFrame(frame, step.report) {
 			return finishAttemptFailure(child, dir, cfg, &reads, protocolError(string(step.report)+" report", source, err))
@@ -1717,6 +1717,10 @@ func nextAttemptFrame(child *OwnedChild, daemon, worker *os.File, daemonOpen, wo
 	}
 }
 
+// errProviderRefused is the worker's own bounded pre-exec failure report: the
+// provider never ran, and the worker is exiting on its own account.
+var errProviderRefused = errors.New("runner: provider exec")
+
 func protocolError(want string, got attemptSource, err error) error {
 	if err == nil {
 		err = ErrState
@@ -1749,6 +1753,9 @@ func finishAttemptWithExit(child *OwnedChild, dir *os.File, cfg attemptConfig, r
 	if cleanupErr != nil {
 		return errors.Join(cause, fmt.Errorf("runner: converge inner: %w", cleanupErr))
 	}
+	// A worker that reported its own pre-exec refusal was already exiting; the
+	// terminate above only hurried it, so the exit stays the provider's own.
+	exit.Aborted = exit.Aborted && !errors.Is(cause, errProviderRefused)
 	cause = errors.Join(cause, killRunStragglers(dir))
 	// An AttemptResult is evidence that the complete owner cleanup path was
 	// observed. Sweep, protocol or kill errors (all unresolved) must never be

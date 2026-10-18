@@ -308,6 +308,10 @@ func (store *Store) ConsumeAttemptResult(ctx context.Context, result AttemptResu
 		failureCode, detail := FailureActivation, "provider converged before activation completed"
 		if result.kind == AttemptInnerUnregisteredConverged {
 			failureCode, detail = FailureSpawn, "runner converged without a registered inner process"
+		} else if run.Phase == RunRunning && result.exit.aborted {
+			// The terminal tail is not an exit reason here, and a constant
+			// detail is what lets the retry rule stop at one.
+			failureCode, detail = FailureTransient, ProviderStoppedRunDetail
 		} else if run.Phase == RunRunning {
 			failureCode, detail = FailureProviderExit, "provider exited before an attempt outcome"
 			if result.output != "" {

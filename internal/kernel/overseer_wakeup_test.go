@@ -909,7 +909,7 @@ func settleCarrier(t *testing.T, store *Store, at int64, seed byte, detail strin
 		t.Fatal(err)
 	}
 	code := FailureProtocol
-	if detail == NeverStartedRunDetail {
+	if detail == NeverStartedRunDetail || detail == ProviderStoppedRunDetail {
 		code = FailureTransient
 	}
 	failure, err := NewFailureProposal(code, detail)

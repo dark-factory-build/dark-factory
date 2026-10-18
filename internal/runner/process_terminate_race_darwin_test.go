@@ -77,13 +77,103 @@ func TestTerminateConvergesQueuedNaturalExit(t *testing.T) {
 	waitOwnedGroupWithoutLiveMembers(t, child.Identity())
 
 	exit, err := child.Terminate(time.Second)
-	if err != nil || exit.Code != 23 || exit.Signal != 0 {
+	if err != nil || exit.Code != 23 || exit.Signal != 0 || exit.Aborted {
 		t.Fatalf("queued natural exit=%+v err=%v", exit, err)
 	}
 	assertWaitedAndAbsent(t, child)
 	if _, err := child.Terminate(time.Second); !errors.Is(err, ErrState) {
 		t.Fatalf("second termination performed work: %v", err)
 	}
+}
+
+// The exit a provider reaches because the runner terminated it is the
+// runner's, whatever status its TERM handler picks. The handler here exits
+// the instant the signal lands, so nothing read after the signal could see
+// the shell alive: the status alone has to carry the attribution. The
+// sleeper is forked before the witness is written: the group TERM then
+// always reaches it, and `wait` returns at once whether bash runs the trap
+// on the signal or only once its child is gone. A witness written before
+// the fork left a window in which the sleeper never saw the signal, bash 3.2
+// held the pending trap until `wait` returned, and the KILL escalation won.
+func TestTerminateAttributesHandledAndDefaultTERMExits(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		trap       string
+		wantCode   int
+		wantSignal int
+	}{
+		{name: "handler-exits-zero", trap: "trap 'exit 0' TERM;", wantCode: 0},
+		{name: "handler-exits-nonzero", trap: "trap 'exit 3' TERM;", wantCode: 3},
+		{name: "default-disposition", wantCode: -1, wantSignal: int(unix.SIGTERM)},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newFixture(t)
+			ready := filepath.Join(f.root, "ready")
+			child := f.start("/bin/sh", []string{"-c", fmt.Sprintf("%s sleep 30 & printf ready > %q; wait", tc.trap, ready)}, nil, outputFile(t, filepath.Join(f.root, "out")))
+			if _, err := child.Activate(); err != nil {
+				t.Fatal(err)
+			}
+			installOwnedChildSafetyCleanup(t, child)
+			waitFile(t, ready)
+			exit, err := child.Terminate(time.Second)
+			if err != nil || exit.Code != tc.wantCode || exit.Signal != tc.wantSignal || !exit.Aborted {
+				t.Fatalf("terminated exit=%+v err=%v, want code=%d signal=%d aborted", exit, err, tc.wantCode, tc.wantSignal)
+			}
+			assertWaitedAndAbsent(t, child)
+		})
+	}
+}
+
+// A provider that signals itself ended on its own: the same SIGTERM status
+// as a termination, with no termination to attribute it to, through either
+// path that can reap it.
+func TestSelfSignalledExitIsNotRunnerAborted(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		reap func(*OwnedChild) (Exit, error)
+	}{
+		{name: "terminate", reap: func(child *OwnedChild) (Exit, error) { return child.Terminate(time.Second) }},
+		{name: "finish-after-exit", reap: func(child *OwnedChild) (Exit, error) { return child.FinishAfterExit(time.Second) }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newFixture(t)
+			child := f.start("/bin/sh", []string{"-c", "kill -TERM $$"}, nil, outputFile(t, filepath.Join(f.root, "out")))
+			if _, err := child.Activate(); err != nil {
+				t.Fatal(err)
+			}
+			installOwnedChildSafetyCleanup(t, child)
+			waitOwnedGroupWithoutLiveMembers(t, child.Identity())
+			exit, err := tc.reap(child)
+			if err != nil || exit.Code != -1 || exit.Signal != int(unix.SIGTERM) || exit.Aborted {
+				t.Fatalf("self-signalled exit=%+v err=%v", exit, err)
+			}
+			assertWaitedAndAbsent(t, child)
+		})
+	}
+}
+
+// Attribution is decided at the signal, not at the reap: a termination whose
+// group convergence fails leaves the exit unreaped, and the retried cleanup
+// that finally waits it still reports the runner's termination.
+func TestRetriedCleanupKeepsTerminationAttribution(t *testing.T) {
+	f := newFixture(t)
+	child, _ := startControlledNaturalExit(t, f, 23)
+	installOwnedChildSafetyCleanup(t, child)
+	child.testConvergence = func() error {
+		return fmt.Errorf("%w: injected group convergence failure", ErrUnresolved)
+	}
+	if _, err := child.Terminate(time.Second); !errors.Is(err, ErrUnresolved) {
+		t.Fatalf("failed convergence termination=%v", err)
+	}
+	if child.state != stateExited || !child.exitObserved || child.cmd.ProcessState != nil {
+		t.Fatalf("failed convergence invented Wait: state=%d observed=%t process_state=%v", child.state, child.exitObserved, child.cmd.ProcessState)
+	}
+	child.testConvergence = nil
+	exit, err := child.FinishAfterExit(time.Second)
+	if err != nil || exit.Code != -1 || exit.Signal != int(unix.SIGTERM) || !exit.Aborted {
+		t.Fatalf("retried reap exit=%+v err=%v", exit, err)
+	}
+	assertWaitedAndAbsent(t, child)
 }
 
 func TestTerminateDischargesEPERMOnlyAfterExactNaturalExit(t *testing.T) {
@@ -106,7 +196,7 @@ func TestTerminateDischargesEPERMOnlyAfterExactNaturalExit(t *testing.T) {
 	if setupErr != nil {
 		t.Fatalf("race setup: %v", setupErr)
 	}
-	if err != nil || exit.Code != 23 || exit.Signal != 0 {
+	if err != nil || exit.Code != 23 || exit.Signal != 0 || exit.Aborted {
 		t.Fatalf("exact exit did not discharge EPERM: exit=%+v err=%v", exit, err)
 	}
 	if got := calls.Load(); got != 1 {

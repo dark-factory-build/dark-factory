@@ -270,6 +270,51 @@ func TestConsumeConvergedResultMatrixAndConcurrentConflict(t *testing.T) {
 	}
 }
 
+// A running provider the runner stopped for factoryd (a restart, quiesce or
+// lost daemon) is the run's transient failure, never a provider exit: the
+// terminal tail is not its reason, its task is queued again, and a second run
+// that ends the same way is not.
+func TestConsumeAbortedResultIsTransientAndRequeuesOnce(t *testing.T) {
+	t.Parallel()
+	store, run, keys := runningStartedOrchestratorRun(t, 190)
+	defer store.Close()
+	ctx := context.Background()
+	resources := resourcesForRunTest(t, store, run.ID)
+	runtimeIdentity := resourceOfKind(t, resources, ResourceRuntimeRoot).Identity
+	providerIdentity := resourceOfKind(t, resources, ResourceProviderProcess).Identity
+	exit, _ := NewAttemptResultExitSignal(15)
+	result, _ := NewInnerConvergedAttemptResult(run.ID, keys.AttemptDigest, keys.ResultProofDigest, runtimeIdentity, providerIdentity, exit.WithAborted(true))
+	consumed, err := store.ConsumeAttemptResult(ctx, result.WithProviderOutput("^C"), run.Revision, mustTime(t, 25))
+	if err != nil || consumed.Phase != RunFinalizing || consumed.Proposal == nil || consumed.Proposal.code != FailureTransient || consumed.Proposal.detail != ProviderStoppedRunDetail || consumed.ProviderExit == nil {
+		t.Fatalf("aborted result consume = %+v err=%v", consumed, err)
+	}
+	runner := resourceOfKind(t, resourcesForRunTest(t, store, run.ID), ResourceRunnerProcess)
+	outerExit, _ := NewProcessExitCode(1, 0, mustTime(t, 26))
+	if _, _, err := store.RecordLiveRunnerExitAndRelease(ctx, run.ID, runner.ID, consumed.Revision, runner.Revision, runner.Identity, outerExit, mustTime(t, 26)); err != nil {
+		t.Fatal(err)
+	}
+	closeTerminalSessionAtCurrent(t, store, run.ID, 27)
+	runtime := resourceOfKind(t, resourcesForRunTest(t, store, run.ID), ResourceRuntimeRoot)
+	if _, err := store.ReleaseResource(ctx, run.ID, runtime.ID, runtime.Revision, runtime.Identity, mustTime(t, 28)); err != nil {
+		t.Fatal(err)
+	}
+	current, _, err := store.Run(ctx, run.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.FinalizeRun(ctx, run.ID, current.Revision, mustTime(t, 29)); err != nil {
+		t.Fatal(err)
+	}
+	task, _, err := store.Task(ctx, run.TaskID)
+	if err != nil || task.Status != TaskQueued || task.WorkRevision.Int64() != 2 {
+		t.Fatalf("task after a stopped run = %+v, %v, want queued at work revision 2", task, err)
+	}
+	settleCarrier(t, store, 40, 91, ProviderStoppedRunDetail)
+	if task, _, err = store.Task(ctx, run.TaskID); err != nil || task.Status != TaskFailed || task.WorkRevision.Int64() != 2 {
+		t.Fatalf("task after two stopped runs = %+v, %v, want failed at work revision 2", task, err)
+	}
+}
+
 func TestConsumeConvergedResultAdmittedAndFinalizingMatrix(t *testing.T) {
 	t.Parallel()
 	for _, activePair := range []bool{false, true} {

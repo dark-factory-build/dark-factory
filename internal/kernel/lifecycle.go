@@ -385,6 +385,12 @@ const RunLimitDetail = "Run time limit reached"
 // never-started run is.
 const ProviderCapacityRunDetail = "provider reported its selected model at capacity"
 
+// ProviderStoppedRunDetail is the transient failure of a running provider the
+// runner terminated for factoryd (a restart, quiesce or lost daemon) before any
+// attempt outcome: factoryd's stop, not a provider exit, so its task is retried
+// as a never-started run is.
+const ProviderStoppedRunDetail = "provider stopped by factoryd before an attempt outcome"
+
 // OverseerRunLimitDetail is the failure of an overseer run stopped at its run
 // limit (the project's, or the MaxOverseerRunSeconds backstop): its task is
 // retried as a never-started run is, so the next run resumes from durable state.

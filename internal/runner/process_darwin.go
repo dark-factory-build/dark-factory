@@ -813,8 +813,8 @@ func (c *OwnedChild) FinishAfterExit(timeout time.Duration) (Exit, error) {
 	return c.exit, nil
 }
 
-func exitFromWait(ps *os.ProcessState, err error) Exit {
-	e := Exit{Code: -1}
+func exitFromWait(ps *os.ProcessState, err error, aborted bool) Exit {
+	e := Exit{Code: -1, Aborted: aborted}
 	if ps == nil {
 		e.LaunchErr = fmt.Sprint(err)
 		return e
@@ -839,7 +839,9 @@ func (c *OwnedChild) waitOnce() error {
 	}
 	err := c.cmd.Wait()
 	c.state = stateWaited
-	c.exit = exitFromWait(c.cmd.ProcessState, err)
+	// Aborted was decided when this owner signalled the live child; the reap,
+	// however many cleanup retries it takes, only learns the status.
+	c.exit = exitFromWait(c.cmd.ProcessState, err, c.exit.Aborted)
 	return err
 }
 
@@ -886,7 +888,17 @@ func (c *OwnedChild) Terminate(timeout time.Duration) (Exit, error) {
 	}
 	var signalFailure error
 	if !c.exitObserved {
-		if err := c.signalGroup(unix.SIGTERM); err != nil {
+		// Only a TERM delivered to a still-live child makes the exit that
+		// follows ours, whatever status a handler picks for it; a group the
+		// census found already ended keeps its own exit. The census precedes
+		// the signal, so it cannot race a handler that exits the instant the
+		// signal lands, and nothing here reads the shared kqueue, whose
+		// level-triggered daemon readiness would otherwise be spun on.
+		switch err := c.signalGroup(unix.SIGTERM); {
+		case err == nil:
+			c.exit.Aborted = true
+		case errors.Is(err, errGroupConverged):
+		default:
 			// The exact child can exit between signalOwnedGroup's census and
 			// kill. Retain the failure while the owned kqueue waits for proof.
 			signalFailure = fmt.Errorf("%w: TERM: %v", ErrUnresolved, err)
@@ -920,7 +932,7 @@ func (c *OwnedChild) Terminate(timeout time.Duration) (Exit, error) {
 		}
 	}
 	if escalate {
-		if err := c.signalGroup(unix.SIGKILL); err != nil {
+		if err := c.signalGroup(unix.SIGKILL); err != nil && !errors.Is(err, errGroupConverged) {
 			return Exit{}, withSignalFailure(fmt.Errorf("%w: KILL: %v", ErrUnresolved, err))
 		}
 		if !c.exitObserved {
@@ -990,7 +1002,7 @@ func killRemainingGroup(leader Identity) error {
 		}
 		if census.hasLiveMember {
 			noLiveSince = time.Time{}
-			if err := signalOwnedGroupBefore(leader, unix.SIGKILL, deadline); err != nil {
+			if err := signalOwnedGroupBefore(leader, unix.SIGKILL, deadline); err != nil && !errors.Is(err, errGroupConverged) {
 				return err
 			}
 		} else if noLiveSince.IsZero() {
@@ -1017,6 +1029,12 @@ var testGroupCensus func(Identity) (ownedGroupCensus, error)
 // census before deciding. It absorbs snapshot lag, never real liveness.
 const groupSignalSettle = 250 * time.Millisecond
 
+// errGroupConverged is a group signal that found nothing live to deliver to:
+// the exact census proved the owned group already ended, before or during the
+// attempt. Callers converging a group treat it as done; a termination deciding
+// whose exit it is treats it as not its own.
+var errGroupConverged = errors.New("runner: owned group already converged")
+
 func signalOwnedGroup(leader Identity, signal unix.Signal) error {
 	return signalOwnedGroupBefore(leader, signal, time.Time{})
 }
@@ -1036,7 +1054,7 @@ func signalOwnedGroupBefore(leader Identity, signal unix.Signal, hardDeadline ti
 		return ErrUnresolved
 	}
 	if !census.hasLiveMember {
-		return nil
+		return errGroupConverged
 	}
 	signalErr := unix.Kill(-leader.PGID, signal)
 	if testGroupSignalResult != nil {
@@ -1102,7 +1120,10 @@ func signalOwnedGroupBefore(leader Identity, signal unix.Signal, hardDeadline ti
 				return classifyGroupSignal(signalErr, false)
 			}
 			if !now.Before(phaseTwoDeadline) {
-				return classifyGroupSignal(signalErr, true)
+				if err := classifyGroupSignal(signalErr, true); err != nil {
+					return err
+				}
+				return errGroupConverged
 			}
 			time.Sleep(5 * time.Millisecond)
 		}
