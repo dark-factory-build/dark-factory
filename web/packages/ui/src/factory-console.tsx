@@ -6,7 +6,7 @@ import { AgentPanel, HumanRequestPanel, WorkPanel, editErrorCopy, type TaskEdit,
 import type { ProjectContentCall } from "./factory-app-controller.js";
 import { useProduction } from "./production-data.js";
 import { deriveProductionView, inProgressProduction } from "./production-view.js";
-import { agentTelemetry, needsYou, workRows } from "./console-view.js";
+import { needsYou, workRows } from "./console-view.js";
 import { IconButton } from "./icons.js";
 import { Badge } from "./console-kit.js";
 
@@ -212,7 +212,6 @@ export function FactoryConsole({
                 agent={liveAgent}
                 state={scopedState}
                 terminalContent={terminalContent}
-                telemetry={agentTelemetry(liveAgent, scopedState, runPaths)}
               />
             </div>}
           </aside>

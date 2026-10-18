@@ -402,8 +402,8 @@ input and output tokens and cost (from `*token*usage*` and `*cost*` metrics,
 either temporality), tool calls and API requests (log events whose
 `event.name` ends `tool_result` or `api_request`), and the time of the last
 one. They ride the console's `RUN_PATHS` answer as `telemetry`; the floor
-tooltip and agent panel show only non-zero recorded counts, and a busy worker
-whose agent recorded nothing for two minutes is drawn waiting. Prompt text,
+tooltip shows only non-zero recorded counts, and a busy worker whose agent
+recorded nothing for two minutes is drawn waiting. Prompt text,
 tool input and output and every other attribute are discarded while decoding.
 Spend is never in the public projection.
 

@@ -314,12 +314,6 @@ export function projectFloor(state: StateView | undefined, prepared: ReturnType<
   return { graph: prepared.graph, workers, tasks };
 }
 
-/** The current run's recorded telemetry, only while its sample is for the agent's exact running task. */
-export function agentTelemetry(agent: AgentItem, state: StateView | undefined, runPaths: ReadonlyMap<string, RunPathSample> | undefined): RunTelemetry | undefined {
-  const task = state === undefined ? undefined : agentCurrentTask(agent, state);
-  return state === undefined || task === undefined ? undefined : matchingRunSample(state, task, runPaths)?.telemetry;
-}
-
 /** A live sample is evidence only for its exact running task and assigned agent. */
 function matchingRunSample(
   state: StateView,
