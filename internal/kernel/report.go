@@ -7,7 +7,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -343,9 +342,6 @@ func why(ctx context.Context, c *sql.Conn, archived history, project *ProjectID,
 	if len(details) > 0 {
 		lines = append(lines, "check failure details: "+strings.Join(details, "; "))
 	}
-	if pr.Review.Findings != "" {
-		lines = append(lines, "review findings: "+oneLine(pr.Review.Findings, 4096))
-	}
 	if found {
 		lines = append(lines, whyTask(task))
 	} else {
@@ -367,8 +363,10 @@ func why(ctx context.Context, c *sql.Conn, archived history, project *ProjectID,
 		if json.Unmarshal([]byte(operation), op) != nil {
 			return nil, ErrCorruptState
 		}
-		if op.Detail != "" {
-			lines = append(lines, "review detail: "+oneLine(op.Detail, 16000))
+		// A verdict's detail is its review of record (daemon review.go keeps its
+		// first 16,000 bytes), already printed.
+		if detail := oneLine(op.Detail, 16000); detail != "" && detail != oneLine(pr.Review.Findings, 16000) {
+			lines = append(lines, "review detail: "+detail)
 		}
 		if op.Conversation != "" {
 			lines = append(lines, "pull request comments: "+oneLine(op.Conversation, 16000))
@@ -485,10 +483,10 @@ func oneLine(value string, limit int) string {
 	return strings.ToValidUTF8(value[:min(len(value), limit)], "")
 }
 
-// escalationWhy is the why line, on its own line, of the pull request an
-// escalation keyed [reviewer:ID] names, so the overseer reads where it stands
-// and whom it waits on; nothing when the key names no pull request. The
-// escalation it follows is the reconciler's last action, so it is left out.
+// escalationWhy names, on its own line, the pull request an escalation keyed
+// [reviewer:ID] follows and whom it waits on; nothing when the key names no
+// pull request. The rest of why (head, checks, review text) is unbounded for a
+// wake and one `attempt why --pull` away.
 func escalationWhy(ctx context.Context, c *sql.Conn, project ProjectID, key string) string {
 	id, ok := strings.CutPrefix(key, "[reviewer:")
 	var repository string
@@ -501,6 +499,5 @@ func escalationWhy(ctx context.Context, c *sql.Conn, project ProjectID, key stri
 	if err != nil {
 		return ""
 	}
-	lines = slices.DeleteFunc(lines, func(line string) bool { return strings.HasPrefix(line, "reconciler: ") })
-	return "\n  why: " + strings.Join(lines, "; ")
+	return "\n  why: " + lines[0] + "; " + lines[len(lines)-1]
 }

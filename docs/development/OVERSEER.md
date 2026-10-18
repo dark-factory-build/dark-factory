@@ -73,10 +73,12 @@ fixed head. This private, project-scoped view contains workers, task objective a
 result excerpts, active runs, questions and explicit intervention history. On an
 ordinary causal wake, the standing task appends a `Factory causal wake` record:
 worker task and open pull request counts, one summary line per due task, and
-each open escalation with its pull request's `why` line beneath it (head,
-checks, review, queue, task, and whom it waits on). Act on the summarized items; use `overseer status --task`
-only when a line is insufficient. `mode=full` is the explicit initial/overflow
-recovery signal. Do not reconstruct an unchanged project merely because the
+each open escalation with its pull request and whom it waits on beneath it
+(`attempt why --pull N` has the head, checks, review and queue). Act on the summarized items; use `overseer status --task`
+only when a line is insufficient. `mode=full` is the explicit initial
+recovery signal (no prior overseer task); a wake that overflows the delivery
+bound stays targeted and names what fits, and the rest wakes you next.
+Do not reconstruct an unchanged project merely because the
 overseer woke. Status returns four entries from each collection. When
 `next_offset` is set, continue with `overseer status --offset N --head HEAD`; reuse
 the returned head exactly. A stale head restarts at page one. Use `overseer status

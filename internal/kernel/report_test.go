@@ -3,6 +3,7 @@ package kernel
 import (
 	"context"
 	"slices"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -71,9 +72,11 @@ func TestReportAndWhyReadTheReconcilersState(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	// A wake carries only the pull request and whom it waits on: the rest of
+	// why is unbounded (review text) and one `why --pull` away.
 	line := escalationWhy(ctx, read.connection, project.ID, "[reviewer:op7]")
 	read.Close()
-	if !strings.Contains(line, "pull: example/factory#7") || !strings.Contains(line, "head: "+head) {
+	if line != "\n  why: pull: example/factory#7 open \"\"; waits on: operator: factoryd escalated it to the overseer" {
 		t.Fatalf("escalation why = %q", line)
 	}
 	// Only required checks count, as in the reconciler: an optional failure or
@@ -86,10 +89,10 @@ func TestReportAndWhyReadTheReconcilersState(t *testing.T) {
 	if read, err = store.beginRead(ctx); err != nil {
 		t.Fatal(err)
 	}
-	line = escalationWhy(ctx, read.connection, project.ID, "[reviewer:op7]")
+	lines, err = why(ctx, read.connection, nil, &project.ID, "example/factory", 7, TaskID{})
 	read.Close()
-	if !strings.Contains(line, "; required checks: 1 passed, 0 pending, 0 failed;") {
-		t.Fatalf("why checks = %q", line)
+	if err != nil || !slices.Contains(lines, "required checks: 1 passed, 0 pending, 0 failed") {
+		t.Fatalf("why checks = %q, %v", lines, err)
 	}
 	// A failing check outranks a pending one and a missing verdict, as in review.Decide.
 	if waits := whyPullWaits(ProductionPullRequest{State: "open"}, false, Task{}, "", nil, 1, 1); waits != "factoryd: failing checks send it back on its next pass" {
@@ -130,8 +133,47 @@ func TestWhyRendersStoredCheckAnnotationsAndReviewFindings(t *testing.T) {
 	}
 	lines, err := store.Why(ctx, &project.ID, 7, TaskID{})
 	joined := strings.Join(lines, "\n")
-	if err != nil || !strings.Contains(joined, "check failure details:") || !strings.Contains(joined, "TestExactHead") || !strings.Contains(joined, "review findings: review found an exact-head regression") {
+	if err != nil || !strings.Contains(joined, "check failure details:") || !strings.Contains(joined, "TestExactHead") || strings.Count(joined, "review found an exact-head regression") != 1 || !strings.Contains(joined, "review-of-record: review found an exact-head regression") {
 		t.Fatalf("why evidence = %q, %v", lines, err)
+	}
+}
+
+// The review of record is the verdict operation's detail (daemon review.go),
+// so why prints that text once; an operation whose detail is something else
+// (an ejection's reason) still prints it.
+func TestWhyPrintsTheReviewOfRecordOnce(t *testing.T) {
+	t.Parallel()
+	store, _, project, agent := newAdmissionStore(t, RoleWorker, 1)
+	defer store.Close()
+	ctx := context.Background()
+	task, err := store.EnqueueTask(ctx, NewTask{ID: taskID(t, 201), ProjectID: project.ID, AssignedAgentID: agent.ID, IncarnationID: incarnationID(t, 202), Title: "ship"}, mustTime(t, 4))
+	if err != nil {
+		t.Fatal(err)
+	}
+	head := strings.Repeat("a", 40)
+	findings := "review found a regression " + strings.Repeat("x", 3000)
+	long := "review found a regression " + strings.Repeat("y", 20000)
+	for at, c := range []struct {
+		findings, detail string
+		printed          bool
+	}{
+		{findings, findings, false},
+		{findings, "Not reviewed: its checks failed.", true},
+		// The daemon keeps only the first 16,000 bytes of a long verdict as
+		// the review of record (review.go), so the texts differ yet render alike.
+		{strings.ToValidUTF8(long[:16000], ""), long, false},
+	} {
+		number := uint64(12 + at) // a stored review of record at the same head wins
+		pr := ProductionPullRequest{Number: number, Title: "Evidence", URL: "https://github.com/example/factory/pull/12", Head: head, Branch: "feature/evidence", Base: "main", State: "open", Review: ProductionReview{Head: head, State: "block", Findings: c.findings}}
+		operation := review.Operation{ID: "op" + strconv.FormatUint(number, 10), Request: review.Request{Repository: "example/factory", PullNumber: number, Head: head}, State: "completed", Detail: c.detail}
+		if err := store.RecordPublicationWithReviewOperation(ctx, project.ID, task.ID, "example/factory", pr, operation.ID, operation, mustTime(t, int64(5+at))); err != nil {
+			t.Fatal(err)
+		}
+		lines, err := store.Why(ctx, &project.ID, number, TaskID{})
+		joined := strings.Join(lines, "\n")
+		if err != nil || strings.Count(joined, "review found a regression") != 1 || strings.Contains(joined, "review detail: ") != c.printed {
+			t.Fatalf("why with detail %.20q = %.300q, %v", c.detail, lines, err)
+		}
 	}
 }
 
