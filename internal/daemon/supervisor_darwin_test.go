@@ -44,7 +44,7 @@ func TestMain(m *testing.M) {
 	}
 	if filepath.Base(os.Args[0]) == "claude" {
 		if err := runSupervisorClaudeFixture(); err != nil {
-			fmt.Fprintln(os.Stderr, "supervisor Claude fixture failed")
+			fmt.Fprintf(os.Stderr, "supervisor Claude fixture failed: %v\n", err)
 			os.Exit(70)
 		}
 		os.Exit(0)
