@@ -37,6 +37,9 @@ func RunProviderSelfCheck(ctx context.Context, spec SupervisorSpec, repository s
 	task := `Run this provider self-check exactly. Read payload.txt from the checkout and verify it contains exact source. Create exactly one file named ` + providerSelfCheckFile + ` containing exactly "provider self-check\n". Stage and commit only that file with commit message ` + providerSelfCheckCommit + ` and git -c commit.gpgSign=false. Then use the configured factory_attempt MCP tool to call attempt succeed with result "provider-self-check". Do not call factoryctl from the shell, do not modify any other file, and do not claim success if any step fails.`
 	var commit string
 	spec.beforeChangeSettlement = func(ctx context.Context, run kernel.Run, changeParent string) error {
+		if run.Proposal == nil || run.Proposal.Kind() != kernel.OutcomeSucceeded {
+			return nil
+		}
 		if run.ChangeID == nil {
 			return errors.New("provider self-check: isolated run has no Change")
 		}

@@ -579,7 +579,9 @@ func runSupervisorClaudeFixture() error {
 				return fmt.Errorf("self-check commit failed: %s", output)
 			}
 		case "noisy":
-			fmt.Print(strings.Repeat("provider self-check output\n", 8192))
+			if err := exec.Command("sh", "-c", "yes 0123456789abcdef | head -n 65536").Run(); err != nil {
+				return fmt.Errorf("self-check noisy output: %w", err)
+			}
 		}
 		payload, err := os.ReadFile("payload.txt")
 		if err != nil || string(payload) != "exact source\n" {
