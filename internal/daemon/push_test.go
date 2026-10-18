@@ -24,6 +24,7 @@ import (
 	"github.com/dark-factory-build/dark-factory/internal/browser"
 	"github.com/dark-factory-build/dark-factory/internal/browserprotocol"
 	"github.com/dark-factory-build/dark-factory/internal/kernel"
+	"github.com/dark-factory-build/dark-factory/internal/maintainer"
 	"github.com/dark-factory-build/dark-factory/internal/relayhost"
 )
 
@@ -257,6 +258,28 @@ func TestFactoryAlertsReadDurableSignalsAndPushOnce(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
+	if source, err = store.SetIntakeSourceEnabled(ctx, source.ID, source.Revision, true, terminalAt); err != nil {
+		t.Fatal(err)
+	}
+	waiting := true
+	daemon.intakeIssues = func(context.Context, string, uint64, uint32, string, uint64) (maintainer.IssuePage, error) {
+		if waiting {
+			issue := maintainer.Issue{ID: 8, NodeID: "I_waiting", Number: 8, Title: "Waiting alert work", Body: "Wait", State: "open", Labels: []string{"factory:ready"}, URL: "https://github.com/team/issues/issues/8"}
+			issue.Author.Login, issue.Author.Type = "stranger", "User"
+			return maintainer.IssuePage{RepositoryID: 42, Issues: []maintainer.Issue{issue}}, nil
+		}
+		return maintainer.IssuePage{RepositoryID: 42}, nil
+	}
+	daemon.pollIntake(ctx)
+	if !daemon.intakeReadyWork() {
+		t.Fatal("poller did not expose waiting intake work")
+	}
+	waiting = false
+	now = now.Add(2 * time.Minute)
+	daemon.pollIntake(ctx)
+	if daemon.intakeReadyWork() {
+		t.Fatal("poller retained cleared waiting intake work")
+	}
 
 	daemon.checkFactoryAlerts(ctx)
 	deadline := time.After(3 * time.Second)
@@ -277,6 +300,15 @@ func TestFactoryAlertsReadDurableSignalsAndPushOnce(t *testing.T) {
 		t.Fatal(err)
 	}
 	now = now.Add(2 * time.Hour)
+	signals, err := store.AlertSignals(ctx, now.UnixMilli())
+	if err != nil {
+		t.Fatal(err)
+	}
+	for condition, active := range factoryAlertConditions(signals, daemon.intakeReadyWork(), now.UnixMilli()) {
+		if active {
+			t.Fatalf("recovery condition %s remains active: signals=%+v", condition, signals)
+		}
+	}
 	daemon.checkFactoryAlerts(ctx)
 	time.Sleep(50 * time.Millisecond)
 	if hits.Load() != 2 {
