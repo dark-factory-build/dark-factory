@@ -70,9 +70,20 @@ func verifyProviderSelfCheckCommit(ctx context.Context, git, repository, base st
 	if err != nil || strings.TrimSpace(subject) != providerSelfCheckCommit {
 		return "", errors.New("provider self-check: commit message mismatch")
 	}
-	names, err := selfCheckGitOutput(ctx, git, "-C", repository, "diff-tree", "--no-commit-id", "--name-only", "-r", commit)
+	baseCommit, err := selfCheckGitOutput(ctx, git, "-C", repository, "rev-parse", "--verify", base+"^{commit}")
 	if err != nil {
-		return "", fmt.Errorf("provider self-check: commit file lookup: %w", err)
+		return "", fmt.Errorf("provider self-check: base lookup: %w", err)
+	}
+	baseCommit = strings.TrimSpace(baseCommit)
+	if baseCommit == commit {
+		return "", errors.New("provider self-check: commit did not advance the base")
+	}
+	if _, err := selfCheckGitOutput(ctx, git, "-C", repository, "merge-base", "--is-ancestor", baseCommit, commit); err != nil {
+		return "", fmt.Errorf("provider self-check: commit is not based on the selected base: %w", err)
+	}
+	names, err := selfCheckGitOutput(ctx, git, "-C", repository, "diff", "--name-only", "--diff-filter=ACDMRTUXB", baseCommit, commit)
+	if err != nil {
+		return "", fmt.Errorf("provider self-check: bounded change lookup: %w", err)
 	}
 	if strings.TrimSpace(names) != providerSelfCheckFile {
 		return "", errors.New("provider self-check: commit changed more than the bounded file")
@@ -83,13 +94,6 @@ func verifyProviderSelfCheckCommit(ctx context.Context, git, repository, base st
 	}
 	if body != "provider self-check\n" {
 		return "", errors.New("provider self-check: bounded file content mismatch")
-	}
-	baseCommit, err := selfCheckGitOutput(ctx, git, "-C", repository, "rev-parse", "--verify", base+"^{commit}")
-	if err != nil {
-		return "", fmt.Errorf("provider self-check: base lookup: %w", err)
-	}
-	if strings.TrimSpace(baseCommit) == commit {
-		return "", errors.New("provider self-check: commit did not advance the base")
 	}
 	return commit, nil
 }

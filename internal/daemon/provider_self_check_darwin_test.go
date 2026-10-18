@@ -42,16 +42,18 @@ func TestVerifyProviderSelfCheckCommitRequiresOneExactFile(t *testing.T) {
 
 func TestRunProviderSelfCheckUsesRunIsolated(t *testing.T) {
 	for _, test := range []struct {
-		name   string
-		mode   string
-		tools  bool
-		passed bool
+		name     string
+		mode     string
+		tools    bool
+		passed   bool
+		evidence string
 	}{
 		{name: "success", tools: true, passed: true},
 		{name: "launch failure", passed: false},
-		{name: "checkout-read failure", mode: "checkout-read-failure", tools: true},
-		{name: "commit failure", mode: "commit-failure", tools: true},
-		{name: "attempt API failure", mode: "attempt-api-failure", tools: true},
+		{name: "checkout-read failure", mode: "checkout-read-failure", tools: true, evidence: "checkout"},
+		{name: "commit failure", mode: "commit-failure", tools: true, evidence: "commit"},
+		{name: "attempt API failure", mode: "attempt-api-failure", tools: true, evidence: "attempt"},
+		{name: "bounded edit failure", mode: "bounded-edit-failure", tools: true, evidence: "bounded"},
 		{name: "output larger than pipe capacity", mode: "noisy", tools: true, passed: true},
 	} {
 		t.Run(test.name, func(t *testing.T) {
@@ -95,7 +97,7 @@ func TestRunProviderSelfCheckUsesRunIsolated(t *testing.T) {
 				GitExecutable: git, BaseRevision: base, RunnerExecutable: executable, FactoryctlExecutable: factoryctl,
 				ToolPath: toolPath, AccountHome: root,
 			}, repository, kernel.ProviderClaudeCode)
-			if result.Passed != test.passed {
+			if result.Passed != test.passed || !test.passed && test.evidence != "" && !strings.Contains(result.Detail, test.evidence) {
 				t.Fatalf("self-check = %+v", result)
 			}
 		})

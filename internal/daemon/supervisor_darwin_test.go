@@ -569,17 +569,32 @@ func runSupervisorClaudeFixture() error {
 		modeBytes, _ := os.ReadFile(".provider-self-check-mode")
 		mode := strings.TrimSpace(string(modeBytes))
 		switch mode {
-		case "checkout-read-failure", "attempt-api-failure":
-			return nil
+		case "checkout-read-failure":
+			_, err := os.ReadFile("missing-self-check-payload.txt")
+			return fmt.Errorf("self-check checkout read failed: %w", err)
 		case "commit-failure":
-			_, err := client.Succeed(ctx, "provider-self-check")
-			return err
+			if output, err := exec.Command("git", "commit", "-m", "un-staged self-check").CombinedOutput(); err == nil {
+				return errors.New("self-check commit unexpectedly succeeded")
+			} else {
+				return fmt.Errorf("self-check commit failed: %s", output)
+			}
 		case "noisy":
 			fmt.Print(strings.Repeat("provider self-check output\n", 8192))
 		}
 		payload, err := os.ReadFile("payload.txt")
 		if err != nil || string(payload) != "exact source\n" {
 			return fmt.Errorf("self-check payload: %v", err)
+		}
+		if mode == "bounded-edit-failure" {
+			if err := os.WriteFile("payload.txt", []byte("changed source\n"), 0o644); err != nil {
+				return err
+			}
+			if output, err := exec.Command("git", "add", "payload.txt").CombinedOutput(); err != nil {
+				return fmt.Errorf("self-check outside-file add: %v: %s", err, output)
+			}
+			if output, err := exec.Command("git", "commit", "-m", "outside bounded file").CombinedOutput(); err != nil {
+				return fmt.Errorf("self-check outside-file commit: %v: %s", err, output)
+			}
 		}
 		if err := os.WriteFile(providerSelfCheckFile, []byte("provider self-check\n"), 0o644); err != nil {
 			return err
@@ -590,8 +605,7 @@ func runSupervisorClaudeFixture() error {
 		if output, err := exec.Command("git", "-c", "commit.gpgSign=false", "commit", "-m", providerSelfCheckCommit).CombinedOutput(); err != nil {
 			return fmt.Errorf("self-check git commit: %v: %s", err, output)
 		}
-		_, err = client.Succeed(ctx, "provider-self-check")
-		return err
+		return runSelfCheckMCP(ctx, mode == "attempt-api-failure")
 	}
 	result := fmt.Sprint(strings.Count(task, "Codify the operator scripts and the deploy order. "))
 	if strings.HasPrefix(task, "fetched ") && strings.Contains(task, "Retained Change rebase context (bounded):") {
@@ -617,6 +631,65 @@ func runSupervisorClaudeFixture() error {
 	}
 	_, err = client.Succeed(ctx, result)
 	return err
+}
+
+func runSelfCheckMCP(ctx context.Context, forged bool) error {
+	factoryctl := os.Getenv("DARK_FACTORY_FACTORYCTL")
+	if factoryctl == "" {
+		return errors.New("self-check MCP command is not configured")
+	}
+	env := os.Environ()
+	var forgedPath string
+	if forged {
+		file, err := os.CreateTemp("", "self-check-forged-token-")
+		if err != nil {
+			return err
+		}
+		forgedPath = file.Name()
+		if _, err := file.WriteString(strings.Repeat("0", 32)); err != nil {
+			file.Close()
+			os.Remove(forgedPath)
+			return err
+		}
+		if err := file.Close(); err != nil {
+			os.Remove(forgedPath)
+			return err
+		}
+		defer os.Remove(forgedPath)
+		filtered := env[:0]
+		for _, entry := range env {
+			if !strings.HasPrefix(entry, "DARK_FACTORY_ATTEMPT_TOKEN_FILE=") {
+				filtered = append(filtered, entry)
+			}
+		}
+		env = append(filtered, "DARK_FACTORY_ATTEMPT_TOKEN_FILE="+forgedPath)
+	}
+	input := "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"initialize\"}\n" +
+		"{\"jsonrpc\":\"2.0\",\"method\":\"notifications/initialized\"}\n" +
+		"{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"tools/call\",\"params\":{\"name\":\"factory\",\"arguments\":{\"argv\":[\"attempt\",\"succeed\",\"--result\",\"provider-self-check\"]}}}\n"
+	command := exec.CommandContext(ctx, factoryctl, "attempt", "mcp")
+	command.Env = env
+	command.Stdin = strings.NewReader(input)
+	output, err := command.Output()
+	if err != nil {
+		return fmt.Errorf("self-check MCP child: %w", err)
+	}
+	lines := strings.Split(strings.TrimSpace(string(output)), "\n")
+	if len(lines) == 0 {
+		return errors.New("self-check MCP child returned no response")
+	}
+	var response struct {
+		Result struct {
+			IsError bool `json:"isError"`
+		} `json:"result"`
+	}
+	if err := json.Unmarshal([]byte(lines[len(lines)-1]), &response); err != nil {
+		return fmt.Errorf("self-check MCP response: %w", err)
+	}
+	if response.Result.IsError {
+		return errors.New("self-check attempt API rejected MCP call")
+	}
+	return nil
 }
 
 // Claude receives a task longer than a terminal line whole in its prompt, as
