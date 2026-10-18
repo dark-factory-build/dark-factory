@@ -11,6 +11,8 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+
+	"github.com/dark-factory-build/dark-factory/internal/runner"
 )
 
 // wakeFixture is a project with a worker and a standing overseer.
@@ -39,6 +41,10 @@ func wakeFixture(t testing.TB) (*Store, Agent, Agent) {
 		t.Fatal(err)
 	}
 	return store, worker, overseer
+}
+
+func wakeBodyFits(provider Provider, body string) bool {
+	return byteLen(body) <= wakeBodyLimit(provider)
 }
 
 func wakeBodies(t testing.TB, store *Store, at int64, cutover ...int64) []string {
@@ -483,8 +489,9 @@ func TestOverseerWakeSummarisesTasks(t *testing.T) {
 }
 
 // Lines that overflow the provider bound are dropped from the end one at a
-// time, before any escalation, and the wake becomes full.
-func TestOverseerWakeInstructionFallsBackToFull(t *testing.T) {
+// time, before any escalation; the wake stays targeted, since the rest stay
+// due, and only a wake without a prior task is full.
+func TestOverseerWakeInstructionDropsOverflowAndStaysTargeted(t *testing.T) {
 	t.Parallel()
 	line := "- " + strings.Repeat("x", 200)
 	lines := make([]string, 50) // > 8 KiB with Codex
@@ -492,13 +499,69 @@ func TestOverseerWakeInstructionFallsBackToFull(t *testing.T) {
 		lines[index] = line
 	}
 	prior := taskID(t, 9)
-	body := overseerWakeInstruction(ProviderCodex, "Supervise.", "counts", lines, []string{"Escalated: stuck"}, &prior, false)
+	body := overseerWakeInstruction(ProviderCodex, "Supervise.", "counts", lines, []string{"Escalated: stuck"}, &prior)
 	if kept := strings.Count(body, line); kept == 0 || wakeBodyFits(ProviderCodex, body+"\n"+line) ||
-		!strings.Contains(body, "mode=full") || !strings.HasSuffix(body, "\nEscalated: stuck") {
+		!strings.Contains(body, "mode=targeted; prior_task_id="+prior.String()) || !strings.HasSuffix(body, "\nEscalated: stuck") {
 		t.Fatalf("overflow body keeps %d lines = %q", kept, body)
 	}
-	if body := overseerWakeInstruction(ProviderCodex, "Supervise.", "counts", lines[:1], nil, &prior, false); !strings.Contains(body, "mode=targeted; prior_task_id="+prior.String()) || !strings.HasSuffix(body, "\n"+line) {
+	if body := overseerWakeInstruction(ProviderCodex, "Supervise.", "counts", lines[:1], nil, &prior); !strings.Contains(body, "mode=targeted; prior_task_id="+prior.String()) || !strings.HasSuffix(body, "\n"+line) {
 		t.Fatalf("targeted body = %q", body)
+	}
+	if body := overseerWakeInstruction(ProviderCodex, "Supervise.", "counts", lines[:1], nil, nil); !strings.Contains(body, "mode=full; prior_task_id=; ") {
+		t.Fatalf("initial body = %q", body)
+	}
+}
+
+// A 4.6 KiB standing instruction and one 10 KiB escalation: the sole line is
+// cut to the room left, so the wake fits the native bound, stays targeted and
+// names the item, instead of an unnamed mode=full wake that left the item
+// due and woke the overseer straight back (18 Oct 2026).
+func TestOverseerWakeInstructionCutsASoleOversizedEscalation(t *testing.T) {
+	t.Parallel()
+	instruction := strings.Repeat("Supervise. ", 428) // 4.6 KiB
+	escalation := "Escalated: stuck 7 [reviewer:op7]\n  why: " + strings.Repeat("review text ", 850)
+	prior := taskID(t, 9)
+	body := overseerWakeInstruction(ProviderCodex, instruction, "counts", nil, []string{escalation}, &prior)
+	if !wakeBodyFits(ProviderCodex, body) || byteLen(body) < runner.MaxNativeTaskBytes-16 || !strings.Contains(body, "mode=targeted; ") || !strings.Contains(body, "\nEscalated: stuck 7 [reviewer:op7]\n  why: review text ") {
+		t.Fatalf("oversized escalation wake (%d bytes) = %.300q", byteLen(body), body)
+	}
+	// A task line ahead of it is dropped first, then the escalation is cut.
+	body = overseerWakeInstruction(ProviderCodex, instruction, "counts", []string{"- task"}, []string{escalation}, &prior)
+	if !wakeBodyFits(ProviderCodex, body) || strings.Contains(body, "- task") || !strings.Contains(body, "[reviewer:op7]") {
+		t.Fatalf("oversized escalation behind a line = %.300q", body)
+	}
+}
+
+// Live shape of the same: the escalated pull request carries a 10 KiB review
+// of record. Each wake fits, names its item, and the named item is not due
+// again once its carrier settles; the second wake, with a prior task, is targeted.
+func TestOverseerOversizedEscalationWakeNamesItsItemOnce(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	store, _, overseer := wakeFixture(t)
+	policy, after, instruction := IdleStandingInstruction, uint32(1), strings.Repeat("Supervise. ", 428) // 4.6 KiB
+	if _, err := store.UpdateAgent(ctx, overseer.ID, overseer.Revision, AgentPatch{IdlePolicy: &policy, IdleAfterSeconds: &after, IdleInstruction: &instruction}, mustTime(t, 5)); err != nil {
+		t.Fatal(err)
+	}
+	head := strings.Repeat("a", 40)
+	findings := strings.Repeat("review text ", 850) // 10 KiB
+	at := int64(1000)
+	for wake, number := range []string{"7", "8"} {
+		escalate(t, store, overseer.ProjectID, number, "open", head, head, at)
+		if _, err := store.writer.ExecContext(ctx, `UPDATE production_records SET document = json_set(document, '$.review', json_object('head', ?, 'state', 'block', 'findings', ?)) WHERE kind = 'pull_request' AND identity = ?`, head, findings, number); err != nil {
+			t.Fatal(err)
+		}
+		at += overseerWakeSettle.Milliseconds()
+		bodies := wakeBodies(t, store, at)
+		mode := map[int]string{0: "mode=full", 1: "mode=targeted"}[wake]
+		if len(bodies) != 1 || !wakeBodyFits(ProviderCodex, bodies[0]) || !strings.Contains(bodies[0], mode+"; ") || !strings.Contains(bodies[0], "Escalated: stuck "+number+" [reviewer:op"+number+"]\n  why: pull: example/factory#"+number+" open \"\"; waits on: operator: factoryd escalated it to the overseer") {
+			t.Fatalf("wake %d = %.200q ... %.200q", wake, bodies, bodies[0][max(0, len(bodies[0])-200):])
+		}
+		settleCarrier(t, store, at+1, byte(10+wake*21), "ran")
+		at += overseerWakeSettle.Milliseconds()
+		if bodies := wakeBodies(t, store, at); len(bodies) != 0 {
+			t.Fatalf("named item woke the overseer again: %.300q", bodies)
+		}
 	}
 }
 

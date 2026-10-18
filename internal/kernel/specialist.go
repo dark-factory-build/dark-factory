@@ -290,7 +290,7 @@ func specialistWake(ctx context.Context, c *sql.Conn, agent Agent, state Special
 			body += "\nEvents since prior review:\n" + strings.Join(events, "\n")
 		}
 		switch {
-		case wakeBodyFits(agent.Provider, body):
+		case byteLen(body) <= wakeBodyLimit(agent.Provider):
 			return body, nil
 		case len(events) != 0:
 			events = nil

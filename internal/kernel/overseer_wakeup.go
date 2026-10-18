@@ -616,15 +616,13 @@ func overseerWake(ctx context.Context, connection *sql.Conn, agent Agent, at, cu
 func overseerWakeFromPass(ctx context.Context, connection *sql.Conn, agent Agent, at int64, pass []overseerPassItem) (string, bool, error) {
 	var lines, escalations []string
 	var counts string
-	full := false
 	for _, item := range pass {
 		if !item.due {
 			continue
 		}
 		counts = item.counts
 		if len(lines)+len(escalations) == 32 {
-			full = true // more is due than one wake names
-			break
+			break // more is due than one wake names; the rest stay due
 		}
 		if item.escalation {
 			line := strings.ToValidUTF8(item.line[:min(len(item.line), 256)], "")
@@ -643,7 +641,7 @@ func overseerWakeFromPass(ctx context.Context, connection *sql.Conn, agent Agent
 	if err != nil {
 		return "", false, err
 	}
-	return overseerWakeInstruction(agent.Provider, agent.Idle.Instruction, counts, lines, escalations, prior, full || prior == nil), true, nil
+	return overseerWakeInstruction(agent.Provider, agent.Idle.Instruction, counts, lines, escalations, prior), true, nil
 }
 
 // overseerWakeLine summarises one due task in a line: identity, title, status,
@@ -705,44 +703,46 @@ func latestOverseerTask(ctx context.Context, connection *sql.Conn, agentID Agent
 }
 
 // overseerWakeInstruction appends the causal record to the standing
-// instruction. What does not fit the provider's delivery bound is dropped
-// from the end one line at a time (task lines, then escalations) and the wake
-// becomes a full reconciliation, so it names the oldest items that fit and the
-// rest stay due; the bare instruction was checked against it when set.
-func overseerWakeInstruction(provider Provider, instruction, counts string, lines, escalations []string, prior *TaskID, full bool) string {
-	priorID := ""
+// instruction; only a wake without a prior overseer task is full. What does
+// not fit the provider's delivery bound is dropped from the end one line at a
+// time (task lines, then escalations) and stays due; a sole line that overflows
+// alone is cut to the room left, since its key leads, so every wake names an
+// item (an unnamed wake woke the overseer straight back, 18 Oct 2026).
+func overseerWakeInstruction(provider Provider, instruction, counts string, lines, escalations []string, prior *TaskID) string {
+	mode, priorID := "full", ""
 	if prior != nil {
-		priorID = prior.String()
+		mode, priorID = "targeted", prior.String()
+	}
+	header := instruction + "\n\nFactory causal wake: mode=" + mode + "; prior_task_id=" + priorID + "; " + counts + ". mode=full requires fixed-head reconciliation."
+	if len(escalations) != 0 {
+		header += "\nFactoryd escalations are first-party facts; do not re-verify them. Reproduce claims from other agents."
 	}
 	for {
-		mode := "targeted"
-		if full {
-			mode = "full"
-		}
-		body := instruction + "\n\nFactory causal wake: mode=" + mode + "; prior_task_id=" + priorID + "; " + counts + ". mode=full requires fixed-head reconciliation."
-		if len(escalations) != 0 {
-			body += "\nFactoryd escalations are first-party facts; do not re-verify them. Reproduce claims from other agents."
-		}
+		body := header
 		for _, line := range slices.Concat(lines, escalations) {
 			body += "\n" + line
 		}
+		excess := byteLen(body) - wakeBodyLimit(provider)
+		drop := &escalations
+		if len(lines) != 0 {
+			drop = &lines
+		}
 		switch {
-		case wakeBodyFits(provider, body):
+		case excess <= 0:
 			return body
-		case len(lines) != 0:
-			lines, full = lines[:len(lines)-1], true
-		case len(escalations) != 0:
-			escalations, full = escalations[:len(escalations)-1], true
-		default:
+		case len(*drop) == 0:
 			return instruction
+		case len(lines)+len(escalations) == 1 && excess < len((*drop)[0]):
+			(*drop)[0] = strings.ToValidUTF8((*drop)[0][:len((*drop)[0])-excess], "")
+		default:
+			*drop = (*drop)[:len(*drop)-1]
 		}
 	}
 }
 
-func wakeBodyFits(provider Provider, body string) bool {
-	limit := runner.MaxProviderTaskBytes
+func wakeBodyLimit(provider Provider) int {
 	if provider != ProviderShell {
-		limit = runner.MaxNativeTaskBytes
+		return runner.MaxNativeTaskBytes
 	}
-	return byteLen(body) <= limit
+	return runner.MaxProviderTaskBytes
 }
