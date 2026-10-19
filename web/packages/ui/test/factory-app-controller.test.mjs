@@ -356,6 +356,28 @@ test("reply and cancel each consume only their exact returned authority once", a
   assert.equal(context.latest().selectedHumanRequest, undefined);
 });
 
+test("a rejected reply or cancel clears the selection and reports its finite error", async () => {
+  const context = harness({
+    reply: async () => { throw new SessionError("stale"); },
+    cancel: async () => { throw new Error("transport"); },
+  });
+  context.controller.start();
+  context.emitState(fixtureState);
+  context.emitStatus("ready");
+
+  await context.controller.selectHumanRequest(request);
+  context.controller.setHumanReply("Continue.");
+  await context.controller.replyHumanRequest();
+  assert.equal(context.latest().selectedHumanRequest, undefined);
+  assert.equal(context.latest().error.code, "stale");
+
+  await context.controller.selectHumanRequest(request);
+  assert.equal(context.latest().error, undefined);
+  await context.controller.cancelHumanRequest();
+  assert.equal(context.latest().selectedHumanRequest, undefined);
+  assert.equal(context.latest().error.code, "connection", "a non-protocol rejection is reported as a finite error");
+});
+
 test("reply drafts obey the exact daemon byte bound before retention or delivery", async () => {
   const replies = [];
   const boundedDetail = detailFor(request, "", 8);

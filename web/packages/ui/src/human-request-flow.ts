@@ -86,7 +86,7 @@ export class HumanRequestFlow<Scope> {
     this.#put({ ...selected, phase: "replying", notice: undefined });
     return session.replyHumanRequest(authority, selected.reply).then(
       () => this.#afterAction(selected, session),
-      (error) => this.#afterAction(selected, session, this.#options.actionFailureNotice?.(error)),
+      (error) => this.#afterAction(selected, session, error),
     );
   }
 
@@ -100,7 +100,7 @@ export class HumanRequestFlow<Scope> {
     this.#put({ ...selected, phase: "cancelling", notice: undefined });
     return session.cancelHumanRequest(authority).then(
       () => this.#afterAction(selected, session),
-      (error) => this.#afterAction(selected, session, this.#options.actionFailureNotice?.(error)),
+      (error) => this.#afterAction(selected, session, error),
     );
   }
 
@@ -124,9 +124,11 @@ export class HumanRequestFlow<Scope> {
     );
   }
 
-  #afterAction(after: HumanRequestFlowSelection<Scope>, session: HumanSession, notice?: string): Promise<void> {
+  #afterAction(after: HumanRequestFlowSelection<Scope>, session: HumanSession, error?: unknown): Promise<void> {
     if (!this.#owns(after, session)) { this.#fence(after); return Promise.resolve(); }
-    if (this.#options.afterAction === "clear") { this.clear(true); return Promise.resolve(); }
+    // A rejection the local console only clears on is still a fault to report.
+    if (this.#options.afterAction === "clear") { this.#end(after, undefined, error); return Promise.resolve(); }
+    const notice = error === undefined ? undefined : this.#options.actionFailureNotice?.(error);
     const request = this.#options.currentRequest(after.scope, after.request.id);
     if (request === undefined) { this.#end(after, notice ?? this.#options.absentNotice); return Promise.resolve(); }
     return this.#load({ ...after, request, detail: undefined, phase: "loading", reply: "" }, notice);
@@ -135,11 +137,8 @@ export class HumanRequestFlow<Scope> {
   #end(after: HumanRequestFlowSelection<Scope>, notice?: string, error?: unknown): void {
     if (this.#selection?.token !== after.token) return;
     if (this.#options.afterAction === "clear") {
-      this.#selection = undefined;
-      ++this.#token;
       if (error !== undefined) this.#options.onError?.(finiteError(error));
-      this.#options.onChange();
-      return;
+      return this.clear(true);
     }
     this.#put({ ...after, phase: "ended", detail: undefined, notice });
   }
