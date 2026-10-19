@@ -71,7 +71,7 @@ test('two principals: callback, pagination, refresh, replay, grants and revocati
           return json({ sha: 'c'.repeat(40) }, 201);
         }
         if (url.pathname.startsWith('/repos/team/shared/git/commits/')) return json({ message: 'base', tree: { sha: 'd'.repeat(40) }, parents: [] });
-        if (url.pathname.startsWith('/repos/team/shared/commits/')) return json({ author: { login: 'fixture', type: 'User' } });
+        if (url.pathname.startsWith('/repos/team/shared/commits/')) return json({ author: { login: 'fixture', type: 'User' }, verification: { verified: true } });
         if (url.pathname === '/repos/team/shared/git/trees' && request.method === 'POST') return json({ sha: 'e'.repeat(40) }, 201);
         if (url.pathname.startsWith('/repos/team/shared/git/trees/')) return json({ tree: [], truncated: false });
         if (url.pathname === '/repos/team/shared/git/blobs') return json({ sha: 'f'.repeat(40) }, 201);

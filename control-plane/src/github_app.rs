@@ -532,6 +532,7 @@ pub(crate) struct CommitAuthor {
     pub(crate) login: String,
     #[serde(rename = "type")]
     pub(crate) kind: String,
+    pub(crate) authenticated: bool,
 }
 
 /// Which commit a branch points at right now.
@@ -3551,7 +3552,18 @@ impl Authority {
     ) -> Result<Option<CommitAuthor>, OperationError> {
         #[derive(Deserialize)]
         struct Commit {
-            author: Option<CommitAuthor>,
+            author: Option<CommitAccount>,
+            verification: CommitVerification,
+        }
+        #[derive(Deserialize)]
+        struct CommitAccount {
+            login: String,
+            #[serde(rename = "type")]
+            kind: String,
+        }
+        #[derive(Deserialize, Default)]
+        struct CommitVerification {
+            verified: bool,
         }
         let commit: Commit = github_json(
             &format!(
@@ -3562,7 +3574,11 @@ impl Authority {
         )
         .await
         .map_err(OperationError::from)?;
-        Ok(commit.author)
+        Ok(commit.author.map(|author| CommitAuthor {
+            login: author.login,
+            kind: author.kind,
+            authenticated: commit.verification.verified,
+        }))
     }
 
     /// The commit itself, which is also the cheapest proof that it exists.
