@@ -877,27 +877,6 @@ test("clean exit immediately adopts different running work at the current head",
   });
 });
 
-test("HumanRequest terminal intent uses only its current public agent relationship and preserves detail draft authority", async () => {
-  const context = terminalHarness();
-  context.controller.start();
-  context.ready();
-  await context.controller.selectHumanRequest(request);
-  context.controller.setHumanReply("keep this draft");
-  context.controller.openTerminalForHumanRequest(request);
-  assert.equal(context.latest().selectedAgent.id, agent.id);
-  assert.equal(context.latest().selectedHumanRequest.reply, "keep this draft");
-
-  const stale = { ...request, revision: request.revision + 1n };
-  context.controller.clearAgentTerminal();
-  context.controller.openTerminalForHumanRequest(stale);
-  assert.equal(context.latest().error.code, "stale");
-
-  const missingAgent = { ...request, agent_id: "ab".repeat(16) };
-  context.clientOptions().onState(stateAt(42, { humanRequests: new Map([[missingAgent.id, missingAgent]]) }));
-  context.controller.openTerminalForHumanRequest(missingAgent);
-  assert.equal(context.latest().error.code, "stale");
-});
-
 test("selected terminal close detaches once, keeps the session ready, and permits reopen", async () => {
   const context = terminalHarness();
   context.controller.start();

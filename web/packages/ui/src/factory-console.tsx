@@ -13,7 +13,6 @@ export type FactoryConsoleProps = FactoryAppSnapshot & {
   onSelectAgent?: (agent: AgentItem) => void;
   onProjectContent?: ProjectContentCall;
   onEditTask?: (task: TaskItem, change: TaskEdit) => Promise<boolean>;
-  onOpenTerminalForHumanRequest?: (request: FactoryHumanRequestView["request"]) => void;
   onSelectHumanRequest?: (request: FactoryHumanRequestView["request"]) => void;
   onHumanReplyChange?: (reply: string) => void;
   onReplyHumanRequest?: () => void;
@@ -72,7 +71,6 @@ export function FactoryConsole({
   onSelectAgent,
   onProjectContent,
   onEditTask,
-  onOpenTerminalForHumanRequest,
   onSelectHumanRequest,
   onHumanReplyChange,
   onReplyHumanRequest,
@@ -154,8 +152,6 @@ export function FactoryConsole({
                 onReplyChange={onHumanReplyChange}
                 onReply={onReplyHumanRequest}
                 onCancel={onCancelHumanRequest}
-                onOpenTerminal={onOpenTerminalForHumanRequest === undefined ? undefined : (request) => { setProjectId(request.project_id); onOpenTerminalForHumanRequest(request); }}
-                terminalReady={ready}
               />}
               onIntakeAction={ready ? onIntakeAction : undefined}
               intake={projectId === undefined ? undefined : { state: intake?.get(projectId)?.state, failed: intakeErrors?.has(projectId) === true, busy: intakePending?.has(projectId) === true }}

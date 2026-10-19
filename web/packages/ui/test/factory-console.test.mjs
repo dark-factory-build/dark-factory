@@ -538,35 +538,6 @@ test("switching right panels keeps the selected terminal mounted", async () => {
   }
 });
 
-test("opening a selected question restores that agent's terminal panel", async () => {
-  const previousAct = globalThis.IS_REACT_ACT_ENVIRONMENT;
-  globalThis.IS_REACT_ACT_ENVIRONMENT = true;
-  function ConsoleHarness() {
-    return createElement(FactoryConsole, {
-      status: "ready",
-      state: baseState(),
-      selectedAgent: agentSelection(),
-      selectedHumanRequest: selectedRequest(),
-      onOpenTerminalForHumanRequest: () => {},
-      terminalContent: createElement("p", null, "terminal"),
-    });
-  }
-  try {
-    let renderer;
-    await act(async () => { renderer = create(createElement(ConsoleHarness)); });
-    await act(async () => { renderer.root.findByProps({ "aria-label": "Project" }).props.onChange({ currentTarget: { value: ids.secondProject } }); });
-    assert.equal(renderer.root.findAllByProps({ "aria-label": "Terminal" }).length, 0);
-    await act(async () => { renderer.root.findByProps({ "aria-label": "Project" }).props.onChange({ currentTarget: { value: "" } }); });
-    await act(async () => { renderer.root.findAllByType("button").find((button) => button.props.children === "Open terminal").props.onClick(); });
-    assert.equal(renderer.root.findByProps({ "aria-label": "Project" }).props.value, ids.project, "opening a global question switches to its agent’s project");
-    assert.ok(renderer.root.findByProps({ "aria-label": "Terminal" }).findByProps({ children: "terminal" }));
-    assert.ok(renderer.root.findByProps({ "aria-label": "Selected question" }), "the question stays open in Work beside the terminal");
-    await act(async () => { renderer.unmount(); });
-  } finally {
-    globalThis.IS_REACT_ACT_ENVIRONMENT = previousAct;
-  }
-});
-
 test("selecting an agent shows its sprite, name and terminal with no status readout or configuration controls", () => {
   const markup = render({
     selectedAgent: agentSelection(),
@@ -584,7 +555,6 @@ test("selecting an agent shows its sprite, name and terminal with no status read
   // Without handlers the sidebar is a readout, never a dead form.
   const readOnly = render({ selectedAgent: agentSelection() });
   assert.equal(readOnly.includes('name="instruction"'), false);
-  assert.equal(readOnly.includes("Open terminal"), false);
 });
 
 test("unclaimed shared work waits under its project until an eligible worker claims it", () => {
@@ -731,22 +701,17 @@ test("request, reply, cancel, and summary collapse forward only presentation int
   assert.deepEqual(calls.slice(1), [["change", "Proceed."], ["reply"], ["cancel"], ["close"]]);
 });
 
-test("agent and question terminal actions expose only current public intent", async () => {
-  const request = fixtureState.humanRequests.get(ids.request);
+test("the floor's worker click is the only terminal intent, and it carries just the public agent identity", async () => {
   const agent = fixtureState.agents.get(ids.orchestrator);
   const calls = [];
   let renderer;
   await act(async () => { renderer = create(createElement(FactoryConsole, {
     status: "ready", state: baseState(), graphs: fixtureGraphs, selectedHumanRequest: selectedRequest(),
     onSelectAgent: (value) => calls.push(["agent", value]),
-    onOpenTerminalForHumanRequest: (value) => calls.push(["request", value]),
   })); });
   await act(async () => { workerSprite(renderer, agent.id).props.onClick(); });
-  await act(async () => { renderer.root.findAllByType("button").filter((element) => element.props.children === "Open terminal").at(-1).props.onClick(); });
-  assert.equal(calls[0][0], "agent");
-  assert.equal(calls[0][1].id, agent.id);
-  assert.equal(calls[0][1].revision, agent.revision);
-  assert.deepEqual(calls[1], ["request", request]);
+  assert.deepEqual(calls.map(([kind, value]) => [kind, value.id, value.revision]), [["agent", agent.id, agent.revision]]);
+  assert.equal(renderer.root.findAllByType("button").some((element) => element.props.children === "Open terminal"), false, "the decision panel offers no navigation control");
   await act(async () => { renderer.unmount(); });
 
   const markup = render({ selectedAgent: agentSelection(), terminalContent: createElement("div", null, "<raw-output>") });
@@ -792,6 +757,7 @@ test("floor questions open the existing question route", async () => {
   await act(async () => { tree = create(createElement(Harness)); });
   await act(async () => { tree.root.findByProps({ "data-human-request-id": ids.request }).props.onClick(); });
   assert.equal(questions[0], fixtureState.humanRequests.get(ids.request));
+  assert.equal(tree.root.findByProps({ "aria-label": "Project" }).props.value, questions[0].project_id, "picking a question scopes the floor to its project, where the asking worker opens its own terminal");
   assert.equal(tree.root.findByProps({ "aria-label": "Selected question" }).findByProps({ className: "dfFactoryConsole__question" }).children.join(""), "Should the migration also cover the users table? The plan only names accounts.");
   await act(async () => tree.unmount());
 });
