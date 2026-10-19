@@ -144,6 +144,20 @@ func TestOverseerEnqueuePinsContentAtInitialWorkRevision(t *testing.T) {
 	}
 }
 
+func TestOverseerEnqueueRejectsDuplicateSourceProposalBodyRegardlessOfTitle(t *testing.T) {
+	t.Parallel()
+	store, overseer, _ := runningOrchestratorRun(t)
+	defer store.Close()
+	ctx := context.Background()
+	body := "Source proposal da76ce8c revision 1\nImplement the accepted change."
+	if _, err := store.EnqueueTaskForOverseer(ctx, overseer.CredentialDigest, NewTask{ID: taskID(t, 127), ProjectID: overseer.ProjectID, IncarnationID: incarnationID(t, 128), Title: "first title", Body: body}, mustTime(t, 41)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.EnqueueTaskForOverseer(ctx, overseer.CredentialDigest, NewTask{ID: taskID(t, 129), ProjectID: overseer.ProjectID, IncarnationID: incarnationID(t, 130), Title: "different title", Body: body}, mustTime(t, 42)); !errors.Is(err, ErrConflict) {
+		t.Fatalf("duplicate source proposal body = %v", err)
+	}
+}
+
 func TestOverseerEnqueueProposalDispatchIsAtomicAndScopedToProposal(t *testing.T) {
 	t.Parallel()
 	store, overseer, _ := runningOrchestratorRun(t)
