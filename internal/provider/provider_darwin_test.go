@@ -1120,6 +1120,13 @@ func TestCodexOrchestratorResumesFromPreviousWorkingDirectory(t *testing.T) {
 	if launch.Argv()[1] != "resume" || launch.Argv()[2] != previousSession {
 		t.Fatalf("orchestrator argv = %q, want a leading resume of %q", launch.Argv(), previousSession)
 	}
+	launch, err = Build(request.WithTask([]byte("standing overseer task\n\nFactory causal wake: mode=delta")))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := launch.Argv()[len(launch.Argv())-1]; got != "\n\nTask:\nFactory causal wake: mode=delta" {
+		t.Fatalf("resumed orchestrator prompt = %q", got)
+	}
 }
 
 func TestInstalledBrowserBridgeUsesOnlyRunPathsForBothProviders(t *testing.T) {
