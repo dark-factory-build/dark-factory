@@ -366,7 +366,7 @@ func TestRetryBlockedMissingPrerequisiteAfterProductionObservation(t *testing.T)
 	if err != nil {
 		t.Fatal(err)
 	}
-	producerAgent, err := store.CreateAgent(ctx, NewAgent{ID: agentID(t, 247), ProjectID: consumer.ProjectID, Name: "producer", Role: RoleOrchestrator, Provider: ProviderCodex, ToolBudgetLimit: 5}, mustTime(t, 61))
+	producerAgent, err := store.CreateAgent(ctx, NewAgent{ID: agentID(t, 247), ProjectID: consumer.ProjectID, Name: "producer", Role: RoleWorker, Provider: ProviderCodex, ToolBudgetLimit: 5}, mustTime(t, 61))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -374,48 +374,79 @@ func TestRetryBlockedMissingPrerequisiteAfterProductionObservation(t *testing.T)
 	if err != nil {
 		t.Fatal(err)
 	}
-	keys := admissionKeys(t, 250, nil)
+	candidate := changeID(t, 150)
+	keys := admissionKeys(t, 151, &candidate)
 	admitted, err := store.AdmitNext(ctx, keys, mustTime(t, 63))
 	if err != nil || !admitted.Admitted() || admitted.Run.TaskID != producerTask.ID {
 		t.Fatalf("producer admission = %+v, %v", admitted, err)
 	}
-	activateAllResourcesUnique(t, store, *admitted.Run, 64, 640)
+	format, _ := NewObjectFormat("sha1")
+	base, _ := NewCommitID(format, bytes.Repeat([]byte{1}, 20))
+	repository, _ := NewFileIdentity(261, 262)
+	selection, _ := NewChangeSelection(format, base, repository)
+	prepared, err := store.RecordChangePrepared(ctx, candidate, mustRevision(t, 1), selection, mustTime(t, 64))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.MarkChangeAvailable(ctx, candidate, prepared.Revision, selection.commit, mustTime(t, 65)); err != nil {
+		t.Fatal(err)
+	}
+	activateAllResourcesUnique(t, store, *admitted.Run, 66, 640)
 	session := terminalSessionForRunTest(t, store, admitted.Run.ID)
 	currentRun, found, err := store.Run(ctx, admitted.Run.ID)
 	if err != nil || !found {
 		t.Fatalf("producer run after activation = %+v, %t, %v", currentRun, found, err)
 	}
-	running, err := store.ActivateRun(ctx, admitted.Run.ID, session.ID, currentRun.Revision, session.Revision, mustTime(t, 70))
+	running, err := store.ActivateRun(ctx, admitted.Run.ID, session.ID, currentRun.Revision, session.Revision, mustTime(t, 72))
 	if err != nil {
 		t.Fatalf("activate producer run: %v (admitted=%d current=%d session=%d)", err, admitted.Run.Revision.Int64(), currentRun.Revision.Int64(), session.Revision.Int64())
 	}
 	success, _ := NewSuccessProposal("producer result")
-	finalizing, err = store.ProposeAttemptOutcome(ctx, keys.AttemptDigest, success, mustTime(t, 71))
+	finalizing, err = store.ProposeAttemptOutcome(ctx, keys.AttemptDigest, success, mustTime(t, 73))
 	if err != nil {
 		t.Fatal(err)
 	}
-	finalizing = observeMissingProcessExits(t, store, running.ID, 72)
+	finalizing = observeMissingProcessExits(t, store, running.ID, 74)
 	for _, resource := range resourcesForRunTest(t, store, running.ID) {
 		if resource.State != ResourceReleased {
-			if _, err := store.ReleaseResource(ctx, running.ID, resource.ID, resource.Revision, resource.Identity, mustTime(t, 73)); err != nil {
+			if _, err := store.ReleaseResource(ctx, running.ID, resource.ID, resource.Revision, resource.Identity, mustTime(t, 75)); err != nil {
 				t.Fatal(err)
 			}
 		}
 	}
-	closeTerminalSessionAtCurrent(t, store, running.ID, 74)
+	closeTerminalSessionAtCurrent(t, store, running.ID, 76)
 	producer, found, err := store.Run(ctx, running.ID)
 	if err != nil || !found {
 		t.Fatalf("producer run = %+v, %t, %v", producer, found, err)
 	}
-	if _, err := finalizeTestRun(t, store, producer, 75); err != nil {
+	change, found, err := store.Change(ctx, candidate)
+	if err != nil || !found || change.HeadCommit == nil {
+		t.Fatalf("producer change = %+v, %t, %v", change, found, err)
+	}
+	moved, _ := NewCommitID(change.Selection.format, bytes.Repeat([]byte{2}, change.Selection.format.oidLength()))
+	settlement, _ := NewRetainedChangeSettlement(change.Revision, &moved)
+	if _, err := store.FinalizeWorkerRun(ctx, producer.ID, producer.Revision, settlement, mustTime(t, 77)); err != nil {
 		t.Fatal(err)
 	}
-	if err := store.RecordProductionObservation(ctx, consumer.ProjectID, ProductionObservation{Repository: "example/factory", ObservedAt: 71, PullRequests: []ProductionPullRequest{{Number: 7, Title: "merged producer", Head: "", State: "merged"}}}, mustTime(t, 71)); err != nil {
+	producer, found, err = store.Run(ctx, producer.ID)
+	if err != nil || !found {
+		t.Fatalf("producer terminal run = %+v, %t, %v", producer, found, err)
+	}
+	head := hex.EncodeToString(moved.Bytes())
+	pr := ProductionPullRequest{Number: 7, Title: "producer", URL: "https://github.com/example/factory/pull/7", Head: head, Branch: "factory/producer", Base: "main", State: "open", Review: ProductionReview{Head: head, State: "unknown"}}
+	if err := store.RecordPublication(ctx, consumer.ProjectID, producerTask.ID, "example/factory", pr, mustTime(t, 78)); err != nil {
 		t.Fatal(err)
 	}
 	corruptSQL(t, store, `INSERT INTO task_prerequisites(task_id, upstream_task_id, upstream_work_revision) VALUES (?, ?, 1)`, consumer.TaskID.Bytes(), producerTask.ID.Bytes())
-	if retried, err := store.RetryBlockedMissingPrerequisites(ctx, consumer.ProjectID, mustTime(t, 72)); err != nil || retried != 1 {
-		t.Fatalf("automatic retry = %d, %v", retried, err)
+	if retried, err := store.RetryBlockedMissingPrerequisites(ctx, consumer.ProjectID, mustTime(t, 79)); err != nil || retried != 0 {
+		t.Fatalf("retry before merge = %d, %v", retried, err)
+	}
+	pr.State = "merged"
+	if err := store.RecordProductionObservation(ctx, consumer.ProjectID, ProductionObservation{Repository: "example/factory", ObservedAt: 80, PullRequests: []ProductionPullRequest{pr}}, mustTime(t, 80)); err != nil {
+		t.Fatal(err)
+	}
+	if retried, err := store.RetryBlockedMissingPrerequisites(ctx, consumer.ProjectID, mustTime(t, 81)); err != nil || retried != 1 {
+		t.Fatalf("automatic retry after merge = %d, %v", retried, err)
 	}
 	current, found, err := store.Task(ctx, consumer.TaskID)
 	if err != nil || !found || current.Status != TaskQueued {
