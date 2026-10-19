@@ -86,14 +86,6 @@ export type FactoryTerminalView = Readonly<{
   surfaceVersion: number;
 }>;
 
-/** One console edit at a time: the sidebar shows exactly one form. */
-export type FactoryEditView = Readonly<{
-  /** The agent or task the edit was for; a refusal belongs to its form alone. */
-  target: string;
-  pending: boolean;
-  error?: SessionError | ProtocolError;
-}>;
-
 export type FactoryAppSnapshot = Readonly<{
   status: SessionStatus;
   state?: StateView;
@@ -109,7 +101,6 @@ export type FactoryAppSnapshot = Readonly<{
   runPaths?: ReadonlyMap<string, RunPathSample>;
   /** Most recent observed paths remain an annotation after that run ends. */
   lastRunPaths?: ReadonlyMap<string, RunPathSample>;
-  edit?: FactoryEditView;
   repositories?: ReadonlyMap<string, readonly RepositoryView[]>;
 }>;
 
@@ -119,7 +110,7 @@ export type FactoryAppStatus =
 
 type HumanSession = Pick<BrowserSession, "getHumanRequestDetail" | "replyHumanRequest" | "cancelHumanRequest">;
 type TerminalSession = Pick<BrowserSession, "resolveAgentTerminal" | "openTerminal" | "close">;
-type ConsoleSession = Pick<BrowserSession, "createProject" | "getRepositories" | "updateTask" | "getOperationalGraph" | "getRunPaths" | "discoverAccounts" | "linkAccount" | "listBrowserClients" | "revokeBrowserClient" | "githubConnection" | "clientId">;
+type ConsoleSession = Pick<BrowserSession, "createProject" | "getRepositories" | "getOperationalGraph" | "getRunPaths" | "discoverAccounts" | "linkAccount" | "listBrowserClients" | "revokeBrowserClient" | "githubConnection" | "clientId">;
 type RemoteInviteSession = Pick<BrowserSession, "inviteRemote" | "capabilities">;
 type ControlledClient = Pick<BrowserClient, "connect" | "close"> & { readonly session?: HumanSession & TerminalSession & ConsoleSession & RemoteInviteSession & Partial<Pick<BrowserSession, "projectContent">> };
 type ClientFactory = (options: BrowserSessionOptions) => ControlledClient;
@@ -156,12 +147,6 @@ type TerminalReplacement = {
 };
 
 /** Keep queue controls disabled until the snapshot carries this accepted write. */
-type TaskEditConfirmation = {
-  edit: FactoryEditView;
-  previousRevision: bigint;
-  revision: bigint;
-};
-
 function agentQueuedTask(agent: AgentItem, state: StateView) {
   for (const task of state.tasks.values()) {
     if (task.assigned_agent_id === agent.id && task.status === "queued") return task;
@@ -207,8 +192,6 @@ export class FactoryAppController {
   #runPathsTicks = 0;
   #runPathsPending = false;
   #runPathsDue = false;
-  #edit: FactoryEditView | undefined;
-  #taskEditConfirmation: TaskEditConfirmation | undefined;
   readonly #repositories = new Map<string, readonly RepositoryView[]>();
   #generation = 0;
   #started = false;
@@ -266,7 +249,6 @@ export class FactoryAppController {
   close(): void {
     if (this.#closed) return;
     this.#closed = true;
-    this.#discardTaskEditConfirmation();
     ++this.#generation;
     this.#human.clear(true);
     this.#selectedAgent = undefined;
@@ -416,42 +398,6 @@ export class FactoryAppController {
     });
   }
 
-  /** Cancel or retry one task against its exact revision. */
-  async editTask(task: Pick<TaskItem, "id" | "revision">, change: { cancel?: boolean; retry?: boolean }): Promise<boolean> {
-    const session = this.#client?.session;
-    if (this.#closed || this.#status !== "ready" || session === undefined || this.#edit?.pending === true) return false;
-    const generation = this.#generation;
-    const edit: FactoryEditView = { target: task.id, pending: true };
-    this.#edit = edit;
-    this.#publish();
-    try {
-      const result = await session.updateTask({ taskId: task.id, expectedRevision: task.revision, ...change });
-      if (!this.#current(generation) || this.#edit !== edit) return false;
-      if (result.revision !== task.revision + 1n) throw new SessionError("stale");
-      const current = this.#state?.tasks.get(task.id);
-      if (current !== undefined && current.revision >= result.revision) {
-        this.#edit = undefined;
-        this.#publish();
-        return true;
-      }
-      if (current === undefined || current.revision !== task.revision) {
-        this.#edit = { target: task.id, pending: false, error: new SessionError("stale") };
-        this.#publish();
-        return false;
-      }
-      this.#taskEditConfirmation = { edit, previousRevision: task.revision, revision: result.revision };
-      // The row stays disabled until STATE carries this revision, but a
-      // successful write retains the caller's existing close-on-acceptance
-      // contract.
-      return true;
-    } catch (error) {
-      if (!this.#current(generation) || this.#edit !== edit) return false;
-      this.#edit = { target: task.id, pending: false, error: finiteError(error) };
-    }
-    this.#publish();
-	return false;
-  }
-
   clearAgentTerminal(): void {
     if (this.#closed) return;
     this.#replaceTerminal({});
@@ -585,7 +531,6 @@ export class FactoryAppController {
     this.#status = status;
     this.#statusReason = status === "closed" ? this.#closedReason() : undefined;
     if (status !== "ready") {
-      this.#discardTaskEditConfirmation();
       this.#human.clear(true);
       // A reconnect must not show a code minted for the connection that dropped.
       this.#repositories.clear();
@@ -606,19 +551,6 @@ export class FactoryAppController {
   #receiveState(generation: number, state: StateView): void {
     if (!this.#current(generation)) return;
     this.#state = state;
-    const confirmation = this.#taskEditConfirmation;
-    if (confirmation !== undefined) {
-      const current = state.tasks.get(confirmation.edit.target);
-      if (current !== undefined && current.revision >= confirmation.revision) {
-        this.#taskEditConfirmation = undefined;
-        if (this.#edit === confirmation.edit) this.#edit = undefined;
-      } else if (current === undefined || current.revision !== confirmation.previousRevision) {
-        this.#taskEditConfirmation = undefined;
-        if (this.#edit === confirmation.edit) {
-          this.#edit = { target: confirmation.edit.target, pending: false, error: new SessionError("stale") };
-        }
-      }
-    }
     // A graph belongs to a project; a project that is gone has no machines and no refusal.
     if ([...this.#graphs.keys(), ...this.#graphErrors.keys()].some((projectId) => !state.projects.has(projectId))) {
       this.#graphs = new Map([...this.#graphs].filter(([projectId]) => state.projects.has(projectId)));
@@ -678,13 +610,6 @@ export class FactoryAppController {
 
   #current(generation: number): boolean {
     return !this.#closed && generation === this.#generation;
-  }
-
-  #discardTaskEditConfirmation(): void {
-    const confirmation = this.#taskEditConfirmation;
-    if (confirmation === undefined || this.#edit !== confirmation.edit) return;
-    this.#taskEditConfirmation = undefined;
-    this.#edit = undefined;
   }
 
   #reconcileTerminal(): void {
@@ -908,18 +833,10 @@ export class FactoryAppController {
     this.#terminalReplacement = undefined;
     this.#dropPendingTerminalInput();
     this.#retireTerminal();
-    const prior = this.#selectedAgent;
     const candidate = replacement.agentId === undefined ? undefined : this.#state?.agents.get(replacement.agentId);
     const agent = candidate?.revision === replacement.agentRevision ? candidate : undefined;
     const task = agent === undefined || this.#state === undefined ? undefined : agentCurrentTask(agent, this.#state);
     const queuedTask = agent === undefined || this.#state === undefined ? undefined : agentQueuedTask(agent, this.#state);
-    const sameAgent = agent !== undefined && prior?.agent.id === agent.id;
-    // A new selection must not inherit an error. Keep the one serialized
-    // pending edit while its selected agent is rebound to a newer revision.
-    if (!sameAgent || this.#edit?.pending !== true) {
-      this.#discardTaskEditConfirmation();
-      this.#edit = undefined;
-    }
     this.#selectedAgent = agent === undefined ? undefined : {
       agent: { ...agent },
       head: this.#state?.head ?? 0n,
@@ -972,7 +889,6 @@ export class FactoryAppController {
       graphErrors: this.#graphErrors,
       runPaths: this.#runPaths,
       lastRunPaths: this.#lastRunPaths,
-      edit: this.#edit,
       selectedHumanRequest: selection === undefined || selection.phase === "ended" ? undefined : {
         request: selection.request,
         phase: selection.phase,

@@ -106,8 +106,6 @@ export type RepositoriesGetBody = { project_id: string };
 export type RepositoriesBody = { project_id: string; items: RepositoryItem[] };
 export type RepositoryMutateBody = { action: "add" | "name" | "base" | "default" | "enabled" | "remove" | "github" | "fetch"; id?: string; project_id?: string; name?: string; root?: string; base_ref?: string; expected_revision?: bigint; enabled?: boolean };
 export type RepositoryMutateResultBody = { repository?: RepositoryItem };
-export type TaskUpdateBody = { task_id: string; expected_revision: bigint; title?: string; body?: string; priority?: number; assigned_agent_id?: string; status?: "cancelled" | "queued" };
-export type TaskUpdateResultBody = { task_id: string; revision: bigint };
 export type OperationalGraphGetBody = { project_id: string };
 export const GRAPH_NODE_KINDS = ["processor", "ingress", "job", "queue", "store", "external", "unknown"] as const;
 export const GRAPH_EDGE_KINDS = ["handles", "calls", "uses", "publishes", "consumes", "runs"] as const;
@@ -219,7 +217,6 @@ export type ServerControlFrame = { type: "PROJECT_CONTENT_RESULT"; id: string; b
   | { type: "PROJECT_CREATE_RESULT"; id: string; body: ProjectCreateResultBody }
   | { type: "REPOSITORIES"; id: string; body: RepositoriesBody }
   | { type: "REPOSITORY_MUTATE_RESULT"; id: string; body: RepositoryMutateResultBody }
-  | { type: "TASK_UPDATE_RESULT"; id: string; body: TaskUpdateResultBody }
   | { type: "OPERATIONAL_GRAPH"; id: string; body: OperationalGraphBody }
   | { type: "RUN_PATHS"; id: string; body: RunPathsBody }
   | { type: "ACCOUNTS"; id: string; body: AccountsBody }
@@ -238,7 +235,6 @@ export type ClientControlFrame = { type: "PROJECT_CONTENT"; id: string; body: Pr
   | { type: "PROJECT_CREATE"; id: string; body: ProjectCreateBody }
   | { type: "REPOSITORIES_GET"; id: string; body: RepositoriesGetBody }
   | { type: "REPOSITORY_MUTATE"; id: string; body: RepositoryMutateBody }
-  | { type: "TASK_UPDATE"; id: string; body: TaskUpdateBody }
   | { type: "OPERATIONAL_GRAPH_GET"; id: string; body: OperationalGraphGetBody }
   | { type: "RUN_PATHS_GET"; id: string; body: RunPathsGetBody }
   | { type: "ACCOUNTS_DISCOVER"; id: string; body: AccountsDiscoverBody }
@@ -366,8 +362,6 @@ function validateBody(type: ControlType, body: unknown, wire: boolean): ControlB
     case "REPOSITORIES": return repositoriesBody(body, wire);
     case "REPOSITORY_MUTATE": return repositoryMutateBody(body, wire);
     case "REPOSITORY_MUTATE_RESULT": { requireKeys(body, [], wire, ["repository"]); return present(body, "repository") ? { repository: repositoryItem(body.repository, wire) } : {}; }
-    case "TASK_UPDATE": requireKeys(body, ["task_id", "expected_revision"], wire, ["title", "body", "priority", "assigned_agent_id", "status"]); { const result: TaskUpdateBody = { task_id: dynamicID(body.task_id), expected_revision: decimal(body.expected_revision, wire, true) }; if (present(body, "title")) result.title = boundedText(body.title, 1, MAX_TASK_TITLE_BYTES); if (present(body, "body")) result.body = boundedText(body.body, 0, MAX_TASK_INSTRUCTION_BYTES); if (present(body, "priority")) result.priority = integer(body.priority, -MAX_TASK_PRIORITY, MAX_TASK_PRIORITY); if (present(body, "assigned_agent_id")) result.assigned_agent_id = dynamicID(body.assigned_agent_id); if (present(body, "status")) { if (body.status !== "cancelled" && body.status !== "queued" || body.status === "queued" && (present(body, "title") || present(body, "body") || present(body, "priority"))) malformed(); result.status = body.status; } return result; }
-    case "TASK_UPDATE_RESULT": requireKeys(body, ["task_id", "revision"], wire); return { task_id: dynamicID(body.task_id), revision: decimal(body.revision, wire, true) };
     case "OPERATIONAL_GRAPH_GET": requireKeys(body, ["project_id"], wire); return { project_id: dynamicID(body.project_id) };
     case "OPERATIONAL_GRAPH": return operationalGraphBody(body, wire);
     case "RUN_PATHS_GET": requireKeys(body, ["agent_id"], wire); return { agent_id: dynamicID(body.agent_id) };

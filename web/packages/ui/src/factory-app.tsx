@@ -85,7 +85,6 @@ export function FactoryApp({ onStatusChange, browserPort }: FactoryAppProps = {}
       {...snapshot}
       onSelectAgent={(agent) => owner.current?.selectAgent(agent)}
       onProjectContent={(operation, input) => owner.current?.projectContent(operation, input) ?? Promise.reject(new Error("closed"))}
-      onEditTask={(task, change) => owner.current?.editTask(task, change) ?? Promise.resolve(false)}
       onSelectHumanRequest={(request) => { void owner.current?.selectHumanRequest(request); }}
       onHumanReplyChange={(reply) => owner.current?.setHumanReply(reply)}
       onReplyHumanRequest={() => { void owner.current?.replyHumanRequest(); }}

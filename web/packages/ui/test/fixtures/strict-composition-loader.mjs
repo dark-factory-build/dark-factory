@@ -32,7 +32,6 @@ export function createBrowserClient(options) {
     getOperationalGraph: async () => { throw new SessionError("not_found"); },
     getRunPaths: async () => { throw new SessionError("not_found"); },
     updateAgent: async () => { throw new SessionError("not_found"); },
-    updateTask: async () => { throw new SessionError("not_found"); },
     resolveAgentTerminal: async () => { counters.resolves += 1; return Object.freeze({}); },
     openTerminal: (_target, callbacks) => {
       counters.opens += 1;

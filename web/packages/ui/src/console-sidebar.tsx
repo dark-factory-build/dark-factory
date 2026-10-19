@@ -1,6 +1,6 @@
 import type { ReactNode } from "react";
 import { type DiscoveredAccount, type AgentItem, type GitHubConnectionBody, type GitHubDelegationBody, type HumanRequestItem, type ProjectItem, type RepositoryView, type StateView, type TaskItem } from "@dark-factory/client";
-import type { FactoryEditView, FactoryHumanRequestView } from "./factory-app-controller.js";
+import type { FactoryHumanRequestView } from "./factory-app-controller.js";
 import { AgentSprite } from "./factory-scene/factory-scene.js";
 import { agentActivity, type WorkRow } from "./console-view.js";
 import { productionStages } from "./production-view.js";
@@ -8,24 +8,8 @@ import { AnswerControls } from "./console-interactions.js";
 import { SectionHeader, Status, formatTime } from "./console-kit.js";
 import type { PublishedRelease, RuntimeBuild } from "./production-data.js";
 
-export type TaskEdit = Readonly<{ cancel?: boolean; retry?: boolean }>;
 export type TaskScope = { agent_id: string } | { project_id: string };
 type TaskCursor = { beforeUpdatedAtMs?: bigint; beforeTaskId?: string };
-
-const EDIT_ERRORS = new Map<string, string>([
-  ["stale", "Someone else changed this. Reopen it and try again."],
-  ["invalid_request", "The factory refused this edit."],
-  ["not_found", "This no longer exists."],
-  ["too_large", "That is too long."],
-  ["rate_limited", "Too many edits at once. Try again shortly."],
-  ["unauthorized", "This browser cannot edit it."],
-  ["unsupported", "The factory does not support this yet."],
-]);
-
-export function editErrorCopy(edit: FactoryEditView | undefined): string | undefined {
-  if (edit?.error === undefined) return undefined;
-  return EDIT_ERRORS.get(edit.error.code) ?? "The edit did not complete.";
-}
 
 /** One agent: its sprite, its name and its terminal. The floor tooltip and the terminal's own state say what it is doing. */
 export function AgentPanel({
@@ -66,15 +50,13 @@ function WorkRowShell({ title, chips, meta, onOpen, href, disabled, expanded, ch
 
 /** One list for everything open: what needs you, what is in review, running and queued. */
 export function WorkPanel({
-  state, rows, projectId, edit, ready, onEditTask,
+  state, rows, projectId, ready,
   selectedHumanRequest, onSelectHumanRequest, onCloseHumanRequest, requestContent,
 }: {
   state: StateView | undefined;
   rows: readonly WorkRow[];
   projectId?: string;
-  edit?: FactoryEditView;
   ready: boolean;
-  onEditTask?: (task: TaskItem, change: TaskEdit) => Promise<boolean>;
   selectedHumanRequest?: FactoryHumanRequestView;
   onSelectHumanRequest?: (request: HumanRequestItem) => void;
   onCloseHumanRequest?: () => void;
@@ -102,7 +84,6 @@ export function WorkPanel({
     }
     return <WorkRowShell key={row.key} title={row.title} chips={chips(row)} meta={meta} href={task ? undefined : row.pr?.pullRequest ? row.pr.pullRequest.url || `https://github.com/${row.pr.repository}/pull/${row.pr.pullRequest.number}` : undefined}>
       {blocked && task.blocked_reason ? <p className="dfConsoleItem__meta">{task.blocked_reason}</p> : null}
-      {!blocked || onEditTask === undefined ? null : <div className="dfConsoleSidebar__taskActions"><button type="button" aria-label={`Retry ${task.title}`} disabled={!ready || edit?.pending === true} onClick={() => { void onEditTask(task, { retry: true }); }}>Retry</button><button type="button" aria-label={`Cancel ${task.title}`} disabled={!ready || edit?.pending === true} onClick={() => { void onEditTask(task, { cancel: true }); }}>Cancel</button></div>}
     </WorkRowShell>;
   };
   return <section className="dfConsoleSidebar__panel" aria-label="Work">

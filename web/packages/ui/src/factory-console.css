@@ -495,14 +495,6 @@ summary.dfConsoleItem__summary { cursor: pointer; }
 .dfConsoleItem__detail h4, .dfConsoleItem__detail p { margin: 0; }
 .dfConsoleItem__detail a { display: block; color: var(--df-console-accent); }
 
-.dfConsoleSidebar__taskActions {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  gap: 0.4rem;
-}
-
-.dfConsoleSidebar__taskActions select { width: auto; flex: 1 1 8rem; }
 .dfConsoleSidebar .dfFactoryConsole__terminalPanel {
   position: static;
   flex: none;

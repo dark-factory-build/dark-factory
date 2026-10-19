@@ -59,72 +59,6 @@ func consoleRoot(t *testing.T) string {
 	writeSourceFixture(t, root, "one/one.go", "package one\n")
 	return root
 }
-
-// The adapter is the authority on both the edit and the revision the client
-// gets back: the result must name the same entity at the next revision.
-func TestBrowserConsoleUpdatesAdvanceTheExactRevision(t *testing.T) {
-	fixture := newConsoleFixture(t, kernel.BrowserCapabilityObserve|kernel.BrowserCapabilityHumanActions, consoleRoot(t))
-	ctx := context.Background()
-	client := rawBrowserClient(fixture.client.ID)
-	model, effort, paused := "gpt-5-codex", "high", browserprotocol.Bool(true)
-	appearance := browserprotocol.SpriteAppearance{Skin: 3, Hair: 2, HairColour: 1, Face: 1, Outfit: 3, ClothesColour: 2, Shoes: 1, Tool: 4, Headwear: 2}
-	agentResult, err := fixture.backend.UpdateAgent(ctx, client, browserprotocol.AgentUpdate{
-		AgentID: fixture.agent.ID.String(), ExpectedRevision: decimalRevision(fixture.agent.Revision),
-		Appearance: &appearance, Model: &model, ReasoningEffort: &effort, Paused: &paused,
-	})
-	if err != nil || agentResult.AgentID != fixture.agent.ID.String() || agentResult.Revision != decimalRevision(fixture.agent.Revision)+1 {
-		t.Fatalf("agent update = %+v, %v", agentResult, err)
-	}
-	stored, found, err := fixture.store.Agent(ctx, fixture.agent.ID)
-	if err != nil || !found || stored.Appearance != (kernel.AgentAppearance{Skin: 3, Hair: 2, HairColour: 1, Face: 1, Outfit: 3, ClothesColour: 2, Shoes: 1, Tool: 4, Headwear: 2}) || stored.Model != model || stored.ReasoningEffort != effort || !stored.Paused {
-		t.Fatalf("stored agent = %+v, found=%v, err=%v", stored, found, err)
-	}
-	// The same observation cannot be spent twice.
-	if _, err := fixture.backend.UpdateAgent(ctx, client, browserprotocol.AgentUpdate{
-		AgentID: fixture.agent.ID.String(), ExpectedRevision: decimalRevision(fixture.agent.Revision), Paused: &paused,
-	}); !errors.Is(mapBrowserError(err), browser.ErrStale) {
-		t.Fatalf("replayed agent update = %v", err)
-	}
-
-	// "queued" asks for a retry, which only a worker's settled blocked or
-	// failed task can take: this orchestrator's queued one is refused by the
-	// retry path, not edited, and left exactly as it was.
-	retry := "queued"
-	if _, err := fixture.backend.UpdateTask(ctx, client, browserprotocol.TaskUpdate{
-		TaskID: fixture.task.ID.String(), ExpectedRevision: decimalRevision(fixture.task.Revision), Status: &retry,
-	}); !errors.Is(mapBrowserError(err), browser.ErrUnauthorized) {
-		t.Fatalf("retry of a queued task = %v", err)
-	}
-	if unchanged, _, err := fixture.store.Task(ctx, fixture.task.ID); err != nil || unchanged.Revision != fixture.task.Revision {
-		t.Fatalf("refused retry changed the task: %+v, %v", unchanged, err)
-	}
-
-	title, body, priority, status := "edited", "replacement instruction", int64(5), "cancelled"
-	taskResult, err := fixture.backend.UpdateTask(ctx, client, browserprotocol.TaskUpdate{
-		TaskID: fixture.task.ID.String(), ExpectedRevision: decimalRevision(fixture.task.Revision),
-		Title: &title, Body: &body, Priority: &priority,
-	})
-	if err != nil || taskResult.TaskID != fixture.task.ID.String() || taskResult.Revision != decimalRevision(fixture.task.Revision)+1 {
-		t.Fatalf("task update = %+v, %v", taskResult, err)
-	}
-	cancelled, err := fixture.backend.UpdateTask(ctx, client, browserprotocol.TaskUpdate{
-		TaskID: fixture.task.ID.String(), ExpectedRevision: taskResult.Revision, Status: &status,
-	})
-	if err != nil || cancelled.Revision != taskResult.Revision+1 {
-		t.Fatalf("task cancel = %+v, %v", cancelled, err)
-	}
-	storedTask, found, err := fixture.store.Task(ctx, fixture.task.ID)
-	if err != nil || !found || storedTask.Title != title || storedTask.Body != body || storedTask.Priority != priority || storedTask.Status != kernel.TaskCancelled {
-		t.Fatalf("stored task = %+v, found=%v, err=%v", storedTask, found, err)
-	}
-	// A task that has left the queue is a conflict, not a fresh edit.
-	if _, err := fixture.backend.UpdateTask(ctx, client, browserprotocol.TaskUpdate{
-		TaskID: fixture.task.ID.String(), ExpectedRevision: cancelled.Revision, Title: &title,
-	}); !errors.Is(mapBrowserError(err), browser.ErrStale) {
-		t.Fatalf("edit after cancel = %v", err)
-	}
-}
-
 func TestBrowserConsoleAcceptsStandingInstruction(t *testing.T) {
 	fixture := newConsoleFixture(t, kernel.BrowserCapabilityObserve|kernel.BrowserCapabilityHumanActions, consoleRoot(t))
 	ctx := context.Background()
@@ -150,16 +84,11 @@ func TestBrowserConsoleGatesUpdatesOnHumanActionsButNotTheGraph(t *testing.T) {
 	fixture := newConsoleFixture(t, kernel.BrowserCapabilityObserve, root)
 	ctx := context.Background()
 	client := rawBrowserClient(fixture.client.ID)
-	paused, status := browserprotocol.Bool(true), "cancelled"
+	paused := browserprotocol.Bool(true)
 	if _, err := fixture.backend.UpdateAgent(ctx, client, browserprotocol.AgentUpdate{
 		AgentID: fixture.agent.ID.String(), ExpectedRevision: decimalRevision(fixture.agent.Revision), Paused: &paused,
 	}); !errors.Is(mapBrowserError(err), browser.ErrUnauthorized) {
 		t.Fatalf("observe-only agent update = %v", err)
-	}
-	if _, err := fixture.backend.UpdateTask(ctx, client, browserprotocol.TaskUpdate{
-		TaskID: fixture.task.ID.String(), ExpectedRevision: decimalRevision(fixture.task.Revision), Status: &status,
-	}); !errors.Is(mapBrowserError(err), browser.ErrUnauthorized) {
-		t.Fatalf("observe-only task update = %v", err)
 	}
 	// A refused mutation left nothing behind.
 	stored, found, err := fixture.store.Agent(ctx, fixture.agent.ID)
@@ -194,29 +123,6 @@ func TestBrowserConsoleRejectsUnusableIdentitiesAndRevisions(t *testing.T) {
 		AgentID: unknownAgent.String(), ExpectedRevision: 1,
 	}); !errors.Is(mapBrowserError(err), browser.ErrNotFound) {
 		t.Fatalf("unknown agent = %v", err)
-	}
-	if _, err := fixture.backend.UpdateTask(ctx, client, browserprotocol.TaskUpdate{
-		TaskID: fixture.task.ID.String(), ExpectedRevision: decimalRevision(fixture.task.Revision) + 5,
-	}); !errors.Is(mapBrowserError(err), browser.ErrStale) {
-		t.Fatalf("stale task revision = %v", err)
-	}
-	// The durable key is (agent, project) together, so a foreign agent is a
-	// refused edit rather than a corrupt row.
-	foreignProject, _ := kernel.ProjectIDFromBytes(adapterID(t, 0x32))
-	foreignAgent, _ := kernel.AgentIDFromBytes(adapterID(t, 0x33))
-	other, err := fixture.store.CreateProject(ctx, kernel.NewProject{ID: foreignProject, Name: "other", Root: filepath.Join(t.TempDir(), "other")}, adapterTime(t, 20))
-	if err != nil {
-		t.Fatal(err)
-	}
-	stranger, err := fixture.store.CreateAgent(ctx, kernel.NewAgent{ID: foreignAgent, ProjectID: other.ID, Name: "stranger", Role: kernel.RoleOrchestrator, Provider: kernel.ProviderCodex, ToolBudgetLimit: 1}, adapterTime(t, 21))
-	if err != nil {
-		t.Fatal(err)
-	}
-	assigned := stranger.ID.String()
-	if _, err := fixture.backend.UpdateTask(ctx, client, browserprotocol.TaskUpdate{
-		TaskID: fixture.task.ID.String(), ExpectedRevision: decimalRevision(fixture.task.Revision), AssignedAgentID: &assigned,
-	}); !errors.Is(mapBrowserError(err), browser.ErrStale) {
-		t.Fatalf("cross-project reassignment = %v", err)
 	}
 }
 
@@ -254,29 +160,6 @@ func TestBrowserEffectVerdictSurvivesItsDeadlineCause(t *testing.T) {
 	}
 	if mapped := mapBrowserError(kernel.ErrStoreClosed); !retryable(mapped) {
 		t.Fatalf("closed store = %v", mapped)
-	}
-}
-
-// Reassignment inside the project is the queue edit the console offers beside
-// reorder and cancel.
-func TestBrowserConsoleReassignsATaskWithinItsProject(t *testing.T) {
-	fixture := newConsoleFixture(t, kernel.BrowserCapabilityObserve|kernel.BrowserCapabilityHumanActions, consoleRoot(t))
-	ctx := context.Background()
-	secondID, _ := kernel.AgentIDFromBytes(adapterID(t, 0x41))
-	second, err := fixture.store.CreateAgent(ctx, kernel.NewAgent{ID: secondID, ProjectID: fixture.project.ID, Name: "second", Role: kernel.RoleOrchestrator, Provider: kernel.ProviderCodex, ToolBudgetLimit: 4}, adapterTime(t, 13))
-	if err != nil {
-		t.Fatal(err)
-	}
-	assigned := second.ID.String()
-	result, err := fixture.backend.UpdateTask(ctx, rawBrowserClient(fixture.client.ID), browserprotocol.TaskUpdate{
-		TaskID: fixture.task.ID.String(), ExpectedRevision: decimalRevision(fixture.task.Revision), AssignedAgentID: &assigned,
-	})
-	if err != nil || result.Revision != decimalRevision(fixture.task.Revision)+1 {
-		t.Fatalf("reassignment = %+v, %v", result, err)
-	}
-	stored, found, err := fixture.store.Task(ctx, fixture.task.ID)
-	if err != nil || !found || stored.AssignedAgentID != second.ID || stored.Status != kernel.TaskQueued {
-		t.Fatalf("reassigned task = %+v, found=%v, err=%v", stored, found, err)
 	}
 }
 
@@ -660,4 +543,31 @@ func onlyRoot(nodes []browserprotocol.GraphNode) bool {
 		}
 	}
 	return true
+}
+
+// The adapter is the authority on the agent update and the revision the client
+// gets back: the result must name the same entity at the next revision.
+func TestBrowserConsoleAgentUpdatesAdvanceTheExactRevision(t *testing.T) {
+	fixture := newConsoleFixture(t, kernel.BrowserCapabilityObserve|kernel.BrowserCapabilityHumanActions, consoleRoot(t))
+	ctx := context.Background()
+	client := rawBrowserClient(fixture.client.ID)
+	model, effort, paused := "gpt-5-codex", "high", browserprotocol.Bool(true)
+	appearance := browserprotocol.SpriteAppearance{Skin: 3, Hair: 2, HairColour: 1, Face: 1, Outfit: 3, ClothesColour: 2, Shoes: 1, Tool: 4, Headwear: 2}
+	agentResult, err := fixture.backend.UpdateAgent(ctx, client, browserprotocol.AgentUpdate{
+		AgentID: fixture.agent.ID.String(), ExpectedRevision: decimalRevision(fixture.agent.Revision),
+		Appearance: &appearance, Model: &model, ReasoningEffort: &effort, Paused: &paused,
+	})
+	if err != nil || agentResult.AgentID != fixture.agent.ID.String() || agentResult.Revision != decimalRevision(fixture.agent.Revision)+1 {
+		t.Fatalf("agent update = %+v, %v", agentResult, err)
+	}
+	stored, found, err := fixture.store.Agent(ctx, fixture.agent.ID)
+	if err != nil || !found || stored.Appearance != (kernel.AgentAppearance{Skin: 3, Hair: 2, HairColour: 1, Face: 1, Outfit: 3, ClothesColour: 2, Shoes: 1, Tool: 4, Headwear: 2}) || stored.Model != model || stored.ReasoningEffort != effort || !stored.Paused {
+		t.Fatalf("stored agent = %+v, found=%v, err=%v", stored, found, err)
+	}
+	// The same observation cannot be spent twice.
+	if _, err := fixture.backend.UpdateAgent(ctx, client, browserprotocol.AgentUpdate{
+		AgentID: fixture.agent.ID.String(), ExpectedRevision: decimalRevision(fixture.agent.Revision), Paused: &paused,
+	}); !errors.Is(mapBrowserError(err), browser.ErrStale) {
+		t.Fatalf("replayed agent update = %v", err)
+	}
 }

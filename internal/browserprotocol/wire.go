@@ -65,8 +65,6 @@ const (
 	TypeRepositories                MessageType = "REPOSITORIES"
 	TypeRepositoryMutate            MessageType = "REPOSITORY_MUTATE"
 	TypeRepositoryMutateResult      MessageType = "REPOSITORY_MUTATE_RESULT"
-	TypeTaskUpdate                  MessageType = "TASK_UPDATE"
-	TypeTaskUpdateResult            MessageType = "TASK_UPDATE_RESULT"
 	TypeOperationalGraphGet         MessageType = "OPERATIONAL_GRAPH_GET"
 	TypeOperationalGraph            MessageType = "OPERATIONAL_GRAPH"
 	TypeRunPathsGet                 MessageType = "RUN_PATHS_GET"
@@ -389,10 +387,6 @@ func decodeControl(data []byte, role senderRole) (ControlFrame, error) {
 		body = new(RepositoryMutate)
 	case TypeRepositoryMutateResult:
 		body = new(RepositoryMutateResult)
-	case TypeTaskUpdate:
-		body = new(TaskUpdate)
-	case TypeTaskUpdateResult:
-		body = new(TaskUpdateResult)
 	case TypeOperationalGraphGet:
 		body = new(OperationalGraphGet)
 	case TypeOperationalGraph:
@@ -534,7 +528,7 @@ func idRequired(kind MessageType) bool {
 		TypeHumanRequestDetailGet, TypeHumanRequestDetail,
 		TypeHumanRequestReply, TypeHumanRequestReplyResult, TypeHumanRequestCancelRun, TypeHumanRequestCancelRunResult,
 		TypeProjectContent, TypeProjectContentResult,
-		TypeAttachmentRetention, TypeAttachmentRetentionResult, TypeAgentUpdate, TypeAgentUpdateResult, TypeProjectCreate, TypeProjectCreateResult, TypeRepositoriesGet, TypeRepositories, TypeRepositoryMutate, TypeRepositoryMutateResult, TypeTaskUpdate, TypeTaskUpdateResult, TypeOperationalGraphGet, TypeOperationalGraph,
+		TypeAttachmentRetention, TypeAttachmentRetentionResult, TypeAgentUpdate, TypeAgentUpdateResult, TypeProjectCreate, TypeProjectCreateResult, TypeRepositoriesGet, TypeRepositories, TypeRepositoryMutate, TypeRepositoryMutateResult, TypeOperationalGraphGet, TypeOperationalGraph,
 		TypeProjectLimits, TypeProjectLimitsResult,
 		TypeRunPathsGet, TypeRunPaths,
 		TypeAccountsDiscover, TypeAccounts, TypeAccountLink, TypeAccountLinkResult, TypeAccountUpdate, TypeAccountUpdateResult,
@@ -558,13 +552,13 @@ func typeAllowed(role senderRole, kind MessageType) bool {
 	if role == clientRole {
 		return kind == TypePairProve || kind == TypeAuthProve || kind == TypeStateGet ||
 			kind == TypeStateWatch || kind == TypeHumanRequestDetailGet || kind == TypeHumanRequestReply || kind == TypeHumanRequestCancelRun || kind == TypeTerminalTargetGet || kind == TypeTerminalAttach || kind == TypeTerminalAck || kind == TypeTerminalLeaseAcquire || kind == TypeTerminalLeaseRenew || kind == TypeTerminalLeaseRelease || kind == TypeTerminalResize || kind == TypeTerminalDetach || kind == TypeRemoteInvite || kind == TypePushSubscribe || kind == TypeTelemetryIngest ||
-			kind == TypeAgentUpdate || kind == TypeProjectLimits || kind == TypeProjectCreate || kind == TypeRepositoriesGet || kind == TypeRepositoryMutate || kind == TypeTaskUpdate || kind == TypeOperationalGraphGet || kind == TypeRunPathsGet ||
+			kind == TypeAgentUpdate || kind == TypeProjectLimits || kind == TypeProjectCreate || kind == TypeRepositoriesGet || kind == TypeRepositoryMutate || kind == TypeOperationalGraphGet || kind == TypeRunPathsGet ||
 			kind == TypeAttachmentRetention || kind == TypeProjectContent ||
 			kind == TypeAccountsDiscover || kind == TypeAccountLink || kind == TypeAccountUpdate || kind == TypeBrowserClientsGet || kind == TypeBrowserClientRevoke || kind == TypeGitHubConnection
 	}
 	return role == serverRole && (kind == TypeHello || kind == TypePairResult || kind == TypeAuthResult ||
 		kind == TypeStateSnapshot || kind == TypeStateChanged || kind == TypeHumanRequestDetail || kind == TypeHumanRequestReplyResult || kind == TypeHumanRequestCancelRunResult || kind == TypeTerminalTarget || kind == TypeTerminalAttached || kind == TypeTerminalLeaseResult || kind == TypeTerminalResized || kind == TypeTerminalDetached || kind == TypeTerminalInputResult || kind == TypeTerminalEOF || kind == TypeTerminalExit || kind == TypeTerminalReset || kind == TypeRemoteInviteResult || kind == TypePushSubscribeResult || kind == TypeTelemetryIngestResult ||
-		kind == TypeAttachmentRetentionResult || kind == TypeProjectContentResult || kind == TypeAgentUpdateResult || kind == TypeProjectLimitsResult || kind == TypeProjectCreateResult || kind == TypeRepositories || kind == TypeRepositoryMutateResult || kind == TypeTaskUpdateResult || kind == TypeOperationalGraph || kind == TypeRunPaths ||
+		kind == TypeAttachmentRetentionResult || kind == TypeProjectContentResult || kind == TypeAgentUpdateResult || kind == TypeProjectLimitsResult || kind == TypeProjectCreateResult || kind == TypeRepositories || kind == TypeRepositoryMutateResult || kind == TypeOperationalGraph || kind == TypeRunPaths ||
 		kind == TypeAccounts || kind == TypeAccountLinkResult || kind == TypeAccountUpdateResult || kind == TypeBrowserClients || kind == TypeBrowserClientRevokeResult || kind == TypeGitHubConnectionResult)
 }
 
@@ -789,7 +783,7 @@ func validateBody(kind MessageType, body any) error {
 		return validTerminalControl(kind, body)
 	case TypeProjectContent, TypeProjectContentResult:
 		return validProjectContent(kind, body)
-	case TypeAttachmentRetention, TypeAttachmentRetentionResult, TypeAgentUpdate, TypeAgentUpdateResult, TypeProjectLimits, TypeProjectLimitsResult, TypeProjectCreate, TypeProjectCreateResult, TypeRepositoriesGet, TypeRepositories, TypeRepositoryMutate, TypeRepositoryMutateResult, TypeTaskUpdate, TypeTaskUpdateResult, TypeOperationalGraphGet, TypeOperationalGraph,
+	case TypeAttachmentRetention, TypeAttachmentRetentionResult, TypeAgentUpdate, TypeAgentUpdateResult, TypeProjectLimits, TypeProjectLimitsResult, TypeProjectCreate, TypeProjectCreateResult, TypeRepositoriesGet, TypeRepositories, TypeRepositoryMutate, TypeRepositoryMutateResult, TypeOperationalGraphGet, TypeOperationalGraph,
 		TypeRunPathsGet, TypeRunPaths, TypeAccountsDiscover, TypeAccounts, TypeAccountLink, TypeAccountLinkResult, TypeAccountUpdate, TypeAccountUpdateResult,
 		TypeBrowserClientsGet, TypeBrowserClients, TypeBrowserClientRevoke, TypeBrowserClientRevokeResult:
 		return validConsoleControl(kind, body)
@@ -1020,8 +1014,6 @@ func rejectNullMembers(kind MessageType, body []byte) error {
 		fields = []string{"appearance", "model", "reasoning_effort", "account_id", "paused", "idle_policy", "idle_after_seconds", "idle_instruction", "idle_run_budget", "idle_wake_on"}
 	case TypeAttachmentRetention, TypeAttachmentRetentionResult:
 		fields = []string{"enabled"}
-	case TypeTaskUpdate:
-		fields = []string{"title", "priority", "assigned_agent_id", "status"}
 	default:
 		return nil
 	}

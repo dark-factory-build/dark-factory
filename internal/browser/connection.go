@@ -516,21 +516,6 @@ func (current *connection) dispatch(frame browserprotocol.ControlFrame) bool {
 		}
 		payload, err = browserprotocol.EncodeRepositories(frame.ID, result)
 
-	case browserprotocol.TaskUpdate:
-		if current.server.consoleBackend == nil {
-			err = ErrUnauthorized
-			break
-		}
-		result, backendErr := current.server.consoleBackend.UpdateTask(ctx, current.principal.ClientID, body)
-		if backendErr != nil {
-			err = backendErr
-			break
-		}
-		if result.TaskID != body.TaskID || result.Revision <= body.ExpectedRevision {
-			current.sendError(frame.ID, browserprotocol.ErrorInternal, false)
-			return false
-		}
-		payload, err = browserprotocol.EncodeTaskUpdateResult(frame.ID, result)
 	case browserprotocol.OperationalGraphGet, browserprotocol.RunPathsGet, browserprotocol.HumanRequestReply, browserprotocol.HumanRequestCancelRun, browserprotocol.GitHubConnection, browserprotocol.RepositoryMutate:
 		// These may use their whole call budget. That must not hold up state
 		// and terminal frames, so one worker answers them in arrival order,

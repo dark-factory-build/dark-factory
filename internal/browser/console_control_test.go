@@ -18,7 +18,6 @@ type consoleDispatchBackend struct {
 	client        [browserprotocol.ClientIDSize]byte
 	agent         browserprotocol.AgentUpdateResult
 	limits        browserprotocol.ProjectLimitsResult
-	task          browserprotocol.TaskUpdateResult
 	graph         browserprotocol.OperationalGraph
 	account       browserprotocol.AccountLinkResult
 	accountUpdate browserprotocol.AccountUpdateResult
@@ -36,7 +35,6 @@ func newConsoleDispatchBackend() *consoleDispatchBackend {
 	backend := &consoleDispatchBackend{fakeBackend: base}
 	backend.agent = browserprotocol.AgentUpdateResult{AgentID: consoleAgentID, Revision: 8}
 	backend.limits = browserprotocol.ProjectLimitsResult{ProjectID: consoleProjectID, Revision: 8}
-	backend.task = browserprotocol.TaskUpdateResult{TaskID: consoleTaskID, Revision: 4}
 	backend.account = browserprotocol.AccountLinkResult{AccountID: consoleAccountID, Revision: 1}
 	backend.accountUpdate = browserprotocol.AccountUpdateResult{AccountID: consoleAccountID, Revision: 2}
 	backend.graph = browserprotocol.OperationalGraph{
@@ -65,13 +63,6 @@ func (backend *consoleDispatchBackend) UpdateAgent(_ context.Context, client [br
 		return browserprotocol.AgentUpdateResult{}, err
 	}
 	return backend.agent, nil
-}
-
-func (backend *consoleDispatchBackend) UpdateTask(_ context.Context, client [browserprotocol.ClientIDSize]byte, _ browserprotocol.TaskUpdate) (browserprotocol.TaskUpdateResult, error) {
-	if err := backend.record(client); err != nil {
-		return browserprotocol.TaskUpdateResult{}, err
-	}
-	return backend.task, nil
 }
 
 func (backend *consoleDispatchBackend) SetProjectLimits(_ context.Context, client [browserprotocol.ClientIDSize]byte, _ browserprotocol.ProjectLimits) (browserprotocol.ProjectLimitsResult, error) {
@@ -205,8 +196,6 @@ var consoleRequests = []struct {
 		`{"type":"AGENT_UPDATE","id":"console-agent","body":{"agent_id":"` + consoleAgentID + `","expected_revision":"7","paused":true}}`},
 	{browserprotocol.TypeProjectLimits, browserprotocol.TypeProjectLimitsResult,
 		`{"type":"PROJECT_LIMITS","id":"console-limits","body":{"project_id":"` + consoleProjectID + `","expected_revision":"7","run_budget":"12","max_run_seconds":900}}`},
-	{browserprotocol.TypeTaskUpdate, browserprotocol.TypeTaskUpdateResult,
-		`{"type":"TASK_UPDATE","id":"console-task","body":{"task_id":"` + consoleTaskID + `","expected_revision":"3","status":"cancelled"}}`},
 	{browserprotocol.TypeOperationalGraphGet, browserprotocol.TypeOperationalGraph,
 		`{"type":"OPERATIONAL_GRAPH_GET","id":"console-topology","body":{"project_id":"` + consoleProjectID + `"}}`},
 	{browserprotocol.TypeRunPathsGet, browserprotocol.TypeRunPaths,
@@ -284,8 +273,6 @@ func TestConsoleControlFailsClosedWithoutBackendAndOnBackendRefusal(t *testing.T
 			{browserprotocol.TypeAgentUpdate, func(backend *consoleDispatchBackend) { backend.agent.AgentID = consoleTaskID }},
 			{browserprotocol.TypeProjectLimits, func(backend *consoleDispatchBackend) { backend.limits.Revision = 7 }},
 			{browserprotocol.TypeProjectLimits, func(backend *consoleDispatchBackend) { backend.limits.ProjectID = consoleTaskID }},
-			{browserprotocol.TypeTaskUpdate, func(backend *consoleDispatchBackend) { backend.task.Revision = 3 }},
-			{browserprotocol.TypeTaskUpdate, func(backend *consoleDispatchBackend) { backend.task.TaskID = consoleAgentID }},
 			{browserprotocol.TypeAccountUpdate, func(backend *consoleDispatchBackend) { backend.accountUpdate.Revision = 1 }},
 			{browserprotocol.TypeAccountUpdate, func(backend *consoleDispatchBackend) { backend.accountUpdate.Revision = 3 }},
 			{browserprotocol.TypeAccountUpdate, func(backend *consoleDispatchBackend) { backend.accountUpdate.AccountID = consoleTaskID }},
@@ -473,8 +460,6 @@ func TestConsoleInvalidRequestKeepsTheConnectionTheTransportWouldClose(t *testin
 	writeClientFrame(t, connection, []byte(consoleFrame(t, browserprotocol.TypeAgentUpdate)))
 	assertError(t, readServerFrame(t, connection), browserprotocol.ErrorInvalidRequest)
 	// The same connection still answers, so the refusal was about the member.
-	writeClientFrame(t, connection, []byte(consoleFrame(t, browserprotocol.TypeTaskUpdate)))
-	assertError(t, readServerFrame(t, connection), browserprotocol.ErrorInvalidRequest)
 
 	// The transport's own invalid_request, from a repeated request id, ends it.
 	closing, _ := dialServer(t, startTaskServer(t, newConsoleDispatchBackend()), testOrigin)

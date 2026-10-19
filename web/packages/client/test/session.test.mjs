@@ -276,7 +276,6 @@ test("private repository listing is exact-correlated", async () => {
 test("console edits and topology carry exact bodies and correlate their results", async () => {
   const { session, socket } = await openHumanSession();
   const agentId = "78".repeat(16);
-  const taskId = "79".repeat(16);
 
   const agentPending = session.updateAgent({ agentId, expectedRevision: 7n, model: "claude-opus-5", paused: true });
   const agentFrame = decodeClientControl(socket.sent.at(-1));
@@ -286,21 +285,6 @@ test("console edits and topology carry exact bodies and correlate their results"
   socket.reply(encodeServerControl({ type: "AGENT_UPDATE_RESULT", id: agentFrame.id, body: { agent_id: agentId, revision: 8n } }));
   assert.deepEqual(await agentPending, { agentId, revision: 8n });
 
-  const taskPending = session.updateTask({ taskId, expectedRevision: 3n, priority: 5, cancel: true });
-  const taskFrame = decodeClientControl(socket.sent.at(-1));
-  assert.equal(taskFrame.type, "TASK_UPDATE");
-  assert.deepEqual(taskFrame.body, { task_id: taskId, expected_revision: 3n, priority: 5, status: "cancelled" });
-  socket.reply(encodeServerControl({ type: "TASK_UPDATE_RESULT", id: taskFrame.id, body: { task_id: taskId, revision: 4n } }));
-  assert.deepEqual(await taskPending, { taskId, revision: 4n });
-
-  // Retrying a blocked task is the same verb with the status it returns to.
-  const retryPending = session.updateTask({ taskId, expectedRevision: 4n, retry: true });
-  const retryFrame = decodeClientControl(socket.sent.at(-1));
-  assert.deepEqual(retryFrame.body, { task_id: taskId, expected_revision: 4n, status: "queued" });
-  socket.reply(encodeServerControl({ type: "TASK_UPDATE_RESULT", id: retryFrame.id, body: { task_id: taskId, revision: 5n } }));
-  assert.deepEqual(await retryPending, { taskId, revision: 5n });
-  // A retry re-queues the task as it stands, so an edit or a cancel beside it is refused, not dropped.
-  for (const extra of [{ title: "renamed" }, { priority: 2 }, { cancel: true }]) await assert.rejects(session.updateTask({ taskId, expectedRevision: 5n, retry: true, ...extra }), { code: "invalid_request" });
 
   const graphBody = JSON.parse(readFileSync(new URL("../../../../protocol/browser/fixtures/operational_graph.json", import.meta.url), "utf8")).body;
   const graphPending = session.getOperationalGraph(graphBody.project_id);
@@ -348,7 +332,6 @@ test("console edits and topology carry exact bodies and correlate their results"
   const closed = new BrowserSession({ url: "ws://127.0.0.1:1/browser", host: "127.0.0.1:1", origin: "http://127.0.0.1:1" });
   for (const request of [
     () => closed.updateAgent({ agentId, expectedRevision: 1n, model: "m".repeat(129) }),
-    () => closed.updateTask({ taskId, expectedRevision: 1n, title: "" }),
   ]) await assert.rejects(request(), (error) => error instanceof SessionError);
   closed.close();
   session.close();
@@ -1896,12 +1879,9 @@ test("closed state watches reconnect only for transport loss or retryable errors
     await readiness;
     readiness = new Promise((resolve) => { ready = resolve; });
     const saved = store.value;
-    const mutation = client.session.updateTask({ taskId: "aa".repeat(16), expectedRevision: 1n, body: "one-shot instruction" });
-    const rejected = assert.rejects(mutation, (error) => error instanceof SessionError);
     const watch = lastFrame(sockets[0], "STATE_WATCH");
     if (failure === null) sockets[0].close();
     else sockets[0].reply(encodeServerError(failure, watch.id));
-    await rejected;
     await tick();
     timer.advance(10);
     const retry = failure === null || failure.retryable;
@@ -1914,7 +1894,6 @@ test("closed state watches reconnect only for transport loss or retryable errors
       assert.ok(types.includes("AUTH_PROVE"));
       assert.ok(types.includes("STATE_GET"));
       assert.ok(!types.includes("PAIR_PROVE"));
-      assert.ok(!types.includes("TASK_UPDATE"));
       assert.ok(!types.some((type) => type.startsWith("TERMINAL_")));
     }
     client.close();

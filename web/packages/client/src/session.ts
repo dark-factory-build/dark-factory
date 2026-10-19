@@ -20,8 +20,6 @@ import {
   type ServerControlFrame,
   type StateChangedFrame,
   type StateSnapshotFrame,
-  type TaskItem,
-  type TaskUpdateBody,
   type TerminalTargetDescriptor,
   type OperationalGraphBody,
   type GitHubConnectionBody,
@@ -30,7 +28,7 @@ import {
 import { ProtocolError, type ProtocolErrorCode } from "./errors.js";
 import { CAPABILITIES, MAX_AGENT_MODEL_BYTES, MAX_AGENT_NAME_BYTES,
   MAX_IDLE_AFTER_SECONDS,
-  MAX_IDLE_RUN_BUDGET, MAX_OUTSTANDING_REQUESTS, MAX_HUMAN_REPLY_BYTES, MAX_SQLITE_INTEGER, MAX_TASK_INSTRUCTION_BYTES, MAX_TASK_PRIORITY, MAX_TASK_TITLE_BYTES, type CapabilityMask, type ErrorCode } from "./manifest.js";
+  MAX_IDLE_RUN_BUDGET, MAX_OUTSTANDING_REQUESTS, MAX_HUMAN_REPLY_BYTES, MAX_SQLITE_INTEGER, MAX_TASK_INSTRUCTION_BYTES, type CapabilityMask, type ErrorCode } from "./manifest.js";
 import { snapshotView, type StateView } from "./state.js";
 import { createTerminalHandle, terminalControlFrame, type InternalTerminalHandle, type TerminalHandle, type TerminalOptions } from "./terminal_session.js";
 import { decodeTerminalServer } from "./terminal_session.js";
@@ -127,12 +125,11 @@ export type BrowserSessionOptions = {
 type Request = { kind: ServerControlFrame["type"]; resolve: (value: never) => void; reject: (error: unknown) => void };
 type TargetPending = Request & { agentId: string; expectedAgentRevision: bigint; expectedHead: bigint };
 type HumanPending = Request & { requestId: string; expectedRevision: bigint; expectedRunRevision: bigint; runId?: string; yielded?: boolean };
-type ConsoleKind = "AGENT_UPDATE_RESULT" | "TASK_UPDATE_RESULT" | "OPERATIONAL_GRAPH" | "RUN_PATHS";
+type ConsoleKind = "AGENT_UPDATE_RESULT" | "OPERATIONAL_GRAPH" | "RUN_PATHS";
 type ConsolePending = Request & { entityId: string; expectedRevision: bigint };
 const IGNORE = (): void => { /* the session itself owns this request's outcome */ };
 
 export type AgentUpdateResult = Readonly<{ agentId: string; revision: bigint }>;
-export type TaskUpdateResult = Readonly<{ taskId: string; revision: bigint }>;
 /** The project's operational structure with its current runtime reading. */
 export type OperationalGraphView = OperationalGraphBody;
 /** One agent's live run and the repository directories it has changed. */
@@ -274,25 +271,6 @@ export class BrowserSession {
     return this.#accountRequest("REPOSITORIES", CAPABILITIES.administration, "repositories", (id) => encodeClientControl({ type: "REPOSITORIES_GET", id, body: { project_id: projectId } }), { entityId: projectId });
   }
 
-
-  /** Edit one still-queued task: its brief, priority, assignment, or cancel it. A blocked task can only be cancelled or retried. */
-  updateTask(request: { taskId: string; expectedRevision: bigint; title?: string; body?: string; priority?: number; assignedAgentId?: string; cancel?: boolean; retry?: boolean }): Promise<TaskUpdateResult> {
-    const body: TaskUpdateBody = { task_id: request.taskId, expected_revision: request.expectedRevision };
-    if (request.title !== undefined) body.title = request.title;
-    if (request.body !== undefined) body.body = request.body;
-    if (request.priority !== undefined) body.priority = request.priority;
-    if (request.assignedAgentId !== undefined) body.assigned_agent_id = request.assignedAgentId;
-    if (request.cancel === true) body.status = "cancelled";
-    else if (request.retry === true) body.status = "queued";
-    if (
-      (request.retry === true && (request.cancel === true || request.title !== undefined || request.body !== undefined || request.priority !== undefined)) ||
-      (request.title !== undefined && (request.title.length === 0 || bounded(request.title, MAX_TASK_TITLE_BYTES))) ||
-      bounded(request.body, MAX_TASK_INSTRUCTION_BYTES) ||
-      (request.priority !== undefined && (!Number.isSafeInteger(request.priority) || Math.abs(request.priority) > MAX_TASK_PRIORITY)) ||
-      (request.assignedAgentId !== undefined && !validDynamicID(request.assignedAgentId))
-    ) return Promise.reject(new SessionError("invalid_request"));
-    return this.#consoleRequest("TASK_UPDATE_RESULT", request.taskId, request.expectedRevision, "task-update", (id) => encodeClientControl({ type: "TASK_UPDATE", id, body }));
-  }
 
   /** The project's operational graph, computed on demand by the daemon. */
   getOperationalGraph(projectId: string): Promise<OperationalGraphView> {
@@ -648,7 +626,7 @@ export class BrowserSession {
       this.#pending(frame.id, frame.type);
       this.#settle(frame.id, frame.type === "PUSH_SUBSCRIBE_RESULT" ? undefined : Object.freeze(frame.body)); return;
     }
-    if (frame.type === "AGENT_UPDATE_RESULT" || frame.type === "TASK_UPDATE_RESULT" || frame.type === "OPERATIONAL_GRAPH" || frame.type === "RUN_PATHS") {
+    if (frame.type === "AGENT_UPDATE_RESULT" || frame.type === "OPERATIONAL_GRAPH" || frame.type === "RUN_PATHS") {
       this.#consoleResult(frame);
       return;
     }
@@ -958,13 +936,12 @@ export class BrowserSession {
     return this.#track(id, { kind, entityId, expectedRevision }, payload);
   }
 
-  #consoleResult(frame: Extract<ServerControlFrame, { type: "AGENT_UPDATE_RESULT" | "TASK_UPDATE_RESULT" | "OPERATIONAL_GRAPH" | "RUN_PATHS" }>): void {
+  #consoleResult(frame: Extract<ServerControlFrame, { type: "AGENT_UPDATE_RESULT" | "OPERATIONAL_GRAPH" | "RUN_PATHS" }>): void {
     const pending = this.#pending<ConsolePending>(frame.id, frame.type);
-    const identity = frame.type === "AGENT_UPDATE_RESULT" || frame.type === "RUN_PATHS" ? frame.body.agent_id : frame.type === "TASK_UPDATE_RESULT" ? frame.body.task_id : frame.body.project_id;
+    const identity = frame.type === "AGENT_UPDATE_RESULT" || frame.type === "RUN_PATHS" ? frame.body.agent_id : frame.body.project_id;
     if (identity !== pending.entityId) throw new ProtocolError("malformed");
     this.#requests.delete(frame.id);
     if (frame.type === "AGENT_UPDATE_RESULT") { pending.resolve(Object.freeze({ agentId: frame.body.agent_id, revision: frame.body.revision }) as never); return; }
-    if (frame.type === "TASK_UPDATE_RESULT") { pending.resolve(Object.freeze({ taskId: frame.body.task_id, revision: frame.body.revision }) as never); return; }
     if (frame.type === "RUN_PATHS") { pending.resolve(Object.freeze({ agentId: frame.body.agent_id, runId: frame.body.run_id, paths: Object.freeze([...frame.body.paths]), ...(frame.body.telemetry === undefined ? {} : { telemetry: Object.freeze({ ...frame.body.telemetry }) }) }) as never); return; }
     // Decoded frames are fresh objects; freezing the top level keeps callers honest.
     pending.resolve(Object.freeze(frame.body) as never);

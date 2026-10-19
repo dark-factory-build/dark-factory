@@ -547,60 +547,6 @@ func (backend *browserBackend) MutateRepository(ctx context.Context, rawClient [
 	return browserprotocol.RepositoryMutateResult{Repository: &item}, nil
 }
 
-func (backend *browserBackend) UpdateTask(ctx context.Context, rawClient [browserprotocol.ClientIDSize]byte, request browserprotocol.TaskUpdate) (browserprotocol.TaskUpdateResult, error) {
-	_, release, _, err := backend.authorize(ctx, rawClient, kernel.BrowserCapabilityHumanActions)
-	if err != nil {
-		return browserprotocol.TaskUpdateResult{}, err
-	}
-	defer release()
-	taskID, err := decodeID(request.TaskID, kernel.TaskIDFromBytes)
-	if err != nil {
-		return browserprotocol.TaskUpdateResult{}, browser.ErrStale
-	}
-	expected, err := browserDecimal(request.ExpectedRevision)
-	if err != nil {
-		return browserprotocol.TaskUpdateResult{}, browser.ErrStale
-	}
-	patch := kernel.TaskPatch{Title: request.Title, Body: request.Body, Priority: request.Priority, Cancel: request.Status != nil && *request.Status == "cancelled"}
-	if request.AssignedAgentID != nil {
-		assigned, err := decodeID(*request.AssignedAgentID, kernel.AgentIDFromBytes)
-		if err != nil {
-			return browserprotocol.TaskUpdateResult{}, browser.ErrStale
-		}
-		patch.AssignedAgentID = &assigned
-	}
-	retry := request.Status != nil && *request.Status == "queued"
-	var assigned kernel.AgentID
-	if patch.AssignedAgentID != nil {
-		assigned = *patch.AssignedAgentID
-	}
-	if retry {
-		err = prepareTaskRetry(ctx, backend.store, taskID, expected, assigned)
-	} else {
-		err = prepareQueuedTaskPatch(ctx, backend.store, taskID, expected, patch)
-	}
-	if err != nil {
-		return browserprotocol.TaskUpdateResult{}, consoleUpdateError(err)
-	}
-	at, err := backend.timestamp()
-	if err != nil {
-		return browserprotocol.TaskUpdateResult{}, err
-	}
-	var task kernel.Task
-	if retry {
-		task, err = backend.store.RetryTask(ctx, nil, taskID, expected, assigned, at, 0)
-	} else {
-		task, err = backend.store.UpdateTask(ctx, taskID, expected, patch, at)
-	}
-	if err != nil {
-		return browserprotocol.TaskUpdateResult{}, consoleUpdateError(err)
-	}
-	if backend.owner != nil {
-		backend.owner.notifyScheduler()
-	}
-	return browserprotocol.TaskUpdateResult{TaskID: task.ID.String(), Revision: decimalRevision(task.Revision)}, nil
-}
-
 // Observe records factoryd's own browser listener activity.
 func (backend *browserBackend) Observe(attributes map[string]string) {
 	backend.owner.observe("server", attributes, nil, false, 0)

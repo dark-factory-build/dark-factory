@@ -123,24 +123,6 @@ func validateRepository(value Repository) error {
 	return nil
 }
 
-// TaskUpdate edits one still-queued task. Status is the only member that is
-// not free: "cancelled" retires the task, "queued" retries a blocked or failed
-// one, and it says nothing else.
-type TaskUpdate struct {
-	TaskID           string  `json:"task_id"`
-	ExpectedRevision Decimal `json:"expected_revision"`
-	Title            *string `json:"title,omitempty"`
-	Body             *string `json:"body,omitempty"`
-	Priority         *int64  `json:"priority,omitempty"`
-	AssignedAgentID  *string `json:"assigned_agent_id,omitempty"`
-	Status           *string `json:"status,omitempty"`
-}
-
-type TaskUpdateResult struct {
-	TaskID   string  `json:"task_id"`
-	Revision Decimal `json:"revision"`
-}
-
 type OperationalGraphGet struct {
 	ProjectID string `json:"project_id"`
 }
@@ -396,10 +378,6 @@ func EncodeRepositories(id string, value Repositories) ([]byte, error) {
 func EncodeRepositoryMutateResult(id string, value RepositoryMutateResult) ([]byte, error) {
 	return encodeControl(TypeRepositoryMutateResult, id, value)
 }
-func EncodeTaskUpdateResult(id string, value TaskUpdateResult) ([]byte, error) {
-	return encodeControl(TypeTaskUpdateResult, id, value)
-}
-
 func EncodeOperationalGraph(id string, value OperationalGraph) ([]byte, error) {
 	if value.Sources == nil {
 		value.Sources = []GraphSource{}
@@ -516,21 +494,6 @@ func validConsoleControl(kind MessageType, body any) error {
 			if validateRepository(item) != nil {
 				return bad()
 			}
-		}
-	case TaskUpdate:
-		if validateDynamicID(value.TaskID) != nil || value.ExpectedRevision == 0 ||
-			value.Title != nil && validateBoundedText(*value.Title, 1, MaxTaskTitleBytes) != nil ||
-			value.Body != nil && validateBoundedText(*value.Body, 0, MaxTaskInstructionBytes) != nil ||
-			value.Priority != nil && (*value.Priority < -MaxTaskPriority || *value.Priority > MaxTaskPriority) ||
-			value.AssignedAgentID != nil && validateDynamicID(*value.AssignedAgentID) != nil ||
-			value.Status != nil && *value.Status != "cancelled" && *value.Status != "queued" ||
-			// A retry re-queues the task as it stands; an edit beside it would be dropped.
-			value.Status != nil && *value.Status == "queued" && (value.Title != nil || value.Body != nil || value.Priority != nil) {
-			return bad()
-		}
-	case TaskUpdateResult:
-		if validateDynamicID(value.TaskID) != nil || value.Revision == 0 {
-			return bad()
 		}
 	case OperationalGraphGet:
 		if validateDynamicID(value.ProjectID) != nil {

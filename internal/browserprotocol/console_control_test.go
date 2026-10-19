@@ -11,14 +11,11 @@ import (
 // widened body would ship green.
 func TestConsoleControlBounds(t *testing.T) {
 	agent := "02020202020202020202020202020202"
-	task := "03030303030303030303030303030303"
 	node := strings.Repeat("a1", 16)
 	for _, frame := range []string{
 		// Every mutable member is optional; only the identity and the observed
 		// revision are required.
 		`{"type":"AGENT_UPDATE","id":"x","body":{"agent_id":"` + agent + `","expected_revision":"7"}}`,
-		`{"type":"TASK_UPDATE","id":"x","body":{"task_id":"` + task + `","expected_revision":"7"}}`,
-		`{"type":"TASK_UPDATE","id":"x","body":{"task_id":"` + task + `","expected_revision":"7","status":"queued"}}`,
 	} {
 		if _, err := DecodeClientControl([]byte(frame)); err != nil {
 			t.Fatalf("optional members refused: %v", err)
@@ -28,12 +25,6 @@ func TestConsoleControlBounds(t *testing.T) {
 		`{"type":"AGENT_UPDATE","id":"x","body":{"agent_id":"` + agent + `","expected_revision":"0"}}`,
 		`{"type":"AGENT_UPDATE","id":"x","body":{"agent_id":"` + agent + `","expected_revision":"7","model":"` + strings.Repeat("m", MaxAgentModelBytes+1) + `"}}`,
 		`{"type":"AGENT_UPDATE","id":"x","body":{"agent_id":"` + agent + `","expected_revision":"7","reasoning_effort":"` + strings.Repeat("e", MaxAgentModelBytes+1) + `"}}`,
-		// Cancellation is the only status transition the console may ask for.
-		`{"type":"TASK_UPDATE","id":"x","body":{"task_id":"` + task + `","expected_revision":"7","status":"succeeded"}}`,
-		// A retry re-queues the task as it stands; an edit beside it would be dropped.
-		`{"type":"TASK_UPDATE","id":"x","body":{"task_id":"` + task + `","expected_revision":"7","status":"queued","title":"renamed"}}`,
-		`{"type":"TASK_UPDATE","id":"x","body":{"task_id":"` + task + `","expected_revision":"7","priority":1000001}}`,
-		`{"type":"TASK_UPDATE","id":"x","body":{"task_id":"` + task + `","expected_revision":"7","title":""}}`,
 		`{"type":"OPERATIONAL_GRAPH_GET","id":"x","body":{"project_id":"0000000000000000000000000000000"}}`,
 		// An explicit null is not "absent". encoding/json would leave the
 		// pointer nil and report success with an advanced revision, while the
@@ -43,10 +34,6 @@ func TestConsoleControlBounds(t *testing.T) {
 		`{"type":"AGENT_UPDATE","id":"x","body":{"agent_id":"` + agent + `","expected_revision":"7","paused":null}}`,
 		`{"type":"AGENT_UPDATE","id":"x","body":{"agent_id":"` + agent + `","expected_revision":"7","appearance":{"automatic":false,"skin":null,"hair":0,"hair_colour":0,"face":0,"outfit":0,"clothes_colour":0,"shoes":0,"tool":0,"headwear":0}}}`,
 		`{"type":"AGENT_UPDATE","id":"x","body":{"agent_id":"` + agent + `","expected_revision":"7","appearance":{"automatic":true,"skin":1,"hair":0,"hair_colour":0,"face":0,"outfit":0,"clothes_colour":0,"shoes":0,"tool":0,"headwear":0}}}`,
-		`{"type":"TASK_UPDATE","id":"x","body":{"task_id":"` + task + `","expected_revision":"7","title":null}}`,
-		`{"type":"TASK_UPDATE","id":"x","body":{"task_id":"` + task + `","expected_revision":"7","priority":null}}`,
-		`{"type":"TASK_UPDATE","id":"x","body":{"task_id":"` + task + `","expected_revision":"7","assigned_agent_id":null}}`,
-		`{"type":"TASK_UPDATE","id":"x","body":{"task_id":"` + task + `","expected_revision":"7","status":null}}`,
 	} {
 		if _, err := DecodeClientControl([]byte(frame)); err != ErrMalformed {
 			t.Fatalf("%s accepted: %v", frame, err)
