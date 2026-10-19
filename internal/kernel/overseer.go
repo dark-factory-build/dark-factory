@@ -5,8 +5,6 @@ import (
 	"database/sql"
 	"encoding/hex"
 	"fmt"
-	"strconv"
-	"strings"
 	"unicode/utf8"
 )
 
@@ -468,33 +466,6 @@ func overseerRun(ctx context.Context, connection *sql.Conn, digest AttemptDigest
 	return run, nil
 }
 
-func sourceProposalMarker(body string) (string, bool) {
-	fields := strings.Fields(strings.SplitN(body, "\n", 2)[0])
-	if len(fields) != 5 || fields[0] != "Source" || fields[1] != "proposal" || fields[3] != "revision" {
-		return "", false
-	}
-	revision, err := strconv.ParseInt(fields[4], 10, 64)
-	if err != nil || revision < 1 {
-		return "", false
-	}
-	return "Source proposal " + fields[2] + " revision " + fields[4], true
-}
-
-func rejectDispatchedSourceProposal(ctx context.Context, connection *sql.Conn, project ProjectID, body string) error {
-	marker, ok := sourceProposalMarker(body)
-	if !ok {
-		return nil
-	}
-	var dispatched bool
-	if err := connection.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM tasks WHERE project_id = ? AND status IN ('queued', 'running', 'blocked', 'succeeded') AND (body = ? OR body LIKE ?))`, project.Bytes(), marker, marker+"\n%").Scan(&dispatched); err != nil {
-		return err
-	}
-	if dispatched {
-		return fmt.Errorf("%w: source proposal revision already has a task", ErrConflict)
-	}
-	return nil
-}
-
 func (store *Store) EnqueueTaskForOverseer(ctx context.Context, digest AttemptDigest, spec NewTask, at UnixMillis, content ...TaskContentReference) (Task, error) {
 	if err := validateNonCarrierTask(spec); err != nil {
 		return Task{}, err
@@ -549,9 +520,6 @@ func (store *Store) EnqueueTaskForOverseer(ctx context.Context, digest AttemptDi
 			return Task{}, err
 		}
 		return existing, nil
-	}
-	if err := rejectDispatchedSourceProposal(ctx, tx.connection, run.ProjectID, spec.Body); err != nil {
-		return Task{}, tx.Rollback(err)
 	}
 	result, err := insertTaskOnConnection(ctx, tx.connection, spec, at)
 	if err != nil {
