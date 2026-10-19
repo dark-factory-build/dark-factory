@@ -1,8 +1,8 @@
 import { useEffect, useMemo, useState, type ReactNode } from "react";
-import type { AgentItem, TaskItem } from "@dark-factory/client";
+import type { AgentItem } from "@dark-factory/client";
 import { type FactoryAgentSelection, type FactoryAppSnapshot, type FactoryHumanRequestView } from "./factory-app-controller.js";
 import { FactoryFloor } from "./console-screens.js";
-import { AgentPanel, HumanRequestPanel, WorkPanel, editErrorCopy, type TaskEdit } from "./console-sidebar.js";
+import { AgentPanel, HumanRequestPanel, WorkPanel } from "./console-sidebar.js";
 import type { ProjectContentCall } from "./factory-app-controller.js";
 import { useProduction } from "./production-data.js";
 import { deriveProductionView, inProgressProduction } from "./production-view.js";
@@ -12,7 +12,6 @@ export type FactoryConsoleProps = FactoryAppSnapshot & {
   selectedAgent?: FactoryAgentSelection;
   onSelectAgent?: (agent: AgentItem) => void;
   onProjectContent?: ProjectContentCall;
-  onEditTask?: (task: TaskItem, change: TaskEdit) => Promise<boolean>;
   onSelectHumanRequest?: (request: FactoryHumanRequestView["request"]) => void;
   onHumanReplyChange?: (reply: string) => void;
   onReplyHumanRequest?: () => void;
@@ -60,12 +59,10 @@ export function FactoryConsole({
   graphErrors,
   runPaths,
   lastRunPaths,
-  edit,
   selectedHumanRequest,
   selectedAgent,
   onSelectAgent,
   onProjectContent,
-  onEditTask,
   onSelectHumanRequest,
   onHumanReplyChange,
   onReplyHumanRequest,
@@ -91,7 +88,6 @@ export function FactoryConsole({
   const rows = useMemo(() => workRows(scopedState, inProgressItems), [scopedState, inProgressItems]);
   const agent = selectedAgent === undefined ? undefined : scopedState?.agents.get(selectedAgent.id);
   const liveAgent = agent?.archived === true ? undefined : agent;
-  const editError = edit !== undefined && state?.projects.has(edit.target) ? undefined : editErrorCopy(edit);
 
   return (
     <div className="dfConsoleShell">
@@ -118,14 +114,11 @@ export function FactoryConsole({
 
           {/* Work (decisions first) always shows; the selected agent's terminal joins it below. */}
           <aside className="dfConsoleSidebar" aria-label="Selected detail">
-            {editError === undefined ? null : <p className="dfFactoryConsole__terminalError" role="alert">{editError}</p>}
             <WorkPanel
               state={scopedState}
               rows={rows}
               projectId={projectId}
-              edit={edit}
               ready={ready}
-              onEditTask={onEditTask}
               selectedHumanRequest={selectedHumanRequest}
               onSelectHumanRequest={pickRequest}
               onCloseHumanRequest={onCloseHumanRequest}

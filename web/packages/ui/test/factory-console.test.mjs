@@ -441,20 +441,15 @@ test("Work is one ranked list: blocked work first, every origin shown, flags dis
       ["b3".repeat(16), { ...running, id: "b3".repeat(16), title: "Overseer stuck", status: "blocked", assigned_agent_id: supervisor.id }],
     ]),
   });
-  const edits = [];
   let renderer;
-  await act(async () => { renderer = create(createElement(FactoryConsole, { status: "ready", state, onEditTask: async (task, change) => { edits.push([task.id, change]); return true; } })); });
+  await act(async () => { renderer = create(createElement(FactoryConsole, { status: "ready", state })); });
   const panel = renderer.root.findByProps({ "aria-label": "Work" });
   const titled = (title) => panel.findAllByProps({ className: "dfConsoleItem__taskTitle dfWorkRow__title" }).some((node) => node.type === "span" && node.children.join("") === title);
-  assert.ok(titled("Stuck on a prerequisite"), "a blocked task is plain text with its actions beside it");
+  assert.ok(titled("Stuck on a prerequisite"), "a blocked task is plain text");
   // The block reason is agent-written free text: it renders as plain text
   // (React's default escaping), never through dangerouslySetInnerHTML.
   const markup = renderToStaticMarkup(createElement(FactoryConsole, { status: "ready", state }));
   assert.match(markup, /Needs a human to resolve a merge conflict &lt;script&gt;/);
-  await act(async () => { panel.findByProps({ "aria-label": "Cancel Stuck on a prerequisite" }).props.onClick(); });
-  assert.deepEqual(edits, [["b1".repeat(16), { cancel: true }]], "a blocked task is cleared in one step");
-  await act(async () => { panel.findByProps({ "aria-label": "Retry Stuck on a prerequisite" }).props.onClick(); });
-  assert.deepEqual(edits.at(-1), ["b1".repeat(16), { retry: true }], "or sent round again in one step");
   assert.ok(titled("Standing instruction") && titled("Overseer stuck"), "overseer passes are never hidden by origin");
   assert.equal(panel.findAllByProps({ "aria-label": "Work filter" }).length + panel.findAllByProps({ "aria-label": "Show overseer and specialist passes" }).length, 0, "no filter or reveal control");
   const order = panel.findAllByProps({ className: "dfConsoleItem__taskTitle dfWorkRow__title" }).map((row) => row.children.join(""));
@@ -552,7 +547,6 @@ test("selecting an agent shows its sprite, name and terminal with no status read
   const markup = render({
     selectedAgent: agentSelection(),
     onSelectAgent: () => {},
-    onEditTask: () => {},
   });
   assert.match(markup, /aria-label="Agent Builder One"[\s\S]*?<h2>Builder One<\/h2>/);
   assert.match(markup, /<section class="dfConsoleSidebar__section dfConsoleSidebar__terminalSlot" aria-label="Terminal">/);
@@ -573,7 +567,6 @@ test("unclaimed shared work waits under its project until an eligible worker cla
   const markup = render({
     state: baseState({ tasks: new Map([[shared.id, shared]]) }),
     selectedAgent: agentSelection(),
-    onEditTask: () => {},
   });
   assert.match(markup, /Anyone free/);
   assert.match(markup, /Any eligible worker/);
@@ -606,34 +599,6 @@ test("a queued row uses the shared Work row with a plain-text title", async () =
     globalThis.IS_REACT_ACT_ENVIRONMENT = previousAct;
   }
 });
-
-test("a rejected edit says plainly that the durable value did not change", () => {
-  const markup = render({
-    selectedAgent: agentSelection(),
-    edit: { target: ids.agent, pending: false, error: new SessionError("stale") },
-  });
-  assert.match(markup, /Someone else changed this\. Reopen it and try again\./);
-  assert.match(markup, /role="alert"/);
-  assert.equal((markup.match(/role="alert"/g) ?? []).length, 1, "an agent refusal has one shared alert");
-  const unknown = render({ selectedAgent: agentSelection(), edit: { target: ids.agent, pending: false, error: { code: "internal" } } });
-  assert.match(unknown, /The edit did not complete\./);
-});
-
-test("a queued edit refusal remains visible after its task leaves the queue", () => {
-  const rejected = { target: ids.task, pending: false, error: new SessionError("stale") };
-  const task = fixtureState.tasks.get(ids.task);
-  const states = [
-    baseState({ tasks: new Map([[task.id, { ...task, status: "running" }]]) }),
-    baseState({ tasks: new Map([[task.id, { ...task, status: "cancelled" }]]) }),
-    baseState({ tasks: new Map() }),
-  ];
-  for (const state of states) {
-    const markup = render({ state, edit: rejected });
-    assert.match(markup, /Someone else changed this\. Reopen it and try again\./);
-    assert.equal((markup.match(/role="alert"/g) ?? []).length, 1);
-  }
-});
-
 test("agent panels render plain portraits without appearance editing", () => {
   for (const view of VIEWS) {
     const markup = render({ view, onSelectAgent: () => {}, selectedAgent: agentSelection(), graphs: fixtureGraphs });
