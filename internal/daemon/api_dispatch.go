@@ -2249,7 +2249,7 @@ func (daemon *Daemon) overseerEnqueueTask(ctx context.Context, call api.Call) ap
 	}
 	task, err := daemon.store.EnqueueTaskForOverseer(ctx, digest, spec, at, content...)
 	if err != nil {
-		return newErrorReply(remoteErrorCode(err))
+		return newRefusalReply(err)
 	}
 	daemon.notifyScheduler()
 	return daemon.mutation(ctx, task.Revision)

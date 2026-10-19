@@ -189,7 +189,10 @@ decision with `"task_id"` set to that task. To
 decline or defer, record the decision without `task_id`, the reason in its
 description. Only you or the operator resolve a proposal, and an acceptance is
 refused while another accepted proposal's task is still queued, running or
-blocked: one self-generated implementation is active at a time.
+blocked: one self-generated implementation is active at a time. A proposal
+revision pins one task: a second `--content` add for it is refused while that
+task is queued, running, blocked or succeeded, merged or not; the refusal
+names its reason.
 
 Specialists may contribute to or challenge each other's proposals; the wake
 line counts those notes and names their authors (`(2 notes from security,

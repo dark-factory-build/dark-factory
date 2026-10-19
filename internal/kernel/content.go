@@ -548,13 +548,15 @@ func attachContentTx(ctx context.Context, tx *writeTx, task TaskID, project Proj
 	if status != TaskQueued.String() && (!started || status != TaskRunning.String() && status != TaskBlocked.String()) {
 		return ErrConflict
 	}
+	// A proposal revision pins one queued, running, blocked or succeeded task, merged or not.
 	var busy bool
 	if err := tx.connection.QueryRowContext(ctx, `SELECT EXISTS (SELECT 1 FROM project_content_revisions AS p WHERE p.id = ?2 AND p.revision = ?5 AND `+proposalRevisionSQL+`)
-		AND EXISTS (SELECT 1 FROM tasks AS t WHERE `+activeImplementationSQL+`)`, project.Bytes(), content.Bytes(), nil, task.String(), revision.Int64()).Scan(&busy); err != nil {
+		AND EXISTS (SELECT 1 FROM tasks AS t WHERE (`+activeImplementationSQL+`) OR t.project_id = ?1 AND lower(hex(t.id)) <> lower(?4) AND t.status IN ('queued', 'running', 'blocked', 'succeeded')
+			AND EXISTS (SELECT 1 FROM task_content_references AS r WHERE r.task_id = t.id AND r.content_id = ?2 AND r.content_revision = ?5))`, project.Bytes(), content.Bytes(), nil, task.String(), revision.Int64()).Scan(&busy); err != nil {
 		return err
 	}
 	if busy {
-		return fmt.Errorf("%w: an accepted proposal's task is still active", ErrConflict)
+		return NewOutcomeRefusal(fmt.Errorf("%w: an accepted proposal's task is still active, or this proposal revision already has one", ErrConflict))
 	}
 	var references int
 	if err := tx.connection.QueryRowContext(ctx, `SELECT COUNT(*) FROM task_content_references WHERE task_id = ? AND task_work_revision = ?`, task.Bytes(), taskWorkRevision).Scan(&references); err != nil {
