@@ -990,7 +990,7 @@ func (daemon *Daemon) awaitAdoptedResult(ctx context.Context, parent *RuntimePar
 		}
 		return daemon.recordRecoveredRunnerAbsence(ctx, run.ID, runnerProcess.ID, runnerProcess.Identity)
 	}
-	settled, tailErr := daemon.attemptResultTail(ctx, parent, changeParent, run, live, resultOutcome, runtimeDirectory, runtimeRoot.Identity, runnerProcess.ID, runtimeRoot.ID, awaitConvergence, recordConvergence, closeRuntime)
+	settled, tailErr := daemon.attemptResultTail(ctx, parent, changeParent, run, live, resultOutcome, runtimeDirectory, runtimeRoot.Identity, runnerProcess.ID, runtimeRoot.ID, awaitConvergence, recordConvergence, closeRuntime, nil)
 	if tailErr == nil && settled.Phase == kernel.RunTerminal {
 		return
 	}

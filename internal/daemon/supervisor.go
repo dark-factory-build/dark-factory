@@ -51,6 +51,7 @@ type SupervisorSpec struct {
 	afterAdmission           func() error
 	beforeProviderStateCheck func() error
 	afterProviderRelease     func() error
+	beforeChangeSettlement   func(context.Context, kernel.Run, string) error
 	beforeProviderRelease    func()
 	beforeRetainedOutcome    func() // before the retained outcome proposal is retried
 

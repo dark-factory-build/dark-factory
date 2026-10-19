@@ -1036,7 +1036,7 @@ func (daemon *Daemon) runNext(ctx context.Context, spec SupervisorSpec) (resultR
 		runtimeOpen = false
 		return nil
 	}
-	return daemon.attemptResultTail(ctx, spec.RuntimeParent, spec.ChangeParent, run, live, resultOutcome, runtimeDirectory, runtimeIdentity, keys.resources.RunnerProcess, keys.resources.RuntimeRoot, awaitConvergence, recordConvergence, closeRuntime)
+	return daemon.attemptResultTail(ctx, spec.RuntimeParent, spec.ChangeParent, run, live, resultOutcome, runtimeDirectory, runtimeIdentity, keys.resources.RunnerProcess, keys.resources.RuntimeRoot, awaitConvergence, recordConvergence, closeRuntime, spec.beforeChangeSettlement)
 }
 
 // attemptResultTail is the shared post-release convergence both a freshly
@@ -1062,6 +1062,7 @@ func (daemon *Daemon) attemptResultTail(
 	awaitConvergence func() error,
 	recordConvergence func() (kernel.Run, error),
 	closeRuntime func() error,
+	beforeChangeSettlement func(context.Context, kernel.Run, string) error,
 ) (settledRun kernel.Run, resultErr error) {
 	// Spend is read from the provider's own session log once the run is over,
 	// however this daemon came to own it. The run's row is the receipt, so the
@@ -1214,6 +1215,11 @@ func (daemon *Daemon) attemptResultTail(
 	}
 	if err := daemon.releaseResources(daemon.cleanupCtx, run.ID, kernel.ResourceRuntimeRoot); err != nil {
 		return run, err
+	}
+	if beforeChangeSettlement != nil {
+		if err := beforeChangeSettlement(daemon.cleanupCtx, run, changeParent); err != nil {
+			return run, err
+		}
 	}
 	settled, err := daemon.settleRun(daemon.cleanupCtx, changeParent, run.ID)
 	if err != nil {

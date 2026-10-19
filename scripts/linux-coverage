@@ -66,6 +66,7 @@ test internal/daemon/live_attempt_darwin_test.go shared L08
 test internal/daemon/local_ci_lease_darwin_test.go linux-equivalent L03
 test internal/daemon/parallelism_darwin_test.go shared L08
 test internal/daemon/project_limits_darwin_test.go shared L08
+test internal/daemon/provider_self_check_darwin_test.go macos-only
 test internal/daemon/publish_darwin_test.go shared L08
 test internal/daemon/recovered_runtime_darwin_test.go linux-equivalent L03
 test internal/daemon/recovery_darwin_test.go shared L08
