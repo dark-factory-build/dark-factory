@@ -6492,6 +6492,15 @@ mod tests {
         let page = pull_request_page(42, &request, vec![entry()]).unwrap();
         assert_eq!(page.next_page, Some(2));
         assert!(!page.pull_requests[0].draft);
+        let mut held = raw.clone();
+        held["draft"] = serde_json::json!(true);
+        let held = serde_json::from_value::<PullRequest>(held).unwrap();
+        assert!(
+            pull_request_page(42, &request, vec![held])
+                .unwrap()
+                .pull_requests[0]
+                .draft
+        );
         assert_eq!(page.pull_requests[0].body, "Refs team/source#9");
         assert_eq!(page.pull_requests[0].base_ref, "release");
         for branch in ["release+hotfix", "release/été", "release@next"] {

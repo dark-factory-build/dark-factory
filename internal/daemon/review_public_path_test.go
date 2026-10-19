@@ -21,7 +21,7 @@ import (
 
 type publicReviewBackend struct {
 	killed, submitAmbiguous, requestChanges bool
-	queued, draft                           bool
+	queued                                  bool
 	checks                                  []string
 	enqueueRefusal                          string // the broker's refusal class, if any
 	defaultBranch                           string
@@ -195,7 +195,7 @@ func (b *publicReviewBackend) ObservePull(_ context.Context, operation review.Op
 	if checks == nil {
 		checks = []string{"required=success"}
 	}
-	return review.Pull{Head: operation.Request.Head, State: "open", Draft: b.draft, Queued: b.queued, Checks: checks}, nil
+	return review.Pull{Head: operation.Request.Head, State: "open", Queued: b.queued, Checks: checks}, nil
 }
 
 func (b *publicReviewBackend) Observe(_ context.Context, operationID string) (review.Receipt, error) {
@@ -1040,17 +1040,76 @@ func TestRefusedEnqueueBecomesAnOverseerItem(t *testing.T) {
 	}
 }
 
+// observedBackend reads the pull request through the production decoder
+// (daemonReviewBackend.ObservePull) from the Maintainer responses the daemon's
+// githubMCP seam serves; the provider and the writes stay fixtures.
+type observedBackend struct {
+	*publicReviewBackend
+	observe *daemonReviewBackend
+}
+
+func (b *observedBackend) ObservePull(ctx context.Context, operation review.Operation) (review.Pull, error) {
+	return b.observe.ObservePull(ctx, operation)
+}
+
+// maintainerPull serves the Maintainer reads the production decoder makes for
+// an open, clean, unqueued pull request at request's head whose one required
+// check passed; *draft is the listing's draft flag at each call.
+func maintainerPull(request api.ReviewRequest, draft *bool) func(context.Context, json.RawMessage, map[string]uint64) (json.RawMessage, error) {
+	return func(_ context.Context, raw json.RawMessage, _ map[string]uint64) (json.RawMessage, error) {
+		var envelope struct {
+			Params struct {
+				Name string `json:"name"`
+			} `json:"params"`
+		}
+		if err := json.Unmarshal(raw, &envelope); err != nil {
+			return nil, err
+		}
+		reply := func(content string) json.RawMessage {
+			return json.RawMessage(`{"jsonrpc":"2.0","id":1,"result":{"structuredContent":` + content + `}}`)
+		}
+		switch envelope.Params.Name {
+		case "list_pull_requests":
+			return reply(fmt.Sprintf(`{"pull_requests":[{"number":%d,"head_sha":%q,"base_sha":%q,"base_ref":"main","state":"open","draft":%t,"mergeable":true,"merge_state_status":"clean","review":{"state":"allow"}}],"next_page":null}`, request.PullNumber, request.Head, request.Base, *draft)), nil
+		case "observe_pull_request_merge":
+			return reply(fmt.Sprintf(`{"pull_number":%d,"head_sha":%q,"base":"main","pull_state":"open","state":"NOT_QUEUED"}`, request.PullNumber, request.Head)), nil
+		case "observe_pull_request_checks":
+			return reply(fmt.Sprintf(`{"pull_number":%d,"head_sha":%q,"checks":[{"name":"required","status":"completed","conclusion":"success","required":true}]}`, request.PullNumber, request.Head)), nil
+		default:
+			return nil, fmt.Errorf("unexpected maintainer tool %s", envelope.Params.Name)
+		}
+	}
+}
+
+// The production decoder carries the Maintainer's draft flag into the
+// observation Decide reads: the draft waits, and marked ready it is enqueued.
+func TestObservePullReadsTheDraftFlag(t *testing.T) {
+	request, draft := publishedReviewRequest(), true
+	backend := &daemonReviewBackend{daemon: &Daemon{githubMCP: maintainerPull(request, &draft)}, repository: request.Repository, repositoryID: 42}
+	allow := review.Operation{ID: "allow", Request: review.Request{Repository: request.Repository, PullNumber: request.PullNumber, Head: request.Head, Base: request.Base, BaseRef: "main"}, State: "enqueued", Verdict: "allow", Submitted: true}
+	for _, want := range []review.Action{review.Wait, review.Enqueue} {
+		pull, err := backend.ObservePull(context.Background(), allow)
+		if action, _ := review.Decide(pull, []review.Operation{allow}, false); err != nil || pull.Draft != draft || action != want {
+			t.Fatalf("draft=%t pull=%+v err=%v action=%d, want %d", draft, pull, err, action, want)
+		}
+		draft = false
+	}
+}
+
 // A draft is an operator's hold (#2076): GitHub refuses to queue it, so its
 // one completed ALLOW is neither resubmitted nor retried into an escalation.
-// Marked ready, the same operation is queued once.
+// The Maintainer's own list_pull_requests response says draft; marked ready,
+// the same operation is queued once.
 func TestADraftWaitsWithItsOneReviewUntilItIsReady(t *testing.T) {
 	fixture, project, _, settle := publishedTask(t)
 	settle()
 	customerMode(t, fixture)
 	ctx := context.Background()
-	backend := &publicReviewBackend{draft: true, enqueueRefusal: "UNPROCESSABLE: Pull request is in draft"}
+	request, draft := publishedReviewRequest(), true
+	fixture.daemon.githubMCP = maintainerPull(request, &draft)
+	backend := &observedBackend{publicReviewBackend: &publicReviewBackend{enqueueRefusal: "UNPROCESSABLE: Pull request is in draft"}, observe: &daemonReviewBackend{daemon: fixture.daemon, project: project, repository: request.Repository, repositoryID: 42}}
 	fixture.daemon.reviewBackend = func(string, uint64) review.Backend { return backend }
-	if _, err := reviewNow(ctx, fixture.daemon, project, publishedReviewRequest()); err != nil {
+	if _, err := reviewNow(ctx, fixture.daemon, project, request); err != nil {
 		t.Fatal(err)
 	}
 	waitForMergePipeline(t, fixture.daemon)
@@ -1063,7 +1122,7 @@ func TestADraftWaitsWithItsOneReviewUntilItIsReady(t *testing.T) {
 	if op.State != "enqueued" || op.Verdict != "allow" || op.Failures != 0 || op.Escalation != "" || backend.reviews != 1 || backend.submits != 1 || backend.enqueues != 0 {
 		t.Fatalf("draft operation = %+v reviews=%d submits=%d enqueues=%d", op, backend.reviews, backend.submits, backend.enqueues)
 	}
-	backend.draft, backend.enqueueRefusal = false, ""
+	draft, backend.enqueueRefusal = false, ""
 	if _, err := fixture.daemon.advanceReviewOperations(ctx, false); err != nil {
 		t.Fatal(err)
 	}
