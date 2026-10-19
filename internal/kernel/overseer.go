@@ -538,6 +538,16 @@ func (store *Store) EnqueueTaskForOverseer(ctx context.Context, digest AttemptDi
 			return Task{}, tx.Rollback(err)
 		}
 	}
+	// The pin is the acceptance: a task naming a proposal without pinning one of
+	// its proposal revisions would leave it open to re-wake the overseer into
+	// accepting it again.
+	var named string
+	if err := tx.connection.QueryRowContext(ctx, `SELECT lower(hex(c.id)) FROM project_content_revisions AS c WHERE c.project_id = ?1 AND `+latestProposalSQL+` AND instr(lower(?2), lower(hex(c.id))) > 0
+		AND NOT EXISTS (SELECT 1 FROM `+attachedProposalSQL+` AND r.task_id = ?3)`, run.ProjectID.Bytes(), spec.Title+"\n"+spec.Body, result.ID.Bytes()).Scan(&named); err == nil {
+		return Task{}, tx.Rollback(NewOutcomeRefusal(fmt.Errorf("%w: the task names proposal %s without pinning it; accept the proposal with --content %s:REVISION", ErrInvalidValue, named, named)))
+	} else if err != sql.ErrNoRows {
+		return Task{}, tx.Rollback(err)
+	}
 	if err := tx.Commit(ctx); err != nil {
 		return Task{}, err
 	}
