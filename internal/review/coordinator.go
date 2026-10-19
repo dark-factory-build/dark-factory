@@ -99,6 +99,7 @@ type Backend interface {
 type Pull struct {
 	Head             string
 	State            string // open, closed or merged
+	Draft            bool   // an operator's hold: GitHub queues no draft
 	Review           string // current review state at this head
 	MergeStateStatus string // GitHub's mergeability state: DIRTY, BLOCKED, CLEAN or UNKNOWN
 	Mergeable        *bool  // nil while GitHub computes it
@@ -306,6 +307,8 @@ func Decide(pull Pull, ops []Operation, answered bool) (Action, string) {
 	conflict := strings.EqualFold(pull.MergeStateStatus, "DIRTY") || pull.Mergeable != nil && !*pull.Mergeable
 	action, note := Enqueue, ""
 	switch {
+	case pull.Draft:
+		return Wait, "" // an operator's hold (#2076): marked ready, the pull changes
 	case op.Failures >= FailuresBeforeEscalation && !conflict && len(pull.Failing) == 0:
 		return Wait, ""
 	case !op.Rebased && (conflict || len(pull.Failing) > 0):

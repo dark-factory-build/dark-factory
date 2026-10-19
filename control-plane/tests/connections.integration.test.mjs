@@ -271,7 +271,7 @@ test('two principals: callback, pagination, refresh, replay, grants and revocati
     // the App's publication authority or its optional merge/deploy grants.
     const pullArgs = {repository: 'team/shared', page: 1, per_page: 1};
     const pulls = (await (await call(bob, 'list_pull_requests', pullArgs)).json()).result.structuredContent;
-    assert.deepEqual(pulls, {repository_id: 2, pull_requests: [{number: 12, body: pull.body, head_sha: pull.head.sha, base_sha: pull.base.sha, base_ref: 'release+hotfix', title: 'review', url: 'https://github.com/team/shared/pull/12', head_ref: 'topic', state: 'open', mergeable: true, merge_state_status: 'clean'}], next_page: 2});
+    assert.deepEqual(pulls, {repository_id: 2, pull_requests: [{number: 12, body: pull.body, head_sha: pull.head.sha, base_sha: pull.base.sha, base_ref: 'release+hotfix', title: 'review', url: 'https://github.com/team/shared/pull/12', head_ref: 'topic', state: 'open', draft: false, mergeable: true, merge_state_status: 'clean'}], next_page: 2});
     assert.deepEqual(requestedPermissions.at(-1), {metadata: 'read', pull_requests: 'read'});
     assert.deepEqual((await (await call(bob, 'list_pull_requests', {...pullArgs, page: 2})).json()).result.structuredContent.pull_requests, []);
     const exactPull = (await (await call(bob, 'list_pull_requests', {...pullArgs, pull_number: 12})).json()).result.structuredContent;

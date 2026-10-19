@@ -87,7 +87,7 @@ Access policy, or App configuration is live.
 - Customer review controllers can use `list_pull_requests` (1–100 entries per
   page, up to page 1000) or an exact `pull_number` at page 1. It requires only
   Pull requests read and Metadata read. Results retain the actual base branch,
-  complete bounded body, and exact head/base commits. A full last page or an
+  complete bounded body, exact head/base commits, and the draft flag. A full last page or an
   upstream refusal is unavailable, never an empty backlog. These reads do not
   create local work or grant publication permission.
 - `list_deployments` (1–30 per call) reads a repository's newest GitHub
