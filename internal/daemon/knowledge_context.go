@@ -212,7 +212,7 @@ func (daemon *Daemon) knowledgeContext(ctx context.Context, run kernel.Run, task
 			if attached[fmt.Sprintf("%s:%d", c.ID, c.Revision.Int64())] {
 				return 1000
 			}
-			score := 0
+			score := map[kernel.ContentKind]int{kernel.ContentLesson: 50, kernel.ContentProcedure: 50}[c.Kind] // retained guidance outranks word-overlap observations, below entity links
 			metadata, _ := kernel.ParseKnowledgeMetadata(c.SourceReferences)
 			if metadata.Pinned {
 				score += 100
