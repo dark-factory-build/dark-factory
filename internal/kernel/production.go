@@ -274,7 +274,7 @@ func (store *Store) RetryBlockedMissingPrerequisites(ctx context.Context, projec
 		  AND EXISTS (SELECT 1 FROM task_prerequisites WHERE task_id = t.id)
 		  AND NOT EXISTS (
 			SELECT 1 FROM task_prerequisites AS prerequisite
-			WHERE prerequisite.task_id = t.id AND prerequisite.consumed_run_id IS NULL
+			WHERE prerequisite.task_id = t.id
 			  AND NOT EXISTS (`+prerequisiteSourceRun+`)
 		  )
 		ORDER BY t.updated_at_ms, t.id`, project.Bytes())

@@ -359,96 +359,135 @@ func TestPrerequisiteWaitsForItsProducerToMergeAtItsExactHead(t *testing.T) {
 func TestRetryBlockedMissingPrerequisiteAfterProductionObservation(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
-	blocked, _ := NewBlockedProposal("missing prerequisite: producer is not in the assigned base")
-	store, finalizing := finalizingReleasedRun(t, RoleWorker, blocked)
+	producerProposal, _ := NewSuccessProposal("producer result")
+	store, finalizing := finalizingReleasedRun(t, RoleWorker, producerProposal)
 	defer store.Close()
-	consumer, err := finalizeTestRun(t, store, finalizing, 60)
+	producer, err := finalizeTestRun(t, store, finalizing, 60)
 	if err != nil {
 		t.Fatal(err)
 	}
-	producerAgent, err := store.CreateAgent(ctx, NewAgent{ID: agentID(t, 247), ProjectID: consumer.ProjectID, Name: "producer", Role: RoleWorker, Provider: ProviderCodex, ToolBudgetLimit: 5}, mustTime(t, 61))
+	consumerAgent, err := store.CreateAgent(ctx, NewAgent{ID: agentID(t, 247), ProjectID: producer.ProjectID, Name: "consumer", Role: RoleWorker, Provider: ProviderCodex, ToolBudgetLimit: 5}, mustTime(t, 61))
 	if err != nil {
 		t.Fatal(err)
 	}
-	producerTask, err := store.EnqueueTask(ctx, NewTask{ID: taskID(t, 248), ProjectID: consumer.ProjectID, AssignedAgentID: producerAgent.ID, IncarnationID: incarnationID(t, 249), Title: "producer"}, mustTime(t, 62))
+	consumer, err := store.EnqueueTask(ctx, NewTask{ID: taskID(t, 248), ProjectID: producer.ProjectID, AssignedAgentID: consumerAgent.ID, IncarnationID: incarnationID(t, 249), Title: "consumer", Prerequisites: []TaskPrerequisite{{TaskID: producer.TaskID, WorkRevision: mustRevision(t, 1)}}}, mustTime(t, 62))
 	if err != nil {
 		t.Fatal(err)
 	}
-	candidate := changeID(t, 150)
-	keys := admissionKeys(t, 151, &candidate)
+	keys := admissionKeys(t, 151, nil)
 	admitted, err := store.AdmitNext(ctx, keys, mustTime(t, 63))
-	if err != nil || !admitted.Admitted() || admitted.Run.TaskID != producerTask.ID {
-		t.Fatalf("producer admission = %+v, %v", admitted, err)
+	if err != nil || !admitted.Admitted() || admitted.Run.TaskID != consumer.ID {
+		t.Fatalf("consumer admission = %+v, %v", admitted, err)
+	}
+	consumerChange, _, err := store.Change(ctx, *admitted.Run.ChangeID)
+	if err != nil {
+		t.Fatal(err)
 	}
 	format, _ := NewObjectFormat("sha1")
-	base, _ := NewCommitID(format, bytes.Repeat([]byte{1}, 20))
-	repository, _ := NewFileIdentity(261, 262)
-	selection, _ := NewChangeSelection(format, base, repository)
-	prepared, err := store.RecordChangePrepared(ctx, candidate, mustRevision(t, 1), selection, mustTime(t, 64))
+	consumerBase, _ := NewCommitID(format, bytes.Repeat([]byte{3}, 20))
+	consumerRepository, _ := NewFileIdentity(263, 264)
+	consumerSelection, _ := NewChangeSelection(format, consumerBase, consumerRepository)
+	prepared, err := store.RecordChangePrepared(ctx, consumerChange.ID, consumerChange.Revision, consumerSelection, mustTime(t, 64))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := store.MarkChangeAvailable(ctx, candidate, prepared.Revision, selection.commit, mustTime(t, 65)); err != nil {
+	if _, err := store.MarkChangeAvailable(ctx, consumerChange.ID, prepared.Revision, consumerSelection.commit, mustTime(t, 65)); err != nil {
 		t.Fatal(err)
 	}
 	activateAllResourcesUnique(t, store, *admitted.Run, 66, 640)
 	session := terminalSessionForRunTest(t, store, admitted.Run.ID)
 	currentRun, found, err := store.Run(ctx, admitted.Run.ID)
 	if err != nil || !found {
-		t.Fatalf("producer run after activation = %+v, %t, %v", currentRun, found, err)
+		t.Fatalf("consumer run after activation = %+v, %t, %v", currentRun, found, err)
 	}
-	running, err := store.ActivateRun(ctx, admitted.Run.ID, session.ID, currentRun.Revision, session.Revision, mustTime(t, 72))
-	if err != nil {
-		t.Fatalf("activate producer run: %v (admitted=%d current=%d session=%d)", err, admitted.Run.Revision.Int64(), currentRun.Revision.Int64(), session.Revision.Int64())
-	}
-	success, _ := NewSuccessProposal("producer result")
-	finalizing, err = store.ProposeAttemptOutcome(ctx, keys.AttemptDigest, success, mustTime(t, 73))
+	running, err := store.ActivateRun(ctx, admitted.Run.ID, session.ID, currentRun.Revision, session.Revision, mustTime(t, 70))
 	if err != nil {
 		t.Fatal(err)
 	}
-	finalizing = observeMissingProcessExits(t, store, running.ID, 74)
+	blocked, _ := NewBlockedProposal("missing prerequisite: producer correction is not in the assigned base")
+	finalizing, err = store.ProposeAttemptOutcome(ctx, keys.AttemptDigest, blocked, mustTime(t, 71))
+	if err != nil {
+		t.Fatal(err)
+	}
+	finalizing = observeMissingProcessExits(t, store, running.ID, 72)
 	for _, resource := range resourcesForRunTest(t, store, running.ID) {
 		if resource.State != ResourceReleased {
-			if _, err := store.ReleaseResource(ctx, running.ID, resource.ID, resource.Revision, resource.Identity, mustTime(t, 75)); err != nil {
+			if _, err := store.ReleaseResource(ctx, running.ID, resource.ID, resource.Revision, resource.Identity, mustTime(t, 73)); err != nil {
 				t.Fatal(err)
 			}
 		}
 	}
-	closeTerminalSessionAtCurrent(t, store, running.ID, 76)
-	producer, found, err := store.Run(ctx, running.ID)
+	closeTerminalSessionAtCurrent(t, store, running.ID, 74)
+	currentRun, found, err = store.Run(ctx, running.ID)
+	if err != nil || !found {
+		t.Fatalf("blocked consumer run = %+v, %t, %v", currentRun, found, err)
+	}
+	consumerRun, err := finalizeTestRun(t, store, currentRun, 75)
+	if err != nil {
+		t.Fatalf("finalize blocked consumer: %v (admitted=%d current=%d session=%d)", err, admitted.Run.Revision.Int64(), currentRun.Revision.Int64(), session.Revision.Int64())
+	}
+	_ = consumerRun
+	producerTask, found, err := store.Task(ctx, producer.TaskID)
+	if err != nil || !found {
+		t.Fatalf("producer task = %+v, %t, %v", producerTask, found, err)
+	}
+	if _, err := store.SendBackTask(ctx, nil, producer.TaskID, producerTask.Revision, changeHead(t, store, producer.TaskID), "correct producer", mustTime(t, 76)); err != nil {
+		t.Fatal(err)
+	}
+	correction := admissionKeys(t, 240, nil)
+	admitted, err = store.AdmitNext(ctx, correction, mustTime(t, 77))
+	if err != nil || !admitted.Admitted() || admitted.Run.TaskID != producer.TaskID {
+		t.Fatalf("producer correction admission = %+v, %v", admitted, err)
+	}
+	running = activateAllResourcesUnique(t, store, *admitted.Run, 78, 780)
+	session = terminalSessionForRunTest(t, store, admitted.Run.ID)
+	running, err = store.ActivateRun(ctx, admitted.Run.ID, session.ID, running.Revision, session.Revision, mustTime(t, 90))
+	if err != nil {
+		t.Fatal(err)
+	}
+	success, _ := NewSuccessProposal("producer correction")
+	finalizing, err = store.ProposeAttemptOutcome(ctx, correction.AttemptDigest, success, mustTime(t, 91))
+	if err != nil {
+		t.Fatal(err)
+	}
+	finalizing = observeMissingProcessExits(t, store, running.ID, 92)
+	for _, resource := range resourcesForRunTest(t, store, running.ID) {
+		if resource.State != ResourceReleased {
+			if _, err := store.ReleaseResource(ctx, running.ID, resource.ID, resource.Revision, resource.Identity, mustTime(t, 93)); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+	closeTerminalSessionAtCurrent(t, store, running.ID, 94)
+	producer, found, err = store.Run(ctx, running.ID)
 	if err != nil || !found {
 		t.Fatalf("producer run = %+v, %t, %v", producer, found, err)
 	}
-	change, found, err := store.Change(ctx, candidate)
-	if err != nil || !found || change.HeadCommit == nil {
-		t.Fatalf("producer change = %+v, %t, %v", change, found, err)
+	change, _, err := store.Change(ctx, *producer.ChangeID)
+	if err != nil || change.HeadCommit == nil {
+		t.Fatalf("producer change = %+v, %v", change, err)
 	}
 	moved, _ := NewCommitID(change.Selection.format, bytes.Repeat([]byte{2}, change.Selection.format.oidLength()))
 	settlement, _ := NewRetainedChangeSettlement(change.Revision, &moved)
-	if _, err := store.FinalizeWorkerRun(ctx, producer.ID, producer.Revision, settlement, mustTime(t, 77)); err != nil {
+	if _, err := store.FinalizeWorkerRun(ctx, producer.ID, producer.Revision, settlement, mustTime(t, 95)); err != nil {
 		t.Fatal(err)
-	}
-	producer, found, err = store.Run(ctx, producer.ID)
-	if err != nil || !found {
-		t.Fatalf("producer terminal run = %+v, %t, %v", producer, found, err)
 	}
 	head := hex.EncodeToString(moved.Bytes())
-	pr := ProductionPullRequest{Number: 7, Title: "producer", URL: "https://github.com/example/factory/pull/7", Head: head, Branch: "factory/producer", Base: "main", State: "open", Review: ProductionReview{Head: head, State: "unknown"}}
-	if err := store.RecordPublication(ctx, consumer.ProjectID, producerTask.ID, "example/factory", pr, mustTime(t, 78)); err != nil {
+	pr := ProductionPullRequest{Number: 7, Title: "producer correction", URL: "https://github.com/example/factory/pull/7", Head: head, Branch: "factory/producer", Base: "main", State: "open", Review: ProductionReview{Head: head, State: "unknown"}}
+	if err := store.RecordPublication(ctx, producer.ProjectID, producer.TaskID, "example/factory", pr, mustTime(t, 96)); err != nil {
 		t.Fatal(err)
 	}
-	corruptSQL(t, store, `INSERT INTO task_prerequisites(task_id, upstream_task_id, upstream_work_revision) VALUES (?, ?, 1)`, consumer.TaskID.Bytes(), producerTask.ID.Bytes())
-	if retried, err := store.RetryBlockedMissingPrerequisites(ctx, consumer.ProjectID, mustTime(t, 79)); err != nil || retried != 0 {
+	if retried, err := store.RetryBlockedMissingPrerequisites(ctx, consumer.ProjectID, mustTime(t, 97)); err != nil || retried != 0 {
 		t.Fatalf("retry before merge = %d, %v", retried, err)
 	}
 	pr.State = "merged"
-	if err := store.RecordProductionObservation(ctx, consumer.ProjectID, ProductionObservation{Repository: "example/factory", ObservedAt: 80, PullRequests: []ProductionPullRequest{pr}}, mustTime(t, 80)); err != nil {
+	if err := store.RecordProductionObservation(ctx, consumer.ProjectID, ProductionObservation{Repository: "example/factory", ObservedAt: 98, PullRequests: []ProductionPullRequest{pr}}, mustTime(t, 98)); err != nil {
 		t.Fatal(err)
 	}
-	if retried, err := store.RetryBlockedMissingPrerequisites(ctx, consumer.ProjectID, mustTime(t, 81)); err != nil || retried != 1 {
+	if retried, err := store.RetryBlockedMissingPrerequisites(ctx, consumer.ProjectID, mustTime(t, 99)); err != nil || retried != 1 {
 		t.Fatalf("automatic retry after merge = %d, %v", retried, err)
 	}
-	current, found, err := store.Task(ctx, consumer.TaskID)
+	current, found, err := store.Task(ctx, consumer.ID)
 	if err != nil || !found || current.Status != TaskQueued {
 		t.Fatalf("consumer after automatic retry = %+v, %t, %v", current, found, err)
 	}
