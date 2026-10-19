@@ -115,17 +115,23 @@ func stallNextRun(t *testing.T, fixture *supervisorFixture, output bool) kernel.
 
 // Codex reports an exhausted account or a model at capacity in its screen and
 // then idles at its prompt, so only the stall reads the notice, from the whole
-// projected tail of a Codex run, even one that made no attempt call. Quoted
-// words without Codex's glyph, and any output of a Claude run, stall as
-// before; the glyph may be drawn in a cell apart from its message (Codex
-// 0.163); and an escape-heavy raw tail still yields its useful text. Fixtures
-// are split so this source carries no notice.
+// raw retained output of a Codex run, even one that made no attempt call, and
+// only as Codex styles it: glyph in a cell of its own, apart from its message
+// (in a non-adjacent cell since Codex 0.163). A task, prompt or tool text that
+// quotes the words, or the whole notice with its glyph, plain or in one style,
+// stalls as before, as does any output of a Claude run; and an escape-heavy raw
+// tail still yields its useful text. Fixtures are split so this source carries
+// no notice.
 func TestStalledRunProposalReadsCodexNotices(t *testing.T) {
 	capacity := func(gap string) string {
 		return "\x1b[33m⚠\x1b[39m" + gap + "\x1b[1mSelected model" + " is at capacity. Please try a different model.\x1b[22m\r\n"
 	}
 	limit := []string{"\x1b[31m■\x1b[39m \x1b[1mYou've hit your us", "age limit. Upgrade to Pro or try again at Sep 25th, 3:00 PM.\x1b[39m\r\n\x1b[1mApproaching rate limits\x1b[0m"}
 	quoted := "issue: the terminal shows `Selected model" + " is at capacity` or `You've hit your" + " usage limit`\r\n"
+	// The whole notices, glyphs included, as a task cell draws them: plain, and
+	// in the cell's one style with the glyph first on its line.
+	echoed := "issue: the terminal shows ⚠ Selected model" + " is at capacity and ■ You've hit your" + " usage limit. Upgrade to Pro\r\n"
+	styledEcho := "\x1b[2m\x1b[36m⚠ Selected model" + " is at capacity. Please try a different model.\r\n■ You've hit your" + " usage limit. Upgrade to Pro\x1b[0m\r\n"
 	for _, test := range []struct {
 		name             string
 		provider         kernel.Provider
@@ -140,9 +146,11 @@ func TestStalledRunProposalReadsCodexNotices(t *testing.T) {
 		{"codex capacity before any attempt call", kernel.ProviderCodex, true, []string{capacity(" ")}, kernel.FailureTransient, kernel.ProviderCapacityRunDetail, ""},
 		{"codex usage limit split frames", kernel.ProviderCodex, false, append([]string{quoted}, limit...), kernel.FailureProviderExit, "provider usage limit", "You've hit your" + " usage limit. Upgrade to Pro or try again at Sep 25th, 3:00 PM."},
 		{"codex echo", kernel.ProviderCodex, false, []string{quoted}, kernel.FailureProtocol, stalledRunDetail, "Selected model" + " is at capacity"},
-		{"codex echo before any attempt call", kernel.ProviderCodex, true, []string{quoted}, kernel.FailureTransient, kernel.NeverStartedRunDetail, ""},
+		{"codex echo of the whole notices", kernel.ProviderCodex, false, []string{echoed}, kernel.FailureProtocol, stalledRunDetail, "⚠ Selected model" + " is at capacity and ■ You've hit your"},
+		{"codex styled echo of the whole notices", kernel.ProviderCodex, false, []string{styledEcho}, kernel.FailureProtocol, stalledRunDetail, "model. ■ You've hit your"},
+		{"codex echo before any attempt call", kernel.ProviderCodex, true, []string{echoed}, kernel.FailureTransient, kernel.NeverStartedRunDetail, ""},
 		{"claude notice", kernel.ProviderClaudeCode, false, append([]string{capacity(" ")}, limit...), kernel.FailureProtocol, stalledRunDetail, "Approaching rate limits"},
-		{"claude echo", kernel.ProviderClaudeCode, false, []string{quoted}, kernel.FailureProtocol, stalledRunDetail, "You've hit your"},
+		{"claude echo", kernel.ProviderClaudeCode, false, []string{echoed}, kernel.FailureProtocol, stalledRunDetail, "You've hit your"},
 		{"escape-heavy tail", kernel.ProviderClaudeCode, false, []string{"useful last line\r\n", strings.Repeat("\x1b[2K\x1b[1A", 100)}, kernel.FailureProtocol, stalledRunDetail + "useful last line", ""},
 		{"adopted replay gap keeps the prompt line", kernel.ProviderShell, false, []string{"Login expired\r\n> "}, kernel.FailureProtocol, stalledRunDetail + "Login expired >", ""},
 	} {

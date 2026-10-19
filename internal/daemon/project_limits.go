@@ -86,15 +86,18 @@ func (daemon *Daemon) enforceRunLiveness(ctx context.Context, spec SupervisorSpe
 
 // Codex reports an exhausted account or a model at capacity as a cell of its
 // own screen and then idles at its prompt, so the stall budget ends the run.
-// Both notices are read only then, from a Codex run's whole projected tail, and
-// only under Codex's own glyph: a task, prompt, source or tool output that
-// quotes the words is ordinary text, as is anything a Claude run prints. Codex
-// 0.163 draws the glyph and its message in separate cells, so a gap between
-// them is allowed.
-// ponytail: fixed strings of one provider's TUI; recognise a structured
-// provider event instead if Codex ever reports these outside its screen.
-var codexUsageLimit = regexp.MustCompile(`■[[:space:]]*(You've hit your` + ` usage limit.{0,1000})`)
-var codexModelCapacity = regexp.MustCompile(`⚠[[:space:]]*Selected model` + ` is at capacity`)
+// Both notices are read only then, from a Codex run's raw retained output, and
+// only as Codex draws them: the glyph is a styled cell of its own, an SGR
+// right before it and an escape right after it, with its message drawn
+// separately within a few bytes (Codex 0.163 puts them in non-adjacent cells).
+// A task, prompt, source or tool text that quotes the whole notice is drawn in
+// its cell's one style, glyph between plain characters, so it never matches;
+// nor does anything a Claude run prints.
+// ponytail: fixed strings of one provider's TUI, told apart from quotes by its
+// styling; recognise a structured provider event instead if Codex ever reports
+// these outside its screen.
+var codexUsageLimit = regexp.MustCompile(`\x1b\[[0-9;]*m■\x1b\[(?s:.{0,64}?)(You've hit your` + ` usage limit)`)
+var codexModelCapacity = regexp.MustCompile(`\x1b\[[0-9;]*m⚠\x1b\[(?s:.{0,64}?)Selected model` + ` is at capacity`)
 
 // stalledRunProposal classifies a stalled run from its retained terminal
 // output, projected whole before the detail is cut: a TUI's last raw bytes are
@@ -106,11 +109,11 @@ var codexModelCapacity = regexp.MustCompile(`⚠[[:space:]]*Selected model` + ` 
 // Codex's first and only act.
 func stalledRunProposal(provider kernel.Provider, neverStarted bool, output []byte) (kernel.FailureCode, string) {
 	if provider == kernel.ProviderCodex {
-		text := terminalTextProjection(output, false, len(output))
-		if report := codexUsageLimit.FindStringSubmatch(text); report != nil {
-			return kernel.FailureProviderExit, "provider usage limit (retry after its reset or select another account): " + report[1]
+		if match := codexUsageLimit.FindSubmatchIndex(output); match != nil {
+			report := []rune(terminalTextProjection(output[match[2]:], false, len(output)))
+			return kernel.FailureProviderExit, "provider usage limit (retry after its reset or select another account): " + string(report[:min(len(report), 1024)])
 		}
-		if codexModelCapacity.MatchString(text) {
+		if codexModelCapacity.Match(output) {
 			return kernel.FailureTransient, kernel.ProviderCapacityRunDetail
 		}
 	}
