@@ -128,17 +128,18 @@ func (store *Store) Report(ctx context.Context, project *ProjectID, since, bucke
 	}
 	lines = append(lines, fmt.Sprintf("lessons=%d reads=%d citations=%d stale=%d", lessons, reads, citations, stale))
 	// Each release updated in the window reports its state, phase and reason.
-	rows, err = read.connection.QueryContext(ctx, `SELECT identity, COALESCE(json_extract(document, '$.state'), '-'), COALESCE(json_extract(document, '$.phase'), '-'), COALESCE(json_extract(document, '$.reason'), '-')
+	rows, err = read.connection.QueryContext(ctx, `SELECT identity, COALESCE(json_extract(document, '$.state'), '-'), COALESCE(json_extract(document, '$.phase'), '-'), COALESCE(json_extract(document, '$.reason'), '-'), observed_at_ms
 		FROM `+archived.table("production_records")+` WHERE (?1 IS NULL OR project_id = ?1) AND kind = 'delivery' AND identity LIKE 'release:%' AND observed_at_ms >= ?2 ORDER BY observed_at_ms`, scope, since)
 	if err != nil {
 		return nil, err
 	}
 	for rows.Next() {
 		var release, state, phase, reason string
-		if err := rows.Scan(&release, &state, &phase, &reason); err != nil {
+		var at int64
+		if err := rows.Scan(&release, &state, &phase, &reason, &at); err != nil {
 			return nil, errors.Join(err, rows.Close())
 		}
-		lines = append(lines, fmt.Sprintf("restart %s %s phase=%s reason=%s", release[:min(len(release), 20)], state, phase, oneLine(reason, 160)))
+		lines = append(lines, fmt.Sprintf("restart %s %s at=%s phase=%s reason=%s", release[:min(len(release), 20)], state, time.UnixMilli(at).UTC().Format("2006-01-02T15:04Z"), phase, oneLine(reason, 160)))
 	}
 	if err := errors.Join(rows.Err(), rows.Close()); err != nil {
 		return nil, err
