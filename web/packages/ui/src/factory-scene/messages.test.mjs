@@ -94,7 +94,7 @@ test("the floor sends a question along the walk between them, its answer back, a
   const tooltipOf = (id) => renderer.root.findByProps({ "data-worker-id": id }).findAll((node) => node.props["data-tooltip"] !== undefined)[0].props["data-tooltip"];
   // Pets off: only messages may ask for animation frames here.
   const appearance = { scenery: "off", animation: "follow-device" };
-  const scene = (props) => createElement(FactoryScene, { graph, workers, tasks, appearance, onOpenTasks() {}, ...props });
+  const scene = (props) => createElement(FactoryScene, { graph, workers, tasks, appearance, ...props });
   try {
     // The console mounts its floor before any state has arrived, then gets state and "connected" in one render.
     await act(async () => { renderer = create(scene({ workers: [], tasks: [], peerQuestions: [], connected: false })); });

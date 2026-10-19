@@ -82,7 +82,7 @@ const NO_CHANGES: readonly ProductionContraption[] = [];
 /** The operational floor: observation and navigation; every action opens an existing control. */
 export function FactoryFloor({
   changes = NO_CHANGES, state, graphs, graphErrors, runPaths, lastRunPaths, selectedAgentId, onSelectAgent,
-  onSelectHumanRequest, onOpenTasks, connected = true, projectId, tools,
+  onSelectHumanRequest, connected = true, tools,
 }: {
   tools?: ReactNode;
   changes?: readonly ProductionContraption[];
@@ -93,10 +93,8 @@ export function FactoryFloor({
   lastRunPaths?: ReadonlyMap<string, RunPathSample>;
   selectedAgentId?: string;
   onSelectAgent?: (agent: AgentItem) => void;
-  onOpenTasks?: (projectId?: string) => void;
   onSelectHumanRequest?: (request: HumanRequestItem) => void;
   connected?: boolean;
-  projectId?: string;
   onProjectContent?: ProjectContentCall;
 }) {
   const projects = useMemo(() => [...state?.projects.values() ?? []].map(({ id }) => id).sort(), [JSON.stringify([...state?.projects.keys() ?? []].sort())]);
@@ -115,14 +113,12 @@ export function FactoryFloor({
       </>}
       selectedWorkerId={selectedAgentId}
       graph={scene.graph}
-      projectId={projectId}
       workers={[...scene.workers, ...proposed.reviewers]}
       connected={connected}
       unavailable={refused.length === 0 ? undefined : refused.join(", ")}
       reading={graphs === undefined || projects.some((id) => !graphs.has(id) && !graphErrors?.has(id))}
       tasks={scene.tasks}
       peerQuestions={peerQuestions}
-      onOpenTasks={onOpenTasks}
       onSelectHumanRequest={onSelectHumanRequest === undefined || state === undefined ? undefined : (id) => {
         const request = state.humanRequests.get(id);
         if (request !== undefined) onSelectHumanRequest(request);
