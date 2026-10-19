@@ -345,6 +345,12 @@ test("the console never shows a kernel-grammar or retired vocabulary word", () =
   }
 });
 
+test("a ready console reports a rejected action through its alert surface", () => {
+  const markup = render({ error: new SessionError("stale") });
+  assert.match(markup, /<p class="dfFactoryConsole__error" role="alert">/);
+  assert.equal(render({}).includes('role="alert"'), false);
+});
+
 test("protocol errors remain finite and never expose their message", () => {
   const markup = render({ status: "closed", error: new ProtocolError("malformed") });
   assert.match(markup, /The server sent an invalid frame\./);
