@@ -87,17 +87,17 @@ func (daemon *Daemon) enforceRunLiveness(ctx context.Context, spec SupervisorSpe
 // Codex reports an exhausted account or a model at capacity as a cell of its
 // own screen and then idles at its prompt, so the stall budget ends the run.
 // Both notices are read only then, from a Codex run's raw retained output, and
-// only as Codex draws them: the glyph is a styled cell of its own, an SGR
-// right before it and an escape right after it, with its message drawn
-// separately within a few bytes (Codex 0.163 puts them in non-adjacent cells).
-// A task, prompt, source or tool text that quotes the whole notice is drawn in
-// its cell's one style, glyph between plain characters, so it never matches;
-// nor does anything a Claude run prints.
+// only as Codex draws them: the glyph (■, or ⚠ in Codex 0.163; ⚠ is now its
+// warnings indicator) is a styled cell of its own, an SGR right before it and
+// an escape right after it, with its message drawn separately within a few
+// bytes, even in non-adjacent cells. A task, prompt, source or tool text that
+// quotes the whole notice is drawn in its cell's one style, glyph between
+// plain characters, so it never matches; nor does anything a Claude run prints.
 // ponytail: fixed strings of one provider's TUI, told apart from quotes by its
 // styling; recognise a structured provider event instead if Codex ever reports
 // these outside its screen.
 var codexUsageLimit = regexp.MustCompile(`\x1b\[[0-9;]*m■\x1b\[(?s:.{0,64}?)(You've hit your` + ` usage limit)`)
-var codexModelCapacity = regexp.MustCompile(`\x1b\[[0-9;]*m⚠\x1b\[(?s:.{0,64}?)Selected model` + ` is at capacity`)
+var codexModelCapacity = regexp.MustCompile(`\x1b\[[0-9;]*m[■⚠]\x1b\[(?s:.{0,64}?)Selected model` + ` is at capacity`)
 
 // stalledRunProposal classifies a stalled run from its retained terminal
 // output, projected whole before the detail is cut: a TUI's last raw bytes are

@@ -117,21 +117,28 @@ func stallNextRun(t *testing.T, fixture *supervisorFixture, output bool) kernel.
 // then idles at its prompt, so only the stall reads the notice, from the whole
 // raw retained output of a Codex run, even one that made no attempt call, and
 // only as Codex styles it: glyph in a cell of its own, apart from its message
-// (in a non-adjacent cell since Codex 0.163). A task, prompt or tool text that
-// quotes the words, or the whole notice with its glyph, plain or in one style,
-// stalls as before, as does any output of a Claude run; and an escape-heavy raw
-// tail still yields its useful text. Fixtures are split so this source carries
-// no notice.
+// (in a non-adjacent cell since Codex 0.163), the capacity glyph a ■ as the
+// overseer's Codex drew it on 2026-10-19 after its ⚠ warnings indicator and
+// status cells, or the ⚠ of Codex 0.163. A task, prompt or tool text that
+// quotes the words, or the whole notice with either glyph, plain or in one
+// style, stalls as before, as does any output of a Claude run; and an
+// escape-heavy raw tail still yields its useful text. Fixtures are split so
+// this source carries no notice.
 func TestStalledRunProposalReadsCodexNotices(t *testing.T) {
-	capacity := func(gap string) string {
-		return "\x1b[33m⚠\x1b[39m" + gap + "\x1b[1mSelected model" + " is at capacity. Please try a different model.\x1b[22m\r\n"
+	capacity := func(glyph, gap string) string {
+		return "\x1b[33m" + glyph + "\x1b[39m" + gap + "\x1b[1mSelected model" + " is at capacity. Please try a different model.\x1b[22m\r\n"
 	}
+	// The overseer's screen before the notice (run 16f13087, 12:44Z): a working
+	// line, the ⚠ warnings indicator in its own styled cell, and status cells,
+	// more than the 64 bytes a glyph cell may precede its message by.
+	screen := "\x1b[2K◦ Working (3m 39s • esc to interrupt)\r\n" + "\x1b[33m⚠\x1b[39m 3 warnings · f2 to view " + "\x1b[1;80H\x1b[2m•40◦•1◦ \x1b[22m" + "\x1b[14;1H"
 	limit := []string{"\x1b[31m■\x1b[39m \x1b[1mYou've hit your us", "age limit. Upgrade to Pro or try again at Sep 25th, 3:00 PM.\x1b[39m\r\n\x1b[1mApproaching rate limits\x1b[0m"}
 	quoted := "issue: the terminal shows `Selected model" + " is at capacity` or `You've hit your" + " usage limit`\r\n"
 	// The whole notices, glyphs included, as a task cell draws them: plain, and
 	// in the cell's one style with the glyph first on its line.
 	echoed := "issue: the terminal shows ⚠ Selected model" + " is at capacity and ■ You've hit your" + " usage limit. Upgrade to Pro\r\n"
 	styledEcho := "\x1b[2m\x1b[36m⚠ Selected model" + " is at capacity. Please try a different model.\r\n■ You've hit your" + " usage limit. Upgrade to Pro\x1b[0m\r\n"
+	squareEcho := "\x1b[2m\x1b[36m■ Selected model" + " is at capacity. Please try a different model.\x1b[0m\r\n"
 	for _, test := range []struct {
 		name             string
 		provider         kernel.Provider
@@ -140,17 +147,24 @@ func TestStalledRunProposalReadsCodexNotices(t *testing.T) {
 		code             kernel.FailureCode
 		prefix, contains string
 	}{
-		{"codex capacity", kernel.ProviderCodex, false, []string{quoted, capacity(" ")}, kernel.FailureTransient, kernel.ProviderCapacityRunDetail, ""},
-		{"codex capacity cells apart", kernel.ProviderCodex, false, []string{capacity("\x1b[12;3H")}, kernel.FailureTransient, kernel.ProviderCapacityRunDetail, ""},
-		{"codex capacity wrapped", kernel.ProviderCodex, false, []string{capacity("\r\n  ")}, kernel.FailureTransient, kernel.ProviderCapacityRunDetail, ""},
-		{"codex capacity before any attempt call", kernel.ProviderCodex, true, []string{capacity(" ")}, kernel.FailureTransient, kernel.ProviderCapacityRunDetail, ""},
-		{"codex usage limit split frames", kernel.ProviderCodex, false, append([]string{quoted}, limit...), kernel.FailureProviderExit, "provider usage limit", "You've hit your" + " usage limit. Upgrade to Pro or try again at Sep 25th, 3:00 PM."},
+		{"codex capacity square cell after the warnings indicator", kernel.ProviderCodex, false, []string{quoted, screen, capacity("■", " ")}, kernel.FailureTransient, kernel.ProviderCapacityRunDetail, ""},
+		{"codex capacity square cell split frames", kernel.ProviderCodex, false, []string{screen + "\x1b[33m■", "\x1b[39m \x1b[1mSelected model" + " is at capacity. Please try a different model.\x1b[22m\r\n"}, kernel.FailureTransient, kernel.ProviderCapacityRunDetail, ""},
+		{"codex capacity square cell apart", kernel.ProviderCodex, false, []string{screen, capacity("■", "\x1b[12;3H")}, kernel.FailureTransient, kernel.ProviderCapacityRunDetail, ""},
+		{"codex capacity square cell wrapped", kernel.ProviderCodex, false, []string{screen, capacity("■", "\r\n  ")}, kernel.FailureTransient, kernel.ProviderCapacityRunDetail, ""},
+		{"codex capacity", kernel.ProviderCodex, false, []string{quoted, capacity("⚠", " ")}, kernel.FailureTransient, kernel.ProviderCapacityRunDetail, ""},
+		{"codex capacity cells apart", kernel.ProviderCodex, false, []string{capacity("⚠", "\x1b[12;3H")}, kernel.FailureTransient, kernel.ProviderCapacityRunDetail, ""},
+		{"codex capacity wrapped", kernel.ProviderCodex, false, []string{capacity("⚠", "\r\n  ")}, kernel.FailureTransient, kernel.ProviderCapacityRunDetail, ""},
+		{"codex capacity before any attempt call", kernel.ProviderCodex, true, []string{screen, capacity("■", " ")}, kernel.FailureTransient, kernel.ProviderCapacityRunDetail, ""},
+		{"codex usage limit split frames", kernel.ProviderCodex, false, append([]string{quoted, screen}, limit...), kernel.FailureProviderExit, "provider usage limit", "You've hit your" + " usage limit. Upgrade to Pro or try again at Sep 25th, 3:00 PM."},
+		{"codex usage limit outranks capacity", kernel.ProviderCodex, false, append([]string{capacity("■", " ")}, limit...), kernel.FailureProviderExit, "provider usage limit", "Approaching rate limits"},
 		{"codex echo", kernel.ProviderCodex, false, []string{quoted}, kernel.FailureProtocol, stalledRunDetail, "Selected model" + " is at capacity"},
+		{"codex echo below the warnings indicator", kernel.ProviderCodex, false, []string{screen, quoted}, kernel.FailureProtocol, stalledRunDetail, "f2 to view •40◦•1◦ issue: the terminal shows `Selected model"},
 		{"codex echo of the whole notices", kernel.ProviderCodex, false, []string{echoed}, kernel.FailureProtocol, stalledRunDetail, "⚠ Selected model" + " is at capacity and ■ You've hit your"},
 		{"codex styled echo of the whole notices", kernel.ProviderCodex, false, []string{styledEcho}, kernel.FailureProtocol, stalledRunDetail, "model. ■ You've hit your"},
+		{"codex styled echo of the square notice", kernel.ProviderCodex, false, []string{screen, squareEcho}, kernel.FailureProtocol, stalledRunDetail, "•40◦•1◦ ■ Selected model" + " is at capacity"},
 		{"codex echo before any attempt call", kernel.ProviderCodex, true, []string{echoed}, kernel.FailureTransient, kernel.NeverStartedRunDetail, ""},
-		{"claude notice", kernel.ProviderClaudeCode, false, append([]string{capacity(" ")}, limit...), kernel.FailureProtocol, stalledRunDetail, "Approaching rate limits"},
-		{"claude echo", kernel.ProviderClaudeCode, false, []string{echoed}, kernel.FailureProtocol, stalledRunDetail, "You've hit your"},
+		{"claude notice", kernel.ProviderClaudeCode, false, append([]string{screen, capacity("■", " ")}, limit...), kernel.FailureProtocol, stalledRunDetail, "Approaching rate limits"},
+		{"claude echo", kernel.ProviderClaudeCode, false, []string{squareEcho, echoed}, kernel.FailureProtocol, stalledRunDetail, "You've hit your"},
 		{"escape-heavy tail", kernel.ProviderClaudeCode, false, []string{"useful last line\r\n", strings.Repeat("\x1b[2K\x1b[1A", 100)}, kernel.FailureProtocol, stalledRunDetail + "useful last line", ""},
 		{"adopted replay gap keeps the prompt line", kernel.ProviderShell, false, []string{"Login expired\r\n> "}, kernel.FailureProtocol, stalledRunDetail + "Login expired >", ""},
 	} {

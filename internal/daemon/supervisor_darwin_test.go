@@ -239,9 +239,10 @@ func runSupervisorCodexFixture() error {
 	// The Library line follows every task; fixture directives precede it.
 	directive, _, _ := strings.Cut(task, "\n\nProject knowledge")
 	if directive == "capacity" {
-		// Codex's capacity warning, glyph and message drawn in cells apart (0.163); the
-		// real CLI then idles at its prompt.
-		fmt.Print("\x1b[33m⚠\x1b[39m\x1b[12;3H\x1b[1mSelected model" + " is at capacity. Please try a different model.\x1b[22m\r\n")
+		// Codex's capacity notice as the overseer's Codex drew it on 2026-10-19:
+		// its ⚠ warnings indicator, then the ■ glyph and message in cells apart;
+		// the real CLI then idles at its prompt.
+		fmt.Print("\x1b[33m⚠\x1b[39m 3 warnings · f2 to view \x1b[1;80H\x1b[33m■\x1b[39m\x1b[12;3H\x1b[1mSelected model" + " is at capacity. Please try a different model.\x1b[22m\r\n")
 		time.Sleep(30 * time.Second)
 		return nil
 	}
