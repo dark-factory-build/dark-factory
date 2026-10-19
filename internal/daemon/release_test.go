@@ -563,22 +563,69 @@ func TestTickBatchesBaseTipsIntoOneRelease(t *testing.T) {
 func TestWatchReleaseToleratesOnlyConsecutiveHealthErrors(t *testing.T) {
 	for _, test := range []struct {
 		name   string
-		probes []error
+		probes []bool
 		want   string
 	}{
-		{name: "isolated error", probes: []error{errors.New("timeout")}},
-		{name: "repeated errors", probes: []error{errors.New("timeout"), errors.New("timeout")}, want: "local API round trip: timeout"},
-		{name: "success resets", probes: []error{errors.New("timeout"), nil, errors.New("timeout")}},
+		{name: "isolated error", probes: []bool{true}},
+		{name: "repeated errors", probes: []bool{true, true}, want: "local API round trip: context deadline exceeded"},
+		{name: "success resets", probes: []bool{true, false, true}},
 	} {
 		t.Run(test.name, func(t *testing.T) {
-			daemon := newSchedulerTestDaemon(t)
-			var probe int
-			got := daemon.WatchRelease(context.Background(), 40*time.Millisecond, time.Millisecond, func(context.Context) error {
-				var err error
-				if probe < len(test.probes) {
-					err = test.probes[probe]
+			fixture, homePath := newHomeFixtureAt(t, runner.ShortTempDir())
+			socket := install.LocalAPISocketPath(homePath)
+			authority, err := fixture.home.OpenLocalAPI(context.Background())
+			if err != nil {
+				t.Fatal(err)
+			}
+			listener, err := api.Listen(authority)
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() { _ = listener.Close() })
+			client, err := api.NewOperatorClient(socket, fixture.operator)
+			if err != nil {
+				t.Fatal(err)
+			}
+			release := make(chan struct{}, len(test.probes))
+			done := make(chan struct{})
+			go func() {
+				defer close(done)
+				for probe := 0; ; probe++ {
+					connection, acceptErr := listener.Accept()
+					if acceptErr != nil {
+						return
+					}
+					if probe < len(test.probes) && test.probes[probe] {
+						go func() {
+							<-release
+							_ = connection.Close()
+						}()
+						continue
+					}
+					go func() { _ = fixture.daemon.HandleConnection(context.Background(), connection) }()
 				}
+			}()
+			t.Cleanup(func() {
+				_ = listener.Close()
+				select {
+				case <-done:
+				case <-time.After(time.Second):
+					t.Fatal("API listener did not stop")
+				}
+			})
+			var probe int
+			got := fixture.daemon.WatchRelease(context.Background(), 40*time.Millisecond, time.Millisecond, func(ctx context.Context) error {
+				probeTimeout := probe < len(test.probes) && test.probes[probe]
 				probe++
+				if probeTimeout {
+					var cancel context.CancelFunc
+					ctx, cancel = context.WithTimeout(ctx, 5*time.Millisecond)
+					defer cancel()
+				}
+				_, err := client.Health(ctx, "")
+				if probeTimeout {
+					release <- struct{}{}
+				}
 				return err
 			})
 			if got != test.want {
