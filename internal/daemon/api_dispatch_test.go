@@ -246,6 +246,24 @@ func TestBackupManifestTempFileDoesNotTruncateLiveDatabase(t *testing.T) {
 
 func newDispatchFixtureAt(t *testing.T, parent string) *dispatchFixture {
 	t.Helper()
+	fixture, authHomePath := newHomeFixtureAt(t, parent)
+	authority, err := fixture.home.OpenLocalAPI(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	listener, err := api.Listen(authority)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = listener.Close() })
+	fixture.listener, fixture.socket = listener, install.LocalAPISocketPath(authHomePath)
+	return fixture
+}
+
+// newHomeFixtureAt is newDispatchFixtureAt without its local API listener,
+// for a test that drives the daemon directly and so binds no socket.
+func newHomeFixtureAt(t *testing.T, parent string) (*dispatchFixture, string) {
+	t.Helper()
 	directory, err := os.MkdirTemp(parent, "dark-factory-dispatch-")
 	if err != nil {
 		t.Fatal(err)
@@ -292,22 +310,8 @@ func newDispatchFixtureAt(t *testing.T, parent string) *dispatchFixture {
 	if err != nil {
 		t.Fatal(err)
 	}
-	authority, err := home.OpenLocalAPI(context.Background())
-	if err != nil {
-		_ = home.Close()
-		t.Fatal(err)
-	}
-	listener, err := api.Listen(authority)
-	if err != nil {
-		_ = home.Close()
-		t.Fatal(err)
-	}
-	t.Cleanup(func() {
-		_ = listener.Close()
-		_ = home.Close()
-	})
-	socket := install.LocalAPISocketPath(authHomePath)
-	return &dispatchFixture{home: home, databasePath: databasePath, daemon: daemon, store: store, listener: listener, socket: socket, operator: operatorToken}
+	t.Cleanup(func() { _ = home.Close() })
+	return &dispatchFixture{home: home, databasePath: databasePath, daemon: daemon, store: store, operator: operatorToken}, authHomePath
 }
 
 func (fixture *dispatchFixture) serve(t *testing.T) <-chan error {

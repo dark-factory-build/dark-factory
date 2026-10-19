@@ -145,6 +145,16 @@ func (daemon *Daemon) advanceMergePipeline(ctx context.Context) {
 			LogFactoryd(daemon.log, "factoryd: refresh %s: %v\n", project, err)
 		}
 	}
+	if at, err := daemon.timestamp(); err == nil {
+		retried, err := daemon.store.RetryTasksBlockedOnPrerequisites(ctx, at)
+		for _, id := range retried {
+			LogFactoryd(daemon.log, "factoryd: task %s queued again: its prerequisites merged\n", id)
+			daemon.notifyScheduler()
+		}
+		if err != nil {
+			LogFactoryd(daemon.log, "factoryd: prerequisite retries: %v\n", err)
+		}
+	}
 	if _, err := daemon.advanceReviewOperations(ctx, false); err != nil {
 		LogFactoryd(daemon.log, "factoryd: review operations: %v\n", err)
 	}
