@@ -506,7 +506,9 @@ test("the two-column console keeps one mounted terminal slot", () => {
   assert.match(css, /:focus-visible\s*\{\s*outline: 2px solid var\(--df-console-accent\);/);
 
   const withTerminal = render({ selectedAgent: agentSelection(), terminalContent: createElement("section", { "aria-label": "Agent terminal" }) });
-  assert.match(withTerminal, /<h1>Dark Factory<\/h1>/);
+  assert.equal(/<header|<h1|dfFactoryConsole__header/.test(withTerminal), false, "no console header row or title");
+  assert.match(withTerminal, /class="dfFactoryEntityTools"><label>Project <select aria-label="Project"/, "the project selector lives in the floor's tools bar");
+  assert.match(render({ state: oneProjectState() }), /class="dfFactoryEntityTools"><\/div>/, "one project and a ready connection leave the bar empty");
   assert.match(withTerminal, /dfConsoleLayout__left[\s\S]*?dfConsoleSidebar/);
   assert.match(withTerminal, /dfConsoleSidebar__terminalSlot" aria-label="Terminal"><section aria-label="Agent terminal"><\/section>/);
   assert.equal(withTerminal.includes("dfConsoleLayout__right"), false);

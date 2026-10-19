@@ -57,20 +57,11 @@
   border: 0;
 }
 
-.dfFactoryConsole__header,
 .dfFactoryConsole__cardTitle {
   display: flex;
   align-items: baseline;
   justify-content: space-between;
   gap: 1rem;
-}
-
-.dfFactoryConsole__header {
-  align-items: flex-start;
-  max-width: 90rem;
-  margin: 0 auto 1rem;
-  padding-bottom: 0.75rem;
-  border-bottom: 1px solid var(--df-console-rule);
 }
 
 .dfFactoryConsole__eyebrow,
@@ -106,12 +97,6 @@
   font-size: var(--df-text-lg);
   font-weight: 600;
   letter-spacing: 0.02em;
-}
-
-.dfFactoryConsole__connection {
-  display: grid;
-  justify-items: end;
-  gap: 0.65rem;
 }
 
 .dfFactoryConsole__status {
@@ -320,11 +305,6 @@
   font-size: var(--df-text-xs);
 }
 
-@media (max-width: 720px) {
-  .dfFactoryConsole__header { align-items: flex-start; flex-direction: column; }
-  .dfFactoryConsole__connection { justify-items: start; }
-}
-
 @media (max-width: 960px) {
   .dfFactoryConsole__terminalPanel {
     position: static;
@@ -430,8 +410,6 @@
    One screen: the floor on the left, work and agent controls on the right.
    ------------------------------------------------------------------------ */
 
-.dfFactoryConsole__header { flex-wrap: wrap; }
-
 .dfConsoleLayout {
   display: grid;
   grid-template-columns: minmax(0, 2fr) minmax(0, 1fr);
@@ -482,7 +460,7 @@
   border-top: 1px solid var(--df-console-rule);
 }
 
-.dfFactoryConsole__header select,
+.dfFactoryEntityTools select,
 .dfConsoleSidebar :where(input[type="text"], input:not([type]), select) {
   width: 100%;
   padding: 0.6rem;
@@ -493,8 +471,8 @@
   font-size: var(--df-text-sm);
 }
 
-.dfFactoryConsole__header label { display: flex; align-items: center; gap: 0.5rem; min-width: 0; max-width: 100%; }
-.dfFactoryConsole__header select { width: auto; min-width: 0; max-width: 100%; }
+.dfFactoryEntityTools label { display: flex; align-items: center; gap: 0.5rem; min-width: 0; max-width: 100%; }
+.dfFactoryEntityTools select { width: auto; min-width: 0; max-width: 100%; }
 
 .dfConsoleItems {
   display: grid;
@@ -548,7 +526,6 @@ summary.dfConsoleItem__summary { cursor: pointer; }
 
 @media (min-width: 1025px) {
   .dfFactoryConsole { display: flex; height: 100svh; min-height: 0; overflow: hidden; flex-direction: column; }
-  .dfFactoryConsole__header,
   .dfConsoleLayout { width: 100%; }
   .dfConsoleLayout { flex: 1 1 auto; min-height: 0; }
   .dfConsoleLayout__left { min-height: 0; overflow: hidden; }
