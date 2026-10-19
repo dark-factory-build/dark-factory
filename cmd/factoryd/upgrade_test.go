@@ -628,9 +628,13 @@ func withRelease(t *testing.T, home string, use func(context.Context, *kernel.St
 // is no longer owner-only, which the real client refuses as invalid, the
 // outage's own error) is rolled back to bin/previous by its health gate, and
 // the previous build's boot records the release failed with that reason; a
-// healthy one keeps serving.
+// healthy one keeps serving, including a slow one whose busy local API answers
+// a probe only after the operator client's generic 5 s default: here 64 idle
+// connections hold its 32 handlers for 5 s each, so a probe queued behind them
+// is answered after about 10 s.
 func TestHealthGateRollsBack(t *testing.T) {
-	for _, healthy := range []bool{true, false} {
+	for _, state := range []string{"healthy", "slow", "unhealthy"} {
+		healthy := state != "unhealthy"
 		home := stagedHome(t, "serve", "development")
 		withRelease(t, home, func(ctx context.Context, store *kernel.Store) error {
 			project, err := kernel.ProjectIDFromBytes(bytes.Repeat([]byte{0x34}, kernel.IDBytes))
@@ -646,13 +650,22 @@ func TestHealthGateRollsBack(t *testing.T) {
 		if err := install.PromoteService(home); err != nil {
 			t.Fatal(err)
 		}
-		window, poll, hook := healthWindow, healthPoll, releaseSettledHook
-		healthWindow, healthPoll = 500*time.Millisecond, 50*time.Millisecond
+		window, poll, probe, hook := healthWindow, healthPoll, healthProbe, releaseSettledHook
+		healthWindow, healthPoll, healthProbe = 500*time.Millisecond, 50*time.Millisecond, 20*time.Second
 		settled := make(chan error, 1)
+		var idle []net.Conn
 		releaseSettledHook = func(string, string) {
 			var err error
-			if !healthy {
+			switch state {
+			case "unhealthy":
 				err = os.Chmod(install.LocalAPISocketPath(home), 0o644)
+			case "slow":
+				for len(idle) < 64 && err == nil {
+					var connection net.Conn
+					if connection, err = net.Dial("unix", install.LocalAPISocketPath(home)); err == nil {
+						idle = append(idle, connection)
+					}
+				}
 			}
 			settled <- err
 		}
@@ -672,6 +685,20 @@ func TestHealthGateRollsBack(t *testing.T) {
 		}
 		var err error
 		if healthy {
+			if state == "slow" {
+				// A client's round trip through the same queue as the probe shows
+				// the daemon answered it, but later than the generic default.
+				probeCtx, cancelProbe := context.WithTimeout(context.Background(), healthProbe)
+				started := time.Now()
+				_, probeErr := waitOperatorClient(t, home).Health(probeCtx, "")
+				cancelProbe()
+				if waited := time.Since(started); probeErr != nil || waited < 5*time.Second {
+					t.Fatalf("round trip through the busy local API = %v after %v", probeErr, waited)
+				}
+				for _, connection := range idle {
+					_ = connection.Close()
+				}
+			}
 			time.Sleep(time.Second)
 			cancel()
 			err = <-done
@@ -683,11 +710,11 @@ func TestHealthGateRollsBack(t *testing.T) {
 			}
 		}
 		cancel()
-		healthWindow, healthPoll, releaseSettledHook = window, poll, hook
+		healthWindow, healthPoll, healthProbe, releaseSettledHook = window, poll, probe, hook
 		current, _ := os.ReadFile(filepath.Join(install.ServiceDirectoryPath(home), "bin", "current", "factoryd"))
 		if healthy {
 			if err != nil || string(current) == currentProgram {
-				t.Fatalf("healthy build: serve = %v, rolled back %t", err, string(current) == currentProgram)
+				t.Fatalf("%s build: serve = %v, rolled back %t", state, err, string(current) == currentProgram)
 			}
 			continue
 		}

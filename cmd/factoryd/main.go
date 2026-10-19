@@ -73,9 +73,14 @@ var (
 	promoteService     = install.PromoteService
 	releaseSettledHook = func(string, string) {}
 	// A promoted build's health gate checks every healthPoll for
-	// healthWindow. Both are package-test seams.
+	// healthWindow, each probe bounded by healthProbe rather than the operator
+	// client's generic 5 s default, which rolled back healthy builds whose
+	// busy store answered later (#2051: local API calls under load reach a
+	// p95 near 9 s, so a probe gets three times that and never overlaps the
+	// next poll). All three are package-test seams.
 	healthWindow = 10 * time.Minute
 	healthPoll   = time.Minute
+	healthProbe  = 30 * time.Second
 
 	cleanStartupCancellation = errors.New("factoryd: clean startup cancellation")
 	startupPhaseHook         func(string)
@@ -435,6 +440,8 @@ func serve(ctx context.Context, configuration config) error {
 // is the one factoryctl status makes, which a durable validation hold refuses.
 func (owner *process) watchRelease(ctx context.Context, home, target string, stopServing context.CancelFunc) {
 	reason := owner.daemon.WatchRelease(ctx, healthWindow, healthPoll, func(ctx context.Context) error {
+		ctx, cancel := context.WithTimeout(ctx, healthProbe)
+		defer cancel()
 		client, err := api.NewOperatorClient(install.LocalAPISocketPath(home), install.OperatorTokenPath(home))
 		if err == nil {
 			_, err = client.Health(ctx, "")
