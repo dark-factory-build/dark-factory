@@ -303,18 +303,6 @@ export class FactoryAppController {
     this.#replaceTerminal({ agentId: current.id, agentRevision: current.revision });
   }
 
-  openTerminalForHumanRequest(request: HumanRequestItem): void {
-    if (this.#closed || this.#status !== "ready") return;
-    const currentRequest = this.#state?.humanRequests.get(request.id);
-    const agent = currentRequest === undefined || currentRequest.revision !== request.revision ? undefined : this.#state?.agents.get(currentRequest.agent_id);
-    if (agent === undefined) {
-      this.#error = new SessionError("stale");
-      this.#publish();
-      return;
-    }
-    this.selectAgent(agent);
-  }
-
   /**
    * The floor's operational graph, for every configured project and no other.
    * It is regenerable, not durable state, so it is fetched on demand, and a

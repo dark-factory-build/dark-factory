@@ -128,15 +128,11 @@ export function HumanRequestPanel({
   onReplyChange,
   onReply,
   onCancel,
-  onOpenTerminal,
-  terminalReady,
 }: {
   selected: FactoryHumanRequestView;
   onReplyChange?: (reply: string) => void;
   onReply?: () => void;
   onCancel?: () => void;
-  onOpenTerminal?: (request: FactoryHumanRequestView["request"]) => void;
-  terminalReady: boolean;
 }) {
   const busy = selected.phase === "replying" || selected.phase === "cancelling";
   return (
@@ -149,7 +145,6 @@ export function HumanRequestPanel({
           {selected.canReply ? null : <p className="dfFactoryConsole__empty">{selected.request.status === "open" ? "This open decision is read-only in this view." : `This decision is ${selected.request.status.replaceAll("_", " ")}.`}</p>}
           <div className="dfFactoryConsole__humanActions">
             {selected.canCancel ? <button type="button" disabled={busy || onCancel === undefined} onClick={onCancel}>Stop task</button> : null}
-            {onOpenTerminal === undefined ? null : <button type="button" disabled={busy || !terminalReady} onClick={() => onOpenTerminal(selected.request)}>Open terminal</button>}
           </div>
         </>
       )}
