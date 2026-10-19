@@ -21,7 +21,7 @@ import (
 
 type publicReviewBackend struct {
 	killed, submitAmbiguous, requestChanges bool
-	queued                                  bool
+	queued, draft                           bool
 	checks                                  []string
 	enqueueRefusal                          string // the broker's refusal class, if any
 	defaultBranch                           string
@@ -195,7 +195,7 @@ func (b *publicReviewBackend) ObservePull(_ context.Context, operation review.Op
 	if checks == nil {
 		checks = []string{"required=success"}
 	}
-	return review.Pull{Head: operation.Request.Head, State: "open", Queued: b.queued, Checks: checks}, nil
+	return review.Pull{Head: operation.Request.Head, State: "open", Draft: b.draft, Queued: b.queued, Checks: checks}, nil
 }
 
 func (b *publicReviewBackend) Observe(_ context.Context, operationID string) (review.Receipt, error) {
@@ -1037,6 +1037,38 @@ func TestRefusedEnqueueBecomesAnOverseerItem(t *testing.T) {
 	wakes, err := fixture.store.EnqueueOverseerWakeups(ctx, mustKernelTime(t, fixture.daemon.now().Add(time.Minute).UnixMilli()), 0)
 	if err != nil || len(wakes) != 1 || !strings.Contains(wakes[0].Body, "Escalated: factoryd cannot advance team/repo#12") {
 		t.Fatalf("escalation wake = %+v, %v", wakes, err)
+	}
+}
+
+// A draft is an operator's hold (#2076): GitHub refuses to queue it, so its
+// one completed ALLOW is neither resubmitted nor retried into an escalation.
+// Marked ready, the same operation is queued once.
+func TestADraftWaitsWithItsOneReviewUntilItIsReady(t *testing.T) {
+	fixture, project, _, settle := publishedTask(t)
+	settle()
+	customerMode(t, fixture)
+	ctx := context.Background()
+	backend := &publicReviewBackend{draft: true, enqueueRefusal: "UNPROCESSABLE: Pull request is in draft"}
+	fixture.daemon.reviewBackend = func(string, uint64) review.Backend { return backend }
+	if _, err := reviewNow(ctx, fixture.daemon, project, publishedReviewRequest()); err != nil {
+		t.Fatal(err)
+	}
+	waitForMergePipeline(t, fixture.daemon)
+	for range review.FailuresBeforeEscalation {
+		if _, err := fixture.daemon.advanceReviewOperations(ctx, false); err != nil {
+			t.Fatal(err)
+		}
+	}
+	op := lastDurableReview(t, fixture.store, project)
+	if op.State != "enqueued" || op.Verdict != "allow" || op.Failures != 0 || op.Escalation != "" || backend.reviews != 1 || backend.submits != 1 || backend.enqueues != 0 {
+		t.Fatalf("draft operation = %+v reviews=%d submits=%d enqueues=%d", op, backend.reviews, backend.submits, backend.enqueues)
+	}
+	backend.draft, backend.enqueueRefusal = false, ""
+	if _, err := fixture.daemon.advanceReviewOperations(ctx, false); err != nil {
+		t.Fatal(err)
+	}
+	if ready := lastDurableReview(t, fixture.store, project); ready.ID != op.ID || ready.Enqueues != 1 || backend.enqueues != 1 || backend.reviews != 1 || backend.submits != 1 {
+		t.Fatalf("ready operation = %+v reviews=%d submits=%d enqueues=%d", ready, backend.reviews, backend.submits, backend.enqueues)
 	}
 }
 

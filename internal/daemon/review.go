@@ -1275,6 +1275,7 @@ func (b *daemonReviewBackend) ObservePull(ctx context.Context, operation review.
 			Number           uint64 `json:"number"`
 			HeadSHA          string `json:"head_sha"`
 			State            string `json:"state"`
+			Draft            bool   `json:"draft"`
 			Mergeable        *bool  `json:"mergeable"`
 			MergeStateStatus string `json:"merge_state_status"`
 			Review           struct {
@@ -1286,7 +1287,7 @@ func (b *daemonReviewBackend) ObservePull(ctx context.Context, operation review.
 		return review.Pull{}, errors.New("review: Maintainer returned an invalid pull request")
 	}
 	value := page.PullRequests[0]
-	pull := review.Pull{Head: value.HeadSHA, State: value.State, Review: value.Review.State, MergeStateStatus: value.MergeStateStatus, Mergeable: value.Mergeable}
+	pull := review.Pull{Head: value.HeadSHA, State: value.State, Draft: value.Draft, Review: value.Review.State, MergeStateStatus: value.MergeStateStatus, Mergeable: value.Mergeable}
 	if pull.Head != request.Head || pull.State != "open" || (pull.Mergeable != nil && !*pull.Mergeable) {
 		return pull, nil
 	}

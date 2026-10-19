@@ -102,7 +102,8 @@ unsupported before a provider runs.
    they call for (bring the Change up to main, send back bound to the head,
    review, retry, enqueue or escalate). An action that keeps failing is retried
    for 30 minutes, then escalated once and left until the pull request changes;
-   a CODEOWNERS refusal is escalated at once. Run settlement retries a
+   a CODEOWNERS refusal is escalated at once. A draft is an operator's hold:
+   it waits, unqueued and unescalated, until it is marked ready. Run settlement retries a
    repository, Git or I/O fault and refuses a worktree that fails its own
    validation; a release drain waits 10 minutes, then fails naming the run. An
    attempt call waits out a 30-second daemon restart before its run sees the

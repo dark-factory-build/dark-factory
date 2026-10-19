@@ -591,6 +591,7 @@ pub(crate) struct PullRequestCandidate {
     pub(crate) url: String,
     pub(crate) head_ref: String,
     pub(crate) state: String,
+    pub(crate) draft: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) mergeable: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -4865,6 +4866,7 @@ fn pull_request_page(
             } else {
                 pull.state
             },
+            draft: pull.draft,
             mergeable: pull.mergeable,
             merge_state_status: pull.merge_state_status,
         });
@@ -6489,6 +6491,7 @@ mod tests {
         let entry = || serde_json::from_value::<PullRequest>(raw.clone()).unwrap();
         let page = pull_request_page(42, &request, vec![entry()]).unwrap();
         assert_eq!(page.next_page, Some(2));
+        assert!(!page.pull_requests[0].draft);
         assert_eq!(page.pull_requests[0].body, "Refs team/source#9");
         assert_eq!(page.pull_requests[0].base_ref, "release");
         for branch in ["release+hotfix", "release/été", "release@next"] {
