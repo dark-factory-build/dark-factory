@@ -186,8 +186,14 @@ a persistent wake item, `Proposal ID from AGENT: TITLE [proposal:ID]`, until a
 and evidence `["proposal:ID"]`, with `"status":"tentative"`: an attempt credential
 cannot write `current`, and is refused as unauthorized if it tries. Before
 deciding, rerun the command or read the file:line the proposal cites as
-evidence; the decision's description names what you re-ran and its result, and
-evidence that does not reproduce is a reason to decline. To accept,
+evidence, at the proposal's exact `source_revision`: check out or read that
+commit from the registered repository's object database (`git -C repo show
+SOURCE_REVISION:PATH`, or a checkout of that commit), never a branch. A local
+branch name such as `main` in any clone, the operator's included, is not
+evidence of current source and must not stand in for `source_revision`: its
+tip may be days behind the commit the proposal was written against. The
+decision's description names what you re-ran, at which revision, and its
+result, and evidence that does not reproduce is a reason to decline. To accept,
 `overseer task add --content PROPOSAL_ID:REVISION` the work (to a worker or the
 shared queue, never the specialist) and record the decision with `"task_id"`
 set to that task. The pin is the acceptance and alone stops the proposal waking
