@@ -560,6 +560,37 @@ func TestTickBatchesBaseTipsIntoOneRelease(t *testing.T) {
 	}
 }
 
+func TestWatchReleaseToleratesOnlyConsecutiveHealthErrors(t *testing.T) {
+	for _, test := range []struct {
+		name   string
+		probes []error
+		want   string
+	}{
+		{name: "isolated error", probes: []error{errors.New("timeout")}},
+		{name: "repeated errors", probes: []error{errors.New("timeout"), errors.New("timeout")}, want: "local API round trip: timeout"},
+		{name: "success resets", probes: []error{errors.New("timeout"), nil, errors.New("timeout")}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			daemon := newSchedulerTestDaemon(t)
+			var probe int
+			got := daemon.WatchRelease(context.Background(), 40*time.Millisecond, time.Millisecond, func(context.Context) error {
+				var err error
+				if probe < len(test.probes) {
+					err = test.probes[probe]
+				}
+				probe++
+				return err
+			})
+			if got != test.want {
+				t.Fatalf("reason = %q, want %q", got, test.want)
+			}
+			if test.want != "" && probe != 2 {
+				t.Fatalf("probes = %d, want rollback on second probe", probe)
+			}
+		})
+	}
+}
+
 // #1854: a release a previous factoryd left running is failed by the next
 // factoryd's boot, its build's process group stopped, and that factoryd's
 // next pass releases the newer tip at once.
