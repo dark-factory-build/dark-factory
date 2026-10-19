@@ -3561,7 +3561,7 @@ impl Authority {
             token.as_str(),
         )
         .await
-        .map_err(Into::into)?;
+        .map_err(OperationError::from)?;
         Ok(commit.author)
     }
 
