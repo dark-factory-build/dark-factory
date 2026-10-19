@@ -459,9 +459,33 @@ func (store *Store) CancelOrphanedTasks(ctx context.Context, at UnixMillis) ([]T
 	}
 }
 
-// cancelTasksWhere cancels each task (id, revision) query selects. A task
-// changed since the read loses the revision race and is reconsidered later.
+// RetryTasksBlockedOnPrerequisites queues again, through the operator retry
+// (task update --retry), every worker task blocked as "missing prerequisite"
+// once each prerequisite it declared is satisfied (prerequisiteSourceRun: its
+// producer succeeded and its work merged at its exact head), so it runs once
+// more on a base that has them (#2079). Once, as a transient failure's
+// requeue: not when the previous run ended the same way.
+func (store *Store) RetryTasksBlockedOnPrerequisites(ctx context.Context, at UnixMillis) ([]TaskID, error) {
+	return store.tasksWhere(ctx, func(id TaskID, revision Revision) error {
+		_, err := store.RetryTask(ctx, nil, id, revision, AgentID{}, at, 0)
+		return err
+	}, `SELECT t.id, t.revision FROM tasks AS t JOIN agents AS a ON a.id = t.assigned_agent_id AND a.role = 'worker'
+		WHERE t.status = 'blocked' AND t.blocked_reason LIKE 'missing prerequisite%'
+		  AND EXISTS (SELECT 1 FROM task_prerequisites AS prerequisite WHERE prerequisite.task_id = t.id)
+		  AND NOT EXISTS (SELECT 1 FROM task_prerequisites AS prerequisite WHERE prerequisite.task_id = t.id AND NOT EXISTS (`+prerequisiteSourceRun+`))
+		  AND NOT EXISTS (SELECT 1 FROM runs AS r WHERE r.task_id = t.id AND r.task_incarnation_id = t.incarnation_id AND r.admitted_task_work_revision = t.work_revision - 1 AND r.terminal_kind = 'blocked' AND r.terminal_detail LIKE 'missing prerequisite%')`)
+}
+
 func (store *Store) cancelTasksWhere(ctx context.Context, patch TaskPatch, at UnixMillis, query string, args ...any) ([]TaskID, error) {
+	return store.tasksWhere(ctx, func(id TaskID, revision Revision) error {
+		_, err := store.UpdateTaskForOperator(ctx, id, revision, patch, at)
+		return err
+	}, query, args...)
+}
+
+// tasksWhere applies act to each task (id, revision) query selects. A task
+// changed since the read loses the revision race and is reconsidered later.
+func (store *Store) tasksWhere(ctx context.Context, act func(TaskID, Revision) error, query string, args ...any) ([]TaskID, error) {
 	var ids [][]byte
 	var revisions []int64
 	read, err := store.beginRead(ctx)
@@ -483,24 +507,24 @@ func (store *Store) cancelTasksWhere(ctx context.Context, patch TaskPatch, at Un
 	if err != nil {
 		return nil, err
 	}
-	var cancelled []TaskID
+	var acted []TaskID
 	for i := range ids {
 		id, err := TaskIDFromBytes(ids[i])
 		if err != nil {
-			return cancelled, err
+			return acted, err
 		}
 		revision, err := NewRevision(revisions[i])
 		if err != nil {
-			return cancelled, err
+			return acted, err
 		}
-		_, err = store.UpdateTaskForOperator(ctx, id, revision, patch, at)
+		err = act(id, revision)
 		if errors.Is(err, ErrConflict) || errors.Is(err, ErrRevisionConflict) {
 			continue
 		}
 		if err != nil {
-			return cancelled, err
+			return acted, err
 		}
-		cancelled = append(cancelled, id)
+		acted = append(acted, id)
 	}
-	return cancelled, nil
+	return acted, nil
 }

@@ -674,6 +674,12 @@ func TestRestartRoutesCompletedRequestChangesWithoutResubmitting(t *testing.T) {
 func reviewPublicFixture(t *testing.T) (*dispatchFixture, kernel.ProjectID) {
 	t.Helper()
 	fixture := newDispatchFixture(t)
+	return fixture, reviewPublicProject(t, fixture)
+}
+
+// reviewPublicProject adds the project whose repository publishes to team/repo.
+func reviewPublicProject(t *testing.T, fixture *dispatchFixture) kernel.ProjectID {
+	t.Helper()
 	project := mustProjectID(t, testID(250))
 	ctx := context.Background()
 	if _, err := fixture.store.CreateProject(ctx, kernel.NewProject{ID: project, Name: "review-public", Root: "/review-public"}, mustKernelTime(t, 2)); err != nil {
@@ -690,7 +696,7 @@ func reviewPublicFixture(t *testing.T) (*dispatchFixture, kernel.ProjectID) {
 	if err := fixture.store.BindRepositoryGitHubID(ctx, repository, 42); err != nil {
 		t.Fatal(err)
 	}
-	return fixture, project
+	return project
 }
 
 func lastDurableReview(t *testing.T, store *kernel.Store, project kernel.ProjectID) review.Operation {
