@@ -1,5 +1,5 @@
 import type { ReactNode } from "react";
-import { type IntakeView, type IntakeBody, type DiscoveredAccount, type AgentItem, type GitHubConnectionBody, type GitHubDelegationBody, type HumanRequestItem, type ProjectItem, type RepositoryView, type StateView, type TaskItem } from "@dark-factory/client";
+import { type DiscoveredAccount, type AgentItem, type GitHubConnectionBody, type GitHubDelegationBody, type HumanRequestItem, type ProjectItem, type RepositoryView, type StateView, type TaskItem } from "@dark-factory/client";
 import type { FactoryEditView, FactoryHumanRequestView } from "./factory-app-controller.js";
 import { AgentSprite } from "./factory-scene/factory-scene.js";
 import { agentActivity, type WorkRow } from "./console-view.js";
@@ -67,11 +67,8 @@ function WorkRowShell({ title, chips, meta, onOpen, href, disabled, expanded, ch
 /** One list for everything open: what needs you, what is in review, running and queued. */
 export function WorkPanel({
   state, rows, projectId, edit, ready, onEditTask,
-  selectedHumanRequest, onSelectHumanRequest, onCloseHumanRequest, requestContent, onIntakeAction, intake,
+  selectedHumanRequest, onSelectHumanRequest, onCloseHumanRequest, requestContent,
 }: {
-  onIntakeAction?: (projectId: string, request: IntakeBody) => void;
-  /** The shown project's last intake outcome. */
-  intake?: Readonly<{ state?: string; failed: boolean; busy: boolean }>;
   state: StateView | undefined;
   rows: readonly WorkRow[];
   projectId?: string;
@@ -93,12 +90,6 @@ export function WorkPanel({
   </>;
   const item = (row: WorkRow) => {
     const { task, request } = row;
-    if (row.intake !== undefined) {
-      const { source, candidate } = row.intake;
-      return <WorkRowShell key={row.key} title={row.title} chips={chips(row)} meta={`${source.repository} · by ${candidate.author}`}>
-        <div className="dfConsoleSidebar__taskActions"><button type="button" aria-label={`Accept ${row.title}`} disabled={!ready || !source.enabled || intake?.busy === true || onIntakeAction === undefined} onClick={() => onIntakeAction?.(source.project_id, { action: "accept", source_id: source.id, expected_revision: source.revision, issue_number: candidate.number, content_hash: candidate.content_hash })}>Accept</button></div>
-      </WorkRowShell>;
-    }
     const named = projectId === undefined && state.projects.size > 1 ? state.projects.get(task?.project_id ?? request?.project_id ?? row.pr?.projectId ?? "")?.name : undefined;
     const blocked = task?.status === "blocked";
     const meta = [named, request === undefined ? owner(task) : `${state.agents.get(request.agent_id)?.name ?? "Agent"} asks`, blocked && formatTime(task.updated_at_ms) ? `since ${formatTime(task.updated_at_ms)}` : ""].filter(Boolean).join(" · ");
@@ -116,7 +107,6 @@ export function WorkPanel({
   };
   return <section className="dfConsoleSidebar__panel" aria-label="Work">
     {state.factory.dispatch_enabled ? null : <p role="status">New work is paused. Queued tasks wait; active processes continue. Resume with <code>factoryctl dispatch on</code>.</p>}
-    {rows.some((row) => row.intake !== undefined) && (intake?.failed || !["ok", "accepted", "imported", "withdrawn", "withdrawal_pending", undefined].includes(intake?.state)) ? <p role="alert">Could not accept: {intake?.failed ? "try again" : intake?.state?.replaceAll("_", " ")}.</p> : null}
     {rows.length === 0 ? <p className="dfFactoryConsole__empty">No open work</p> : <ul className="dfConsoleItems">{rows.map(item)}</ul>}
   </section>;
 }

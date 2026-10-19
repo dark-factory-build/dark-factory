@@ -63,7 +63,6 @@ function harness(overrides = {}) {
     getRepositories: overrides.getRepositories ?? (async () => []),
     createProject: overrides.createProject ?? (async () => undefined),
     githubConnection: overrides.githubConnection ?? (async () => ({ state: "denied" })),
-    intake: overrides.intake ?? (async () => ({ state: "ok", sources: [] })),
     clientId: overrides.clientId ?? "60".repeat(16),
     capabilities: overrides.capabilities ?? 15,
   };
@@ -107,63 +106,6 @@ function harness(overrides = {}) {
     historyState,
   };
 }
-
-test("Work acceptance imports the accepted receipt before publishing intake", async () => {
-  const projectId = [...fixtureState.projects.keys()][0];
-  const calls = [];
-  const context = harness({ intake: async (request) => {
-    calls.push(request);
-    if (request.action === "accept") return { state: "accepted", acceptance_id: "receipt-1" };
-    if (request.action === "import") return { state: "imported", acceptance_id: "receipt-1", task_id: "task-1" };
-    if (request.action === "list") return { state: "ok", sources: [{ id: "waiting-1", project_id: projectId }] };
-    throw new Error(`unexpected intake action ${request.action}`);
-  } });
-  context.controller.start(); context.emitStatus("ready"); context.emitState(fixtureState);
-  await context.controller.intakeAction(projectId, { action: "accept", issue_number: 7n, content_hash: "ab".repeat(32), source_id: "a1".repeat(16), expected_revision: 1n });
-  assert.deepEqual(calls, [
-    { action: "accept", issue_number: 7n, content_hash: "ab".repeat(32), source_id: "a1".repeat(16), expected_revision: 1n },
-    { action: "import", acceptance_id: "receipt-1" },
-    { action: "list", project_id: projectId },
-  ]);
-  assert.deepEqual(context.latest().intake.get(projectId).sources.map((source) => source.id), ["waiting-1"]);
-});
-
-test("Work acceptance keeps waiting issues visible when content changes or import fails", async () => {
-  const projectId = [...fixtureState.projects.keys()][0];
-  const source = { id: "a1".repeat(16), project_id: projectId, revision: 4n, waiting: [{ number: 7n, content_hash: "ab".repeat(32) }] };
-  let mode = "changed";
-  const calls = [];
-  const context = harness({ intake: async (request) => {
-    calls.push(request);
-    if (request.action === "list") return { state: "ok", sources: [source] };
-    if (request.action === "accept" && mode === "changed") return { state: "content_changed" };
-    if (request.action === "accept") return { state: "accepted", acceptance_id: "receipt-2" };
-    if (request.action === "import") return { state: "content_changed" };
-    throw new Error(`unexpected intake action ${request.action}`);
-  } });
-  context.controller.start(); context.emitStatus("ready");
-  await context.controller.loadIntake(projectId);
-  await context.controller.intakeAction(projectId, { action: "accept", source_id: source.id, issue_number: 7n, content_hash: "cd".repeat(32), expected_revision: source.revision });
-  assert.deepEqual(context.latest().intake.get(projectId).sources, [source]);
-  assert.equal(context.latest().intake.get(projectId).state, "content_changed");
-  mode = "import-failed";
-  await context.controller.intakeAction(projectId, { action: "accept", source_id: source.id, issue_number: 7n, content_hash: "ab".repeat(32), expected_revision: source.revision });
-  assert.deepEqual(context.latest().intake.get(projectId).sources, [source]);
-  assert.equal(context.latest().intake.get(projectId).state, "content_changed");
-  assert.equal(calls.filter((request) => request.action === "list").length, 1);
-});
-
-test("a pending intake list cannot repopulate state after disconnect", async () => {
-  const projectId = [...fixtureState.projects.keys()][0];
-  let release;
-  const context = harness({ intake: async () => new Promise((resolve) => { release = resolve; }) });
-  context.controller.start(); context.emitStatus("ready");
-  const pending = context.controller.loadIntake(projectId);
-  context.emitStatus("closed");
-  release({ state: "ok", sources: [{ id: "late", project_id: projectId }] });
-  await pending;
-  assert.equal(context.latest().intake.has(projectId), false);
-});
 
 test("a pending repository read cannot repopulate state after disconnect", async () => {
   const pending = deferred();
@@ -986,34 +928,12 @@ test("a structure arriving during a run-paths round is asked as soon as the roun
   assert.deepEqual(hidden, [runningAgentID]);
 });
 
-test("failed source preview cannot reuse another source's reviewed candidates or pagination", async () => {
-  const projectId = [...fixtureState.projects.keys()][0];
-  let rejectPreview;
-  const context = harness({ intake: async (request) => {
-    if (request.source_id === "a1".repeat(16)) return { state: "ok", candidates: [{ number: 7n, content_hash: "ab".repeat(32) }], reviewed_revision: 1n, next_page: 2 };
-    return new Promise((_, reject) => { rejectPreview = reject; });
-  } });
-  context.controller.start(); context.emitStatus("ready"); context.emitState(fixtureState);
-  await context.controller.intakeAction(projectId, { action: "preview", source_id: "a1".repeat(16), page: 1 });
-  assert.equal(context.latest().intake.get(projectId).candidates.length, 1);
-  const pending = context.controller.intakeAction(projectId, { action: "preview", source_id: "a2".repeat(16), page: 1 });
-  assert.equal(context.latest().intake.get(projectId).candidates, undefined);
-  rejectPreview(new Error("unavailable")); await pending;
-  const result = context.latest().intake.get(projectId);
-  assert.equal(result.candidates, undefined);
-  assert.equal(result.reviewed_revision, undefined);
-  assert.equal(result.next_page, undefined);
-});
-
- test("disconnect removes private repository and intake settings from the snapshot", async () => {
-  const context = harness({ getRepositories: async () => [{ root: "/private/checkout" }], intake: async () => ({ sources: [{ repository: "private/source" }] }) });
+test("disconnect removes private repository settings from the snapshot", async () => {
+  const context = harness({ getRepositories: async () => [{ root: "/private/checkout" }] });
   context.controller.start(); context.emitStatus("ready");
   await context.controller.loadRepositories("project");
-  await context.controller.loadIntake("project");
   assert.equal(context.latest().repositories.size, 1);
-  assert.equal(context.latest().intake.size, 1);
   context.emitStatus("closed");
   assert.equal(context.latest().repositories.size, 0);
-  assert.equal(context.latest().intake.size, 0);
   context.controller.close();
 });

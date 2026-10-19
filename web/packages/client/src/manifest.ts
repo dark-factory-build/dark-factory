@@ -74,7 +74,6 @@ export const CONTROL_MANIFEST = [
   { type: "PROJECT_CREATE", direction: "client" }, { type: "PROJECT_CREATE_RESULT", direction: "server" },
   { type: "REPOSITORIES_GET", direction: "client" }, { type: "REPOSITORIES", direction: "server" },
   { type: "REPOSITORY_MUTATE", direction: "client" }, { type: "REPOSITORY_MUTATE_RESULT", direction: "server" },
-  { type: "INTAKE", direction: "client" }, { type: "INTAKE_RESULT", direction: "server" },
   { type: "TASK_UPDATE", direction: "client" }, { type: "TASK_UPDATE_RESULT", direction: "server" },
   { type: "OPERATIONAL_GRAPH_GET", direction: "client" }, { type: "OPERATIONAL_GRAPH", direction: "server" },
   { type: "RUN_PATHS_GET", direction: "client" }, { type: "RUN_PATHS", direction: "server" },

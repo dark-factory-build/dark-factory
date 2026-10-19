@@ -2001,22 +2001,3 @@ test("library numeric bounds match the Go wire contract", () => {
   for (const output of [{ revision: Number.MAX_SAFE_INTEGER }, { document: { anchor_work_revision: Number.MAX_SAFE_INTEGER } }]) assert.deepEqual(decodeServerControl(frame(output)).body.output, output);
   for (const output of [{ revision: Number.MAX_SAFE_INTEGER + 1 }, { document: { anchor_work_revision: Number.MAX_SAFE_INTEGER + 1 } }]) assert.throws(() => decodeServerControl(frame(output)), ProtocolError);
 });
-
- test("intake requests reject after session closure without waiting for a response", async () => {
-  const { session } = await openHumanSession(undefined, CAPABILITIES.observe | CAPABILITIES.administration);
-  session.close();
-  await assert.rejects(session.intake({ action: "list", project_id: "01".repeat(16) }), (error) => error.code === "closed");
-});
-
-test("a refused intake request stays scoped to that request", async () => {
-  const { session, socket } = await openHumanSession(undefined, CAPABILITIES.observe | CAPABILITIES.administration);
-  const first = session.intake({ action: "list", project_id: "01".repeat(16) });
-  const request = lastFrame(socket, "INTAKE");
-  socket.reply(encodeServerError({ code: "rate_limited", retryable: true }, request.id));
-  await assert.rejects(first, (error) => error.code === "rate_limited" && error.retryable);
-  assert.equal(session.status, "ready");
-  const next = session.intake({ action: "list", project_id: "01".repeat(16) });
-  assert.equal(lastFrame(socket, "INTAKE").type, "INTAKE");
-  session.close();
-  await assert.rejects(next, (error) => error.code === "closed");
-});
