@@ -1,4 +1,4 @@
-import { useMemo } from "react";
+import { useMemo, type ReactNode } from "react";
 import type { AgentItem, HumanRequestItem, OperationalGraphView, StateView, TaskItem } from "@dark-factory/client";
 import {
   agentStatus,
@@ -82,8 +82,9 @@ const NO_CHANGES: readonly ProductionContraption[] = [];
 /** The operational floor: observation and navigation; every action opens an existing control. */
 export function FactoryFloor({
   changes = NO_CHANGES, state, graphs, graphErrors, runPaths, lastRunPaths, selectedAgentId, onSelectAgent,
-  onSelectHumanRequest, selectedTaskId, onSelectTask, onOpenTasks, connected = true, projectId,
+  onSelectHumanRequest, selectedTaskId, onSelectTask, onOpenTasks, connected = true, projectId, tools,
 }: {
+  tools?: ReactNode;
   changes?: readonly ProductionContraption[];
   state: StateView | undefined;
   graphs: ReadonlyMap<string, OperationalGraphView> | undefined;
@@ -110,6 +111,7 @@ export function FactoryFloor({
   return <div className="dfFactoryFloor">
     <FactoryScene
       tools={<>
+        {tools}
         {refused.length > 0 ? <p className="dfFactoryEntityTools__notice" role="status">Plant unavailable: {refused.join(", ")}; retrying.</p> : null}
         {unavailable.length > 0 ? <p className="dfFactoryEntityTools__notice" role="status">Source unavailable for {unavailable.map((source) => source.name).join(", ")}; those units cannot be inferred.</p> : null}
       </>}

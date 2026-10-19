@@ -125,25 +125,6 @@ export function FactoryConsole({
   return (
     <div className="dfConsoleShell">
       <main className="dfFactoryConsole" aria-label="Factory operator console">
-        <header className="dfFactoryConsole__header">
-          <div>
-            <h1>Dark Factory</h1>
-          </div>
-          {state?.projects.size === 1 ? null : <label>Project <select aria-label="Project" value={projectId ?? ""} onChange={(event) => selectProject(event.currentTarget.value || undefined)}>
-            <option value="">All projects</option>
-            {[...state?.projects.values() ?? []].sort((a, b) => a.name.localeCompare(b.name) || a.id.localeCompare(b.id)).map((project) => <option key={project.id} value={project.id}>{project.name}</option>)}
-          </select></label>}
-          <div
-            className={ready || error !== undefined ? "dfFactoryConsole__visuallyHidden" : "dfFactoryConsole__connection"}
-            aria-label={`Connection status: ${STATUS_LABELS[status]}`}
-          >
-            <p className="dfFactoryConsole__status" role="status" aria-live="polite" aria-atomic="true">
-              <span className={`dfFactoryConsole__statusDot dfFactoryConsole__statusDot--${status}`} aria-hidden="true" />
-              {STATUS_LABELS[status]}
-            </p>
-          </div>
-        </header>
-
         {error === undefined ? null : (
           <p className="dfFactoryConsole__error" role="alert">
             {ERROR_LABELS.get(error.code) ?? "The connection could not continue."}
@@ -152,7 +133,16 @@ export function FactoryConsole({
 
         <div className="dfConsoleLayout">
           <section className="dfConsoleLayout__left dfFactoryConsole__section" aria-label="Factory floor">
-            <FactoryFloor changes={productionItems} onProjectContent={onProjectContent} onOpenTasks={ready ? selectProject : undefined} projectId={projectId} selectedTaskId={selectedTask?.id} onSelectTask={ready ? onSelectTask : undefined} selectedAgentId={liveAgent?.id} state={scopedState} graphs={graphs} graphErrors={graphErrors} runPaths={runPaths} lastRunPaths={lastRunPaths} onSelectAgent={ready ? onSelectAgent : undefined} onSelectHumanRequest={ready ? pickRequest : undefined} connected={ready} />
+            <FactoryFloor tools={<>
+              {state?.projects.size === 1 ? null : <label>Project <select aria-label="Project" value={projectId ?? ""} onChange={(event) => selectProject(event.currentTarget.value || undefined)}>
+                <option value="">All projects</option>
+                {[...state?.projects.values() ?? []].sort((a, b) => a.name.localeCompare(b.name) || a.id.localeCompare(b.id)).map((project) => <option key={project.id} value={project.id}>{project.name}</option>)}
+              </select></label>}
+              {ready || error !== undefined ? null : <p className="dfFactoryConsole__status" role="status" aria-live="polite" aria-atomic="true" aria-label={`Connection status: ${STATUS_LABELS[status]}`}>
+                <span className={`dfFactoryConsole__statusDot dfFactoryConsole__statusDot--${status}`} aria-hidden="true" />
+                {STATUS_LABELS[status]}
+              </p>}
+            </>} changes={productionItems} onProjectContent={onProjectContent} onOpenTasks={ready ? selectProject : undefined} projectId={projectId} selectedTaskId={selectedTask?.id} onSelectTask={ready ? onSelectTask : undefined} selectedAgentId={liveAgent?.id} state={scopedState} graphs={graphs} graphErrors={graphErrors} runPaths={runPaths} lastRunPaths={lastRunPaths} onSelectAgent={ready ? onSelectAgent : undefined} onSelectHumanRequest={ready ? pickRequest : undefined} connected={ready} />
           </section>
 
           {/* Work (decisions first) always shows; the selected agent's terminal joins it below. */}
