@@ -67,8 +67,8 @@ func (daemon *Daemon) enforceRunLiveness(ctx context.Context, spec SupervisorSpe
 		if !found || run.Phase != kernel.RunRunning {
 			continue
 		}
-		floor, _, output := attempt.diagnosticSnapshot()
-		code, detail := stalledRunProposal(run.Provider, attempt.neverStarted(), floor, output)
+		_, _, output := attempt.diagnosticSnapshot()
+		code, detail := stalledRunProposal(run.Provider, attempt.neverStarted(), output)
 		proposal, err := kernel.NewFailureProposal(code, detail)
 		if err != nil {
 			return err
@@ -98,10 +98,13 @@ var codexModelCapacity = regexp.MustCompile(`⚠[[:space:]]*Selected model` + ` 
 
 // stalledRunProposal classifies a stalled run from its retained terminal
 // output, projected whole before the detail is cut: a TUI's last raw bytes are
-// mostly escapes, and cutting them first leaves an empty tail. A Codex notice
-// is read even from a run that made no attempt call yet, as it can be Codex's
-// first and only act.
-func stalledRunProposal(provider kernel.Provider, neverStarted bool, floor uint64, output []byte) (kernel.FailureCode, string) {
+// mostly escapes, and cutting them first leaves an empty tail. Only a ring
+// buffer that wrapped has cut raw bytes itself, so only then does the detail
+// drop the partial first and last lines as the raw observer would; an adopted
+// run's replay floor is a gap, not a cut, and keeps its prompt line. A Codex
+// notice is read even from a run that made no attempt call yet, as it can be
+// Codex's first and only act.
+func stalledRunProposal(provider kernel.Provider, neverStarted bool, output []byte) (kernel.FailureCode, string) {
 	if provider == kernel.ProviderCodex {
 		text := terminalTextProjection(output, false, len(output))
 		if report := codexUsageLimit.FindStringSubmatch(text); report != nil {
@@ -114,7 +117,7 @@ func stalledRunProposal(provider kernel.Provider, neverStarted bool, floor uint6
 	if neverStarted {
 		return kernel.FailureTransient, kernel.NeverStartedRunDetail
 	}
-	return kernel.FailureProtocol, stalledRunDetail + terminalTextProjection(output, floor > 0, 512)
+	return kernel.FailureProtocol, stalledRunDetail + terminalTextProjection(output, len(output) == kernel.MaxTerminalDiagnosticsBytes, 512)
 }
 
 func casLost(err error) bool {

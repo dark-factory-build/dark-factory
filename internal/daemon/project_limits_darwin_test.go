@@ -144,16 +144,17 @@ func TestStalledRunProposalReadsCodexNotices(t *testing.T) {
 		{"claude notice", kernel.ProviderClaudeCode, false, append([]string{capacity(" ")}, limit...), kernel.FailureProtocol, stalledRunDetail, "Approaching rate limits"},
 		{"claude echo", kernel.ProviderClaudeCode, false, []string{quoted}, kernel.FailureProtocol, stalledRunDetail, "You've hit your"},
 		{"escape-heavy tail", kernel.ProviderClaudeCode, false, []string{"useful last line\r\n", strings.Repeat("\x1b[2K\x1b[1A", 100)}, kernel.FailureProtocol, stalledRunDetail + "useful last line", ""},
+		{"adopted replay gap keeps the prompt line", kernel.ProviderShell, false, []string{"Login expired\r\n> "}, kernel.FailureProtocol, stalledRunDetail + "Login expired >", ""},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			var attempt liveAttempt
-			var cursor uint64
+			cursor := uint64(40) // retained from a replay floor, as after a takeover
 			for _, frame := range test.frames {
 				attempt.retainDiagnosticOutput(cursor, cursor+uint64(len(frame)), []byte(frame))
 				cursor += uint64(len(frame))
 			}
-			floor, _, output := attempt.diagnosticSnapshot()
-			code, detail := stalledRunProposal(test.provider, test.neverStarted, floor, output)
+			_, _, output := attempt.diagnosticSnapshot()
+			code, detail := stalledRunProposal(test.provider, test.neverStarted, output)
 			if code != test.code || !strings.HasPrefix(detail, test.prefix) || !strings.Contains(detail, test.contains) {
 				t.Fatalf("%v: %v %q", test.provider, code, strings.ReplaceAll(detail, " ", "_"))
 			}
