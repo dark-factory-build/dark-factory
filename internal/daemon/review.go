@@ -17,6 +17,7 @@ import (
 
 	"github.com/dark-factory-build/dark-factory/internal/api"
 	"github.com/dark-factory-build/dark-factory/internal/change"
+	"github.com/dark-factory-build/dark-factory/internal/gitauthor"
 	"github.com/dark-factory-build/dark-factory/internal/kernel"
 	"github.com/dark-factory-build/dark-factory/internal/provider"
 	"github.com/dark-factory-build/dark-factory/internal/review"
@@ -478,25 +479,36 @@ func (daemon *Daemon) sendBackPull(ctx context.Context, open kernel.OpenPull, ta
 
 // publishUnanswered reports whether the pull request's head is not the
 // Change head its task settled, which is then no answer (#1800): that head is
-// published at once, or why says factoryd does not publish it.
+// published at once, a trusted operator's head past it is adopted (#2080), or
+// why says factoryd does neither.
 func (daemon *Daemon) publishUnanswered(ctx context.Context, open kernel.OpenPull, request review.Request) (bool, string, error) {
 	settled, err := daemon.unpublishedHead(ctx, open, request)
 	if err != nil || settled == "" || daemon.publishSettledChanges(ctx, open.Task) {
 		return settled != "", "", err
 	}
-	return true, "its task settled head " + settled + ", which pull request head " + request.Head + " is not, and factoryd does not publish it: its task did not succeed, its publication failed for good, or its work is not factoryd's to publish", nil
+	adopted, refusal, err := daemon.adoptPullHead(ctx, open, request, settled)
+	if err != nil || adopted {
+		return !adopted, "", err
+	}
+	return true, "its task settled head " + settled + ", which pull request head " + request.Head + " is not, and factoryd does not publish it: its task did not succeed, its publication failed for good, or its work is not factoryd's to publish; nor does it adopt that head: " + refusal, nil
+}
+
+// publishedChange is the retained Change published on the pull request.
+func (daemon *Daemon) publishedChange(ctx context.Context, open kernel.OpenPull) (kernel.Change, bool, error) {
+	changeID, found, err := daemon.store.PublishedChangeID(ctx, open.Project, open.Repository, open.Pull.Number)
+	if err != nil || !found {
+		return kernel.Change{}, false, err
+	}
+	state, found, err := daemon.store.Change(ctx, changeID)
+	return state, found && state.Phase == kernel.ChangeRetained && state.HeadCommit != nil, err
 }
 
 // unpublishedHead is the head of the retained Change published on the pull
 // request when it is not the pull request's head; "" when they match or no
 // Change is published. factoryd pushes the Change's exact commit.
 func (daemon *Daemon) unpublishedHead(ctx context.Context, open kernel.OpenPull, request review.Request) (string, error) {
-	changeID, found, err := daemon.store.PublishedChangeID(ctx, open.Project, open.Repository, open.Pull.Number)
+	state, found, err := daemon.publishedChange(ctx, open)
 	if err != nil || !found {
-		return "", err
-	}
-	state, found, err := daemon.store.Change(ctx, changeID)
-	if err != nil || !found || state.Phase != kernel.ChangeRetained || state.HeadCommit == nil {
 		return "", err
 	}
 	if head := hex.EncodeToString(state.HeadCommit.Bytes()); !strings.EqualFold(head, request.Head) {
@@ -505,16 +517,160 @@ func (daemon *Daemon) unpublishedHead(ctx context.Context, open kernel.OpenPull,
 	return "", nil
 }
 
+// githubAccount is a GitHub user as GitHub attributes a commit, not as the
+// commit's author line spells it.
+type githubAccount struct {
+	Login string `json:"login"`
+	ID    int64  `json:"id"`
+}
+
+// adoptPullHead makes the pull request's head the retained Change's when a
+// trusted operator advanced the branch past the head its task settled
+// (#2080): the head must descend from the settled head by commits GitHub
+// verifies as signed by, and attributes to, the Maintainer connection's user
+// or an intake author trusted for the repository, so a spoofed author line
+// adopts nothing. The worktree fast-forwards to exactly that head, which the
+// reconciler then judges as any other: nothing is reviewed, approved or
+// enqueued here. It reports adoption, or why the head stays unadopted; an
+// error is retried next pass.
+func (daemon *Daemon) adoptPullHead(ctx context.Context, open kernel.OpenPull, request review.Request, settled string) (bool, string, error) {
+	state, found, err := daemon.publishedChange(ctx, open)
+	if err != nil || !found {
+		return false, "its Change is not retained", err
+	}
+	if branch := change.BranchName(state.ID.String()); open.Pull.Branch != "" && open.Pull.Branch != branch || open.Pull.HeadRepository != "" && !strings.EqualFold(open.Pull.HeadRepository, open.Repository) {
+		return false, "the pull request's head " + open.Pull.HeadRepository + ":" + open.Pull.Branch + " is not the Change's branch " + branch, nil
+	}
+	repository, err := daemon.repositoryForChange(ctx, state)
+	if err != nil {
+		return false, "", err
+	}
+	source, verified, err := daemon.store.RepositorySourceIdentity(ctx, repository.ID)
+	if err != nil || !verified {
+		return false, "", errors.Join(err, kernel.ErrConflict)
+	}
+	id, pinned, err := daemon.store.RepositoryGitHubID(ctx, repository.ID)
+	if err != nil || !pinned {
+		return false, "", errors.Join(err, kernel.ErrConflict)
+	}
+	call := daemon.maintainerCall(&daemonReviewBackend{daemon: daemon, project: open.Project, repository: open.Repository, repositoryID: id}, false)
+	response, err := call(ctx, "observe_pull_request_commits", map[string]any{"repository": open.Repository, "pull_number": open.Pull.Number, "head_sha": request.Head, "base_sha": settled})
+	var rejection maintainerRejection
+	if errors.As(err, &rejection) {
+		return false, err.Error(), nil // a determinate answer: the head moved, or the range is unreadable
+	}
+	if err != nil {
+		return false, "", err
+	}
+	var observed struct {
+		Head    string `json:"head_sha"`
+		Base    string `json:"base_sha"`
+		Status  string `json:"status"`
+		Commits []struct {
+			SHA       string         `json:"sha"`
+			Author    *githubAccount `json:"author"`
+			Committer *githubAccount `json:"committer"`
+			Commit    struct {
+				Verification struct {
+					Verified bool `json:"verified"`
+				} `json:"verification"`
+			} `json:"commit"`
+		} `json:"commits"`
+	}
+	if json.Unmarshal(response, &observed) != nil || !strings.EqualFold(observed.Head, request.Head) || !strings.EqualFold(observed.Base, settled) {
+		return false, "", errors.New("review: Maintainer returned an invalid commits observation")
+	}
+	if observed.Status != "ahead" || len(observed.Commits) == 0 {
+		return false, "head " + request.Head + " is " + observed.Status + " of the settled head, not a descendant", nil
+	}
+	sources, err := daemon.store.ProjectIntakeSources(ctx, open.Project)
+	if err != nil {
+		return false, "", err
+	}
+	trusted := func(account *githubAccount) bool {
+		return trustedGitHubAccount(daemon.gitAuthor(ctx), sources, repository.ID, account)
+	}
+	for _, commit := range observed.Commits {
+		// GitHub verifies a signature only against a key of the account that
+		// owns the committer email, and signs its own web editor's commits as
+		// web-flow for the author it authenticated: either way the accounts are
+		// GitHub's attribution, so an author line alone trusts nothing.
+		if !commit.Commit.Verification.Verified || !trusted(commit.Author) || !trusted(commit.Committer) && (commit.Committer == nil || commit.Committer.Login != "web-flow") {
+			return false, "commit " + commit.SHA + " is not verified by GitHub as a trusted author's", nil
+		}
+	}
+	git, parent := daemon.gitExecutable.Load(), daemon.changeParent.Load()
+	if git == nil || *git == "" || parent == nil || *parent == "" {
+		return false, "", errPublishLater
+	}
+	identity, err := sourceIdentity(source)
+	if err != nil {
+		return false, "", err
+	}
+	facts, err := change.AdvanceWorktree(ctx, *git, repository.Root, identity, filepath.Join(*parent, state.ID.String()), fmt.Sprintf("refs/pull/%d/head", open.Pull.Number), request.Head)
+	var invalid *change.ValidationError
+	if errors.As(err, &invalid) {
+		return false, invalid.Reason, nil
+	}
+	if err == nil && facts.Branch() != change.BranchName(state.ID.String()) {
+		err = errors.New("advanced Change worktree failed verification")
+	}
+	if err != nil {
+		return false, "", fmt.Errorf("advance its worktree to %s: %w", request.Head, err)
+	}
+	head, err := kernelCommit(facts.Head())
+	if err != nil {
+		return false, "", err
+	}
+	at, err := daemon.timestamp()
+	if err != nil {
+		return false, "", err
+	}
+	if _, err := daemon.store.RecordChangeRebased(ctx, state.ID, state.Revision, *state.HeadCommit, head, at); err != nil {
+		return false, "", err
+	}
+	// The head is on the pull request already: nothing is left to publish.
+	if err := daemon.store.RecordCorrectionPublished(ctx, kernel.PublishableChange{Task: kernel.Task{ID: open.Task}, Change: state.ID, Pull: open.Pull.Number}, at); err != nil {
+		return false, "", err
+	}
+	LogFactoryd(daemon.log, "factoryd: adopted %s#%d head %s onto change %s for task %s: %d trusted commits past %s\n", open.Repository, open.Pull.Number, request.Head, state.ID, open.Task, len(observed.Commits), settled)
+	return true, "", nil
+}
+
+// trustedGitHubAccount is whether account is the Maintainer connection's user
+// (by GitHub's numeric id) or a login an enabled trusted-authors intake source
+// of the repository names.
+func trustedGitHubAccount(operator gitauthor.Identity, sources []kernel.IntakeSource, repository kernel.RepositoryID, account *githubAccount) bool {
+	if account == nil {
+		return false
+	}
+	if operator.ID != 0 && account.ID == operator.ID {
+		return true
+	}
+	for _, source := range sources {
+		if source.Enabled && source.TargetRepositoryID == repository && kernel.TrustedIntakeAuthor(source, kernel.IntakeIssueSnapshot{AuthorLogin: account.Login, AuthorType: kernel.GitHubAuthorUser}) {
+			return true
+		}
+	}
+	return false
+}
+
+// sourceIdentity is the registered repository's identity as change proves it.
+func sourceIdentity(source kernel.RepositorySourceIdentity) (change.RepositorySourceIdentity, error) {
+	root, err := change.NewRepositoryIdentity(source.RootDevice, source.RootInode)
+	if err != nil {
+		return change.RepositorySourceIdentity{}, err
+	}
+	git, err := change.NewRepositoryIdentity(source.GitDevice, source.GitInode)
+	return change.RepositorySourceIdentity{Root: root, Git: git, OriginDigest: source.OriginDigest}, err
+}
+
 // rebaseChange brings the retained Change published on the pull request up to
 // current main without a worker turn. It reports whether the Change's head
 // moved: not on a real Git conflict, a Change already on main, or none.
 func (daemon *Daemon) rebaseChange(ctx context.Context, open kernel.OpenPull) (bool, error) {
-	changeID, found, err := daemon.store.PublishedChangeID(ctx, open.Project, open.Repository, open.Pull.Number)
-	if err != nil || !found {
-		return false, err
-	}
-	state, found, err := daemon.store.Change(ctx, changeID)
-	if err != nil || !found || state.Phase != kernel.ChangeRetained || state.Selection == nil || state.HeadCommit == nil {
+	state, found, err := daemon.publishedChange(ctx, open)
+	if err != nil || !found || state.Selection == nil {
 		return false, err
 	}
 	parent := daemon.changeParent.Load()
@@ -558,22 +714,18 @@ func (daemon *Daemon) prepareRetainedChange(ctx context.Context, state kernel.Ch
 	if err != nil || !verified {
 		return state, nil, errors.Join(err, kernel.ErrConflict)
 	}
-	root, err := change.NewRepositoryIdentity(source.RootDevice, source.RootInode)
+	identity, err := sourceIdentity(source)
 	if err != nil {
 		return state, nil, err
 	}
-	gitIdentity, err := change.NewRepositoryIdentity(source.GitDevice, source.GitInode)
-	if err != nil {
-		return state, nil, err
-	}
-	selection, err := change.SelectRegisteredGit(ctx, *git, registered.Root, registered.BaseRef, change.RepositorySourceIdentity{Root: root, Git: gitIdentity, OriginDigest: source.OriginDigest})
+	selection, err := change.SelectRegisteredGit(ctx, *git, registered.Root, registered.BaseRef, identity)
 	if err != nil {
 		return state, nil, err
 	}
 	if err := change.FetchBase(ctx, selection, path); err != nil {
 		return state, nil, err
 	}
-	currentBase, err := change.DescendsFrom(ctx, *git, repository.Root, root, path, selection.Base())
+	currentBase, err := change.DescendsFrom(ctx, *git, repository.Root, identity.Root, path, selection.Base())
 	if err != nil {
 		return state, nil, err
 	}
@@ -852,9 +1004,8 @@ func (b *daemonReviewBackend) clone(ctx context.Context, repo, ref, head, base, 
 	if err != nil {
 		return "", nil, err
 	}
-	rootIdentity, rootErr := change.NewRepositoryIdentity(source.RootDevice, source.RootInode)
-	gitIdentity, gitErr := change.NewRepositoryIdentity(source.GitDevice, source.GitInode)
-	if rootErr != nil || gitErr != nil {
+	expected, err := sourceIdentity(source)
+	if err != nil {
 		return "", nil, kernel.ErrCorruptState
 	}
 	root, err := os.MkdirTemp("", "dark-factory-review-")
@@ -863,7 +1014,6 @@ func (b *daemonReviewBackend) clone(ctx context.Context, repo, ref, head, base, 
 	}
 	cleanup := func() { _ = os.RemoveAll(root) }
 	checkout := filepath.Join(root, "repo")
-	expected := change.RepositorySourceIdentity{Root: rootIdentity, Git: gitIdentity, OriginDigest: source.OriginDigest}
 	if err := change.ReviewCheckout(ctx, change.TrustedGitExecutable, repository.Root, expected, checkout, ref, head, base, baseRef); err != nil {
 		cleanup()
 		return "", nil, fmt.Errorf("review checkout: %w", err)

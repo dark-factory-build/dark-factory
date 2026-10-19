@@ -99,8 +99,9 @@ unsupported before a provider runs.
    escalates on its first failure. Each open pull request has one
    level-triggered reconciler: every 5-minute merge-stage pass reads the exact
    pull request, its task and the review at its head, and takes the one action
-   they call for (bring the Change up to main, send back bound to the head,
-   review, retry, enqueue or escalate). An action that keeps failing is retried
+   they call for (bring the Change up to main, adopt a trusted operator's head
+   GitHub verifies onto it, send back bound to the head, review, retry, enqueue
+   or escalate). An action that keeps failing is retried
    for 30 minutes, then escalated once and left until the pull request changes;
    a CODEOWNERS refusal is escalated at once. A draft is an operator's hold:
    it waits, unqueued and unescalated, until it is marked ready. Run settlement retries a

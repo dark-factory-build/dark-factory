@@ -677,6 +677,61 @@ pub(crate) struct PullRequestCommentsResult {
     pub(crate) comments: Vec<PullRequestComment>,
 }
 
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct ObservePullRequestCommits {
+    pub(crate) repository: String,
+    pub(crate) pull_number: i64,
+    pub(crate) head_sha: String,
+    pub(crate) base_sha: String,
+}
+
+/// GitHub's comparison of two commits: how the head stands to the base and,
+/// for a head ahead of it, every commit added.
+#[derive(Debug, Deserialize)]
+pub(crate) struct CommitComparison {
+    pub(crate) status: String,
+    pub(crate) total_commits: i64,
+    pub(crate) commits: Vec<ComparedCommit>,
+}
+
+/// One compared commit as GitHub attributes it: `author` and `committer` are
+/// the accounts GitHub resolved, null when none, and `commit.verification` is
+/// GitHub's signature check. The author line itself is not carried.
+#[derive(Debug, Deserialize, Serialize)]
+pub(crate) struct ComparedCommit {
+    pub(crate) sha: String,
+    pub(crate) author: Option<GitHubAccount>,
+    pub(crate) committer: Option<GitHubAccount>,
+    pub(crate) commit: CommitAttestation,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+pub(crate) struct GitHubAccount {
+    pub(crate) login: String,
+    pub(crate) id: i64,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+pub(crate) struct CommitAttestation {
+    pub(crate) verification: CommitVerification,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+pub(crate) struct CommitVerification {
+    pub(crate) verified: bool,
+    pub(crate) reason: String,
+}
+
+#[derive(Debug, Serialize)]
+pub(crate) struct PullRequestCommitsResult {
+    pub(crate) pull_number: i64,
+    pub(crate) head_sha: String,
+    pub(crate) base_sha: String,
+    pub(crate) status: String,
+    pub(crate) commits: Vec<ComparedCommit>,
+}
+
 #[derive(Debug, Deserialize, Serialize)]
 pub(crate) struct PullRequestMergeResult {
     pub(crate) pull_number: i64,
@@ -2051,6 +2106,52 @@ impl AppAuthority {
             comments,
         })
     }
+
+    /// The commits one exact pull request head adds past base_sha, with the
+    /// accounts GitHub attributes each to and its signature verification, so
+    /// factoryd can adopt an operator's head onto its Change (#2080). A range
+    /// GitHub does not return whole is refused.
+    #[cfg(target_arch = "wasm32")]
+    pub(crate) async fn observe_pull_request_commits(
+        &self,
+        mut request: ObservePullRequestCommits,
+    ) -> Result<PullRequestCommitsResult, OperationError> {
+        request.validate()?;
+        let repository = RepositoryName::requested(&mut request.repository)?;
+        let token = self
+            .0
+            .installation_token(
+                repository,
+                BTreeMap::from([
+                    ("contents", "read"),
+                    ("metadata", "read"),
+                    ("pull_requests", "read"),
+                ]),
+            )
+            .await?;
+        self.0
+            .verify_pull_request_head(&token, request.pull_number, &request.head_sha)
+            .await?;
+        let comparison: CommitComparison = github_json(
+            &format!(
+                "https://api.github.com/repos/{}/{}/compare/{}...{}?per_page=100",
+                token.repository.owner, token.repository.name, request.base_sha, request.head_sha
+            ),
+            token.as_str(),
+        )
+        .await
+        .map_err(|error: Error| issue_read_error(error.into()))?;
+        if comparison.total_commits != comparison.commits.len() as i64 {
+            return Err(OperationError::InvalidInput);
+        }
+        Ok(PullRequestCommitsResult {
+            pull_number: request.pull_number,
+            head_sha: request.head_sha,
+            base_sha: request.base_sha,
+            status: comparison.status,
+            commits: comparison.commits,
+        })
+    }
 }
 
 impl CreatePullRequest {
@@ -2771,6 +2872,17 @@ impl ObservePullRequestComments {
     fn validate(&self) -> Result<(), OperationError> {
         valid_exact_integer(self.pull_number)?;
         valid_sha(&self.head_sha)
+    }
+}
+
+impl ObservePullRequestCommits {
+    fn validate(&self) -> Result<(), OperationError> {
+        valid_exact_integer(self.pull_number)?;
+        valid_sha(&self.head_sha)?;
+        valid_sha(&self.base_sha)?;
+        (self.head_sha != self.base_sha)
+            .then_some(())
+            .ok_or(OperationError::InvalidInput)
     }
 }
 
@@ -6388,6 +6500,42 @@ mod tests {
         assert_eq!(response["verification"]["reason"], "unsigned");
         let commit: GitObjectId = serde_json::from_value(response).unwrap();
         assert_eq!(valid_sha(&commit.sha), Ok(()));
+    }
+
+    #[test]
+    fn compared_commits_carry_github_attribution_not_author_lines() {
+        let comparison: CommitComparison = serde_json::from_value(serde_json::json!({
+            "status": "ahead", "ahead_by": 1, "behind_by": 0, "total_commits": 1,
+            "commits": [{
+                "sha": "2021f7132fc901f183abf257d115b5cf37cdaa21",
+                "commit": {"author": {"name": "spoofed", "email": "owner@example.invalid"}, "verification": {"verified": true, "reason": "valid", "signature": "-----", "payload": "tree"}},
+                "author": {"login": "owner", "id": 7, "type": "User"},
+                "committer": null
+            }]
+        }))
+        .unwrap();
+        let rendered = serde_json::to_value(&comparison.commits[0]).unwrap();
+        assert_eq!(
+            rendered,
+            serde_json::json!({"sha": "2021f7132fc901f183abf257d115b5cf37cdaa21", "author": {"login": "owner", "id": 7}, "committer": null, "commit": {"verification": {"verified": true, "reason": "valid"}}})
+        );
+        let request = |head: &str, base: &str| ObservePullRequestCommits {
+            repository: "team/repo".into(),
+            pull_number: 2080,
+            head_sha: head.into(),
+            base_sha: base.into(),
+        };
+        let head = "2021f7132fc901f183abf257d115b5cf37cdaa21";
+        let base = "ec6fb6449f8ca89a607819d836f147c763521d41";
+        assert_eq!(request(head, base).validate(), Ok(()));
+        assert_eq!(
+            request(head, head).validate(),
+            Err(OperationError::InvalidInput)
+        );
+        assert_eq!(
+            request(&head.to_ascii_uppercase(), base).validate(),
+            Err(OperationError::InvalidInput)
+        );
     }
 
     #[test]

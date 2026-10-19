@@ -385,8 +385,10 @@ factoryd wakes you with `Escalated: factoryd cannot advance OWNER/REPO#N at
 exact head HEAD: ...` only when it cannot advance a pull request: a review that
 failed twice, a task that answered a send-back without a new head (its Change
 head has the pull request head's tree; a disputed block upheld by its second
-review included; a settled head the pull request lacks is published at once, and
-escalated only when factoryd does not publish it), or an action (enqueue, send-back, review) that kept failing
+review included; a settled head the pull request lacks is published at once, a
+head a trusted operator pushed past the settled one is adopted onto the Change
+when GitHub verifies every added commit as theirs, and the mismatch is
+escalated only when factoryd does neither), or an action (enqueue, send-back, review) that kept failing
 for 30 minutes and now waits for the pull request to change. A CODEOWNERS refusal is escalated at once and waits for the owner.
 Resolve the cause or raise it with
 `attempt request-human` naming the pull request; never start another review.

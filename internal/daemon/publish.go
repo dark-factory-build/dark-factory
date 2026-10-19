@@ -106,18 +106,25 @@ func (daemon *Daemon) publishSettledChange(ctx context.Context, c kernel.Publish
 	if err != nil {
 		return daemon.publishFailed(ctx, c, repo, err)
 	}
+	return daemon.publishChange(ctx, c, repo, source, daemon.maintainerCall(backend, c.Accepted.Snapshot.LinearTeamID != ""), checkout)
+}
+
+// maintainerCall is backend's Maintainer tool call, behind the
+// private-destination fence when private, or a test's Maintainer when it has
+// one.
+func (daemon *Daemon) maintainerCall(backend *daemonReviewBackend, private bool) publishCall {
 	call := backend.callResponse
-	if c.Accepted.Snapshot.LinearTeamID != "" {
+	if private {
 		call = backend.callResponsePrivate
 	}
-	if daemon.reviewBackend != nil { // a test's Maintainer, when it publishes
-		if fake, ok := daemon.reviewBackend(repo, id).(interface {
+	if daemon.reviewBackend != nil {
+		if fake, ok := daemon.reviewBackend(backend.repository, backend.repositoryID).(interface {
 			call(context.Context, string, map[string]any) (json.RawMessage, error)
 		}); ok {
 			call = fake.call
 		}
 	}
-	return daemon.publishChange(ctx, c, repo, source, call, checkout)
+	return call
 }
 
 // settledChangeGitDirectory is the verified private Git directory holding the

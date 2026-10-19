@@ -54,24 +54,9 @@ func ReviewCheckout(ctx context.Context, gitExecutable, root string, expected Re
 		return err
 	}
 	defer authority.close()
-	actual, err := authority.sourceIdentity(ctx)
+	fetch, err := originFetch(ctx, authority, root, expected)
 	if err != nil {
-		return reviewCheckoutGitError("inspect", err)
-	}
-	if actual.Root != expected.Root || actual.Git != expected.Git || actual.OriginDigest != expected.OriginDigest {
-		return &ValidationError{Reason: "registered checkout identity changed"}
-	}
-	origin, err := authority.succeed(ctx, maxGitSelectionOutput, "-C", root, "remote", "get-url", "--", "origin")
-	if err != nil {
-		return reviewCheckoutGitError("remote", err)
-	}
-	sshCommand, err := authority.run(ctx, maxGitSelectionOutput, "-C", root, "config", "--local", "--get", "core.sshCommand")
-	if err != nil {
-		return reviewCheckoutGitError("config", err)
-	}
-	sshArgs, err := reviewCheckoutSSHArgs(sshCommand)
-	if err != nil {
-		return reviewCheckoutGitError("config", err)
+		return err
 	}
 	if _, err := authority.succeed(ctx, maxGitSelectionOutput, "init", "--quiet", "--", path); err != nil {
 		return reviewCheckoutGitError("init", err)
@@ -79,10 +64,7 @@ func ReviewCheckout(ctx context.Context, gitExecutable, root string, expected Re
 	if err := os.WriteFile(filepath.Join(path, ".git", "objects", "info", "alternates"), []byte(filepath.Join(root, ".git", "objects")+"\n"), 0o600); err != nil {
 		return newGitError(gitFailurePrivateIO)
 	}
-	// The origin is the registered, digest-bound remote, so a local-path
-	// origin (a mirror, or a test fixture) is as trusted as a GitHub one.
-	fetch := []string{"-C", path, "-c", "core.hooksPath=/dev/null", "-c", "protocol.file.allow=always", "fetch", "--quiet", "--no-tags", "--no-recurse-submodules", "--no-write-fetch-head", "--no-auto-maintenance", "--end-of-options", strings.TrimSpace(string(origin)), "+refs/heads/" + strings.TrimPrefix(baseRef, "refs/heads/") + ":refs/review/base"}
-	fetch = append(fetch[:4], append(sshArgs, fetch[4:]...)...)
+	fetch = append(append([]string{"-C", path}, fetch...), "+refs/heads/"+strings.TrimPrefix(baseRef, "refs/heads/")+":refs/review/base")
 	checkout := head
 	if ref != "" {
 		fetch, checkout = append(fetch, "+"+ref+":refs/review/head"), "refs/review/head"
@@ -106,6 +88,86 @@ func ReviewCheckout(ctx context.Context, gitExecutable, root string, expected Re
 		return &ValidationError{Reason: "pull request head or base differs from the requested review"}
 	}
 	return nil
+}
+
+// originFetch is a fetch from the registered origin up to its refspecs: the
+// digest-bound remote, under its SSH command, once the checkout's identity is
+// proved unchanged. The origin is that registered remote, so a local-path
+// origin (a mirror, or a test fixture) is as trusted as a GitHub one.
+func originFetch(ctx context.Context, authority *gitAuthority, root string, expected RepositorySourceIdentity) ([]string, error) {
+	actual, err := authority.sourceIdentity(ctx)
+	if err != nil {
+		return nil, reviewCheckoutGitError("inspect", err)
+	}
+	if actual.Root != expected.Root || actual.Git != expected.Git || actual.OriginDigest != expected.OriginDigest {
+		return nil, &ValidationError{Reason: "registered checkout identity changed"}
+	}
+	origin, err := authority.succeed(ctx, maxGitSelectionOutput, "-C", root, "remote", "get-url", "--", "origin")
+	if err != nil {
+		return nil, reviewCheckoutGitError("remote", err)
+	}
+	sshCommand, err := authority.run(ctx, maxGitSelectionOutput, "-C", root, "config", "--local", "--get", "core.sshCommand")
+	if err != nil {
+		return nil, reviewCheckoutGitError("config", err)
+	}
+	sshArgs, err := reviewCheckoutSSHArgs(sshCommand)
+	if err != nil {
+		return nil, reviewCheckoutGitError("config", err)
+	}
+	fetch := append([]string{"-c", "core.hooksPath=/dev/null", "-c", "protocol.file.allow=always"}, sshArgs...)
+	return append(fetch, "fetch", "--quiet", "--no-tags", "--no-recurse-submodules", "--no-write-fetch-head", "--no-auto-maintenance", "--end-of-options", strings.TrimSpace(string(origin))), nil
+}
+
+// AdvanceWorktree fast-forwards the Change worktree at path to head, the
+// commit ref must name at the registered origin, so a trusted operator's
+// commits on the Change's own pull request branch become its retained work
+// (#2080). A ref no longer at head, or a head that does not descend from the
+// worktree's, is refused and nothing moves.
+func AdvanceWorktree(ctx context.Context, gitExecutable, root string, expected RepositorySourceIdentity, path, ref, head string) (WorktreeFacts, error) {
+	if err := validateWorktreePath(path); err != nil {
+		return WorktreeFacts{}, err
+	}
+	if raw, err := hex.DecodeString(head); err != nil || (len(raw) != 20 && len(raw) != 32) || head != strings.ToLower(head) {
+		return WorktreeFacts{}, &ValidationError{Reason: "the adopted commit must be a full lowercase object ID"}
+	}
+	if err := validateRevision(ref); err != nil {
+		return WorktreeFacts{}, err
+	}
+	authority, err := openGitAuthority(gitExecutable, root, expected.Root, nil, true)
+	if err != nil {
+		return WorktreeFacts{}, err
+	}
+	defer authority.close()
+	if _, err := authority.inspectWorktree(ctx, path); err != nil {
+		return WorktreeFacts{}, err
+	}
+	fetch, err := originFetch(ctx, authority, root, expected)
+	if err != nil {
+		return WorktreeFacts{}, err
+	}
+	tracking := "refs/remotes/origin/" + strings.TrimPrefix(ref, "refs/")
+	if _, err := authority.succeed(ctx, maxGitSelectionOutput, append(append([]string{"-C", path}, fetch...), "+"+ref+":"+tracking)...); err != nil {
+		return WorktreeFacts{}, reviewCheckoutGitError("fetch", err)
+	}
+	fetched, err := authority.run(ctx, maxGitSelectionOutput, "-C", path, "rev-parse", "--verify", "--end-of-options", tracking+"^{commit}")
+	if err != nil {
+		return WorktreeFacts{}, err
+	}
+	if fetched.exitCode != 0 || string(fetched.output) != head+"\n" {
+		return WorktreeFacts{}, &ValidationError{Reason: "the pull request head is no longer " + head}
+	}
+	merged, err := authority.run(ctx, maxGitSelectionOutput, "-C", path, "-c", "core.hooksPath=/dev/null", "merge", "--quiet", "--ff-only", "--end-of-options", head)
+	if err != nil {
+		return WorktreeFacts{}, err
+	}
+	if merged.exitCode != 0 {
+		return WorktreeFacts{}, &ValidationError{Reason: head + " does not fast-forward the Change worktree"}
+	}
+	facts, err := authority.inspectWorktree(ctx, path)
+	if err == nil && facts.head.Hex() != head {
+		return WorktreeFacts{}, &ValidationError{Reason: "the Change worktree is not at " + head}
+	}
+	return facts, err
 }
 
 // ProbeOrigin proves the checkout's own origin answers a sealed fetch, whatever

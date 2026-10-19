@@ -46,7 +46,8 @@ Access policy, or App configuration is live.
   reached headlessly with no human present. Each principal's claim set rejects
   the other's shape, so neither can take the other's path. Its finite typed
   tools observe the default head, any branch head, a file at an exact commit, one
-  commit's parents and complete tree, or a determinate refusal when GitHub
+  commit's parents and complete tree, the commits a pull request head adds
+  with the accounts GitHub attributes them to, or a determinate refusal when GitHub
   truncates it, and durable operation state, manage a bounded issue lifecycle,
   publish an exact commit, as the merge a worker made when it integrated the
   default branch, and pull request, submit an exact-head
