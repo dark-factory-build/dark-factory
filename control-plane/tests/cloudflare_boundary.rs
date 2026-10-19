@@ -312,7 +312,7 @@ fn declared_output_schemas_name_the_fields_the_results_carry() {
         (
             "observe_tree",
             "TreeObservationResult",
-            &["commit_sha", "tree_sha", "parents", "entries"][..],
+            &["commit_sha", "tree_sha", "parents", "entries", "author"][..],
         ),
         (
             // Scoped to `entries.items`, not to the whole output schema. A

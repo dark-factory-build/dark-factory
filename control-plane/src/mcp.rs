@@ -304,6 +304,7 @@ fn tools() -> Value {
                 "commit_sha": {"type": "string"},
                 "tree_sha": {"type": "string"},
                 "parents": {"type": "array", "items": {"type": "string"}},
+                "author": {"type": ["object", "null"], "properties": {"login": {"type": "string"}, "type": {"type": "string"}}, "required": ["login", "type"], "additionalProperties": false},
                 "entries": {
                     "type": "array",
                     "items": {
@@ -319,7 +320,7 @@ fn tools() -> Value {
                     }
                 }
             },
-            "required": ["commit_sha", "tree_sha", "parents", "entries"],
+            "required": ["commit_sha", "tree_sha", "parents", "entries", "author"],
             "additionalProperties": false
         },
         "annotations": {"readOnlyHint": true, "destructiveHint": false, "openWorldHint": true}

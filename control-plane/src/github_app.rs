@@ -524,6 +524,14 @@ pub(crate) struct TreeObservationResult {
     /// so this costs nothing.
     pub(crate) parents: Vec<String>,
     pub(crate) entries: Vec<TreeEntryResult>,
+    pub(crate) author: Option<CommitAuthor>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub(crate) struct CommitAuthor {
+    pub(crate) login: String,
+    #[serde(rename = "type")]
+    pub(crate) kind: String,
 }
 
 /// Which commit a branch points at right now.
@@ -2904,6 +2912,7 @@ fn tree_observation(
     commit_sha: String,
     commit: GitCommit,
     tree: GitTree,
+    author: Option<CommitAuthor>,
 ) -> Result<TreeObservationResult, OperationError> {
     // Truncation is GitHub's own fact about its own answer, and a partial
     // listing read as complete is the one outcome a caller cannot recover from.
@@ -2938,6 +2947,7 @@ fn tree_observation(
                 sha: entry.sha,
             })
             .collect(),
+        author,
     })
 }
 
@@ -3530,7 +3540,29 @@ impl Authority {
             token.as_str(),
         )
         .await?;
-        tree_observation(commit_sha, commit, tree)
+        let author = self.read_authenticated_commit(token, &commit_sha).await?;
+        tree_observation(commit_sha, commit, tree, author)
+    }
+
+    async fn read_authenticated_commit(
+        &self,
+        token: &RepositoryToken,
+        commit_sha: &str,
+    ) -> Result<Option<CommitAuthor>, OperationError> {
+        #[derive(Deserialize)]
+        struct Commit {
+            author: Option<CommitAuthor>,
+        }
+        let commit: Commit = github_json(
+            &format!(
+                "https://api.github.com/repos/{}/{}/commits/{commit_sha}",
+                token.repository.owner, token.repository.name
+            ),
+            token.as_str(),
+        )
+        .await
+        .map_err(Into::into)?;
+        Ok(commit.author)
     }
 
     /// The commit itself, which is also the cheapest proof that it exists.
@@ -7224,11 +7256,13 @@ mod tests {
             "a".repeat(40),
             commit(&["b".repeat(40).as_str(), &"f".repeat(40)]),
             tree(false),
+            None,
         )
         .unwrap();
         assert_eq!(merge.parents, vec!["b".repeat(40), "f".repeat(40)]);
         assert_eq!(merge.commit_sha, "a".repeat(40));
         assert_eq!(merge.tree_sha, "c".repeat(40));
+        assert!(merge.author.is_none());
         // Entries are reported as git records them, modes included.
         assert_eq!(
             merge
@@ -7248,14 +7282,14 @@ mod tests {
         );
         // A root commit has none, which is an answer rather than a failure.
         assert!(
-            tree_observation("a".repeat(40), commit(&[]), tree(false))
+            tree_observation("a".repeat(40), commit(&[]), tree(false), None)
                 .unwrap()
                 .parents
                 .is_empty()
         );
         // A partial listing must never be returned as if it were complete.
         assert_eq!(
-            tree_observation("a".repeat(40), commit(&[]), tree(true)).err(),
+            tree_observation("a".repeat(40), commit(&[]), tree(true), None).err(),
             Some(OperationError::Refused(RefusalReason::TreeTruncated))
         );
     }
