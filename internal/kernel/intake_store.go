@@ -602,7 +602,7 @@ func (store *Store) importIntakeAcceptance(ctx context.Context, id IntakeAccepta
 		if _, err := tx.connection.ExecContext(ctx, `UPDATE intake_acceptances SET withdrawn_at_ms = NULL WHERE id = ?`, id.Bytes()); err != nil {
 			return Task{}, tx.Rollback(err)
 		}
-		return store.retryTaskTx(ctx, tx, nil, task.ID, task.Revision, AgentID{}, at, 0)
+		return store.retryTaskTx(ctx, tx, nil, task.ID, task.Revision, AgentID{}, at, false)
 	}
 	// Accepted work goes straight to any idle worker; the overseer wakes only
 	// for its outcome (overseer_wakeup.go).

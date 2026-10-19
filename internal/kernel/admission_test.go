@@ -413,7 +413,7 @@ func TestCancelledConsumerKeepsItsProducerChangeForItsRetry(t *testing.T) {
 	if reclaim(63) == nil {
 		t.Fatal("Change reclaimed while a cancelled consumer may still be retried")
 	}
-	retried, err := store.RetryTask(ctx, nil, consumer.ID, consumer.Revision, AgentID{}, mustTime(t, 64), 0)
+	retried, err := store.RetryTask(ctx, nil, consumer.ID, consumer.Revision, AgentID{}, mustTime(t, 64), false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1443,7 +1443,7 @@ func TestRequeuedProducerKeepsPrerequisitePins(t *testing.T) {
 		{name: "requeue", role: RoleOrchestrator, proposal: neverStarted, requeue: func(*Store, Task) error { return nil }},
 		{name: "overseer-limit", role: RoleOrchestrator, proposal: overseerLimit, requeue: func(*Store, Task) error { return nil }},
 		{name: "retry", role: RoleWorker, proposal: failed, requeue: func(store *Store, task Task) error {
-			_, err := store.RetryTask(context.Background(), nil, task.ID, task.Revision, AgentID{}, mustTime(t, 70), 0)
+			_, err := store.RetryTask(context.Background(), nil, task.ID, task.Revision, AgentID{}, mustTime(t, 70), false)
 			return err
 		}},
 		{name: "send-back", role: RoleWorker, proposal: failed, requeue: func(store *Store, task Task) error {

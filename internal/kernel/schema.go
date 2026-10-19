@@ -641,8 +641,8 @@ const archiveBatchesTable = `CREATE TABLE archive_batches (
 // taskAutomaticEventsTable records what factoryd did to a task on its own,
 // at the task row revision it left: a blocked expiry, which is the cause of
 // the task's end only while the task is still at that revision (any later
-// transition, an operator's cancel included, moves it), and each intake retry,
-// which the retry bound counts. An operator cancel records nothing.
+// transition, an operator's cancel included, moves it). An operator cancel
+// records nothing; 'intake_retried' rows are history (refuseRetry replaced the bound).
 const taskAutomaticEventsTable = `CREATE TABLE task_automatic_events (
     task_id BLOB NOT NULL CHECK (length(task_id) = 16) REFERENCES tasks(id),
     task_revision INTEGER NOT NULL CHECK (task_revision >= 1),

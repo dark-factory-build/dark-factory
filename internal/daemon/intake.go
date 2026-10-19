@@ -336,8 +336,8 @@ func (daemon *Daemon) exactIntakeIssue(ctx context.Context, source kernel.Intake
 // importAcceptedIntake imports an accepted issue whose content still matches.
 // A tick passes the issue it just listed, so it is not fetched again.
 // The issue owns its task's liveness: a task that ended automatically is
-// retried within kernel.IntakeRetryLimit. The operator's import retries a failed or
-// cancelled task unbounded; the kernel's import lifts a withdrawal.
+// retried, unless it ended the same way twice in a row. The operator's import
+// also retries an operator's cancel; the kernel's import lifts a withdrawal.
 func (daemon *Daemon) importAcceptedIntake(ctx context.Context, accepted kernel.IntakeAcceptance, operator bool, listed *maintainer.Issue) (kernel.Task, error) {
 	sources, err := daemon.store.ProjectIntakeSources(ctx, accepted.ProjectID)
 	if err != nil {
@@ -366,13 +366,9 @@ func (daemon *Daemon) importAcceptedIntake(ctx context.Context, accepted kernel.
 		if err == nil && (task.Status == kernel.TaskFailed || task.Status == kernel.TaskCancelled) {
 			retried, retryErr := task, prepareTaskRetry(ctx, daemon.store, task.ID, task.Revision, kernel.AgentID{})
 			if retryErr == nil {
-				limit := int64(kernel.IntakeRetryLimit)
-				if operator {
-					limit = 0
-				}
-				retried, retryErr = daemon.store.RetryTask(ctx, nil, task.ID, task.Revision, kernel.AgentID{}, at, limit)
+				retried, retryErr = daemon.store.RetryTask(ctx, nil, task.ID, task.Revision, kernel.AgentID{}, at, !operator)
 			}
-			// A tick that cannot retry (an operator's cancel, the bound, a race)
+			// A tick that cannot retry (an operator's cancel, a repeated end, a race)
 			// is not an intake failure; the task stays as it is.
 			switch {
 			case retryErr == nil:

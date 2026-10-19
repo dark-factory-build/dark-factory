@@ -744,13 +744,12 @@ func (store *Store) finalizeRun(ctx context.Context, runID RunID, expected Revis
 	case OutcomeFailed:
 		taskStatus, completed = TaskFailed.String(), at.Int64()
 		if terminal.code == FailureTransient {
-			// Queue its task again once, unless the previous run ended the same way.
-			var again bool
-			if err := tx.connection.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM runs WHERE task_id = ? AND task_incarnation_id = ? AND admitted_task_work_revision = ? AND terminal_code = ? AND terminal_detail = ?)`,
-				task.ID.Bytes(), run.TaskIncarnationID.Bytes(), run.AdmittedTaskWorkRevision.Int64()-1, terminal.code.String(), terminal.detail).Scan(&again); err != nil {
+			// Queue its task again once, unless the previous run ended the same way (refuseRetry's rule).
+			previous, err := runEndClass(ctx, tx.connection, task.ID, run.TaskIncarnationID, run.AdmittedTaskWorkRevision.Int64()-1)
+			if err != nil {
 				return Run{}, tx.Rollback(err)
 			}
-			if !again {
+			if previous != endClass(terminal.kind.String(), terminal.code.String(), terminal.detail) {
 				taskStatus, completed, requeue = TaskQueued.String(), nil, 1
 			}
 		}

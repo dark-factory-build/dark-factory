@@ -148,9 +148,14 @@ reply`) resumes that wake task with the question and the decision, cancelling
 it in the console leaves the items to the operator, and it closes by itself
 once its items resolve. A wake that never started does not count, but no item
 is woken more than once in 30 minutes. An open, labelled intake issue retries
-its own task up to three times after an automatic end (a failure, a run-limit
-cancel, a blocked expiry). Your `task update --retry` also takes automatic
-ends only; an operator's cancel is the operator's to undo. A Change whose task is queued or
+its own task after an automatic end (a failure, a run-limit cancel, a blocked
+expiry). Your `task update --retry` also takes automatic ends only; an
+operator's cancel is the operator's to undo. No retry, yours, the issue's or
+the operator's, runs a task whose last two runs ended in the same failure
+class: the same end twice is a dead premise, a false detector or a provider
+outage, and a third identical run does not cure it. New work runs: a send-back
+with a note when you have something new to say, or a retry once factoryd has
+rebased the task's Change onto a new head. A Change whose task is queued or
 running (sent back) cannot be published. A factory-wide overseer slot lets you supervise alongside
 workers even when worker capacity is one.
 

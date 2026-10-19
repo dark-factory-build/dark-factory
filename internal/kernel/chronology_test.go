@@ -1088,7 +1088,7 @@ func TestOverseerRetryKeepsCurrentWorkerWithoutReplacement(t *testing.T) {
 	if err != nil || !found {
 		t.Fatalf("terminal task = %+v, found=%v, err=%v", before, found, err)
 	}
-	retried, err := store.RetryTask(ctx, &overseerKeys.AttemptDigest, terminal.TaskID, before.Revision, AgentID{}, mustTime(t, 43), 0)
+	retried, err := store.RetryTask(ctx, &overseerKeys.AttemptDigest, terminal.TaskID, before.Revision, AgentID{}, mustTime(t, 43), false)
 	if err != nil || retried.AssignedAgentID != terminal.AgentID || retried.Status != TaskQueued || retried.WorkRevision.Int64() != before.WorkRevision.Int64()+1 {
 		t.Fatalf("retry without replacement = %+v, %v", retried, err)
 	}
@@ -1118,7 +1118,7 @@ func TestOverseerRetryAtomicallyReassignsSettledTask(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	retried, err := store.RetryTask(ctx, &overseerKeys.AttemptDigest, terminal.TaskID, terminal.Revision, replacement.ID, mustTime(t, 43), 0)
+	retried, err := store.RetryTask(ctx, &overseerKeys.AttemptDigest, terminal.TaskID, terminal.Revision, replacement.ID, mustTime(t, 43), false)
 	if err != nil {
 		t.Fatalf("atomic retry = %v", err)
 	}
@@ -1189,7 +1189,7 @@ func TestOverseerRetryRefusesCausallyEarlyTimestamp(t *testing.T) {
 		t.Fatal(err)
 	}
 	stale := mustTime(t, beforeTask.UpdatedAt.Int64()-1)
-	if _, err := store.RetryTask(ctx, &overseerKeys.AttemptDigest, terminal.TaskID, terminal.Revision, replacement.ID, stale, 0); !errors.Is(err, ErrRevisionConflict) {
+	if _, err := store.RetryTask(ctx, &overseerKeys.AttemptDigest, terminal.TaskID, terminal.Revision, replacement.ID, stale, false); !errors.Is(err, ErrRevisionConflict) {
 		t.Fatalf("stale retry = %v, want ErrRevisionConflict", err)
 	}
 	afterTask, found, err := store.Task(ctx, terminal.TaskID)
@@ -1624,7 +1624,7 @@ func TestRetryTaskRequeuesCancelledTask(t *testing.T) {
 	if err != nil || task.Status != TaskCancelled {
 		t.Fatalf("settled task = %+v, %v", task, err)
 	}
-	if task, err = store.RetryTask(ctx, nil, task.ID, task.Revision, AgentID{}, mustTime(t, 70), 0); err != nil || task.Status != TaskQueued || task.WorkRevision.Int64() != 2 || task.AssignedAgentID != finalizing.AgentID {
+	if task, err = store.RetryTask(ctx, nil, task.ID, task.Revision, AgentID{}, mustTime(t, 70), false); err != nil || task.Status != TaskQueued || task.WorkRevision.Int64() != 2 || task.AssignedAgentID != finalizing.AgentID {
 		t.Fatalf("retried ran task = %+v, %v", task, err)
 	}
 	shared, err := store.EnqueueTask(ctx, NewTask{ID: taskID(t, 90), IncarnationID: incarnationID(t, 91), ProjectID: finalizing.ProjectID, Title: "shared"}, mustTime(t, 71))
@@ -1634,43 +1634,40 @@ func TestRetryTaskRequeuesCancelledTask(t *testing.T) {
 	if shared, err = store.UpdateTask(ctx, shared.ID, shared.Revision, TaskPatch{Cancel: true}, mustTime(t, 72)); err != nil {
 		t.Fatal(err)
 	}
-	if shared, err = store.RetryTask(ctx, nil, shared.ID, shared.Revision, AgentID{}, mustTime(t, 73), 0); err != nil || shared.Status != TaskQueued || shared.WorkRevision.Int64() != 1 || shared.AssignedAgentID != (AgentID{}) {
+	if shared, err = store.RetryTask(ctx, nil, shared.ID, shared.Revision, AgentID{}, mustTime(t, 73), false); err != nil || shared.Status != TaskQueued || shared.WorkRevision.Int64() != 1 || shared.AssignedAgentID != (AgentID{}) {
 		t.Fatalf("retried unadmitted task = %+v, %v", shared, err)
 	}
 }
 
 // An intake retry follows only an automatic end (a failure, a run-limit
-// cancel, a blocked expiry), never an operator's cancel, and stops at its
-// bound of recorded retries.
-func TestIntakeRetryOnlyAfterAutomaticEndWithinBound(t *testing.T) {
+// cancel, a blocked expiry), never an operator's cancel.
+func TestIntakeRetryOnlyAfterAutomaticEnd(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
 	failed, _ := NewFailureProposal(FailureInternal, "crashed")
-	premise, _ := NewFailureProposal(FailureInternal, "\npremise not reproduced: the cited source is already fixed")
 	limited, _ := NewCancelledProposal(RunLimitDetail)
 	stopped, _ := NewCancelledProposal("stopped by operator")
 	blocked, _ := NewBlockedProposal("needs a decision")
 	for _, test := range []struct {
-		name               string
-		proposal           Proposal
-		end                func(*Store, Task) error
-		automatic, premise bool
+		name      string
+		proposal  Proposal
+		end       func(*Store, Task) error
+		automatic bool
 	}{
-		{"failure", failed, nil, true, false},
-		{"premise dispute", premise, nil, false, true},
-		{"run limit", limited, nil, true, false},
-		{"operator stop", stopped, nil, false, false},
+		{"failure", failed, nil, true},
+		{"run limit", limited, nil, true},
+		{"operator stop", stopped, nil, false},
 		{"blocked expiry", blocked, func(store *Store, _ Task) error {
 			expired, err := store.ExpireBlockedTasks(ctx, mustTime(t, 60+BlockedExpiry.Milliseconds()))
 			if err == nil && len(expired) != 1 {
 				err = errors.New("expiry did not cancel the blocked task")
 			}
 			return err
-		}, true, false},
+		}, true},
 		{"operator cancel of a blocked task", blocked, func(store *Store, task Task) error {
 			_, err := store.UpdateTaskForOperator(ctx, task.ID, task.Revision, TaskPatch{Cancel: true}, mustTime(t, 61))
 			return err
-		}, false, false},
+		}, false},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			store, finalizing := finalizingReleasedRun(t, RoleWorker, test.proposal)
@@ -1691,40 +1688,13 @@ func TestIntakeRetryOnlyAfterAutomaticEndWithinBound(t *testing.T) {
 				}
 			}
 			at := mustTime(t, 100+BlockedExpiry.Milliseconds())
-			if !test.automatic && !test.premise {
-				if _, err := store.RetryTask(ctx, nil, task.ID, task.Revision, AgentID{}, at, IntakeRetryLimit); !errors.Is(err, ErrConflict) {
+			if !test.automatic {
+				if _, err := store.RetryTask(ctx, nil, task.ID, task.Revision, AgentID{}, at, true); !errors.Is(err, ErrConflict) {
 					t.Fatalf("operator end retried: %v", err)
 				}
 				return
 			}
-			if !test.automatic {
-				if _, err := store.RetryTask(ctx, nil, task.ID, task.Revision, AgentID{}, at, IntakeRetryLimit); !errors.Is(err, ErrConflict) {
-					t.Fatalf("premise dispute automatically retried: %v", err)
-				}
-				overseerKeys := premiseOverseerKeys(t, store, task.ProjectID)
-				if _, err := store.RetryTask(ctx, &overseerKeys.AttemptDigest, task.ID, task.Revision, AgentID{}, at, 0); !errors.Is(err, ErrConflict) {
-					t.Fatalf("premise dispute overseer retry: %v", err)
-				}
-				if retried, err := store.RetryTask(ctx, nil, task.ID, task.Revision, AgentID{}, at, 0); err != nil || retried.Status != TaskQueued {
-					t.Fatalf("operator retry after premise dispute: %+v, %v", retried, err)
-				}
-				return
-			}
-			// The bound's worth of recorded retries, all at this very revision
-			// (a retry of a task cancelled before admission keeps it): refused
-			// at the bound, admitted one below it.
-			for range IntakeRetryLimit {
-				if _, err := store.writer.ExecContext(ctx, `INSERT INTO task_automatic_events(task_id, task_revision, kind, at_ms) VALUES (?, ?, 'intake_retried', 1)`, task.ID.Bytes(), task.Revision.Int64()); err != nil {
-					t.Fatal(err)
-				}
-			}
-			if _, err := store.RetryTask(ctx, nil, task.ID, task.Revision, AgentID{}, at, IntakeRetryLimit); !errors.Is(err, ErrConflict) {
-				t.Fatalf("retry past the bound: %v", err)
-			}
-			if _, err := store.writer.ExecContext(ctx, `DELETE FROM task_automatic_events WHERE rowid = (SELECT max(rowid) FROM task_automatic_events)`); err != nil {
-				t.Fatal(err)
-			}
-			if retried, err := store.RetryTask(ctx, nil, task.ID, task.Revision, AgentID{}, at, IntakeRetryLimit); err != nil || retried.Status != TaskQueued {
+			if retried, err := store.RetryTask(ctx, nil, task.ID, task.Revision, AgentID{}, at, true); err != nil || retried.Status != TaskQueued {
 				t.Fatalf("automatic end not retried: %+v, %v", retried, err)
 			}
 		})
@@ -1758,7 +1728,7 @@ func TestAwaitedTaskRefusesRetryAndSendBack(t *testing.T) {
 		t.Fatal(err)
 	}
 	tx.Close()
-	if _, err := store.RetryTask(ctx, nil, task.ID, task.Revision, AgentID{}, mustTime(t, 62), 0); !errors.Is(err, ErrConflict) {
+	if _, err := store.RetryTask(ctx, nil, task.ID, task.Revision, AgentID{}, mustTime(t, 62), false); !errors.Is(err, ErrConflict) {
 		t.Fatalf("retry of an awaited task: %v", err)
 	}
 	if _, err := store.SendBackTask(ctx, nil, task.ID, task.Revision, "", "again", mustTime(t, 62)); !errors.Is(err, ErrConflict) {
@@ -1787,17 +1757,17 @@ func TestOverseerRetryLeavesAnOperatorCancel(t *testing.T) {
 	if cancelled, err = store.UpdateTaskForOperator(ctx, cancelled.ID, cancelled.Revision, TaskPatch{Cancel: true}, mustTime(t, 44)); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := store.RetryTask(ctx, &overseerKeys.AttemptDigest, cancelled.ID, cancelled.Revision, AgentID{}, mustTime(t, 45), 0); !errors.Is(err, ErrConflict) {
+	if _, err := store.RetryTask(ctx, &overseerKeys.AttemptDigest, cancelled.ID, cancelled.Revision, AgentID{}, mustTime(t, 45), false); !errors.Is(err, ErrConflict) {
 		t.Fatalf("overseer revived an operator cancel: %v", err)
 	}
-	if _, err := store.RetryTask(ctx, nil, cancelled.ID, cancelled.Revision, AgentID{}, mustTime(t, 45), 0); err != nil {
+	if _, err := store.RetryTask(ctx, nil, cancelled.ID, cancelled.Revision, AgentID{}, mustTime(t, 45), false); err != nil {
 		t.Fatalf("operator retry of its own cancel: %v", err)
 	}
 	failed, _, err := store.Task(ctx, terminal.TaskID)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := store.RetryTask(ctx, &overseerKeys.AttemptDigest, failed.ID, failed.Revision, AgentID{}, mustTime(t, 46), 0); err != nil {
+	if _, err := store.RetryTask(ctx, &overseerKeys.AttemptDigest, failed.ID, failed.Revision, AgentID{}, mustTime(t, 46), false); err != nil {
 		t.Fatalf("overseer retry of a failure: %v", err)
 	}
 }
@@ -1817,7 +1787,7 @@ func TestOverseerRetriesOrdinaryBlockedWorker(t *testing.T) {
 		t.Fatalf("blocked task = %+v, found=%v, err=%v", task, found, err)
 	}
 	overseerKeys := premiseOverseerKeys(t, store, terminal.ProjectID)
-	retried, err := store.RetryTask(ctx, &overseerKeys.AttemptDigest, task.ID, task.Revision, AgentID{}, mustTime(t, 100), 0)
+	retried, err := store.RetryTask(ctx, &overseerKeys.AttemptDigest, task.ID, task.Revision, AgentID{}, mustTime(t, 100), false)
 	if err != nil || retried.Status != TaskQueued {
 		t.Fatalf("ordinary blocked overseer retry = %+v, %v", retried, err)
 	}
@@ -1840,9 +1810,9 @@ func TestRetryAfterExpiryLeavesTheOperatorsLaterCancel(t *testing.T) {
 			digest := runningOverseerDigest(t, store, finalizing.ProjectID, 61)
 			retry := func(task Task, at int64) (Task, error) {
 				if overseer {
-					return store.RetryTask(ctx, &digest, task.ID, task.Revision, AgentID{}, mustTime(t, at), 0)
+					return store.RetryTask(ctx, &digest, task.ID, task.Revision, AgentID{}, mustTime(t, at), false)
 				}
-				return store.RetryTask(ctx, nil, task.ID, task.Revision, AgentID{}, mustTime(t, at), IntakeRetryLimit)
+				return store.RetryTask(ctx, nil, task.ID, task.Revision, AgentID{}, mustTime(t, at), true)
 			}
 			expiry := 60 + BlockedExpiry.Milliseconds()
 			if expired, err := store.ExpireBlockedTasks(ctx, mustTime(t, expiry)); err != nil || len(expired) != 1 {
@@ -1913,7 +1883,7 @@ func TestOverseerRetryLeavesAWithdrawnIssue(t *testing.T) {
 	if err != nil || task.Status != TaskFailed {
 		t.Fatalf("failed intake task = %+v, %v", task, err)
 	}
-	if _, err := store.RetryTask(ctx, &digest, task.ID, task.Revision, AgentID{}, mustTime(t, 30), 0); !errors.Is(err, ErrConflict) {
+	if _, err := store.RetryTask(ctx, &digest, task.ID, task.Revision, AgentID{}, mustTime(t, 30), false); !errors.Is(err, ErrConflict) {
 		t.Fatalf("overseer retried a withdrawn issue's task: %v", err)
 	}
 }

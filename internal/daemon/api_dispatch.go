@@ -2293,7 +2293,7 @@ func (daemon *Daemon) overseerUpdateTask(ctx context.Context, call api.Call) api
 		if err != nil {
 			return newErrorReply(api.RemoteInternal)
 		}
-		task, err := daemon.store.RetryTask(ctx, &digest, id, expected, assigned, at, 0)
+		task, err := daemon.store.RetryTask(ctx, &digest, id, expected, assigned, at, false)
 		if err != nil {
 			return newErrorReply(remoteErrorCode(err))
 		}
@@ -2396,7 +2396,7 @@ func (daemon *Daemon) operatorUpdateTask(ctx context.Context, call api.Call) api
 		if err != nil {
 			return newErrorReply(api.RemoteInternal)
 		}
-		task, err := daemon.store.RetryTask(ctx, nil, id, expected, value, at, 0)
+		task, err := daemon.store.RetryTask(ctx, nil, id, expected, value, at, false)
 		if err != nil {
 			return newErrorReply(remoteErrorCode(err))
 		}

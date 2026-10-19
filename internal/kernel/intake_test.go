@@ -422,10 +422,10 @@ func TestIntakeSkipsWholeStoreValidation(t *testing.T) {
 	if _, err := store.AcceptIntakeSnapshot(ctx, source.ID, third, mustTime(t, 8)); err != nil {
 		t.Fatalf("new acceptance = %v", err)
 	}
-	if _, err := store.RetryTask(ctx, nil, task.ID, task.Revision, AgentID{}, mustTime(t, 9), IntakeRetryLimit); !errors.Is(err, ErrConflict) {
+	if _, err := store.RetryTask(ctx, nil, task.ID, task.Revision, AgentID{}, mustTime(t, 9), true); !errors.Is(err, ErrConflict) {
 		t.Fatalf("intake retry of a queued task = %v, want ErrConflict", err)
 	}
-	if _, err := store.RetryTask(ctx, nil, task.ID, task.Revision, AgentID{}, mustTime(t, 9), 0); !errors.Is(err, ErrCorruptState) {
+	if _, err := store.RetryTask(ctx, nil, task.ID, task.Revision, AgentID{}, mustTime(t, 9), false); !errors.Is(err, ErrCorruptState) {
 		t.Fatalf("operator retry over corrupt history = %v, want ErrCorruptState", err)
 	}
 }
