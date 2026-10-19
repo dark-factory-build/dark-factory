@@ -538,13 +538,11 @@ func TestIntakeTickRetriesAnAutomaticEnd(t *testing.T) {
 		}
 		return task
 	}
-	for retry := range int64(kernel.IntakeRetryLimit) {
-		if task = failAndTick(200 + 10*byte(retry)); task.Status != kernel.TaskQueued || task.WorkRevision.Int64() != retry+2 {
-			t.Fatalf("automatic end %d not retried: %+v", retry+1, task)
-		}
+	if task = failAndTick(200); task.Status != kernel.TaskQueued || task.WorkRevision.Int64() != 2 {
+		t.Fatalf("automatic end not retried: %+v", task)
 	}
 	if task = failAndTick(240); task.Status != kernel.TaskFailed {
-		t.Fatalf("retry past the bound: %+v", task)
+		t.Fatalf("repeated failure class was retried: %+v", task)
 	}
 
 	// Every tick offers the spent issue a retry again. The refusal writes
@@ -568,7 +566,7 @@ func TestIntakeTickRetriesAnAutomaticEnd(t *testing.T) {
 		t.Fatalf("tick while another write holds the store = %+v, %v", got, busy.Err())
 	}
 	t.Log(got.Timing)
-	if task, _, err = fixture.store.Task(ctx, task.ID); err != nil || task.Status != kernel.TaskFailed || task.WorkRevision.Int64() != kernel.IntakeRetryLimit+1 {
+	if task, _, err = fixture.store.Task(ctx, task.ID); err != nil || task.Status != kernel.TaskFailed || task.WorkRevision.Int64() != 2 {
 		t.Fatalf("spent issue's task = %+v, %v", task, err)
 	}
 }

@@ -115,6 +115,22 @@ func failureCause(code, detail string) string {
 	return "other"
 }
 
+// samePreviousFailureClass reports whether the immediately preceding terminal
+// run ended in the same normalized failure class.
+func samePreviousFailureClass(ctx context.Context, connection *sql.Conn, taskID TaskID, incarnationID IncarnationID, workRevision Revision, code, detail string) (bool, error) {
+	var previousCode, previousDetail sql.NullString
+	err := connection.QueryRowContext(ctx, `SELECT terminal_code, terminal_detail FROM runs
+		WHERE task_id = ? AND task_incarnation_id = ? AND admitted_task_work_revision < ? AND phase = 'terminal'
+		ORDER BY admitted_task_work_revision DESC LIMIT 1`, taskID.Bytes(), incarnationID.Bytes(), workRevision.Int64()).Scan(&previousCode, &previousDetail)
+	if errors.Is(err, sql.ErrNoRows) || !previousCode.Valid {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	return failureCause(code, detail) == failureCause(previousCode.String, previousDetail.String), nil
+}
+
 // failureSignature names a run failure by its cause class and structured
 // fields. Check failures also include their diagnostic test name.
 func failureSignature(kind, code string, exit, signal, runner sql.NullInt64, detail string) string {
