@@ -279,6 +279,7 @@ func (daemon *Daemon) FinishRelease(ctx context.Context, sha, state, reason stri
 // since bin/previous is then no longer the build to roll back to.
 func (daemon *Daemon) WatchRelease(ctx context.Context, window, poll time.Duration, roundTrip func(context.Context) error) string {
 	since := time.Now().UnixMilli()
+	var healthError bool
 	for deadline := time.Now().Add(window); time.Now().Before(deadline); {
 		select {
 		case <-ctx.Done():
@@ -293,11 +294,12 @@ func (daemon *Daemon) WatchRelease(ctx context.Context, window, poll time.Durati
 		switch {
 		case ctx.Err() != nil:
 			return ""
-		case err != nil:
+		case err != nil && healthError:
 			return "local API round trip: " + err.Error()
 		case runsErr == nil && ended >= 5 && failed*2 > ended:
 			return fmt.Sprintf("%d of %d runs since the restart failed", failed, ended)
 		}
+		healthError = err != nil
 	}
 	return ""
 }
