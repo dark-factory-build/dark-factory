@@ -43,6 +43,10 @@ func seedContextKnowledgeNamed(t *testing.T, f *dispatchFixture, project kernel.
 }
 
 func seedContextKnowledgeNamedAt(t *testing.T, f *dispatchFixture, project kernel.ProjectID, id string, kind kernel.ContentKind, metadata kernel.KnowledgeMetadata, title, body string, at int64) kernel.ContentRevision {
+	return seedContextDocument(t, f, project, id, kind, metadata, title, "Use the exact source revision", body, at)
+}
+
+func seedContextDocument(t *testing.T, f *dispatchFixture, project kernel.ProjectID, id string, kind kernel.ContentKind, metadata kernel.KnowledgeMetadata, title, description, body string, at int64) kernel.ContentRevision {
 	t.Helper()
 	if kind == kernel.ContentLesson && metadata.Verification == "" {
 		metadata.Verification = "go test ./internal/daemon"
@@ -55,7 +59,7 @@ func seedContextKnowledgeNamedAt(t *testing.T, f *dispatchFixture, project kerne
 	if err != nil {
 		t.Fatal(err)
 	}
-	spec, err := f.daemon.writeContentSource(context.Background(), kernel.NewContent{ID: contentID, ProjectID: project, Kind: kind, Title: title, Description: "Use the exact source revision", Author: "operator:local", SourceReferences: string(encoded), Body: body}, 1)
+	spec, err := f.daemon.writeContentSource(context.Background(), kernel.NewContent{ID: contentID, ProjectID: project, Kind: kind, Title: title, Description: description, Author: "operator:local", SourceReferences: string(encoded), Body: body}, 1)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -303,6 +307,120 @@ func TestKnowledgeLaunchCarriesTaskAndKnowledge(t *testing.T) {
 	}
 	if !bytes.HasPrefix(launch, []byte("do the useful thing")) || !bytes.Contains(launch, []byte(lesson.ID.String())) || len(supplied) == 0 || supplied[0].ContentID != lesson.ID {
 		t.Fatalf("launch = %q, receipts %+v", launch, supplied)
+	}
+}
+
+// admittedKnowledgeRun admits one run on a store-backed daemon without the
+// local API socket, which a confined worker sandbox cannot bind.
+func admittedKnowledgeRun(t *testing.T, seed byte) (*dispatchFixture, kernel.Run) {
+	t.Helper()
+	ctx := context.Background()
+	at := mustKernelTime(t, 100)
+	base, err := os.MkdirTemp(runner.ShortTempDir(), "dark-factory-knowledge-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(base) })
+	store, err := createTestStore(ctx, filepath.Join(base, "kernel.sqlite"), kernel.FactoryConfig{DispatchEnabled: true, Capacity: 1}, at)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	if err := store.InitializeRepositoryBase(ctx, "HEAD"); err != nil {
+		t.Fatal(err)
+	}
+	daemon, err := newDaemon(store, func() time.Time { return time.UnixMilli(1000) })
+	if err != nil {
+		t.Fatal(err)
+	}
+	project, agent, task := mustProjectID(t, testID(seed)), mustAgentID(t, testID(seed+1)), mustTaskID(t, testID(seed+2))
+	if _, err := store.CreateProject(ctx, kernel.NewProject{ID: project, Name: "knowledge", Root: contentRepositoryFixture(t)}, at); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.CreateAgent(ctx, kernel.NewAgent{ID: agent, ProjectID: project, Name: "agent", Role: kernel.RoleOrchestrator, Provider: kernel.ProviderCodex, ToolBudgetLimit: 1}, at); err != nil {
+		t.Fatal(err)
+	}
+	incarnation, err := kernel.IncarnationIDFromBytes(mustIDBytes(t, testID(seed+3)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.EnqueueTask(ctx, kernel.NewTask{ID: task, ProjectID: project, AssignedAgentID: agent, IncarnationID: incarnation, Title: "task", Body: "private", Priority: 1}, at); err != nil {
+		t.Fatal(err)
+	}
+	attempt, err := kernel.AttemptDigestFromBytes(bytes.Repeat([]byte{seed + 4}, kernel.DigestBytes))
+	if err != nil {
+		t.Fatal(err)
+	}
+	proof, err := kernel.ResultProofDigestFromBytes(bytes.Repeat([]byte{seed + 5}, 32))
+	if err != nil {
+		t.Fatal(err)
+	}
+	candidate, err := kernel.ChangeIDFromBytes(mustIDBytes(t, testID(seed+6)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	keys := kernel.AdmissionKeys{RunID: mustRunID(t, testID(seed+7)), TerminalSessionID: mustTerminalSessionID(t, testID(seed+8)), AttemptDigest: attempt, ResultProofDigest: proof, CandidateChangeID: candidate, RuntimeRoot: filepath.Join(base, "runtime"), Resources: kernel.AdmissionResourceIDs{RuntimeRoot: mustResourceID(t, testID(seed+9)), RunnerProcess: mustResourceID(t, testID(seed+10)), ProviderProcess: mustResourceID(t, testID(seed+11)), ProviderGroup: mustResourceID(t, testID(seed+12))}}
+	admission, err := store.AdmitNext(ctx, keys, at)
+	if err != nil || !admission.Admitted() {
+		t.Fatalf("admission = %+v, %v", admission, err)
+	}
+	return &dispatchFixture{daemon: daemon, store: store}, *admission.Run
+}
+
+// Under the fixed launch budget a retained lesson or procedure outranks
+// unattached observations whose relevance is only long-description word
+// overlap; pinned records keep their explicit precedence. Equal scores keep
+// the candidate order: the earlier task word that surfaces a record wins, then
+// newest first, so the lesson found by "durable" precedes the newer procedure
+// found by "needle".
+func TestKnowledgeLessonOutranksLongDescriptionObservations(t *testing.T) {
+	f, run := admittedKnowledgeRun(t, 30)
+	ctx := context.Background()
+	task := "Settle durable transitions before the needle guard rotates its credential"
+	description := strings.Repeat("settle durable transitions before needle guard rotates credential; ", 24)
+	tentative := kernel.KnowledgeMetadata{Status: "tentative", Evidence: []string{"word overlap"}}
+	lesson := seedContextDocument(t, f, run.ProjectID, testID(60), kernel.ContentLesson, tentative, "Needle guard: durable transitions fail closed", "", "Fail closed before the guard rotates.", 1000)
+	procedure := seedContextDocument(t, f, run.ProjectID, testID(61), kernel.ContentProcedure, tentative, "Needle guard credential rotates safely", "", "Rotate after the durable transition settles.", 1001)
+	pinned := seedContextDocument(t, f, run.ProjectID, testID(62), kernel.ContentDiscussion, kernel.KnowledgeMetadata{Status: "tentative", Pinned: true}, "Pinned thread", description, "pinned body", 1002)
+	var unpinned []kernel.ContentRevision
+	for i := 0; i < 6; i++ {
+		unpinned = append(unpinned, seedContextDocument(t, f, run.ProjectID, testID(byte(63+i)), kernel.ContentObservation, tentative, fmt.Sprintf("Contribution %d: durable transitions", i), description, "observation body", int64(1003+i)))
+	}
+	text, receipts, err := f.daemon.prepareKnowledgeTask(ctx, run, []byte(task), false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(text) > len(task)+knowledgeContextBytes {
+		t.Fatalf("knowledge exceeded its %d-byte budget: %d bytes", knowledgeContextBytes, len(text)-len(task))
+	}
+	supplied := map[kernel.ContentID]int{}
+	for _, receipt := range receipts {
+		if receipt.Kind == "supplied" {
+			supplied[receipt.ContentID] = receipt.ByteLength
+		}
+	}
+	for _, want := range []kernel.ContentRevision{lesson, procedure} {
+		if supplied[want.ID] == 0 || !bytes.Contains(text, []byte(want.ID.String())) {
+			t.Fatalf("%s %s was crowded out: receipts %+v\n%s", want.Kind, want.ID, receipts, text)
+		}
+	}
+	first := bytes.Index(text, []byte(pinned.ID.String()))
+	if first < 0 || first > bytes.Index(text, []byte(lesson.ID.String())) || bytes.Index(text, []byte(lesson.ID.String())) > bytes.Index(text, []byte(procedure.ID.String())) {
+		t.Fatalf("pinned thread, lesson, procedure order lost: %s", text)
+	}
+	selected, frozen, err := f.store.KnowledgeContext(ctx, run.ID)
+	if err != nil || !frozen || len(selected) < 4 {
+		t.Fatalf("frozen selection = %+v, %v, %v", selected, frozen, err)
+	}
+	for index, want := range []kernel.ContentRevision{pinned, lesson, procedure, unpinned[5]} {
+		if selected[index].ContentID != want.ID {
+			t.Fatalf("selection[%d] = %s, want %s %s", index, selected[index].ContentID, want.Kind, want.ID)
+		}
+	}
+	for _, observation := range unpinned {
+		if at := bytes.Index(text, []byte(observation.ID.String())); at >= 0 && at < bytes.Index(text, []byte(lesson.ID.String())) {
+			t.Fatalf("unpinned observation %s rendered before the lesson: %s", observation.ID, text)
+		}
 	}
 }
 
