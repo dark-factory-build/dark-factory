@@ -58,11 +58,6 @@ export function FactoryApp({ onStatusChange, browserPort }: FactoryAppProps = {}
     if (snapshot.status === "ready") owner.current?.loadGraphs();
   }, [snapshot.status, projectKey]);
 
-  const selectedProjectID = snapshot.selectedAgent === undefined ? undefined : snapshot.state?.agents.get(snapshot.selectedAgent.id)?.project_id;
-  useEffect(() => {
-    if (snapshot.status === "ready" && selectedProjectID !== undefined) void owner.current?.loadRepositories(selectedProjectID);
-  }, [snapshot.status, selectedProjectID]);
-
   // Keep worker locations live while the console is connected.
   useEffect(() => {
     if (snapshot.status !== "ready") return;
