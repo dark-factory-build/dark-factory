@@ -298,14 +298,6 @@ type liveAttempt struct {
 	// owner-bound chance to commit it. It is not terminal authority and is never
 	// recovered or replayed after this owner is gone.
 	pendingOutcome *kernel.Proposal
-	// usageLimit is a provider usage-limit or capacity report seen in live output and owed
-	// as a failed outcome with usageCode; usageScan carries the tail across a frame boundary
-	// and usageScanned is the stream offset scanned so far. All belong to the
-	// owner goroutine.
-	usageLimit   string
-	usageCode    kernel.FailureCode
-	usageScan    []byte
-	usageScanned uint64
 
 	livenessMu           sync.Mutex
 	callFirst            bool // a fresh launch's prompt is taskFetchInstruction, so its first act is an attempt API call; never set on adoption

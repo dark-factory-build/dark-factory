@@ -3,6 +3,7 @@ package daemon
 import (
 	"context"
 	"errors"
+	"regexp"
 	"time"
 
 	"github.com/dark-factory-build/dark-factory/internal/kernel"
@@ -67,15 +68,7 @@ func (daemon *Daemon) enforceRunLiveness(ctx context.Context, spec SupervisorSpe
 			continue
 		}
 		_, _, output := attempt.diagnosticSnapshot()
-		code, detail := kernel.FailureTransient, kernel.NeverStartedRunDetail
-		if !attempt.neverStarted() {
-			code = kernel.FailureProtocol
-			dropped := len(output) > 512
-			if dropped {
-				output = output[len(output)-512:]
-			}
-			detail = stalledRunDetail + terminalTextProjection(output, dropped, 512)
-		}
+		code, detail := stalledRunProposal(run.Provider, attempt.neverStarted(), output)
 		proposal, err := kernel.NewFailureProposal(code, detail)
 		if err != nil {
 			return err
@@ -89,6 +82,45 @@ func (daemon *Daemon) enforceRunLiveness(ctx context.Context, spec SupervisorSpe
 		return nil
 	}
 	return daemon.recoverOwnerlessRuns(ctx, spec.RuntimeParent, spec.ChangeParent, at.Int64()-ownerlessRunAge.Milliseconds())
+}
+
+// Codex reports an exhausted account or a model at capacity as a cell of its
+// own screen and then idles at its prompt, so the stall budget ends the run.
+// Both notices are read only then, from a Codex run's raw retained output, and
+// only as Codex draws them: the glyph is a styled cell of its own, an SGR
+// right before it and an escape right after it, with its message drawn
+// separately within a few bytes (Codex 0.163 puts them in non-adjacent cells).
+// A task, prompt, source or tool text that quotes the whole notice is drawn in
+// its cell's one style, glyph between plain characters, so it never matches;
+// nor does anything a Claude run prints.
+// ponytail: fixed strings of one provider's TUI, told apart from quotes by its
+// styling; recognise a structured provider event instead if Codex ever reports
+// these outside its screen.
+var codexUsageLimit = regexp.MustCompile(`\x1b\[[0-9;]*m■\x1b\[(?s:.{0,64}?)(You've hit your` + ` usage limit)`)
+var codexModelCapacity = regexp.MustCompile(`\x1b\[[0-9;]*m⚠\x1b\[(?s:.{0,64}?)Selected model` + ` is at capacity`)
+
+// stalledRunProposal classifies a stalled run from its retained terminal
+// output, projected whole before the detail is cut: a TUI's last raw bytes are
+// mostly escapes, and cutting them first leaves an empty tail. Only a ring
+// buffer that wrapped has cut raw bytes itself, so only then does the detail
+// drop the partial first and last lines as the raw observer would; an adopted
+// run's replay floor is a gap, not a cut, and keeps its prompt line. A Codex
+// notice is read even from a run that made no attempt call yet, as it can be
+// Codex's first and only act.
+func stalledRunProposal(provider kernel.Provider, neverStarted bool, output []byte) (kernel.FailureCode, string) {
+	if provider == kernel.ProviderCodex {
+		if match := codexUsageLimit.FindSubmatchIndex(output); match != nil {
+			report := []rune(terminalTextProjection(output[match[2]:], false, len(output)))
+			return kernel.FailureProviderExit, "provider usage limit (retry after its reset or select another account): " + string(report[:min(len(report), 1024)])
+		}
+		if codexModelCapacity.Match(output) {
+			return kernel.FailureTransient, kernel.ProviderCapacityRunDetail
+		}
+	}
+	if neverStarted {
+		return kernel.FailureTransient, kernel.NeverStartedRunDetail
+	}
+	return kernel.FailureProtocol, stalledRunDetail + terminalTextProjection(output, len(output) == kernel.MaxTerminalDiagnosticsBytes, 512)
 }
 
 func casLost(err error) bool {
