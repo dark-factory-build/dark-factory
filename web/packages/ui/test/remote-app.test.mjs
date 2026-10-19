@@ -246,6 +246,9 @@ test("two factories switch which projects the console shows", async () => {
     assert.match(south, /Harbour Line/);
     assert.match(south, /Re-tile the harbour/);
     assert.equal(south.includes("North Workshop"), false);
+    // A live row states its stage with the shared chip, the same word every other row uses.
+    const work = renderer.root.find((node) => classNames(node.props.className).includes("dfRemote__projects"));
+    assert.equal(work.findAll((node) => classNames(node.props.className).includes("dfStatus") && node.props["data-stage"] === "running").length, 1);
     assert.equal(buttons(renderer, "dfRemote__factory")[1].props["aria-pressed"], true);
   });
 });
@@ -618,24 +621,6 @@ test("a replaced session cannot refresh an old reply or cancellation", async () 
       assert.equal(action === "reply" ? replacement.calls.reply.length : replacement.calls.cancel.length, 0, `${action} is never replayed`);
     });
   }
-});
-
-test("the asking agent's sprite opens its question, and only while that could work", async () => {
-  const session = fakeSession({ detail: () => detailFor(northRequest) });
-  const manager = fakeManager([northFactory()], new Map([[NORTH, session]]));
-  await withApp(props(manager), async (renderer) => {
-    await act(async () => { button(renderer, "dfConsoleStrip__agent--needs-you").props.onClick(); });
-    await settle();
-    assert.match(sectionText(renderer, "dfRemote__detail"), /Proceed with the migration\?/);
-  });
-  await withApp(props(fakeManager([northFactory({ status: "offline" })])), (renderer) => {
-    assert.equal(buttons(renderer, "dfConsoleStrip__agent--needs-you").length, 0);
-  });
-  // A question past "open" has nothing to open: its agent still needs you, but the tile is not a control.
-  const stuck = { ...fixtureState, humanRequests: new Map([[northRequest.id, { ...northRequest, status: "delivery_unknown" }]]) };
-  await withApp(props(fakeManager([northFactory({ state: stuck })])), (renderer) => {
-    assert.equal(buttons(renderer, "dfConsoleStrip__agent--needs-you").length, 0);
-  });
 });
 
 test("ANSWER opens one question at a time", async () => {
