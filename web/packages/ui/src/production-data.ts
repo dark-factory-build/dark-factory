@@ -1,26 +1,16 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import type { ProjectContentCall } from "./factory-app-controller.js";
 
-export type RuntimeBuild = { version: string; source: string; target: string; build_id: string; release: boolean };
-/** The newest release the daemon has observed. Absent is no answer, not current. */
-export type PublishedRelease = { version: string; url: string };
-
 export type ProductionRecord = {
   project_id: string; repository: string; kind: string; id: string; visual_id: string;
-  observed_at: number; links_overflow?: boolean; document: Record<string, unknown>; tasks: string[]; missions: string[];
+  observed_at: number; document: Record<string, unknown>; tasks: string[]; missions: string[];
 };
 
 /** One local read of the relevant production set for scene and inspector. Neither sprites nor panels
- * poll GitHub. */
-export function useProduction(projects: readonly string[], call: ProjectContentCall | undefined) {
-  const [runtime, setRuntime] = useState<RuntimeBuild>();
-  const [release, setRelease] = useState<PublishedRelease>();
+ * poll GitHub. A failed read keeps the previously read work. */
+export function useProduction(projects: readonly string[], call: ProjectContentCall | undefined): readonly ProductionRecord[] {
   const [records, setRecords] = useState<ProductionRecord[]>([]);
-  const [error, setError] = useState("");
   const generation = useRef(0);
-  const runtimeGeneration = useRef(-1);
-  // The project list those records were read for: a switch is a first read too.
-  const readKey = useRef("");
   const caller = useRef(call); caller.current = call;
   const connected = call !== undefined;
   const key = JSON.stringify(projects);
@@ -33,24 +23,18 @@ export function useProduction(projects: readonly string[], call: ProjectContentC
       busy = true;
       try {
         const next: ProductionRecord[] = [];
-        let currentRuntime: RuntimeBuild | undefined, currentRelease: PublishedRelease | undefined;
-        // The daemon's own build and the published release ride on every
-        // production read. A factory with no project still asks once, with no
-        // project, so those two facts never depend on a project existing.
-        for (const project_id of projects.length > 0 ? projects : [""]) {
+        for (const project_id of projects) {
           // The daemon bounds the set by relevance, so every page is read.
           let offset = 0;
           do {
-            const result = await caller.current!("production", { project_id, offset, limit: 8 }) as { records: Omit<ProductionRecord, "project_id">[]; next_offset: number; total: number; runtime?: RuntimeBuild; release?: PublishedRelease };
+            const result = await caller.current!("production", { project_id, offset, limit: 8 }) as { records: Omit<ProductionRecord, "project_id">[]; next_offset: number; total: number };
             if (stopped || generation.current !== current) return;
-            currentRuntime = result.runtime;
-            currentRelease = result.release;
             next.push(...result.records.map((record) => ({ ...record, project_id })));
             offset = result.next_offset;
           } while (offset !== 0);
         }
-        if (!stopped) { runtimeGeneration.current = current; readKey.current = key; setRuntime(currentRuntime); setRelease(currentRelease); setRecords(next); setError(""); }
-      } catch { if (!stopped) setError("Production observation unavailable. Previously read work is retained."); }
+        if (!stopped) setRecords(next);
+      } catch { /* retained */ }
       finally { busy = false; }
     };
     void refresh();
@@ -59,11 +43,5 @@ export function useProduction(projects: readonly string[], call: ProjectContentC
     document.addEventListener("visibilitychange", visible);
     return () => { stopped = true; clearInterval(timer); document.removeEventListener("visibilitychange", visible); };
   }, [key, connected]);
-  const scoped = useMemo(() => records.filter((record) => projects.includes(record.project_id)), [records, key]);
-  const notices = scoped.filter((record) => record.kind === "repository" && (record.document.unavailable || record.document.overflow)).map((record) => `${record.repository}: ${record.document.unavailable ? "some external evidence is unavailable" : "observation is bounded"}${record.document.overflow ? "; additional external records exist" : ""}.`);
-  // The runtime identity belongs to this connection and is dropped when it goes;
-  // the published release is a repository fact that no reconnect invalidates.
-  const read = connected && runtimeGeneration.current === generation.current && readKey.current === key;
-  // `read`: the records were read on this connection, so their changes are news, not history.
-  return { runtime: read ? runtime : undefined, read, release, notices, records: scoped, error };
+  return useMemo(() => records.filter((record) => projects.includes(record.project_id)), [records, key]);
 }
