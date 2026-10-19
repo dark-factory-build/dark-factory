@@ -16,7 +16,6 @@ import {
   type StateView,
   type TaskItem,
 } from "@dark-factory/client";
-import { AgentStrip, StageMeter } from "../console-screens.js";
 import { AnswerControls } from "../console-interactions.js";
 import { HumanRequestFlow, type HumanRequestFlowSelection } from "../human-request-flow.js";
 import { Badge, SectionHeader, Status, formatTime } from "../console-kit.js";
@@ -565,19 +564,7 @@ export function RemoteApp(props: RemoteAppProps = {}) {
           </section>
         )}
 
-        {selected === undefined ? null : (
-          <>
-            <AgentStrip
-              state={selected.state}
-              // Offered only when it would work: a reachable factory and an open question.
-              ask={(agentId) => {
-                const item = needsYou.find((entry) => entry.nodeId === selected.nodeId && entry.request.agent_id === agentId);
-                return item === undefined || !actionable(selected.nodeId) || working ? undefined : () => open(item.nodeId, item.label, item.request);
-              }}
-            />
-            <ProjectsSection state={selected.state} />
-          </>
-        )}
+        {selected === undefined ? null : <ProjectsSection state={selected.state} />}
 
         {factories.length === 0 ? null : setup}
         </div>
@@ -671,7 +658,7 @@ function ProjectsSection({ state }: { state: StateView | undefined }) {
         <span className="dfConsoleRow__title">{task.title}</span>
         <span className="dfConsoleRow__agent">{task.assigned_agent_id === "" ? "any eligible worker" : entityName(state?.agents, task.assigned_agent_id, "agent")}</span>
         {formatTime(task.updated_at_ms) === "" ? null : <time>{formatTime(task.updated_at_ms)}</time>}
-        <StageMeter stage={task.status} />
+        <Status stage={task.status} />
       </div>
     </li>
   );
