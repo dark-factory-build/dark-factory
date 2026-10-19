@@ -50,6 +50,7 @@ fi
 if [ "$local_ci_mode" = full ] && in_source_shard; then
     echo "local-ci: release fixture"; ./scripts/test-release.sh
     echo "local-ci: hotspots fixture"; ./scripts/test-hotspots.sh
+    echo "local-ci: ci-annotate fixture"; ./scripts/test-ci-annotate.sh
     echo "local-ci: dependency lockfile fixture"; ./scripts/test-locked-dependency-env.sh
 fi
 if [ "$local_ci_mode" = full ]; then
