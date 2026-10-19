@@ -488,7 +488,7 @@ func sendBackTask(ctx context.Context, connection *sql.Conn, task Task, head, no
 // taskEndedAutomatically holds while task t's current end is automatic: a
 // failure, a run-limit cancel of the run at its work revision, or a blocked
 // expiry recorded at its row revision. Retries and overseer wakes share it.
-const taskEndedAutomatically = `(t.status = 'failed' OR t.status = 'cancelled' AND (
+const taskEndedAutomatically = `((t.status = 'failed' AND NOT EXISTS (SELECT 1 FROM runs AS r WHERE r.task_id = t.id AND r.task_incarnation_id = t.incarnation_id AND r.admitted_task_work_revision = t.work_revision AND r.terminal_kind = 'failed' AND r.terminal_detail LIKE 'premise not reproduced:%')) OR t.status = 'cancelled' AND (
 	EXISTS (SELECT 1 FROM task_automatic_events AS e WHERE e.task_id = t.id AND e.task_revision = t.revision AND e.kind = 'blocked_expired')
 	OR EXISTS (SELECT 1 FROM runs AS r WHERE r.task_id = t.id AND r.admitted_task_work_revision = t.work_revision AND r.terminal_kind = 'cancelled' AND r.terminal_detail = '` + RunLimitDetail + `')))`
 

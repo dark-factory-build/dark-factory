@@ -1623,6 +1623,7 @@ func TestIntakeRetryOnlyAfterAutomaticEndWithinBound(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
 	failed, _ := NewFailureProposal(FailureInternal, "crashed")
+	premise, _ := NewFailureProposal(FailureInternal, "premise not reproduced: source differs")
 	limited, _ := NewCancelledProposal(RunLimitDetail)
 	stopped, _ := NewCancelledProposal("stopped by operator")
 	blocked, _ := NewBlockedProposal("needs a decision")
@@ -1633,6 +1634,7 @@ func TestIntakeRetryOnlyAfterAutomaticEndWithinBound(t *testing.T) {
 		automatic bool
 	}{
 		{"failure", failed, nil, true},
+		{"premise dispute", premise, nil, false},
 		{"run limit", limited, nil, true},
 		{"operator stop", stopped, nil, false},
 		{"blocked expiry", blocked, func(store *Store, _ Task) error {
