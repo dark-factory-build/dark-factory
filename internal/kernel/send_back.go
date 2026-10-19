@@ -188,6 +188,20 @@ func TaskBodyWithInstruction(task Task, instruction string) (string, *int64) {
 // With a digest, the sender is that attempt, which must be a running
 // orchestrator, and the task a worker's in its project other than its own.
 func (store *Store) SendBackTask(ctx context.Context, digest *AttemptDigest, id TaskID, expected Revision, head, note string, at UnixMillis) (Task, error) {
+	return store.sendBackTask(ctx, digest, id, expected, head, note, at, false, "")
+}
+
+// SendBackAdoptedTask is the audited send-back for a provider-authenticated
+// descendant head. The retained Change remains at retainedHead; only the
+// worker task is reopened with the exact observed head in its review note.
+func (store *Store) SendBackAdoptedTask(ctx context.Context, digest *AttemptDigest, id TaskID, expected Revision, retainedHead, observedHead, note string, at UnixMillis) (Task, error) {
+	if retainedHead == "" || observedHead == "" || strings.EqualFold(retainedHead, observedHead) {
+		return Task{}, fmt.Errorf("%w: invalid adopted head", ErrInvalidValue)
+	}
+	return store.sendBackTask(ctx, digest, id, expected, observedHead, note, at, true, retainedHead)
+}
+
+func (store *Store) sendBackTask(ctx context.Context, digest *AttemptDigest, id TaskID, expected Revision, head, note string, at UnixMillis, adopted bool, retainedHead string) (Task, error) {
 	if id.zero() || expected.Int64() < 1 {
 		return Task{}, fmt.Errorf("%w: invalid task send-back", ErrInvalidValue)
 	}
@@ -235,7 +249,7 @@ func (store *Store) SendBackTask(ctx context.Context, digest *AttemptDigest, id 
 	if task.Revision != expected {
 		return Task{}, tx.Rollback(ErrRevisionConflict)
 	}
-	updated, err := sendBackTask(ctx, tx.connection, task, head, note, at)
+	updated, err := sendBackTask(ctx, tx.connection, task, head, note, at, adopted, retainedHead)
 	if err != nil {
 		return Task{}, tx.Rollback(err)
 	}
@@ -409,7 +423,7 @@ func (store *Store) retryTaskTx(ctx context.Context, tx *writeTx, digest *Attemp
 // Change head it was observed at: once the task has a Change head, a note
 // about any other head is a premise the worker cannot reproduce, so it is
 // refused as superseded instead of costing a run (#1673).
-func sendBackTask(ctx context.Context, connection *sql.Conn, task Task, head, note string, at UnixMillis) (Task, error) {
+func sendBackTask(ctx context.Context, connection *sql.Conn, task Task, head, note string, at UnixMillis, adopted bool, retainedHead string) (Task, error) {
 	var removed bool
 	if err := connection.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM task_attachments WHERE task_id = ? AND data IS NULL)`, task.ID.Bytes()).Scan(&removed); err != nil {
 		return Task{}, err
@@ -459,7 +473,10 @@ func sendBackTask(ctx context.Context, connection *sql.Conn, task Task, head, no
 	}
 	// factoryd publishes the Change's exact commit, so the pull request
 	// head a reviewer observed is the Change head.
-	if current != "" && !strings.EqualFold(head, current) {
+	if adopted && (current == "" || !strings.EqualFold(current, retainedHead)) {
+		return Task{}, fmt.Errorf("%w: adopted send-back retained Change head changed from %q", ErrConflict, retainedHead)
+	}
+	if !adopted && current != "" && !strings.EqualFold(head, current) {
 		return Task{}, fmt.Errorf("%w: %w: the note was observed at head %q but the task's Change head is %q; observe it there before sending it back", ErrConflict, ErrSuperseded, head, current)
 	}
 	next := task.WorkRevision.Int64() + 1

@@ -290,9 +290,9 @@ func (daemon *Daemon) reconcilePull(ctx context.Context, open kernel.OpenPull, s
 		// before the head is judged (#1800). ponytail: a head left stuck
 		// (escalated) is checked out again each pass; record the compared
 		// tree on the operation if that cost shows.
-		lacks, why := false, ""
+		lacks, why, adopted := false, "", false
 		if !working {
-			lacks, why, err = daemon.publishUnanswered(ctx, open, op.Request)
+			lacks, why, adopted, err = daemon.publishUnanswered(ctx, open, op.Request)
 		}
 		switch {
 		case why != "" && !op.Handled:
@@ -327,12 +327,12 @@ func (daemon *Daemon) reconcilePull(ctx context.Context, open kernel.OpenPull, s
 				daemon.publishSettledChanges(ctx, kernel.TaskID{})
 			} else if err == nil {
 				op.Rebased = true
-				err = daemon.sendBackPull(ctx, open, task, op, note)
+				err = daemon.sendBackPull(ctx, open, task, op, note, false)
 			}
 		case review.SendBack:
-			err = daemon.sendBackPull(ctx, open, task, op, note)
+			err = daemon.sendBackPull(ctx, open, task, op, note, adopted)
 			if errors.Is(err, kernel.ErrSuperseded) {
-				_, _, err = daemon.publishUnanswered(ctx, open, op.Request)
+				_, _, _, err = daemon.publishUnanswered(ctx, open, op.Request)
 			}
 		case review.Enqueue:
 			if err = coordinator.Backend.Enqueue(ctx, op); err == nil {
@@ -343,7 +343,7 @@ func (daemon *Daemon) reconcilePull(ctx context.Context, open kernel.OpenPull, s
 				op.Conversation = "GitHub will not queue exact head " + op.Request.Head + " while a review conversation on it is unresolved. Fix what each thread names; answer a human reviewer's thread on the thread itself.\n\n" + err.Error()
 				if err = nil; !working {
 					action, note = review.SendBack, op.Conversation
-					err = daemon.sendBackPull(ctx, open, task, op, note)
+					err = daemon.sendBackPull(ctx, open, task, op, note, false)
 				}
 			} else if binding, observed := enqueueBinding(err); binding != "" {
 				// A binding conflict is a stale observation, not an enqueue
@@ -461,7 +461,7 @@ func priorAllowedOperation(open kernel.OpenPull, request review.Request) (review
 // sendBackPull returns the head's work, with the operation's marker, to the
 // task that published the pull request, or to a new repair task when no task
 // did. A fork's stays on GitHub for its author.
-func (daemon *Daemon) sendBackPull(ctx context.Context, open kernel.OpenPull, task kernel.Task, op review.Operation, note string) error {
+func (daemon *Daemon) sendBackPull(ctx context.Context, open kernel.OpenPull, task kernel.Task, op review.Operation, note string, adopted bool) error {
 	at, err := daemon.timestamp()
 	if err != nil {
 		return err
@@ -469,7 +469,15 @@ func (daemon *Daemon) sendBackPull(ctx context.Context, open kernel.OpenPull, ta
 	note = "review-operation: " + op.ID + "\nreview-head: " + op.Request.Head + "\n\n" + note
 	note = strings.ToValidUTF8(note[:min(len(note), kernel.MaxSendBackNoteBytes)], "")
 	if open.Task != (kernel.TaskID{}) {
-		_, err = daemon.store.SendBackTask(ctx, nil, task.ID, task.Revision, op.Request.Head, note, at)
+		if adopted {
+			retained, findErr := daemon.unpublishedHead(ctx, open, op.Request)
+			if findErr != nil || retained == "" {
+				return errors.Join(findErr, kernel.ErrConflict)
+			}
+			_, err = daemon.store.SendBackAdoptedTask(ctx, nil, task.ID, task.Revision, retained, op.Request.Head, note, at)
+		} else {
+			_, err = daemon.store.SendBackTask(ctx, nil, task.ID, task.Revision, op.Request.Head, note, at)
+		}
 	} else if _, err = daemon.store.CreateRepairTask(ctx, open.Project, open.Repository, open.Pull.Number, op.Request.Head, note, at); errors.Is(err, kernel.ErrNotFound) {
 		err = nil
 	}
@@ -479,17 +487,17 @@ func (daemon *Daemon) sendBackPull(ctx context.Context, open kernel.OpenPull, ta
 // publishUnanswered reports whether the pull request's head is not the
 // Change head its task settled, which is then no answer (#1800): that head is
 // published at once, or why says factoryd does not publish it.
-func (daemon *Daemon) publishUnanswered(ctx context.Context, open kernel.OpenPull, request review.Request) (bool, string, error) {
+func (daemon *Daemon) publishUnanswered(ctx context.Context, open kernel.OpenPull, request review.Request) (bool, string, bool, error) {
 	settled, err := daemon.unpublishedHead(ctx, open, request)
 	if err != nil || settled == "" || daemon.publishSettledChanges(ctx, open.Task) {
-		return settled != "", "", err
+		return settled != "", "", false, err
 	}
 	if adopted, verifyErr := daemon.trustedDescendant(ctx, open, settled, request.Head); adopted {
-		return false, "", nil
+		return false, "", true, nil
 	} else if verifyErr != nil {
-		return true, "could not verify externally added commits between retained head " + settled + " and pull request head " + request.Head + ": " + verifyErr.Error(), nil
+		return true, "could not verify externally added commits between retained head " + settled + " and pull request head " + request.Head + ": " + verifyErr.Error(), false, nil
 	}
-	return true, "its task settled head " + settled + ", which pull request head " + request.Head + " is not, and factoryd does not publish it: its task did not succeed, its publication failed for good, or its work is not factoryd's to publish", nil
+	return true, "its task settled head " + settled + ", which pull request head " + request.Head + " is not, and factoryd does not publish it: its task did not succeed, its publication failed for good, or its work is not factoryd's to publish", false, nil
 }
 
 // trustedDescendant proves every commit after the retained Change through the
@@ -507,7 +515,9 @@ func (daemon *Daemon) trustedDescendant(ctx context.Context, open kernel.OpenPul
 	if err != nil {
 		return false, err
 	}
-	trusted := func(login, kind string) bool { return trustedIntakeCommitAuthor(sources, accepted, login, kind) }
+	trusted := func(login, kind string, authenticated bool) bool {
+		return trustedIntakeCommitAuthor(sources, accepted, login, kind, authenticated)
+	}
 	backend := &daemonReviewBackend{daemon: daemon, project: open.Project, repository: open.Repository}
 	seen, visiting := map[string]bool{}, map[string]bool{}
 	var walk func(string) (bool, error)
@@ -525,8 +535,9 @@ func (daemon *Daemon) trustedDescendant(ctx context.Context, open kernel.OpenPul
 		var value struct {
 			Parents []string `json:"parents"`
 			Author  *struct {
-				Login string `json:"login"`
-				Kind  string `json:"type"`
+				Login         string `json:"login"`
+				Kind          string `json:"type"`
+				Authenticated bool   `json:"authenticated"`
 			} `json:"author"`
 		}
 		response, err := backend.callResponse(ctx, "observe_tree", map[string]any{"repository": open.Repository, "commit_sha": sha})
@@ -536,7 +547,7 @@ func (daemon *Daemon) trustedDescendant(ctx context.Context, open kernel.OpenPul
 		if err != nil {
 			return false, err
 		}
-		if value.Author == nil || !trusted(value.Author.Login, value.Author.Kind) {
+		if value.Author == nil || !trusted(value.Author.Login, value.Author.Kind, value.Author.Authenticated) {
 			return false, nil
 		}
 		if len(value.Parents) == 0 {
@@ -555,8 +566,8 @@ func (daemon *Daemon) trustedDescendant(ctx context.Context, open kernel.OpenPul
 	return walk(head)
 }
 
-func trustedIntakeCommitAuthor(sources []kernel.IntakeSource, accepted kernel.IntakeAcceptance, login, kind string) bool {
-	if kind != "User" && kind != "user" || login == "" {
+func trustedIntakeCommitAuthor(sources []kernel.IntakeSource, accepted kernel.IntakeAcceptance, login, kind string, authenticated bool) bool {
+	if !authenticated || kind != "User" && kind != "user" || login == "" {
 		return false
 	}
 	for _, source := range sources {
