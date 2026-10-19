@@ -8,10 +8,8 @@ import (
 	"fmt"
 	"io"
 	"os"
-	"strings"
 	"syscall"
 	"time"
-	"unicode/utf8"
 
 	"github.com/dark-factory-build/dark-factory/internal/browser"
 	"github.com/dark-factory-build/dark-factory/internal/kernel"
@@ -284,21 +282,6 @@ func (attempt *liveAttempt) processLifecycle(ctx context.Context) (bool, error) 
 	if attempt.resultReturned {
 		attempt.daemon.operationMu.Unlock()
 		return false, nil
-	}
-	if attempt.usageLimit != "" {
-		// The same durable edge as the provider's own `attempt fail`, under the
-		// same gate; the finalizing check below then terminates the provider.
-		// An outcome that won first leaves the run unauthorized for this one.
-		proposal, err := kernel.NewFailureProposal(attempt.usageCode, attempt.usageLimit)
-		at, timeErr := attempt.daemon.timestamp()
-		if err = errors.Join(err, timeErr); err == nil {
-			storeCtx, cancel := context.WithTimeout(context.Background(), liveAttemptStoreTimeout)
-			_, err = attempt.daemon.store.ProposeAttemptOutcome(storeCtx, attempt.attemptDigest, proposal, at)
-			cancel()
-		}
-		if err == nil || errors.Is(err, kernel.ErrUnauthorized) {
-			attempt.usageLimit = ""
-		}
 	}
 	storeCtx, cancel := context.WithTimeout(context.Background(), liveAttemptStoreTimeout)
 	run, found, err := attempt.daemon.store.Run(storeCtx, attempt.runID)
@@ -760,22 +743,20 @@ func (attempt *liveAttempt) routeFrame(frame runner.TerminalFrame) error {
 			return runner.ErrState
 		}
 		attempt.readySeen = true
-		// Credit from the start, viewer or not: the provider-report scan and
-		// output liveness read this stream.
+		// Credit from the start, viewer or not: output liveness and the
+		// stall diagnostic read this stream.
 		return attempt.addCredit(liveAttemptCredit)
 	case runner.TerminalAttached:
 		return attempt.routeAttached(frame)
 	case runner.TerminalOutput:
 		if attempt.diagnosticReplayCorrelation != 0 && frame.Correlation == attempt.diagnosticReplayCorrelation {
 			attempt.retainDiagnosticOutput(frame.Start, frame.End, frame.Payload)
-			attempt.scanUsageLimit(frame.Start, frame.End, frame.Payload)
 			if frame.End >= attempt.diagnosticReplayHead {
 				attempt.diagnosticReplayCorrelation = 0
 			}
 		} else if frame.Correlation == 0 {
 			attempt.markTerminalOutput(attempt.now(), frame.End)
 			attempt.retainDiagnosticOutput(frame.Start, frame.End, frame.Payload)
-			attempt.scanUsageLimit(frame.Start, frame.End, frame.Payload)
 			for subscriber := range attempt.subs {
 				attempt.routeLive(subscriber, frame)
 			}
@@ -819,61 +800,6 @@ func (attempt *liveAttempt) routeFrame(frame runner.TerminalFrame) error {
 	default:
 		return runner.ErrState
 	}
-}
-
-// codexUsageLimit is Codex's error cell for an exhausted account. Codex then
-// idles at an interactive prompt and never exits, so the report itself ends
-// the attempt. The "■ " error marker keeps task text or tool output that only
-// quotes the message from matching.
-// ponytail: a fixed string of one provider's TUI; recognise a structured
-// provider event instead if Codex ever reports this outside its screen.
-const codexUsageLimit = "■ You've hit your usage limit"
-
-// codexModelCapacity is Codex's warning cell for a model at capacity, after
-// which it idles the same way. It is transient, so its task is queued again
-// (kernel.FailureTransient).
-const codexModelCapacity = "⚠ Selected model is at capacity"
-
-// usageScanCarry bounds the raw tail carried across frames: room for a marker
-// and the escapes a TUI styles it with, glyph and text apart.
-const usageScanCarry = 256
-
-// scanUsageLimit reads each output byte once by its stream offset, whether it
-// arrives live or in an adopted owner's retained replay: the report may exist
-// only in that replay when Codex hit the limit before a handover.
-func (attempt *liveAttempt) scanUsageLimit(start, end uint64, payload []byte) {
-	if end < start || end <= attempt.usageScanned {
-		return
-	}
-	payload = payload[:min(len(payload), int(end-start))]
-	if start > attempt.usageScanned {
-		attempt.usageScan = attempt.usageScan[:0] // not adjacent: never join the ranges
-	} else {
-		payload = payload[min(len(payload), int(attempt.usageScanned-start)):]
-	}
-	attempt.usageScanned = end
-	if attempt.usageLimit != "" {
-		return
-	}
-	attempt.usageScan = append(attempt.usageScan, payload...)
-	// Match the escape-stripped text: Codex may colour the glyph apart from
-	// its message.
-	text := terminalTextProjection(attempt.usageScan, false, len(attempt.usageScan))
-	if index := strings.Index(text, codexUsageLimit); index >= 0 {
-		report := text[index+len("■ "):]
-		attempt.usageLimit, attempt.usageCode = "provider usage limit (retry after its reset or select another account): "+terminalTextProjection([]byte(report[:min(len(report), 1024)]), false, 1024), kernel.FailureProviderExit
-		attempt.usageScan = nil
-		return
-	}
-	if strings.Contains(text, codexModelCapacity) {
-		attempt.usageLimit, attempt.usageCode, attempt.usageScan = kernel.ProviderCapacityRunDetail, kernel.FailureTransient, nil
-		return
-	}
-	cut := max(0, len(attempt.usageScan)-usageScanCarry)
-	for cut < len(attempt.usageScan) && !utf8.RuneStart(attempt.usageScan[cut]) {
-		cut++ // a stray continuation byte reads as a C1 control that can swallow text
-	}
-	attempt.usageScan = append(attempt.usageScan[:0], attempt.usageScan[cut:]...)
 }
 
 func (attempt *liveAttempt) routeAttached(frame runner.TerminalFrame) error {

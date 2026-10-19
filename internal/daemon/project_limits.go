@@ -3,6 +3,7 @@ package daemon
 import (
 	"context"
 	"errors"
+	"regexp"
 	"time"
 
 	"github.com/dark-factory-build/dark-factory/internal/kernel"
@@ -66,16 +67,8 @@ func (daemon *Daemon) enforceRunLiveness(ctx context.Context, spec SupervisorSpe
 		if !found || run.Phase != kernel.RunRunning {
 			continue
 		}
-		_, _, output := attempt.diagnosticSnapshot()
-		code, detail := kernel.FailureTransient, kernel.NeverStartedRunDetail
-		if !attempt.neverStarted() {
-			code = kernel.FailureProtocol
-			dropped := len(output) > 512
-			if dropped {
-				output = output[len(output)-512:]
-			}
-			detail = stalledRunDetail + terminalTextProjection(output, dropped, 512)
-		}
+		floor, _, output := attempt.diagnosticSnapshot()
+		code, detail := stalledRunProposal(run.Provider, attempt.neverStarted(), floor, output)
 		proposal, err := kernel.NewFailureProposal(code, detail)
 		if err != nil {
 			return err
@@ -89,6 +82,39 @@ func (daemon *Daemon) enforceRunLiveness(ctx context.Context, spec SupervisorSpe
 		return nil
 	}
 	return daemon.recoverOwnerlessRuns(ctx, spec.RuntimeParent, spec.ChangeParent, at.Int64()-ownerlessRunAge.Milliseconds())
+}
+
+// Codex reports an exhausted account or a model at capacity as a cell of its
+// own screen and then idles at its prompt, so the stall budget ends the run.
+// Both notices are read only then, from a Codex run's whole projected tail, and
+// only under Codex's own glyph: a task, prompt, source or tool output that
+// quotes the words is ordinary text, as is anything a Claude run prints. Codex
+// 0.163 draws the glyph and its message in separate cells, so a gap between
+// them is allowed.
+// ponytail: fixed strings of one provider's TUI; recognise a structured
+// provider event instead if Codex ever reports these outside its screen.
+var codexUsageLimit = regexp.MustCompile(`■[[:space:]]*(You've hit your` + ` usage limit.{0,1000})`)
+var codexModelCapacity = regexp.MustCompile(`⚠[[:space:]]*Selected model` + ` is at capacity`)
+
+// stalledRunProposal classifies a stalled run from its retained terminal
+// output, projected whole before the detail is cut: a TUI's last raw bytes are
+// mostly escapes, and cutting them first leaves an empty tail. A Codex notice
+// is read even from a run that made no attempt call yet, as it can be Codex's
+// first and only act.
+func stalledRunProposal(provider kernel.Provider, neverStarted bool, floor uint64, output []byte) (kernel.FailureCode, string) {
+	if provider == kernel.ProviderCodex {
+		text := terminalTextProjection(output, false, len(output))
+		if report := codexUsageLimit.FindStringSubmatch(text); report != nil {
+			return kernel.FailureProviderExit, "provider usage limit (retry after its reset or select another account): " + report[1]
+		}
+		if codexModelCapacity.MatchString(text) {
+			return kernel.FailureTransient, kernel.ProviderCapacityRunDetail
+		}
+	}
+	if neverStarted {
+		return kernel.FailureTransient, kernel.NeverStartedRunDetail
+	}
+	return kernel.FailureProtocol, stalledRunDetail + terminalTextProjection(output, floor > 0, 512)
 }
 
 func casLost(err error) bool {
