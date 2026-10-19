@@ -168,7 +168,9 @@ func TestOverseerEnqueueProposalDispatchIsAtomicAndScopedToProposal(t *testing.T
 	if !errors.Is(err, ErrConflict) {
 		t.Fatalf("different active proposal dispatch: %v", err)
 	}
-	if _, err := store.EnqueueTaskForOverseer(ctx, overseer.CredentialDigest, NewTask{ID: taskID(t, 138), ProjectID: overseer.ProjectID, IncarnationID: incarnationID(t, 139), Title: "duplicate"}, mustTime(t, 143), TaskContentReference{ContentID: firstProposal.ID, ContentRevision: firstProposal.Revision}); !errors.Is(err, ErrConflict) {
+	// The refusal is keyed on the pin, whatever the title or body says, and carries its reason.
+	var refusal *OutcomeRefusal
+	if _, err := store.EnqueueTaskForOverseer(ctx, overseer.CredentialDigest, NewTask{ID: taskID(t, 138), ProjectID: overseer.ProjectID, IncarnationID: incarnationID(t, 139), Title: "Owner-priority correction", Body: "Owner-priority correction accepted from proposal " + firstProposal.ID.String() + "."}, mustTime(t, 143), TaskContentReference{ContentID: firstProposal.ID, ContentRevision: firstProposal.Revision}); !errors.Is(err, ErrConflict) || !errors.As(err, &refusal) {
 		t.Fatalf("duplicate proposal dispatch: %v", err)
 	}
 	cancelled, err := store.UpdateTask(ctx, first.ID, first.Revision, TaskPatch{Cancel: true}, mustTime(t, 144))
@@ -189,7 +191,7 @@ func TestOverseerEnqueueProposalDispatchIsAtomicAndScopedToProposal(t *testing.T
 	}
 }
 
-func TestProposalDispatchStaysBlockedAfterSuccessUntilPullMerges(t *testing.T) {
+func TestProposalDispatchStaysBlockedAfterSuccessEvenWhenPullMerges(t *testing.T) {
 	t.Parallel()
 	store, _, project, agent := newAdmissionStore(t, RoleWorker, 4)
 	defer store.Close()
@@ -230,8 +232,20 @@ func TestProposalDispatchStaysBlockedAfterSuccessUntilPullMerges(t *testing.T) {
 	if err := store.RecordProductionObservation(ctx, project.ID, ProductionObservation{Repository: "example/factory", ObservedAt: 90, PullRequests: []ProductionPullRequest{pr}}, mustTime(t, 90)); err != nil {
 		t.Fatal(err)
 	}
-	if err := store.AttachContentToTask(ctx, second.ID, project.ID, content.ID, content.Revision, mustTime(t, 91)); err != nil {
-		t.Fatalf("replacement after merge: %v", err)
+	// Merging releases the one-active-implementation rule for other proposals,
+	// but the merged proposal revision keeps its one task.
+	if err := store.AttachContentToTask(ctx, second.ID, project.ID, content.ID, content.Revision, mustTime(t, 91)); !errors.Is(err, ErrConflict) {
+		t.Fatalf("duplicate after merge: %v", err)
+	}
+	another := contentSpec(t, project.ID, 156, "another proposal")
+	another.Kind = ContentObservation
+	another.SourceReferences = proposal.SourceReferences
+	other, err := store.CreateContent(ctx, another, mustTime(t, 92))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.AttachContentToTask(ctx, second.ID, project.ID, other.ID, other.Revision, mustTime(t, 93)); err != nil {
+		t.Fatalf("different proposal after merge: %v", err)
 	}
 }
 
