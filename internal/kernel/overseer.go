@@ -486,7 +486,7 @@ func rejectDispatchedSourceProposal(ctx context.Context, connection *sql.Conn, p
 		return nil
 	}
 	var dispatched bool
-	if err := connection.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM tasks WHERE project_id = ? AND status IN ('queued', 'running', 'blocked', 'succeeded') AND body LIKE ?)`, project.Bytes(), marker+"%").Scan(&dispatched); err != nil {
+	if err := connection.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM tasks WHERE project_id = ? AND status IN ('queued', 'running', 'blocked', 'succeeded') AND (body = ? OR body LIKE ?))`, project.Bytes(), marker, marker+"\n%").Scan(&dispatched); err != nil {
 		return err
 	}
 	if dispatched {
@@ -510,9 +510,6 @@ func (store *Store) EnqueueTaskForOverseer(ctx context.Context, digest AttemptDi
 	}
 	if spec.ProjectID != run.ProjectID {
 		return Task{}, tx.Rollback(ErrUnauthorized)
-	}
-	if err := rejectDispatchedSourceProposal(ctx, tx.connection, run.ProjectID, spec.Body); err != nil {
-		return Task{}, tx.Rollback(err)
 	}
 	if !spec.AssignedAgentID.zero() {
 		agent, found, err := agentByID(ctx, tx.connection, spec.AssignedAgentID)
@@ -552,6 +549,9 @@ func (store *Store) EnqueueTaskForOverseer(ctx context.Context, digest AttemptDi
 			return Task{}, err
 		}
 		return existing, nil
+	}
+	if err := rejectDispatchedSourceProposal(ctx, tx.connection, run.ProjectID, spec.Body); err != nil {
+		return Task{}, tx.Rollback(err)
 	}
 	result, err := insertTaskOnConnection(ctx, tx.connection, spec, at)
 	if err != nil {
