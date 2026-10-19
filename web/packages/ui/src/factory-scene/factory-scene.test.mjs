@@ -306,6 +306,10 @@ test("every generated person layer is reachable, including fallbacks", () => {
   // What is carried decides what is rested with, where it suits a table.
   const carrying = (name) => ({ ...fallback, appearance: { automatic: false, skin: 0, hair: 0, hair_colour: 0, face: 0, outfit: 0, clothes_colour: 0, shoes: 0, tool: spriteOptions.tool.findIndex((tool) => tool.name === name), headwear: 0 } });
   assert.deepEqual(["mug", "tablet", "clipboard"].map((name) => restingItem(carrying(name)).item), ["cup", "tablet", "clipboard"]);
+  // Arms folded while waiting hold nothing; the same hands idle at the side still carry the tool.
+  const standing = (activity, name) => workerFrames({ ...carrying(name), activity }, { action: "still", frame: 0, at: 0 }).filter((frame) => frame.startsWith("person.tool."));
+  assert.deepEqual(["wrench", "mug", "clipboard"].map((name) => standing("waiting", name)), [[], [], []], "waiting with folded arms carries nothing");
+  assert.deepEqual(standing("idle", "wrench"), ["person.tool.2.low"]);
   // Nothing jumps from the table to the mouth: sampled at the floor's own pulse,
   // a thing only ever moves one stage at a time, and everything is used and put back.
   const stages = ["table", "chest", "mouth"];

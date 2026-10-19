@@ -167,7 +167,7 @@ export function workerFrames(worker: SceneWorker, motion?: WorkerMotion, seat?: 
     : pose === "sip" || pose === "hold" ? [`person.held.${rest.item}.${rest.where}`]
     : seat === "planning" && pose.startsWith("type") ? [`person.held.pencil.${scribble}`]
     : pose.startsWith("type") ? ["person.held.keyboard"]
-    : seated ? [] : [`person.tool.${appearance.tool}.${pose === "walk.1" ? "high" : "low"}`];
+    : seated || pose === "waiting" ? [] : [`person.tool.${appearance.tool}.${pose === "walk.1" ? "high" : "low"}`];
   return [
     `person.skin.${appearance.skin}.${pose}`,
     `person.legs.${cloth}.${seated ? "sit" : step}`,
