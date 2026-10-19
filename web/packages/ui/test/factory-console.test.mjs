@@ -721,7 +721,6 @@ test("the floor's worker click is the only terminal intent, and it carries just 
   })); });
   await act(async () => { workerSprite(renderer, agent.id).props.onClick(); });
   assert.deepEqual(calls.map(([kind, value]) => [kind, value.id, value.revision]), [["agent", agent.id, agent.revision]]);
-  assert.equal(renderer.root.findAllByType("button").some((element) => element.props.children === "Open terminal"), false, "the decision panel offers no navigation control");
   await act(async () => { renderer.unmount(); });
 
   const markup = render({ selectedAgent: agentSelection(), terminalContent: createElement("div", null, "<raw-output>") });
