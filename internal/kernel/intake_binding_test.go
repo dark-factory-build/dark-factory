@@ -155,6 +155,7 @@ func TestFailedIntakeWakesItsConfiguredOverseer(t *testing.T) {
 		expired, withdrawn, unconfigured, due bool
 	}{
 		{"failed", "failed", false, false, false, true},
+		{"premise dispute", "failed", false, false, false, false},
 		{"expired", "cancelled", true, false, false, true},
 		{"operator cancel", "cancelled", false, false, false, true},
 		{"no configured overseer", "cancelled", false, false, true, true},
@@ -176,6 +177,11 @@ func TestFailedIntakeWakesItsConfiguredOverseer(t *testing.T) {
 			}
 			if test.expired {
 				if _, err := store.writer.ExecContext(ctx, `INSERT INTO task_automatic_events(task_id, task_revision, kind, at_ms) SELECT id, revision, 'blocked_expired', 1000 FROM tasks WHERE id = ?`, accepted.TaskID.Bytes()); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if test.name == "premise dispute" {
+				if _, err := store.writer.ExecContext(ctx, `UPDATE runs SET phase = 'terminal', finalizing_at_ms = ?, terminal_at_ms = ?, updated_at_ms = ?, proposal_kind = 'failed', proposal_code = ?, proposal_detail = ?, terminal_kind = 'failed', terminal_code = ?, terminal_detail = ?, credential_revoked_at_ms = ? WHERE id = ?`, 1000, 1000, 1000, FailureInternal.String(), "\npremise not reproduced: cited source is already fixed", FailureInternal.String(), "\npremise not reproduced: cited source is already fixed", 1000, run.ID.Bytes()); err != nil {
 					t.Fatal(err)
 				}
 			}
@@ -203,6 +209,50 @@ func TestFailedIntakeWakesItsConfiguredOverseer(t *testing.T) {
 				t.Fatalf("intake wake: due=%v body=%q err=%v, want due=%v", due, body, err, test.due)
 			}
 		})
+	}
+}
+
+func TestPremiseDisputeWorkerIntakeDoesNotWakeItsOverseer(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	premise, _ := NewFailureProposal(FailureInternal, "\npremise not reproduced: the cited source is already fixed")
+	store, finalizing := finalizingReleasedRun(t, RoleWorker, premise)
+	defer store.Close()
+	terminal, err := finalizeTestRun(t, store, finalizing, 70)
+	if err != nil {
+		t.Fatal(err)
+	}
+	overseer, err := store.CreateAgent(ctx, NewAgent{ID: agentID(t, 246), ProjectID: terminal.ProjectID, Name: "overseer", Role: RoleOrchestrator, Provider: ProviderCodex, ToolBudgetLimit: 2}, mustTime(t, 71))
+	if err != nil {
+		t.Fatal(err)
+	}
+	sourceID, err := IntakeSourceIDFromBytes(bytes.Repeat([]byte{247}, IDBytes))
+	if err != nil {
+		t.Fatal(err)
+	}
+	source, err := store.CreateIntakeSource(ctx, NewIntakeSource{ID: sourceID, GitHubRepositoryID: 42, GitHubRepositoryName: "owner/source", ProjectID: terminal.ProjectID, TargetRepositoryID: RepositoryID(terminal.ProjectID), OverseerAgentID: overseer.ID, Policy: IntakePolicyManual, PollSeconds: 60, AdmissionLimit: 25}, mustTime(t, 72))
+	if err != nil {
+		t.Fatal(err)
+	}
+	accepted, err := store.AcceptIntakeSnapshot(ctx, source.ID, intakeSnapshotForTest(), mustTime(t, 73))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.writer.ExecContext(ctx, `INSERT INTO intake_task_bindings (task_id, acceptance_id) VALUES (?, ?)`, terminal.TaskID.Bytes(), accepted.ID.Bytes()); err != nil {
+		t.Fatal(err)
+	}
+	read, err := store.beginRead(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer read.Close()
+	current, found, err := agentByID(ctx, read.connection, overseer.ID)
+	if err != nil || !found {
+		t.Fatalf("overseer: %+v %v", current, err)
+	}
+	body, due, err := overseerWake(ctx, read.connection, current, 70+overseerWakeSettle.Milliseconds(), 0, nil)
+	if err != nil || due {
+		t.Fatalf("premise dispute worker wake: due=%v body=%q err=%v", due, body, err)
 	}
 }
 

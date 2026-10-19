@@ -1052,6 +1052,29 @@ func runningOverseerKeys(t *testing.T, store *Store, projectID ProjectID, base i
 	return overseerKeys, runningOverseer
 }
 
+func premiseOverseerKeys(t *testing.T, store *Store, projectID ProjectID) AdmissionKeys {
+	t.Helper()
+	ctx := context.Background()
+	overseer, err := store.CreateAgent(ctx, NewAgent{ID: agentID(t, 250), ProjectID: projectID, Name: "premise overseer", Role: RoleOrchestrator, Provider: ProviderCodex, ToolBudgetLimit: 4}, mustTime(t, 90))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.EnqueueTask(ctx, NewTask{ID: taskID(t, 251), ProjectID: projectID, AssignedAgentID: overseer.ID, IncarnationID: incarnationID(t, 252), Title: "premise oversee"}, mustTime(t, 91)); err != nil {
+		t.Fatal(err)
+	}
+	keys := admissionKeys(t, 10, nil)
+	admission, err := store.AdmitNext(ctx, keys, mustTime(t, 92))
+	if err != nil || !admission.Admitted() {
+		t.Fatalf("premise overseer admission = %+v, %v", admission, err)
+	}
+	running := activateAllResourcesUnique(t, store, *admission.Run, 93, 500)
+	session := terminalSessionForRunTest(t, store, running.ID)
+	if _, err := store.ActivateRun(ctx, running.ID, session.ID, running.Revision, session.Revision, mustTime(t, 97)); err != nil {
+		t.Fatal(err)
+	}
+	return keys
+}
+
 // A retry that names no replacement keeps the settled task's current worker:
 // the ordinary recovery of a run that ended without an attempt outcome needs
 // no second agent.
@@ -1623,29 +1646,31 @@ func TestIntakeRetryOnlyAfterAutomaticEndWithinBound(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
 	failed, _ := NewFailureProposal(FailureInternal, "crashed")
+	premise, _ := NewFailureProposal(FailureInternal, "\npremise not reproduced: the cited source is already fixed")
 	limited, _ := NewCancelledProposal(RunLimitDetail)
 	stopped, _ := NewCancelledProposal("stopped by operator")
 	blocked, _ := NewBlockedProposal("needs a decision")
 	for _, test := range []struct {
-		name      string
-		proposal  Proposal
-		end       func(*Store, Task) error
-		automatic bool
+		name               string
+		proposal           Proposal
+		end                func(*Store, Task) error
+		automatic, premise bool
 	}{
-		{"failure", failed, nil, true},
-		{"run limit", limited, nil, true},
-		{"operator stop", stopped, nil, false},
+		{"failure", failed, nil, true, false},
+		{"premise dispute", premise, nil, false, true},
+		{"run limit", limited, nil, true, false},
+		{"operator stop", stopped, nil, false, false},
 		{"blocked expiry", blocked, func(store *Store, _ Task) error {
 			expired, err := store.ExpireBlockedTasks(ctx, mustTime(t, 60+BlockedExpiry.Milliseconds()))
 			if err == nil && len(expired) != 1 {
 				err = errors.New("expiry did not cancel the blocked task")
 			}
 			return err
-		}, true},
+		}, true, false},
 		{"operator cancel of a blocked task", blocked, func(store *Store, task Task) error {
 			_, err := store.UpdateTaskForOperator(ctx, task.ID, task.Revision, TaskPatch{Cancel: true}, mustTime(t, 61))
 			return err
-		}, false},
+		}, false, false},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			store, finalizing := finalizingReleasedRun(t, RoleWorker, test.proposal)
@@ -1666,9 +1691,22 @@ func TestIntakeRetryOnlyAfterAutomaticEndWithinBound(t *testing.T) {
 				}
 			}
 			at := mustTime(t, 100+BlockedExpiry.Milliseconds())
-			if !test.automatic {
+			if !test.automatic && !test.premise {
 				if _, err := store.RetryTask(ctx, nil, task.ID, task.Revision, AgentID{}, at, IntakeRetryLimit); !errors.Is(err, ErrConflict) {
 					t.Fatalf("operator end retried: %v", err)
+				}
+				return
+			}
+			if !test.automatic {
+				if _, err := store.RetryTask(ctx, nil, task.ID, task.Revision, AgentID{}, at, IntakeRetryLimit); !errors.Is(err, ErrConflict) {
+					t.Fatalf("premise dispute automatically retried: %v", err)
+				}
+				overseerKeys := premiseOverseerKeys(t, store, task.ProjectID)
+				if _, err := store.RetryTask(ctx, &overseerKeys.AttemptDigest, task.ID, task.Revision, AgentID{}, at, 0); !errors.Is(err, ErrConflict) {
+					t.Fatalf("premise dispute overseer retry: %v", err)
+				}
+				if retried, err := store.RetryTask(ctx, nil, task.ID, task.Revision, AgentID{}, at, 0); err != nil || retried.Status != TaskQueued {
+					t.Fatalf("operator retry after premise dispute: %+v, %v", retried, err)
 				}
 				return
 			}
@@ -1761,6 +1799,27 @@ func TestOverseerRetryLeavesAnOperatorCancel(t *testing.T) {
 	}
 	if _, err := store.RetryTask(ctx, &overseerKeys.AttemptDigest, failed.ID, failed.Revision, AgentID{}, mustTime(t, 46), 0); err != nil {
 		t.Fatalf("overseer retry of a failure: %v", err)
+	}
+}
+
+func TestOverseerRetriesOrdinaryBlockedWorker(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	blocked, _ := NewBlockedProposal("temporary infrastructure failure")
+	store, finalizing := finalizingReleasedRun(t, RoleWorker, blocked)
+	defer store.Close()
+	terminal, err := finalizeTestRun(t, store, finalizing, 80)
+	if err != nil {
+		t.Fatal(err)
+	}
+	task, found, err := store.Task(ctx, terminal.TaskID)
+	if err != nil || !found {
+		t.Fatalf("blocked task = %+v, found=%v, err=%v", task, found, err)
+	}
+	overseerKeys := premiseOverseerKeys(t, store, terminal.ProjectID)
+	retried, err := store.RetryTask(ctx, &overseerKeys.AttemptDigest, task.ID, task.Revision, AgentID{}, mustTime(t, 100), 0)
+	if err != nil || retried.Status != TaskQueued {
+		t.Fatalf("ordinary blocked overseer retry = %+v, %v", retried, err)
 	}
 }
 
