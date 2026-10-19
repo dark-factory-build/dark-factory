@@ -672,15 +672,18 @@ test("a walking worker is drawn facing where they go, and only a westward walk i
   globalThis.cancelAnimationFrame = () => { pending = undefined; };
   let renderer;
   try {
-    await act(async () => { renderer = create(createElement(FactoryScene, { graph, appearance: scenic, workers, connected: true })); });
+    const helped = workers.map((worker, index) => index === 0 ? { ...worker, telemetry: { ...worker.telemetry, subagents: 3 } } : worker);
+    await act(async () => { renderer = create(createElement(FactoryScene, { graph, appearance: scenic, workers: helped, connected: true })); });
     const drawn = () => {
       const worker = renderer.root.findByProps({ "data-worker-id": workers[0].id });
       const sprite = worker.findAll((node) => node.type === "g" && typeof node.props.transform === "string" && node.props.transform.startsWith("scale("))[0];
-      return { action: worker.props["data-worker-action"], facing: worker.props["data-worker-facing"], transform: sprite.props.transform, frames: sprite.findAllByType("use").map((node) => node.props.href) };
+      return { action: worker.props["data-worker-action"], facing: worker.props["data-worker-facing"], transform: sprite.props.transform, frames: sprite.findAllByType("use").map((node) => node.props.href), companions: worker.findAll((node) => node.props["data-subagent-of"] === workers[0].id) };
     };
     const seen = new Set();
     const check = () => {
-      const { action, facing, transform, frames } = drawn();
+      const { action, facing, transform, frames, companions } = drawn();
+      assert.equal(companions.length, action === "walking" ? 0 : 3, `${action}: companions`);
+      if (action !== "walking") for (const companion of companions) assert.deepEqual(companion.findAllByType("use").map((node) => node.props.href), frames, `${action}: companion pose`);
       assert.equal(transform.includes("scale(-1 1)"), action === "walking" && facing === "west", `${action}/${facing}: ${transform}`);
       assert.equal(facing !== undefined, action === "walking");
       // Working the machine faces it, which from the floor's side is a back too.
@@ -692,7 +695,7 @@ test("a walking worker is drawn facing where they go, and only a westward walk i
     // There and back again covers both horizontal directions of the same route.
     // Across the floor and back, then to rest beside a machine.
     for (const where of [{ nodeId: "lib" }, { nodeId: "src" }, { nodeId: "lib", observedBayId: "lib-in" }, { nodeId: "lib" }, { location: "resting", activity: "idle", nodeId: undefined }]) {
-      await act(async () => { renderer.update(createElement(FactoryScene, { graph, appearance: scenic, workers: [{ ...workers[0], ...where }, workers[1]], connected: true })); });
+      await act(async () => { renderer.update(createElement(FactoryScene, { graph, appearance: scenic, workers: helped.map((worker, index) => index === 0 ? { ...worker, ...where } : worker), connected: true })); });
       for (let step = 0; step < 400 && pending !== undefined; step++) { const tick = pending; pending = undefined; clock += 40; await act(async () => { tick(clock); }); check(); }
       assert.notEqual(drawn().action, "walking", "the route ends");
     }
