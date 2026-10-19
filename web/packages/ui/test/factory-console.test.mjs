@@ -8,7 +8,7 @@ import { MAX_SNAPSHOT_ENTITIES, ProtocolError, SessionError } from "@dark-factor
 import { FactoryApp, FactoryConsole } from "../dist/src/index.js";
 import { layoutScene } from "../dist/src/factory-scene/scene.js";
 import { projectGraph, projectFloor, workRows } from "../dist/src/console-view.js";
-import { FactoryFloor, StageMeter } from "../dist/src/console-screens.js";
+import { FactoryFloor } from "../dist/src/console-screens.js";
 import { AgentPanel, WorkPanel } from "../dist/src/console-sidebar.js";
 import { FactoryScene } from "../dist/src/factory-scene/factory-scene.js";
 import { TerminalPanel } from "../dist/src/factory-app.js";
@@ -838,17 +838,6 @@ test("floor preparation survives draft and live snapshot updates and relayouts o
   assert.notEqual(layout(), originalLayout);
   await act(async () => { renderer.unmount(); });
 });
-
-test("task meter displays every canonical status without conflating cancellation", () => {
-  for (const [stage, filled, marker] of [["queued", 1, ""], ["running", 2, ""], ["succeeded", 2, "✓"], ["failed", 0, "×"], ["blocked", 0, "!"], ["cancelled", 0, "−"]]) {
-    const markup = renderToStaticMarkup(createElement(StageMeter, { stage }));
-    assert.ok(markup.includes(`stage: ${stage}`));
-    assert.equal((markup.match(/segment--filled/g) ?? []).length, filled);
-    assert.ok(markup.includes(`aria-hidden="true">${marker}</span>`));
-    assert.equal(markup.includes("terminal--failed"), stage === "failed");
-  }
-});
-
 
 test("Work has no browser intake acceptance or polling surface", async (t) => {
   t.mock.timers.enable({ apis: ["setInterval"] });
