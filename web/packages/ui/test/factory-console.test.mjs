@@ -414,7 +414,7 @@ test("an overseer pass is shown in Work", () => {
 test("a succeeded task linked to an open PR is in review with its PR cell", () => {
   const done = { ...fixtureState.tasks.get(ids.task), status: "succeeded" };
   const state = baseState({ tasks: new Map([[done.id, done]]), humanRequests: new Map() });
-  const pr = { visualId: "change:1", projectId: done.project_id, repository: "o/r", tasks: [done.id], missions: [], pullRequest: { number: 7, state: "open", title: "Ship", url: "https://github.com/o/r/pull/7", head: "a".repeat(40) }, review: { state: "pending" }, checks: [], deliveries: [], reviewers: [], completed: false, completedAt: 0, status: "open", nextAction: "" };
+  const pr = { visualId: "change:1", projectId: done.project_id, repository: "o/r", tasks: [done.id], missions: [], pullRequest: { number: 7, state: "open", title: "Ship", url: "https://github.com/o/r/pull/7", head: "a".repeat(40) }, review: { state: "pending" }, checks: [], deliveries: [], reviewers: [], completed: false, completedAt: 0, status: "open" };
   const markup = renderToStaticMarkup(createElement(WorkPanel, { state, rows: workRows(state, [pr]), ready: true }));
   assert.match(markup, /data-stage="in-review">in review/);
   assert.match(markup, /<a href="https:\/\/github.com\/o\/r\/pull\/7" target="_blank" rel="noreferrer">PR #7<\/a>/);
@@ -423,7 +423,7 @@ test("a succeeded task linked to an open PR is in review with its PR cell", () =
 });
 
 test("a task-less production row opens its pull request and keeps its stages", () => {
-  const pr = { visualId: "change:taskless", projectId: ids.project, repository: "o/r", tasks: [], missions: [], pullRequest: { number: 8, state: "open", title: "Taskless", url: "https://github.com/o/r/pull/8", head: "b".repeat(40) }, review: { state: "pending" }, checks: [], deliveries: [], reviewers: [], completed: false, completedAt: 0, status: "open", nextAction: "" };
+  const pr = { visualId: "change:taskless", projectId: ids.project, repository: "o/r", tasks: [], missions: [], pullRequest: { number: 8, state: "open", title: "Taskless", url: "https://github.com/o/r/pull/8", head: "b".repeat(40) }, review: { state: "pending" }, checks: [], deliveries: [], reviewers: [], completed: false, completedAt: 0, status: "open" };
   const markup = renderToStaticMarkup(createElement(WorkPanel, { state: fixtureState, rows: workRows(fixtureState, [pr]), ready: true }));
   assert.match(markup, /<a class="dfConsoleItem__taskTitle dfWorkRow__title" href="https:\/\/github.com\/o\/r\/pull\/8" target="_blank" rel="noreferrer">Taskless<\/a>/);
   assert.match(markup, /data-stage="in-review">in review/);

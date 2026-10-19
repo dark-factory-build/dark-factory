@@ -56,7 +56,6 @@ test("stale repository health blocks actionability but preserves historical revi
   assert.equal(machine.review.current, true);
   assert.equal(machine.review.allowed, false);
   assert.equal(machine.review.sourceFresh, false);
-  assert.match(machine.nextAction, /stale or unavailable/);
 });
 
 test("construction and PR with one visual identity remain one contraption", () => {
@@ -77,7 +76,6 @@ test("fresh repository reads cannot keep old active processes running", () => {
   const machine = view.contraptions[key];
   assert.equal(machine.checks[0].state, "stale");
   assert.equal(machine.reviewers[0].state, "stale");
-  assert.match(machine.nextAction, /unavailable or incomplete/);
 });
 
 
@@ -102,16 +100,15 @@ test("tied delivery timestamps never let success hide an unresolved attempt", ()
     for (const order of [[success, unresolved], [unresolved, success]]) {
       const view = deriveProductionView([pr, ...order]);
       assert.equal(view.contraptions[key].completed, false);
-      assert.match(view.contraptions[key].nextAction, /pending/);
-      assert.equal(view.deliveries["project\0owner/repo\0newer"].state, state);
+      assert.equal(view.contraptions[key].deliveries.find((delivery) => delivery.id === "newer").state, state);
     }
   }
 });
 
 
 test("re-reading an old running release receipt does not prove continuing installation activity", () => {
-  const view = deriveProductionView([record("delivery", "attempt", "", { destination: "host", state: "running", updated_at: 1, pull_requests: [] }, { observed_at: 700_000 })], 700_000);
-  assert.equal(view.deliveries["project\0owner/repo\0attempt"].state, "stale");
+  const view = deriveProductionView([record("pull_request", "7", "change:1", { number: 7, head, state: "merged", merge: head }), record("delivery", "attempt", "", { destination: "host", state: "running", updated_at: 1, pull_requests: [7] }, { observed_at: 700_000 })], 700_000);
+  assert.equal(view.contraptions[key].deliveries[0].state, "stale");
 });
 
 
@@ -119,11 +116,9 @@ test("in-progress membership excludes delivered and proven unchanged finished wo
   const make = (document) => Object.values(deriveProductionView([record("construction", "c", "change:c", document)]).contraptions)[0];
   const finished = make({ status: "succeeded", phase: "retained", has_changes: false });
   assert.equal(inProgressProduction(finished), false);
-  assert.match(finished.nextAction, /finished without a source change/);
   const unpublished = make({ status: "succeeded", phase: "retained", has_changes: true });
   assert.equal(inProgressProduction(unpublished), true);
   assert.deepEqual(productionStages(unpublished), ["Publication unrecorded"]);
-  assert.doesNotMatch(unpublished.nextAction, /in progress/);
   assert.equal(inProgressProduction(make({ status: "blocked", has_changes: false })), true);
   assert.equal(inProgressProduction(make({ status: "failed", has_changes: false })), true);
   assert.equal(inProgressProduction(make({ status: "cancelled", has_changes: true })), false);

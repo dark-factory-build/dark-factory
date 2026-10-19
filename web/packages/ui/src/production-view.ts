@@ -6,16 +6,14 @@ export type ProductionRecord = Readonly<{
   id: string;
   visual_id: string;
   observed_at: number;
-  links_overflow?: boolean;
   document: unknown;
   tasks: readonly string[];
   missions: readonly string[];
 }>;
 
-export type ProductionJob = Readonly<{ id: string; name: string; state: string; conclusion: string; url?: string }>;
 export type ProductionCheck = Readonly<{
   project_id?: string; repository: string; id: string; name: string; revision: string; scope: string;
-  state: string; conclusion: string; url?: string; pull_requests: readonly number[]; jobs: readonly ProductionJob[]; overflow: number;
+  state: string; conclusion: string; url?: string; pull_requests: readonly number[]; overflow: number;
 }>;
 export type ProductionDelivery = Readonly<{
   project_id?: string; repository: string; id: string; kind: string; destination: string; revision: string;
@@ -23,13 +21,12 @@ export type ProductionDelivery = Readonly<{
 }>;
 export type ProductionReviewer = Readonly<{
   project_id?: string; repository: string; id: string; number: number; head: string; name: string;
-  provider: string; state: string; url?: string; findings?: string;
+  provider: string; state: string; url?: string;
 }>;
 
 type PullRequest = Readonly<{
   number: number; title: string; url?: string; head: string; branch?: string; base?: string; state: string;
-  merge?: string; merge_queue?: string; merged_at?: string; review?: Readonly<{ head?: string; state?: string; url?: string; findings?: string }>;
-  next_action?: string;
+  merge?: string; merge_queue?: string; merged_at?: string; review?: Readonly<{ head?: string; state?: string }>;
 }>;
 type Construction = Readonly<{ title?: string; phase?: string; status?: string; head?: string; task_id?: string; blocked_reason?: string; has_changes?: boolean; needs_you?: boolean }>;
 type Scoped = Readonly<{ projectId: string; repository: string }>;
@@ -44,21 +41,16 @@ export type ProposedSource = Readonly<{
 export type ProductionContraption = Readonly<{
   source: ProposedSource;
   visualId: string; projectId: string; repository: string; pullRequest?: PullRequest; construction?: Construction;
-  tasks: readonly string[]; missions: readonly string[]; linksOverflow: boolean;
-  review: Readonly<{ head: string; state: string; current: boolean; allowed: boolean; sourceFresh: boolean; findings: string; url: string }>;
+  tasks: readonly string[]; missions: readonly string[];
+  review: Readonly<{ head: string; state: string; current: boolean; allowed: boolean; sourceFresh: boolean }>;
   checks: readonly (ProductionCheck & { applicable: boolean })[];
   deliveries: readonly (ProductionDelivery & { verified: boolean })[];
   reviewers: readonly ProductionReviewer[];
-  completed: boolean; completedAt: number; status: string; nextAction: string;
+  completed: boolean; completedAt: number; status: string;
   /** When its records were last observed: the snapshot's own clock. */
   observedAt: number;
 }>;
-export type ProductionView = Readonly<{
-  contraptions: Readonly<Record<string, ProductionContraption>>;
-  checks: Readonly<Record<string, ProductionCheck>>;
-  deliveries: Readonly<Record<string, ProductionDelivery>>;
-  reviewers: Readonly<Record<string, ProductionReviewer>>;
-}>;
+export type ProductionView = Readonly<{ contraptions: Readonly<Record<string, ProductionContraption>> }>;
 
 export const productionKey = (item: Pick<ProductionContraption, "projectId" | "repository" | "visualId">) => JSON.stringify([item.projectId, item.repository, item.visualId]);
 
@@ -132,33 +124,6 @@ function latestDestinations(deliveries: readonly ProductionContraption["deliveri
   }
   return [...latest.values()];
 }
-function nextAction(pr: PullRequest, review: ProductionContraption["review"], checks: readonly (ProductionCheck & { applicable: boolean })[], deliveries: readonly ProductionContraption["deliveries"][number][]) {
-  if (pr.state === "closed" && !pr.merge) return "Closed without merge.";
-  if (pr.state === "merged") return deliveries.length > 0 && latestDestinations(deliveries).every((delivery) => delivery.verified) ? "Delivery verified at all recorded destinations." : "Merged; delivery verification is pending.";
-  if (pr.next_action) return pr.next_action;
-  if (review.current && review.state === "block") return "Changes requested; inspect the review findings.";
-  if (!review.current) return review.head ? "Review is stale for the current head." : "Independent review is required.";
-  if (!review.sourceFresh) return "Production source observation is stale or unavailable.";
-  if (review.state !== "allow") return "Independent review is required.";
-  if (checks.some((check) => check.applicable && ["running", "in_progress", "queued", "waiting"].includes(check.state))) return "Current-head checks are running.";
-  if (checks.some((check) => check.applicable && ["unknown", "stale", "unavailable", "skipped", "notapplicable"].includes(check.state))) return "A current-head check is unavailable or incomplete.";
-  if (checks.some((check) => check.applicable && check.conclusion && check.conclusion !== "success")) return "A current-head check is not successful.";
-  return "Awaiting the next recorded publication observation.";
-}
-
-function constructionNextAction(doc: Record<string, unknown>) {
-  if (text(doc.blocked_reason)) return text(doc.blocked_reason);
-  if (doc.needs_you === true) return "Needs you: publish the completed Change.";
-  switch (text(doc.status)) {
-    case "running": return "Work is running.";
-    case "queued": return "Waiting for a worker.";
-    case "succeeded": return doc.has_changes === false ? "Work finished without a source change." : "Work finished; no linked publication is recorded.";
-    case "failed": return "Work failed; inspect the task result.";
-    case "cancelled": return "Work was cancelled.";
-    case "blocked": return "Work is blocked; inspect the task.";
-    default: return "Work state is unavailable.";
-  }
-}
 
 /** Shared queue membership and stage labels for the floor and inspector. */
 export function inProgressProduction(item: ProductionContraption): boolean {
@@ -197,9 +162,9 @@ export function deriveProductionView(records: readonly ProductionRecord[], now =
   for (const record of latest) {
     const scope = scoped(record), key = scopeKey(scope, record.id), document = object(record.document);
     if (record.kind === "repository") health.set(scopeKey(scope, "repository"), record);
-    if (record.kind === "check") checks[key] = { project_id: record.project_id, repository: record.repository, id: record.id, name: text(document.name), revision: text(document.revision), scope: text(document.scope), state: activityState(record, document.state, now), conclusion: text(document.conclusion), url: text(document.url), pull_requests: numbers(document.pull_requests), jobs: Array.isArray(document.jobs) ? document.jobs.map((job) => { const value = object(job); return { id: text(value.id), name: text(value.name), state: text(value.state), conclusion: text(value.conclusion), url: text(value.url) }; }) : [], overflow: typeof document.overflow === "number" ? document.overflow : 0 };
+    if (record.kind === "check") checks[key] = { project_id: record.project_id, repository: record.repository, id: record.id, name: text(document.name), revision: text(document.revision), scope: text(document.scope), state: activityState(record, document.state, now), conclusion: text(document.conclusion), url: text(document.url), pull_requests: numbers(document.pull_requests), overflow: typeof document.overflow === "number" ? document.overflow : 0 };
     if (record.kind === "delivery") deliveries[key] = { project_id: record.project_id, repository: record.repository, id: record.id, kind: text(document.kind), destination: text(document.destination), revision: text(document.revision), state: activityState({ ...record, observed_at: Number(document.updated_at) || record.observed_at }, document.state, now), url: text(document.url), pull_requests: numbers(document.pull_requests), phase: text(document.phase), reason: text(document.reason), updated_at: Number(document.updated_at) || 0, overflow: Number(document.overflow) || 0, verified_at: typeof document.verified_at === "number" ? document.verified_at : undefined };
-    if (record.kind === "reviewer") reviewers[key] = { project_id: record.project_id, repository: record.repository, id: record.id, number: Number(document.number) || 0, head: text(document.head), name: text(document.name), provider: text(document.provider), state: activityState(record, document.state, now), url: text(document.url), findings: text(document.findings) };
+    if (record.kind === "reviewer") reviewers[key] = { project_id: record.project_id, repository: record.repository, id: record.id, number: Number(document.number) || 0, head: text(document.head), name: text(document.name), provider: text(document.provider), state: activityState(record, document.state, now), url: text(document.url) };
   }
   const contraptions: Record<string, ProductionContraption> = {};
   const constructionRecords = latest.filter((record) => record.kind === "construction");
@@ -220,11 +185,11 @@ export function deriveProductionView(records: readonly ProductionRecord[], now =
     const pullDeliveries = pr ? Object.values(deliveries).filter((delivery) => (delivery.project_id ?? "") === item.scope.projectId && delivery.repository === item.scope.repository && delivery.pull_requests.includes(pr.number)).map((delivery) => ({ ...delivery, verified: verifiedDelivery(delivery) })) : [];
     const assigned = pr ? Object.values(reviewers).filter((reviewer) => (reviewer.project_id ?? "") === item.scope.projectId && reviewer.repository === item.scope.repository && reviewer.number === pr.number && reviewer.head === pr.head) : [];
     const review = pr?.review ?? {};
-    const reviewView = { head: text(review.head), state: text(review.state) || "unknown", current: reviewedSource && text(review.head) !== "" && text(review.head) === pr?.head, allowed: reviewedSource && sourceFresh && text(review.head) !== "" && text(review.head) === pr?.head && text(review.state) === "allow", sourceFresh, findings: text(review.findings), url: text(review.url) };
+    const reviewView = { head: text(review.head), state: text(review.state) || "unknown", current: reviewedSource && text(review.head) !== "" && text(review.head) === pr?.head, allowed: reviewedSource && sourceFresh && text(review.head) !== "" && text(review.head) === pr?.head && text(review.state) === "allow", sourceFresh };
     const closedUnmerged = pr?.state === "closed" && !pr.merge;
     const completed = closedUnmerged || pr?.state === "merged" && pullDeliveries.length > 0 && latestDestinations(pullDeliveries).every((delivery) => delivery.verified);
     const doc = construction ? object(construction.document) : {};
-    contraptions[key] = { source, visualId: item.visualId, projectId: item.scope.projectId, repository: item.scope.repository, construction: construction ? { title: text(doc.title), phase: text(doc.phase), status: text(doc.status), head: text(doc.head), task_id: text(doc.task_id), blocked_reason: text(doc.blocked_reason), has_changes: typeof doc.has_changes === "boolean" ? doc.has_changes : undefined, needs_you: doc.needs_you === true } : undefined, pullRequest: pr, tasks: [...new Set([...(construction?.tasks ?? []), ...(pull?.tasks ?? [])])], missions: [...new Set([...(construction?.missions ?? []), ...(pull?.missions ?? [])])], linksOverflow: Boolean(construction?.links_overflow || pull?.links_overflow), review: reviewView, checks: pullChecks, deliveries: pullDeliveries, reviewers: assigned, completed: Boolean(completed), completedAt: Date.parse(pr?.merged_at ?? "") || pull?.observed_at || 0, observedAt: Math.max(pull?.observed_at ?? 0, construction?.observed_at ?? 0), status: completed ? (closedUnmerged ? "closed-unmerged" : "delivered") : text(pr?.state) || text(doc.status) || text(doc.phase) || "construction", nextAction: pr ? nextAction(pr, reviewView, pullChecks, pullDeliveries) : constructionNextAction(doc) };
+    contraptions[key] = { source, visualId: item.visualId, projectId: item.scope.projectId, repository: item.scope.repository, construction: construction ? { title: text(doc.title), phase: text(doc.phase), status: text(doc.status), head: text(doc.head), task_id: text(doc.task_id), blocked_reason: text(doc.blocked_reason), has_changes: typeof doc.has_changes === "boolean" ? doc.has_changes : undefined, needs_you: doc.needs_you === true } : undefined, pullRequest: pr, tasks: [...new Set([...(construction?.tasks ?? []), ...(pull?.tasks ?? [])])], missions: [...new Set([...(construction?.missions ?? []), ...(pull?.missions ?? [])])], review: reviewView, checks: pullChecks, deliveries: pullDeliveries, reviewers: assigned, completed: Boolean(completed), completedAt: Date.parse(pr?.merged_at ?? "") || pull?.observed_at || 0, observedAt: Math.max(pull?.observed_at ?? 0, construction?.observed_at ?? 0), status: completed ? (closedUnmerged ? "closed-unmerged" : "delivered") : text(pr?.state) || text(doc.status) || text(doc.phase) || "construction" };
   }
-  return { contraptions, checks, deliveries, reviewers };
+  return { contraptions };
 }

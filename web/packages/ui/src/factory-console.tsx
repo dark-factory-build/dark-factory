@@ -81,8 +81,8 @@ export function FactoryConsole({
     humanRequests: new Map([...state.humanRequests].filter(([, request]) => request.project_id === projectId)),
   }, [state, projectId]);
   const ready = status === "ready";
-  const productionData = useProduction([...(scopedState?.projects.keys() ?? [])].sort(), ready ? onProjectContent : undefined);
-  const productionView = useMemo(() => deriveProductionView(productionData.records, Date.now()), [productionData.records]);
+  const productionRecords = useProduction([...(scopedState?.projects.keys() ?? [])].sort(), ready ? onProjectContent : undefined);
+  const productionView = useMemo(() => deriveProductionView(productionRecords, Date.now()), [productionRecords]);
   const productionItems = useMemo(() => Object.values(productionView.contraptions).sort((a, b) => Number(a.completed) - Number(b.completed) || (a.completed ? a.completedAt - b.completedAt : 0) || a.visualId.localeCompare(b.visualId)), [productionView]);
   const inProgressItems = useMemo(() => productionItems.filter(inProgressProduction), [productionItems]);
   const rows = useMemo(() => workRows(scopedState, inProgressItems), [scopedState, inProgressItems]);

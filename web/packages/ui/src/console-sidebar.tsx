@@ -6,7 +6,6 @@ import { agentActivity, type WorkRow } from "./console-view.js";
 import { productionStages } from "./production-view.js";
 import { AnswerControls } from "./console-interactions.js";
 import { SectionHeader, Status, formatTime } from "./console-kit.js";
-import type { PublishedRelease, RuntimeBuild } from "./production-data.js";
 
 export type TaskScope = { agent_id: string } | { project_id: string };
 type TaskCursor = { beforeUpdatedAtMs?: bigint; beforeTaskId?: string };
@@ -92,8 +91,7 @@ export function WorkPanel({
   </section>;
 }
 
-/** Two observations and one command. Nothing here installs anything, and a
- * missing release is no answer from GitHub rather than proof of being current. */
+/** The selected question: its text, the answer controls and the one stop command. */
 export function HumanRequestPanel({
   selected,
   onReplyChange,
