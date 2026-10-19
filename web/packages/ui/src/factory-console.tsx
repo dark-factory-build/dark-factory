@@ -131,7 +131,7 @@ export function FactoryConsole({
                 <span className={`dfFactoryConsole__statusDot dfFactoryConsole__statusDot--${status}`} aria-hidden="true" />
                 {STATUS_LABELS[status]}
               </p>}
-            </>} changes={productionItems} onProjectContent={onProjectContent} onOpenTasks={ready ? setProjectId : undefined} projectId={projectId} selectedAgentId={liveAgent?.id} state={scopedState} graphs={graphs} graphErrors={graphErrors} runPaths={runPaths} lastRunPaths={lastRunPaths} onSelectAgent={ready ? onSelectAgent : undefined} onSelectHumanRequest={ready ? pickRequest : undefined} connected={ready} />
+            </>} changes={productionItems} onProjectContent={onProjectContent} selectedAgentId={liveAgent?.id} state={scopedState} graphs={graphs} graphErrors={graphErrors} runPaths={runPaths} lastRunPaths={lastRunPaths} onSelectAgent={ready ? onSelectAgent : undefined} onSelectHumanRequest={ready ? pickRequest : undefined} connected={ready} />
           </section>
 
           {/* Work (decisions first) always shows; the selected agent's terminal joins it below. */}

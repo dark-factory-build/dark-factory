@@ -237,7 +237,7 @@ test("a standing specialist is known by what it does on the floor, never by a sy
   assert.equal(worker(planningSpecialistID).specialist.stage, "ready");
   assert.match(worker(planningSpecialistID).specialist.next, /^Next review .* \(scheduled\)$/);
   assert.equal(worker(fixtureFloorState.tasks.get("31".repeat(16)).assigned_agent_id).specialist, undefined, "an ordinary worker is not one");
-  const markup = renderToStaticMarkup(createElement(FactoryScene, { graph: scene.graph, workers: scene.workers, tasks: scene.tasks, onOpenTasks() {} }));
+  const markup = renderToStaticMarkup(createElement(FactoryScene, { graph: scene.graph, workers: scene.workers, tasks: scene.tasks }));
   // Its review is inspection, board in hand; between reviews it is an ordinary sprite. Nothing is drawn over either.
   const sprite = (id) => { const from = markup.slice(markup.indexOf(`data-worker-id="${id}"`)); return from.slice(0, from.indexOf("</g></g>")); };
   assert.match(sprite(operationsSpecialistID), /person\.skin\.\d\.inspect\.\d.*person\.held\.(clipboard|tablet)\./);
@@ -251,7 +251,7 @@ test("a standing specialist is known by what it does on the floor, never by a sy
   assert.match(markup, /data-tooltip="planning · Planning specialist · ready: between reviews[^\"]*Asleep in the break room until its next review/);
   // Its running sub-agents work beside it as smaller sprites, and its tooltip counts them.
   const telemetry = { tokens_in: 1, tokens_out: 1, cost_micro_usd: 0, tool_calls: 1, api_requests: 1, subagents: 2 };
-  const helped = renderToStaticMarkup(createElement(FactoryScene, { graph: scene.graph, workers: scene.workers.map((item) => item.id === operationsSpecialistID ? { ...item, telemetry } : item), tasks: scene.tasks, onOpenTasks() {} }));
+  const helped = renderToStaticMarkup(createElement(FactoryScene, { graph: scene.graph, workers: scene.workers.map((item) => item.id === operationsSpecialistID ? { ...item, telemetry } : item), tasks: scene.tasks }));
   assert.equal(helped.match(new RegExp(`data-subagent-of="${operationsSpecialistID}"`, "g"))?.length, 2);
   assert.match(helped, /aria-label="Sub-agent of operations, read-only sweep"[^>]*><use href="#df-frame-person\.skin\./);
   assert.match(helped, /2 sub-agents running/);

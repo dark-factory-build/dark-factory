@@ -110,6 +110,16 @@ test("one screen keeps Factory and the operator panels together", () => {
   assert.equal(markup.includes("BUILDING STATE UNAVAILABLE"), false);
 });
 
+test("the floor's work tray reads the queue and is no tab stop, with Work beside it at every width", () => {
+  const markup = render();
+  assert.match(markup, /data-floor-inbox="(\d+)" role="img" aria-label="Work · (\1 queued|queue is empty)" data-tooltip="Work · \2" transform=/);
+  assert.doesNotMatch(markup, /data-floor-inbox="\d+"[^>]*(role="button"|tabindex|Open Work)/, "Work is always on screen: the tray opens nothing");
+  assert.match(markup, /aria-label="Work"/);
+  // The same markup serves both widths; only the layout rules differ, and each keeps the floor in its own clipped pane beside or above Work.
+  const css = readFileSync(new URL("../src/factory-console.css", import.meta.url), "utf8");
+  for (const query of ["@media (min-width: 1025px)", "@media (max-width: 1024px)"]) assert.match(css.slice(css.indexOf(query)), /^[^}]*\{[\s\S]*?\.dfConsoleLayout__left \{ min-height: 0; overflow: hidden; \}/, query);
+});
+
 test("a selected decision names the action and keeps one collapse control", () => {
   const markup = render({ selectedHumanRequest: selectedRequest(), onCloseHumanRequest: () => {}, onReplyHumanRequest: () => {}, onCancelHumanRequest: () => {} });
   assert.match(markup, /<h3>Decision needed<\/h3>/);

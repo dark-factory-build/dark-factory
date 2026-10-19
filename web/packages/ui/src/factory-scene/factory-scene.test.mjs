@@ -534,8 +534,8 @@ test("resting workers take fair, uninterrupted turns at the break-room furniture
   assert.ok(workerFrames(crowd[0], { action: "still", frame: 0, at: 0 }, undefined, "tasks").includes("person.held.clipboard.chest"), "tasks");
   // The floor draws exactly the furniture the nook has; with the scenery off, only the implements, never the coffee.
   assert.equal((render().match(/data-break-room=/g) ?? []).length, breakRoomNook(floorFor(graph)).furniture.length);
-  assert.equal(breakRoomNook(floorFor(graph)).furniture.length, 2, "the shelf remains beside the coffee");
-  assert.deepEqual(render({ appearance: { scenery: "off", animation: "on" }, onOpenTasks() {} }).match(/data-break-room="\w+"/g), ['data-break-room="shelf"', 'data-break-room="tasks"']);
+  assert.equal(breakRoomNook(floorFor(graph)).furniture.length, 3, "the shelf and the tray remain beside the coffee");
+  assert.deepEqual(render({ appearance: { scenery: "off", animation: "on" } }).match(/data-break-room="\w+"/g), ['data-break-room="shelf"', 'data-break-room="tasks"']);
 });
 
 test("a floor mounted late still starts seated, then someone gets up, stands at the furniture, and comes back", async () => {
@@ -801,15 +801,16 @@ test("stationary tasks link the existing queue and questions", () => {
     status: index === 0 ? "running" : "queued",
     humanRequestIds: index === 0 ? ["question-1"] : [],
   }));
-  const markup = render({ tasks, onSelectHumanRequest() {}, onOpenTasks() {} });
+  const markup = render({ tasks, onSelectHumanRequest() {} });
   assert.equal((markup.match(/data-floor-inbox="10"/g) ?? []).length, 1);
-  // The tray is a distinct, keyboard reachable route into the existing Work view.
-  assert.match(markup, /data-floor-inbox="10"[^>]*aria-label="Open Work"[^>]*role="button"[^>]*tabindex="0"/);
+  // The tray is a reading of the queue, never a control: Work is always on screen, so there is nothing to open and no tab stop.
+  assert.match(markup, /data-floor-inbox="10" role="img" aria-label="Work · 10 queued" data-tooltip="Work · 10 queued" transform=/);
+  assert.doesNotMatch(markup, /data-floor-inbox="10"[^>]*(role="button"|tabindex)/);
   const pile = (html) => html.match(/data-floor-inbox="\d+"[\s\S]*?<\/g><\/g>/)[0].match(/fill="#e4dcc0"/g)?.length ?? 0;
-  assert.deepEqual([pile(markup), pile(render({ tasks: tasks.slice(0, 3), onOpenTasks() {} })), pile(render({ tasks: [tasks[0]], onOpenTasks() {} }))], [3, 2, 0], "the pile follows the queue, up to three papers");
-  // The tray is there wherever the floor can open Work: it stays when nothing waits, and says so.
-  const idle = render({ tasks: [tasks[0]], onOpenTasks() {} });
-  assert.match(idle, /data-floor-inbox="0"/);
+  assert.deepEqual([pile(markup), pile(render({ tasks: tasks.slice(0, 3) })), pile(render({ tasks: [tasks[0]] }))], [3, 2, 0], "the pile follows the queue, up to three papers");
+  // The tray stays when nothing waits, and says so.
+  const idle = render({ tasks: [tasks[0]] });
+  assert.match(idle, /data-floor-inbox="0" role="img" aria-label="Work · queue is empty"/);
   assert.doesNotMatch(idle, />QUEUE/, "the tray says nothing; MERGE QUEUE is the outbound line's station");
   assert.match(markup, /data-human-request-id="question-1"/);
   assert.match(markup, /aria-label="Question from Builder"/);
@@ -821,16 +822,15 @@ test("stationary tasks link the existing queue and questions", () => {
   assert.doesNotMatch(noObservation, /data-human-request-id=/);
 });
 
-test("the shelf remains passive scenery while the task tray opens its panel", () => {
-  const markup = render({ projectId: "project-a", onOpenTasks() {} });
+test("the shelf remains passive scenery and the task tray is signed but opens nothing", () => {
+  const markup = render({});
   assert.doesNotMatch(markup, /data-floor-tray-desk|data-common-table/);
-  assert.equal((markup.match(/>WORK</g) ?? []).length, 1, "only the live-work implement is signed");
-  assert.match(markup, /data-break-room="tasks" data-floor-inbox="0"[^>]*aria-label="Open Work"[^>]*role="button"[^>]*tabindex="0"/);
-  assert.match(markup, /data-break-room="shelf"(?![^>]*role="button")/);
+  assert.equal((markup.match(/>WORK</g) ?? []).length, 1, "only the work implement is signed");
+  assert.match(markup, /data-break-room="tasks" data-floor-inbox="0" role="img" aria-label="Work · queue is empty"/);
+  assert.doesNotMatch(markup, /data-break-room="(tasks|shelf)"[^>]*(role="button"|tabindex|Open Work)/);
 });
 
-test("the floor task hit areas invoke the existing Work and worker routes", async () => {
-  let tasksOpened;
+test("the floor hit areas invoke the worker route; the tray has none", async () => {
   let conversationWorker;
   const task = { id: "task-peer", agentId: "worker-b", projectId: "project", title: "Peer work", status: "running", humanRequestIds: [] };
   let renderer;
@@ -838,19 +838,15 @@ test("the floor task hit areas invoke the existing Work and worker routes", asyn
     renderer = create(createElement(FactoryScene, {
       graph,
       appearance: scenic,
-      projectId: "project",
       workers,
       tasks: [task],
       peerQuestions: [{ id: "peer-1", source_task_id: "task-peer", target_task_id: "task-other", answered: false, revision: 1n }],
-      onOpenTasks: (projectId) => { tasksOpened = projectId; },
       onSelectWorker: (workerId) => { conversationWorker = workerId; },
       connected: false,
     }));
   });
   const tray = renderer.root.findByProps({ "data-floor-inbox": 0 });
-  assert.equal(tray.findAll((node) => node.props.className === "dfFactoryScene__focus").length, 1, "one focus ring for the task tray");
-  await act(async () => tray.props.onClick());
-  assert.equal(tasksOpened, "project");
+  assert.deepEqual([tray.props.onClick, tray.props.onKeyDown, tray.props.tabIndex, tray.props.role, tray.findAll((node) => node.props.className === "dfFactoryScene__focus").length], [undefined, undefined, undefined, "img", 0], "the tray is read, never pressed: no handler, no tab stop, no focus ring");
   await act(async () => renderer.root.findByProps({ "data-peer-question-count": 1 }).props.onClick());
   assert.equal(conversationWorker, "worker-b", "a peer question opens its worker's terminal, where it is answered");
   await act(async () => renderer.unmount());
