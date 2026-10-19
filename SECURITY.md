@@ -37,26 +37,19 @@ operator for every purpose; that is the same-user boundary, not a pairing one.
 The control after the fact is revocation, through `factoryctl web list-clients`
 and `web revoke` or the console; a boot holds at most 32 live challenges, each
 expiring after five minutes. `factoryctl web status` reports the transport state
-and the live challenge count. A remote invitation is minted only by a client
-holding the full loopback grant, whose terminal_input bit a remote grant never
-carries, so a paired phone can never invite another phone. Such a console does
-consume the same cap, so the daemon bounds it to four invitations per five
-minutes: even a console looping the request holds at most four of the 32 slots,
-and `factoryctl web pair` can always still mint one. Revoking any client
-invalidates every live pairing challenge, so a link minted before the revocation
-cannot pair after it.
+and the live challenge count. A paired browser cannot mint a pairing link for
+another client. Revoking any client invalidates every live pairing challenge,
+so a link minted before the revocation cannot pair after it.
 
 ### Hosted-origin compromise response
 
 A compromised hosted origin or same-origin dependency can exercise every
 capability granted to a paired browser client. Stop trusting the hosted page,
 revoke every paired browser client through the owner-authenticated local API,
-and prove that no browser connection remains. A compromised console holding the
-full loopback grant can mint remote invitations, but no more than four per five
-minutes, so it can neither exhaust the challenge cap nor deny `factoryctl web
-pair`; a compromised remote client could not have minted one at all. Revocation
-also invalidates every live pairing challenge, so an invitation minted before it
-cannot pair afterwards. If revocation
+and prove that no browser connection remains. A compromised console cannot mint
+a pairing link, so it can neither exhaust the challenge cap nor deny
+`factoryctl web pair`. Revocation also invalidates every live pairing challenge,
+so a link minted before it cannot pair afterwards. If revocation
 cannot prove connection cleanup, quiesce the browser runtime or stop the
 service and keep it stopped until cleanup is resolved. Only then remediate and
 republish the exact reviewed hosted artifact. Re-pair clients only after that

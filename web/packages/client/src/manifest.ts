@@ -33,8 +33,6 @@ export const MAX_TERMINAL_ROWS = 4096;
 export const MAX_TERMINAL_COLS = 4096;
 export const MAX_AGENT_MODEL_BYTES = 128;
 export const MAX_MODEL_SOURCE_BYTES = 1024;
-export const MAX_REMOTE_INVITE_LINK_BYTES = 8192;
-export const MAX_REMOTE_INVITE_SVG_BYTES = 32768;
 export const MAX_IDLE_AFTER_SECONDS = 604800;
 export const MAX_IDLE_RUN_BUDGET = 1000000;
 
@@ -82,7 +80,6 @@ export const CONTROL_MANIFEST = [
   { type: "BROWSER_CLIENTS_GET", direction: "client" }, { type: "BROWSER_CLIENTS", direction: "server" },
   { type: "BROWSER_CLIENT_REVOKE", direction: "client" }, { type: "BROWSER_CLIENT_REVOKE_RESULT", direction: "server" },
   { type: "GITHUB_CONNECTION", direction: "client" }, { type: "GITHUB_CONNECTION_RESULT", direction: "server" },
-  { type: "REMOTE_INVITE", direction: "client" }, { type: "REMOTE_INVITE_RESULT", direction: "server" },
   { type: "PUSH_SUBSCRIBE", direction: "client" }, { type: "PUSH_SUBSCRIBE_RESULT", direction: "server" },
   { type: "ERROR", direction: "both" },
   { type: "PROJECT_CONTENT", direction: "client" }, { type: "PROJECT_CONTENT_RESULT", direction: "server" },

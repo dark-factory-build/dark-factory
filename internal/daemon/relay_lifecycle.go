@@ -13,6 +13,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/dark-factory-build/dark-factory/internal/api"
 	"github.com/dark-factory-build/dark-factory/internal/browser"
 	"github.com/dark-factory-build/dark-factory/internal/install"
 	"github.com/dark-factory-build/dark-factory/internal/kernel"
@@ -242,4 +243,35 @@ func (daemon *Daemon) revokeRelayClient(id kernel.BrowserClientID) {
 	var raw [relayhost.ControllerIDSize]byte
 	copy(raw[:], id.Bytes())
 	runtime.connector.Revoke(raw)
+}
+
+// RemoteStatus is the bounded operator view of the relay connector.
+func (daemon *Daemon) RemoteStatus() (api.RemoteStatus, error) {
+	relay, err := daemon.relayRuntime()
+	if err != nil {
+		return api.RemoteStatus{}, err
+	}
+	status := relay.Status()
+	return api.RemoteStatus{
+		NodeID:      status.NodeID,
+		RelayOrigin: relay.relayOrigin,
+		Connected:   status.Connected,
+		Sessions:    status.Sessions,
+	}, nil
+}
+
+// relayRuntime returns the registered relay connector. A factory started
+// without a relay origin has no remote surface at all, which is a refusal
+// rather than an empty projection: there is no node to invite anyone to.
+func (daemon *Daemon) relayRuntime() (*RelayRuntime, error) {
+	if daemon == nil || daemon.store == nil {
+		return nil, fmt.Errorf("%w: invalid daemon", kernel.ErrInvalidValue)
+	}
+	daemon.browserMu.Lock()
+	relay := daemon.relay
+	daemon.browserMu.Unlock()
+	if relay == nil || relay.connector == nil || relay.identity.NodeID() == "" || relay.relayOrigin == "" || relay.browserAddress == "" {
+		return nil, fmt.Errorf("%w: the relay is not enabled", kernel.ErrNotFound)
+	}
+	return relay, nil
 }

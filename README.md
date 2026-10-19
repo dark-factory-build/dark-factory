@@ -29,7 +29,7 @@ factory](docs/development/OPERATIONAL_FACTORY.md).*
 - **Contain the work.** Every worker attempt gets its own Git worktree, and every attempt gets a private runtime home and temp directory. Codex and Claude Code commands run in an OS sandbox whose only writable places are those, the repository's Git directory (read-only for an overseer), and the shared local CI lease when one exists. Inside your home directory it can read only what the factory granted it, such as those places and the configured toolchain.
 - **Set the budget.** Cap a project by runs and by recorded provider tokens: at either ceiling it admits nothing new and running work finishes. Cap each run's wall-clock time: a run that passes it is cancelled.
 - **Choose the model per worker.** Codex and Claude Code workers share one floor, each with its own provider, model and effort.
-- **Step away from the browser.** Work continues while your Mac stays awake. With remote access configured, a paired phone can steer the same factory.
+- **Step away from the browser.** Work continues while your Mac stays awake.
 
 ## Requirements
 

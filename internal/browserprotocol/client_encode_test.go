@@ -43,9 +43,6 @@ func EncodeTerminalLeaseRenew(id string, value TerminalLeaseRenew) ([]byte, erro
 func EncodeTerminalDetach(id string, value TerminalDetach) ([]byte, error) {
 	return encodeControl(TypeTerminalDetach, id, value)
 }
-func EncodeRemoteInvite(id string, value RemoteInvite) ([]byte, error) {
-	return encodeControl(TypeRemoteInvite, id, value)
-}
 func EncodePushSubscribe(id string, value PushSubscribe) ([]byte, error) {
 	return encodeControl(TypePushSubscribe, id, value)
 }

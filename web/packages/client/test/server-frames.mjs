@@ -19,5 +19,4 @@ export function encodeTerminalDetached(id, body) { return encodeServerControl({ 
 export function encodeTerminalInputResult(id, body) { return encodeServerControl({ type: "TERMINAL_INPUT_RESULT", id, body }); }
 export function encodeTerminalExit(id, body) { return encodeServerControl({ type: "TERMINAL_EXIT", id, body }); }
 export function encodeTerminalReset(id, body) { return encodeServerControl({ type: "TERMINAL_RESET", id, body }); }
-export function encodeRemoteInviteResult(id, body) { return encodeServerControl({ type: "REMOTE_INVITE_RESULT", id, body }); }
 export function encodeServerError(body, id) { return encodeServerControl({ type: "ERROR", ...(id === undefined ? {} : { id }), body }); }

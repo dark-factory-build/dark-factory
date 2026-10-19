@@ -618,17 +618,6 @@ func (current *connection) dispatch(frame browserprotocol.ControlFrame) bool {
 		}
 		payload, err = browserprotocol.EncodeBrowserClientRevokeResult(frame.ID, result)
 
-	case browserprotocol.RemoteInvite:
-		if current.server.taskBackend == nil {
-			err = ErrUnauthorized
-			break
-		}
-		invitation, backendErr := current.server.taskBackend.RemoteInvite(ctx, current.principal.ClientID)
-		if backendErr != nil {
-			err = backendErr
-			break
-		}
-		payload, err = browserprotocol.EncodeRemoteInviteResult(frame.ID, invitation)
 	case browserprotocol.TelemetryIngest:
 		if current.server.taskBackend == nil {
 			err = ErrUnauthorized

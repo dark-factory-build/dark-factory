@@ -16,7 +16,6 @@ import {
   type HumanRequestReplyResultBody,
   type PairResultFrame,
   type PushSubscribeBody,
-  type RemoteInviteResultBody,
   type ServerControlFrame,
   type StateChangedFrame,
   type StateSnapshotFrame,
@@ -154,8 +153,6 @@ export type RepositoryView = Readonly<RepositoryItem>;
 export type ProjectCreateResult = Readonly<{ projectId: string; revision: bigint }>;
 export type GitHubConnectionResult = Readonly<GitHubConnectionResultBody>;
 
-/** One minted remote pairing invitation and the code that carries it. */
-export type RemoteInvite = Readonly<{ link: string; expiresAtMs: bigint; svg: string }>;
 export type HumanRequestCancelRunDescriptor = Readonly<{
   requestId: string;
   runId: string;
@@ -340,22 +337,6 @@ export class BrowserSession {
   revokeBrowserClient(request: { clientId: string; expectedRevision: bigint }): Promise<Readonly<{ clientId: string; revision: bigint }>> {
     if (!validDynamicID(request.clientId) || request.clientId === this.#clientId || request.expectedRevision < 1n || request.expectedRevision > MAX_SQLITE_INTEGER) return Promise.reject(new SessionError("invalid_request"));
     return this.#accountRequest("BROWSER_CLIENT_REVOKE_RESULT", CAPABILITIES.administration, "browser-client-revoke", (id) => encodeClientControl({ type: "BROWSER_CLIENT_REVOKE", id, body: { client_id: request.clientId, expected_revision: request.expectedRevision } }), { accountId: request.clientId, expectedRevision: request.expectedRevision });
-  }
-
-  /** Mints one remote pairing invitation. The mint is never retried: a failed
-   * request is reported and the operator asks for another. It needs the full
-   * loopback grant, whose terminal_input bit a remote grant never carries, so
-   * a remote controller cannot propagate its own pairing. */
-  inviteRemote(): Promise<RemoteInvite> {
-    try { this.#ensureLive(); } catch (error) { return Promise.reject(error); }
-    if (!this.#authenticated) return Promise.reject(new SessionError("unauthorized"));
-    const loopbackGrant = CAPABILITIES.human_actions | CAPABILITIES.terminal_input;
-    if ((this.#capabilities & loopbackGrant) !== loopbackGrant) return Promise.reject(new SessionError("unauthorized"));
-    if (this.#requests.size >= MAX_OUTSTANDING_REQUESTS) return Promise.reject(new SessionError("rate_limited"));
-    const id = this.#nextID("remote-invite");
-    let payload: string;
-    try { payload = encodeClientControl({ type: "REMOTE_INVITE", id, body: {} }); } catch (error) { return Promise.reject(error); }
-    return this.#track(id, { kind: "REMOTE_INVITE_RESULT" }, payload);
   }
 
   /** Hands the factory this device's alert subscription. Observing is all it
@@ -650,10 +631,6 @@ export class BrowserSession {
     }
     if (frame.type === "AGENT_UPDATE_RESULT" || frame.type === "TASK_UPDATE_RESULT" || frame.type === "OPERATIONAL_GRAPH" || frame.type === "RUN_PATHS") {
       this.#consoleResult(frame);
-      return;
-    }
-    if (frame.type === "REMOTE_INVITE_RESULT") {
-      this.#inviteResult(frame.body, frame.id);
       return;
     }
     if (frame.type === "PROJECT_CONTENT_RESULT" || frame.type === "ACCOUNTS" || frame.type === "ACCOUNT_LINK_RESULT" || frame.type === "BROWSER_CLIENTS" || frame.type === "BROWSER_CLIENT_REVOKE_RESULT" || frame.type === "PROJECT_CREATE_RESULT" || frame.type === "REPOSITORIES") {
@@ -1015,11 +992,6 @@ export class BrowserSession {
     if (frame.type === "ACCOUNTS") { this.#requests.delete(frame.id); pending.resolve(Object.freeze({ accounts: frame.body.accounts.map((account) => Object.freeze({ ...account })), ...(frame.body.next_offset === undefined ? {} : { next_offset: frame.body.next_offset }) }) as never); return; }
     this.#requests.delete(frame.id);
     pending.resolve(Object.freeze({ accountId: frame.body.account_id, revision: frame.body.revision }) as never);
-  }
-
-  #inviteResult(body: RemoteInviteResultBody, id: string): void {
-    this.#pending(id, "REMOTE_INVITE_RESULT");
-    this.#settle(id, Object.freeze({ link: body.link, expiresAtMs: body.expires_at_ms, svg: body.svg }));
   }
 
   #mintTarget(descriptor: TerminalTargetDescriptor): TerminalTarget {

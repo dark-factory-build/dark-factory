@@ -4,12 +4,12 @@
 // one build, so a browser always runs the console its daemon was built with.
 import { createElement } from "react";
 import { createRoot } from "react-dom/client";
-import { FactoryApp, RemoteApp } from "./src/index.js";
+import { FactoryApp } from "./src/index.js";
 
 export * from "./src/index.js";
 export { createElement, createRoot };
 
-const views = { factory: FactoryApp, remote: RemoteApp };
+const views = { factory: FactoryApp };
 
 /** Renders one view into root with the console's own stylesheet. */
 export function mount(root, view, props = {}) {
