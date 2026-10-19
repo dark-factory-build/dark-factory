@@ -801,16 +801,14 @@ test("stationary tasks link the existing queue and questions", () => {
     status: index === 0 ? "running" : "queued",
     humanRequestIds: index === 0 ? ["question-1"] : [],
   }));
-  const markup = render({ tasks, onSelectTask() {}, onSelectHumanRequest() {}, onOpenTasks() {} });
+  const markup = render({ tasks, onSelectHumanRequest() {}, onOpenTasks() {} });
   assert.equal((markup.match(/data-floor-inbox="10"/g) ?? []).length, 1);
   // The tray is a distinct, keyboard reachable route into the existing Work view.
   assert.match(markup, /data-floor-inbox="10"[^>]*aria-label="Open Work"[^>]*role="button"[^>]*tabindex="0"/);
-  // Selecting queued work in the panel still lights its pile on the floor.
-  assert.match(render({ tasks, selectedTaskId: "task-1", onSelectTask() {}, onOpenTasks() {} }), /data-floor-inbox="10"[\s\S]*?stroke="#80ddff"/);
   const pile = (html) => html.match(/data-floor-inbox="\d+"[\s\S]*?<\/g><\/g>/)[0].match(/fill="#e4dcc0"/g)?.length ?? 0;
   assert.deepEqual([pile(markup), pile(render({ tasks: tasks.slice(0, 3), onOpenTasks() {} })), pile(render({ tasks: [tasks[0]], onOpenTasks() {} }))], [3, 2, 0], "the pile follows the queue, up to three papers");
   // The tray is there wherever the floor can open Work: it stays when nothing waits, and says so.
-  const idle = render({ tasks: [tasks[0]], onSelectTask() {}, onOpenTasks() {} });
+  const idle = render({ tasks: [tasks[0]], onOpenTasks() {} });
   assert.match(idle, /data-floor-inbox="0"/);
   assert.doesNotMatch(idle, />QUEUE/, "the tray says nothing; MERGE QUEUE is the outbound line's station");
   assert.match(markup, /data-human-request-id="question-1"/);
@@ -831,9 +829,9 @@ test("the shelf remains passive scenery while the task tray opens its panel", ()
   assert.match(markup, /data-break-room="shelf"(?![^>]*role="button")/);
 });
 
-test("the floor task hit area invokes the existing task route", async () => {
+test("the floor task hit areas invoke the existing Work and worker routes", async () => {
   let tasksOpened;
-  let conversationTask;
+  let conversationWorker;
   const task = { id: "task-peer", agentId: "worker-b", projectId: "project", title: "Peer work", status: "running", humanRequestIds: [] };
   let renderer;
   await act(async () => {
@@ -845,7 +843,7 @@ test("the floor task hit area invokes the existing task route", async () => {
       tasks: [task],
       peerQuestions: [{ id: "peer-1", source_task_id: "task-peer", target_task_id: "task-other", answered: false, revision: 1n }],
       onOpenTasks: (projectId) => { tasksOpened = projectId; },
-      onSelectTask: (taskId) => { conversationTask = taskId; },
+      onSelectWorker: (workerId) => { conversationWorker = workerId; },
       connected: false,
     }));
   });
@@ -854,7 +852,7 @@ test("the floor task hit area invokes the existing task route", async () => {
   await act(async () => tray.props.onClick());
   assert.equal(tasksOpened, "project");
   await act(async () => renderer.root.findByProps({ "data-peer-question-count": 1 }).props.onClick());
-  assert.equal(conversationTask, "task-peer");
+  assert.equal(conversationWorker, "worker-b", "a peer question opens its worker's terminal, where it is answered");
   await act(async () => renderer.unmount());
 });
 

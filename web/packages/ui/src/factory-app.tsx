@@ -18,7 +18,6 @@ export type FactoryAppProps = {
 /** Complete browser application lifecycle; hosts only render this component. */
 export function FactoryApp({ onStatusChange, browserPort }: FactoryAppProps = {}) {
   const [snapshot, setSnapshot] = useState<FactoryAppSnapshot>(INITIAL_SNAPSHOT);
-  const [selectedTaskId, setSelectedTaskId] = useState<string>();
   const browser = useMemo(() => browserEndpoint(browserPort), [browserPort]);
   const owner = useRef<FactoryAppController | undefined>(undefined);
   const defaultedController = useRef<FactoryAppController | undefined>(undefined);
@@ -83,8 +82,6 @@ export function FactoryApp({ onStatusChange, browserPort }: FactoryAppProps = {}
   );
   return (
     <FactoryConsole
-      selectedTaskId={selectedTaskId}
-      onSelectTask={setSelectedTaskId}
       {...snapshot}
       onSelectAgent={(agent) => owner.current?.selectAgent(agent)}
       onProjectContent={(operation, input) => owner.current?.projectContent(operation, input) ?? Promise.reject(new Error("closed"))}
