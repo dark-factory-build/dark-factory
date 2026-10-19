@@ -485,12 +485,10 @@ func sendBackTask(ctx context.Context, connection *sql.Conn, task Task, head, no
 	return updated, nil
 }
 
-// taskEndedAutomatically holds while task t's current end is automatic: a
-// failure, a run-limit cancel of the run at its work revision, or a blocked
-// expiry recorded at its row revision. Retries and overseer wakes share it.
+const taskLatestPremiseDispute = `EXISTS (SELECT 1 FROM runs AS r WHERE r.task_id = t.id AND r.phase = 'terminal' AND r.id = (SELECT latest.id FROM runs AS latest WHERE latest.task_id = t.id AND latest.phase = 'terminal' ORDER BY latest.terminal_at_ms DESC, latest.id DESC LIMIT 1) AND lower(ltrim(COALESCE(r.terminal_detail, ''), char(9)||char(10)||char(12)||char(13)||' ')) LIKE 'premise not reproduced%')`
 const taskEndedAutomatically = `(t.status = 'failed' OR t.status = 'cancelled' AND (
 	EXISTS (SELECT 1 FROM task_automatic_events AS e WHERE e.task_id = t.id AND e.task_revision = t.revision AND e.kind = 'blocked_expired')
-	OR EXISTS (SELECT 1 FROM runs AS r WHERE r.task_id = t.id AND r.admitted_task_work_revision = t.work_revision AND r.terminal_kind = 'cancelled' AND r.terminal_detail = '` + RunLimitDetail + `')))`
+	OR EXISTS (SELECT 1 FROM runs AS r WHERE r.task_id = t.id AND r.admitted_task_work_revision = t.work_revision AND r.terminal_kind = 'cancelled' AND r.terminal_detail = '` + RunLimitDetail + `'))) AND NOT (` + taskLatestPremiseDispute + `)`
 
 // taskIssueWithdrawn holds while task t's intake receipt is withdrawn.
 const taskIssueWithdrawn = `EXISTS (SELECT 1 FROM intake_task_bindings AS b JOIN intake_acceptances AS a ON a.id = b.acceptance_id WHERE b.task_id = t.id AND a.withdrawn_at_ms IS NOT NULL)`
@@ -499,14 +497,14 @@ const taskIssueWithdrawn = `EXISTS (SELECT 1 FROM intake_task_bindings AS b JOIN
 // intakeLimit) retry of task: a withdrawn issue, an operator's cancel, or an
 // intake retry of any other end or past its bound.
 func refuseAutomaticRetry(ctx context.Context, connection *sql.Conn, task Task, intakeLimit int64) error {
-	var automatic, withdrawn bool
+	var automatic, premise, withdrawn bool
 	var retries int64
-	if err := connection.QueryRowContext(ctx, `SELECT `+taskEndedAutomatically+`, `+taskIssueWithdrawn+`,
+	if err := connection.QueryRowContext(ctx, `SELECT `+taskEndedAutomatically+`, `+taskLatestPremiseDispute+`, `+taskIssueWithdrawn+`,
 		(SELECT count(*) FROM task_automatic_events WHERE task_id = t.id AND kind = 'intake_retried') FROM tasks AS t WHERE t.id = ?`,
-		task.ID.Bytes()).Scan(&automatic, &withdrawn, &retries); err != nil {
+		task.ID.Bytes()).Scan(&automatic, &premise, &withdrawn, &retries); err != nil {
 		return err
 	}
-	if withdrawn || task.Status == TaskCancelled && !automatic || intakeLimit > 0 && (!automatic || retries >= intakeLimit) {
+	if withdrawn || premise || task.Status == TaskCancelled && !automatic || intakeLimit > 0 && (!automatic || retries >= intakeLimit) {
 		return ErrConflict
 	}
 	return nil
