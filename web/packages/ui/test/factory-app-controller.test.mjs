@@ -59,7 +59,6 @@ function harness(overrides = {}) {
     inviteRemote: overrides.inviteRemote ?? (async () => remoteInvite),
     listBrowserClients: overrides.listBrowserClients ?? (async () => ({ clients: [], more: false })),
     revokeBrowserClient: overrides.revokeBrowserClient ?? (async () => { throw new SessionError("not_found"); }),
-    getRepositories: overrides.getRepositories ?? (async () => []),
     createProject: overrides.createProject ?? (async () => undefined),
     githubConnection: overrides.githubConnection ?? (async () => ({ state: "denied" })),
     clientId: overrides.clientId ?? "60".repeat(16),
@@ -105,17 +104,6 @@ function harness(overrides = {}) {
     historyState,
   };
 }
-
-test("a pending repository read cannot repopulate state after disconnect", async () => {
-  const pending = deferred();
-  const context = harness({ getRepositories: () => pending.promise });
-  context.controller.start(); context.emitStatus("ready");
-  const read = context.controller.loadRepositories("project");
-  context.emitStatus("closed");
-  pending.resolve([{ root: "/private/late" }]);
-  await read;
-  assert.equal(context.latest().repositories.has("project"), false);
-});
 
 test("pairing is scrubbed before exact client construction and connection", () => {
   const order = [];
@@ -798,14 +786,4 @@ test("a structure arriving during a run-paths round is asked as soon as the roun
   await settle();
   await settle();
   assert.deepEqual(hidden, [runningAgentID]);
-});
-
-test("disconnect removes private repository settings from the snapshot", async () => {
-  const context = harness({ getRepositories: async () => [{ root: "/private/checkout" }] });
-  context.controller.start(); context.emitStatus("ready");
-  await context.controller.loadRepositories("project");
-  assert.equal(context.latest().repositories.size, 1);
-  context.emitStatus("closed");
-  assert.equal(context.latest().repositories.size, 0);
-  context.controller.close();
 });

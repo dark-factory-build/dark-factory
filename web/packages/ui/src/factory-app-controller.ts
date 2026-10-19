@@ -16,7 +16,6 @@ import {
   type SessionErrorCode,
   type SessionStatus,
   type DiscoveredAccountView,
-  type RepositoryView,
   type StateView,
   type TaskItem,
   type TerminalReset,
@@ -101,7 +100,6 @@ export type FactoryAppSnapshot = Readonly<{
   runPaths?: ReadonlyMap<string, RunPathSample>;
   /** Most recent observed paths remain an annotation after that run ends. */
   lastRunPaths?: ReadonlyMap<string, RunPathSample>;
-  repositories?: ReadonlyMap<string, readonly RepositoryView[]>;
 }>;
 
 export type FactoryAppStatus =
@@ -110,7 +108,7 @@ export type FactoryAppStatus =
 
 type HumanSession = Pick<BrowserSession, "getHumanRequestDetail" | "replyHumanRequest" | "cancelHumanRequest">;
 type TerminalSession = Pick<BrowserSession, "resolveAgentTerminal" | "openTerminal" | "close">;
-type ConsoleSession = Pick<BrowserSession, "createProject" | "getRepositories" | "getOperationalGraph" | "getRunPaths" | "discoverAccounts" | "linkAccount" | "listBrowserClients" | "revokeBrowserClient" | "githubConnection" | "clientId">;
+type ConsoleSession = Pick<BrowserSession, "createProject" | "getOperationalGraph" | "getRunPaths" | "discoverAccounts" | "linkAccount" | "listBrowserClients" | "revokeBrowserClient" | "githubConnection" | "clientId">;
 type RemoteInviteSession = Pick<BrowserSession, "inviteRemote" | "capabilities">;
 type ControlledClient = Pick<BrowserClient, "connect" | "close"> & { readonly session?: HumanSession & TerminalSession & ConsoleSession & RemoteInviteSession & Partial<Pick<BrowserSession, "projectContent">> };
 type ClientFactory = (options: BrowserSessionOptions) => ControlledClient;
@@ -192,7 +190,6 @@ export class FactoryAppController {
   #runPathsTicks = 0;
   #runPathsPending = false;
   #runPathsDue = false;
-  readonly #repositories = new Map<string, readonly RepositoryView[]>();
   #generation = 0;
   #started = false;
   #closed = false;
@@ -414,22 +411,6 @@ export class FactoryAppController {
     this.#replaceTerminal(selected === undefined ? {} : { agentId: selected.agent.id, agentRevision: selected.agent.revision });
   }
 
-  /** The provider logins on this machine; SETTINGS explicitly asks for them. */
-  async loadRepositories(projectId: string): Promise<void> {
-    const session = this.#client?.session;
-    if (!this.#current(this.#generation) || session === undefined || typeof session.getRepositories !== "function") return;
-    const generation = this.#generation;
-    try {
-      const repositories = await session.getRepositories(projectId);
-      if (!this.#current(generation) || this.#status !== "ready") return;
-      this.#repositories.set(projectId, repositories);
-    } catch {
-      if (!this.#current(generation) || this.#status !== "ready") return;
-      this.#repositories.delete(projectId);
-    }
-    this.#publish();
-  }
-
   beginTerminalSurface(token: object, surfaceVersion = this.#terminalSurfaceVersion): void {
     if (this.#closed || this.#selectedAgent === undefined || surfaceVersion !== this.#terminalSurfaceVersion) return;
     if (this.#terminalSurfaceToken !== undefined && this.#terminalSurfaceToken !== token) return;
@@ -533,7 +514,6 @@ export class FactoryAppController {
     if (status !== "ready") {
       this.#human.clear(true);
       // A reconnect must not show a code minted for the connection that dropped.
-      this.#repositories.clear();
     }
     // A wire-level state restart resnapshots on the same authenticated socket;
     // exact terminal discovery and handles remain owned by that session.
@@ -899,7 +879,6 @@ export class FactoryAppController {
         replyMaxBytes: selection.detail?.replyMaxBytes ?? 0,
         reply: selection.reply,
       },
-      repositories: this.#repositories,
       selectedAgent: this.#selectedAgent === undefined ? undefined : {
         id: this.#selectedAgent.agent.id,
         name: this.#selectedAgent.agent.name,
