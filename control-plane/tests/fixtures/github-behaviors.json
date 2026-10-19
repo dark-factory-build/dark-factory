@@ -4,11 +4,17 @@
     "source": "production log 2026-10-09 (#1288/#1455 publication incident)",
     "response": {
       "sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-      "verification": {
-        "verified": false,
-        "reason": "unsigned",
-        "signature": null,
-        "payload": null
+      "author": {
+        "login": "maintainer",
+        "type": "User"
+      },
+      "commit": {
+        "verification": {
+          "verified": false,
+          "reason": "unsigned",
+          "signature": null,
+          "payload": null
+        }
       }
     }
   },

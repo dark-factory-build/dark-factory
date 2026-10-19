@@ -535,6 +535,37 @@ pub(crate) struct CommitAuthor {
     pub(crate) authenticated: bool,
 }
 
+#[derive(Deserialize)]
+struct GithubCommitResponse {
+    author: Option<GithubCommitAccount>,
+    commit: GithubCommitDetails,
+}
+
+#[derive(Deserialize)]
+struct GithubCommitAccount {
+    login: String,
+    #[serde(rename = "type")]
+    kind: String,
+}
+
+#[derive(Deserialize)]
+struct GithubCommitDetails {
+    verification: GithubCommitVerification,
+}
+
+#[derive(Deserialize, Default)]
+struct GithubCommitVerification {
+    verified: bool,
+}
+
+fn authenticated_commit_author(commit: GithubCommitResponse) -> Option<CommitAuthor> {
+    commit.author.map(|author| CommitAuthor {
+        login: author.login,
+        kind: author.kind,
+        authenticated: commit.commit.verification.verified,
+    })
+}
+
 /// Which commit a branch points at right now.
 ///
 /// Every other observation takes a `head_sha` as input, and `maintainer_status`
@@ -3550,22 +3581,7 @@ impl Authority {
         token: &RepositoryToken,
         commit_sha: &str,
     ) -> Result<Option<CommitAuthor>, OperationError> {
-        #[derive(Deserialize)]
-        struct Commit {
-            author: Option<CommitAccount>,
-            verification: CommitVerification,
-        }
-        #[derive(Deserialize)]
-        struct CommitAccount {
-            login: String,
-            #[serde(rename = "type")]
-            kind: String,
-        }
-        #[derive(Deserialize, Default)]
-        struct CommitVerification {
-            verified: bool,
-        }
-        let commit: Commit = github_json(
+        let commit: GithubCommitResponse = github_json(
             &format!(
                 "https://api.github.com/repos/{}/{}/commits/{commit_sha}",
                 token.repository.owner, token.repository.name
@@ -3574,11 +3590,7 @@ impl Authority {
         )
         .await
         .map_err(OperationError::from)?;
-        Ok(commit.author.map(|author| CommitAuthor {
-            login: author.login,
-            kind: author.kind,
-            authenticated: commit.verification.verified,
-        }))
+        Ok(authenticated_commit_author(commit))
     }
 
     /// The commit itself, which is also the cheapest proof that it exists.
@@ -6432,8 +6444,16 @@ mod tests {
     #[test]
     fn an_explicit_author_commit_fixture_is_accepted_by_sha_not_signature() {
         let response = fixture("commit-created-with-explicit-author")["response"].clone();
-        assert!(!response["verification"]["verified"].as_bool().unwrap());
-        assert_eq!(response["verification"]["reason"], "unsigned");
+        assert!(
+            !response["commit"]["verification"]["verified"]
+                .as_bool()
+                .unwrap()
+        );
+        assert_eq!(response["commit"]["verification"]["reason"], "unsigned");
+        let author =
+            authenticated_commit_author(serde_json::from_value(response.clone()).unwrap()).unwrap();
+        assert_eq!(author.login, "maintainer");
+        assert!(!author.authenticated);
         let commit: GitObjectId = serde_json::from_value(response).unwrap();
         assert_eq!(valid_sha(&commit.sha), Ok(()));
     }

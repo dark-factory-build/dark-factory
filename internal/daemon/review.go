@@ -518,7 +518,14 @@ func (daemon *Daemon) trustedDescendant(ctx context.Context, open kernel.OpenPul
 	trusted := func(login, kind string, authenticated bool) bool {
 		return trustedIntakeCommitAuthor(sources, accepted, login, kind, authenticated)
 	}
-	backend := &daemonReviewBackend{daemon: daemon, project: open.Project, repository: open.Repository}
+	coordinator, err := daemon.reviewCoordinator(ctx, open.Project, open.Repository)
+	if err != nil {
+		return false, err
+	}
+	backend, ok := coordinator.Backend.(*daemonReviewBackend)
+	if !ok {
+		return false, nil
+	}
 	seen, visiting := map[string]bool{}, map[string]bool{}
 	var walk func(string) (bool, error)
 	walk = func(sha string) (bool, error) {
