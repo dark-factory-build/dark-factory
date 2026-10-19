@@ -20,7 +20,6 @@ import {
   type ServerControlFrame,
   type StateChangedFrame,
   type StateSnapshotFrame,
-  type TaskItem,
   type TerminalTargetDescriptor,
   type OperationalGraphBody,
   type GitHubConnectionBody,
@@ -29,7 +28,7 @@ import {
 import { ProtocolError, type ProtocolErrorCode } from "./errors.js";
 import { CAPABILITIES, MAX_AGENT_MODEL_BYTES, MAX_AGENT_NAME_BYTES,
   MAX_IDLE_AFTER_SECONDS,
-  MAX_IDLE_RUN_BUDGET, MAX_OUTSTANDING_REQUESTS, MAX_HUMAN_REPLY_BYTES, MAX_SQLITE_INTEGER, MAX_TASK_INSTRUCTION_BYTES, MAX_TASK_PRIORITY, MAX_TASK_TITLE_BYTES, type CapabilityMask, type ErrorCode } from "./manifest.js";
+  MAX_IDLE_RUN_BUDGET, MAX_OUTSTANDING_REQUESTS, MAX_HUMAN_REPLY_BYTES, MAX_SQLITE_INTEGER, MAX_TASK_INSTRUCTION_BYTES, type CapabilityMask, type ErrorCode } from "./manifest.js";
 import { snapshotView, type StateView } from "./state.js";
 import { createTerminalHandle, terminalControlFrame, type InternalTerminalHandle, type TerminalHandle, type TerminalOptions } from "./terminal_session.js";
 import { decodeTerminalServer } from "./terminal_session.js";

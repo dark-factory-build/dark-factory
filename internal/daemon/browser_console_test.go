@@ -544,3 +544,30 @@ func onlyRoot(nodes []browserprotocol.GraphNode) bool {
 	}
 	return true
 }
+
+// The adapter is the authority on the agent update and the revision the client
+// gets back: the result must name the same entity at the next revision.
+func TestBrowserConsoleAgentUpdatesAdvanceTheExactRevision(t *testing.T) {
+	fixture := newConsoleFixture(t, kernel.BrowserCapabilityObserve|kernel.BrowserCapabilityHumanActions, consoleRoot(t))
+	ctx := context.Background()
+	client := rawBrowserClient(fixture.client.ID)
+	model, effort, paused := "gpt-5-codex", "high", browserprotocol.Bool(true)
+	appearance := browserprotocol.SpriteAppearance{Skin: 3, Hair: 2, HairColour: 1, Face: 1, Outfit: 3, ClothesColour: 2, Shoes: 1, Tool: 4, Headwear: 2}
+	agentResult, err := fixture.backend.UpdateAgent(ctx, client, browserprotocol.AgentUpdate{
+		AgentID: fixture.agent.ID.String(), ExpectedRevision: decimalRevision(fixture.agent.Revision),
+		Appearance: &appearance, Model: &model, ReasoningEffort: &effort, Paused: &paused,
+	})
+	if err != nil || agentResult.AgentID != fixture.agent.ID.String() || agentResult.Revision != decimalRevision(fixture.agent.Revision)+1 {
+		t.Fatalf("agent update = %+v, %v", agentResult, err)
+	}
+	stored, found, err := fixture.store.Agent(ctx, fixture.agent.ID)
+	if err != nil || !found || stored.Appearance != (kernel.AgentAppearance{Skin: 3, Hair: 2, HairColour: 1, Face: 1, Outfit: 3, ClothesColour: 2, Shoes: 1, Tool: 4, Headwear: 2}) || stored.Model != model || stored.ReasoningEffort != effort || !stored.Paused {
+		t.Fatalf("stored agent = %+v, found=%v, err=%v", stored, found, err)
+	}
+	// The same observation cannot be spent twice.
+	if _, err := fixture.backend.UpdateAgent(ctx, client, browserprotocol.AgentUpdate{
+		AgentID: fixture.agent.ID.String(), ExpectedRevision: decimalRevision(fixture.agent.Revision), Paused: &paused,
+	}); !errors.Is(mapBrowserError(err), browser.ErrStale) {
+		t.Fatalf("replayed agent update = %v", err)
+	}
+}
