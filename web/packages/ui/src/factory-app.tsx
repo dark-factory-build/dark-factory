@@ -91,8 +91,6 @@ export function FactoryApp({ onStatusChange, browserPort }: FactoryAppProps = {}
       onReplyHumanRequest={() => { void owner.current?.replyHumanRequest(); }}
       onCancelHumanRequest={() => { void owner.current?.cancelHumanRequest(); }}
       onCloseHumanRequest={() => owner.current?.clearHumanRequest()}
-      onLoadIntake={snapshot.status === "ready" ? (projectId) => { void owner.current?.loadIntake(projectId); } : undefined}
-      onIntakeAction={(projectId, request) => { void owner.current?.intakeAction(projectId, request); }}
       terminalContent={terminal}
     />
   );

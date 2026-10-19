@@ -531,7 +531,7 @@ func (current *connection) dispatch(frame browserprotocol.ControlFrame) bool {
 			return false
 		}
 		payload, err = browserprotocol.EncodeTaskUpdateResult(frame.ID, result)
-	case browserprotocol.OperationalGraphGet, browserprotocol.RunPathsGet, browserprotocol.HumanRequestReply, browserprotocol.HumanRequestCancelRun, browserprotocol.Intake, browserprotocol.GitHubConnection, browserprotocol.RepositoryMutate:
+	case browserprotocol.OperationalGraphGet, browserprotocol.RunPathsGet, browserprotocol.HumanRequestReply, browserprotocol.HumanRequestCancelRun, browserprotocol.GitHubConnection, browserprotocol.RepositoryMutate:
 		// These may use their whole call budget. That must not hold up state
 		// and terminal frames, so one worker answers them in arrival order,
 		// each under its own budget from the moment it starts; the websocket
@@ -1140,7 +1140,7 @@ func (current *connection) walk() {
 func (current *connection) observe(frame browserprotocol.ControlFrame) {
 	limit := backendCallLimit
 	switch frame.Body.(type) {
-	case browserprotocol.Intake, browserprotocol.GitHubConnection, browserprotocol.RepositoryMutate:
+	case browserprotocol.GitHubConnection, browserprotocol.RepositoryMutate:
 		// Remote operator calls may outlast a local snapshot. Reuse the slow
 		// queue so GitHub latency cannot block state or terminal traffic.
 		limit = 90 * time.Second
@@ -1162,20 +1162,6 @@ func (current *connection) observe(frame browserprotocol.ControlFrame) {
 			break
 		}
 		payload, err = browserprotocol.EncodeRepositoryMutateResult(frame.ID, result)
-	case browserprotocol.Intake:
-		if current.server.consoleBackend == nil {
-			err = ErrUnauthorized
-			break
-		}
-		result, backendErr := current.server.consoleBackend.Intake(ctx, current.principal.ClientID, body)
-		if backendErr != nil {
-			err = backendErr
-			break
-		}
-		write = current.writeSnapshot
-		if payload, err = browserprotocol.EncodeIntakeResult(frame.ID, result); errors.Is(err, browserprotocol.ErrOversized) {
-			err = ErrTooLarge
-		}
 	case browserprotocol.GitHubConnection:
 		if current.server.githubBackend == nil {
 			err = ErrUnauthorized
@@ -1293,7 +1279,7 @@ func (current *connection) write(payload []byte) error {
 }
 
 // writeSnapshot is the only outbound path allowed past MaxControlBytes, and
-// Snapshot-sized typed results (including private intake previews) use this
+// Snapshot-sized typed results use this
 // path. Other control frames stay inside 64 KiB.
 func (current *connection) writeSnapshot(payload []byte) error {
 	if len(payload) == 0 || len(payload) > browserprotocol.MaxSnapshotBytes {

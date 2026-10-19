@@ -73,7 +73,6 @@ func TestControlFixturesRoundTrip(t *testing.T) {
 		})
 	}
 }
-
 func decodeFixtureControl(name string, data []byte) (ControlFrame, error) {
 	switch name {
 	case "attachment_retention", "pair_prove", "auth_prove", "state_get", "state_watch", "human_request_detail_get", "project_create", "repositories_get", "repository_mutate", "terminal_target_get":
@@ -82,7 +81,6 @@ func decodeFixtureControl(name string, data []byte) (ControlFrame, error) {
 		return DecodeServerControl(data)
 	}
 }
-
 func encodeDecoded(frame ControlFrame) ([]byte, error) {
 	switch value := frame.Body.(type) {
 	case Hello:
@@ -141,10 +139,6 @@ func encodeDecoded(frame ControlFrame) ([]byte, error) {
 		return encodeControl(TypeRepositoryMutate, frame.ID, value)
 	case RepositoryMutateResult:
 		return EncodeRepositoryMutateResult(frame.ID, value)
-	case Intake:
-		return encodeControl(TypeIntake, frame.ID, value)
-	case IntakeResult:
-		return EncodeIntakeResult(frame.ID, value)
 	case AccountsDiscover:
 		return encodeControl(TypeAccountsDiscover, frame.ID, value)
 	case Accounts:
@@ -236,6 +230,7 @@ func encodeDecoded(frame ControlFrame) ([]byte, error) {
 	}
 }
 
+// eof
 func TestBinaryFixturesRoundTrip(t *testing.T) {
 	for _, name := range []string{"terminal_input.hex", "terminal_output.hex"} {
 		t.Run(name, func(t *testing.T) {
@@ -605,7 +600,7 @@ func TestManifestMatchesImplementedRegistry(t *testing.T) {
 	}
 	// The manifest carries a stable name, not a generation: the contract is
 	// unversioned by owner decision on 4 September 2026.
-	if manifest.Name != "dark-factory/browser" || len(manifest.Control) != 65 || len(manifest.Terminal.Opcodes) != 2 {
+	if manifest.Name != "dark-factory/browser" || len(manifest.Control) != 63 || len(manifest.Terminal.Opcodes) != 2 {
 		t.Fatalf("manifest registry incomplete: %+v", manifest)
 	}
 	capabilityNames := []string{"observe", "private_human_request_detail", "human_actions", "terminal_input", "administration"}
@@ -739,7 +734,6 @@ func TestManifestMatchesImplementedRegistry(t *testing.T) {
 		}
 	}
 }
-
 func decodeRole(direction string, data []byte) (ControlFrame, error) {
 	if direction == "client" {
 		return DecodeClientControl(data)
@@ -1182,47 +1176,6 @@ func TestPushSubscribeAdmitsOnlyKnownPushServices(t *testing.T) {
 		_, err := EncodePushSubscribe("push", body)
 		if (err == nil) != want {
 			t.Fatalf("%s: err=%v, want admitted=%v", endpoint, err, want)
-		}
-	}
-}
-
-func TestIntakeEmptyListsEncodeAsSharedClientFixture(t *testing.T) {
-	want := fixtureBytes(t, "intake_result.json")
-	frame, err := DecodeServerControl(want)
-	if err != nil {
-		t.Fatal(err)
-	}
-	value := frame.Body.(IntakeResult)
-	value.Sources[0].TrustedAuthors = nil
-	value.Candidates[0].Labels = nil
-	got, err := EncodeIntakeResult(frame.ID, value)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !bytes.Equal(got, want) {
-		t.Fatalf("empty required lists changed shared wire fixture: %s", got)
-	}
-}
-
-func TestIntakeSourceConfigurationRequiresExactWireFields(t *testing.T) {
-	for _, field := range []string{"repository", "trusted_authors"} {
-		for _, rename := range []bool{false, true} {
-			var frame map[string]any
-			if err := json.Unmarshal(fixtureBytes(t, "intake_result.json"), &frame); err != nil {
-				t.Fatal(err)
-			}
-			source := frame["body"].(map[string]any)["sources"].([]any)[0].(map[string]any)
-			if rename {
-				source[strings.ToUpper(field)] = source[field]
-			}
-			delete(source, field)
-			wire, err := json.Marshal(frame)
-			if err != nil {
-				t.Fatal(err)
-			}
-			if _, err := DecodeServerControl(wire); !errors.Is(err, ErrMalformed) {
-				t.Fatalf("missing/case-changed source field %s accepted: %v", field, err)
-			}
 		}
 	}
 }

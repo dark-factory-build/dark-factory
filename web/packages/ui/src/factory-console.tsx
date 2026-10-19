@@ -18,11 +18,6 @@ export type FactoryConsoleProps = FactoryAppSnapshot & {
   onReplyHumanRequest?: () => void;
   onCancelHumanRequest?: () => void;
   onCloseHumanRequest?: () => void;
-  intake?: ReadonlyMap<string, import("@dark-factory/client").IntakeView>;
-  intakePending?: ReadonlySet<string>;
-  intakeErrors?: ReadonlyMap<string, string>;
-  onLoadIntake?: (projectId: string) => void;
-  onIntakeAction?: (projectId: string, request: import("@dark-factory/client").IntakeBody) => void;
   /** The selected agent's mounted terminal and durable composer. */
   terminalContent?: ReactNode;
 };
@@ -76,11 +71,6 @@ export function FactoryConsole({
   onReplyHumanRequest,
   onCancelHumanRequest,
   onCloseHumanRequest,
-  intake,
-  intakePending,
-  intakeErrors,
-  onLoadIntake,
-  onIntakeAction,
   terminalContent,
 }: FactoryConsoleProps) {
   const [chosenProjectId, setProjectId] = useState<string>();
@@ -98,17 +88,9 @@ export function FactoryConsole({
   const productionView = useMemo(() => deriveProductionView(productionData.records, Date.now()), [productionData.records]);
   const productionItems = useMemo(() => Object.values(productionView.contraptions).sort((a, b) => Number(a.completed) - Number(b.completed) || (a.completed ? a.completedAt - b.completedAt : 0) || a.visualId.localeCompare(b.visualId)), [productionView]);
   const inProgressItems = useMemo(() => productionItems.filter(inProgressProduction), [productionItems]);
-  const sources = projectId === undefined ? undefined : intake?.get(projectId)?.sources;
-  const rows = useMemo(() => workRows(scopedState, inProgressItems, sources), [scopedState, inProgressItems, sources]);
+  const rows = useMemo(() => workRows(scopedState, inProgressItems), [scopedState, inProgressItems]);
   const agent = selectedAgent === undefined ? undefined : scopedState?.agents.get(selectedAgent.id);
   const liveAgent = agent?.archived === true ? undefined : agent;
-  // Work's inbox is the daemon's last intake poll: re-read that local list (never the backlog) while connected.
-  useEffect(() => {
-    if (!ready || projectId === undefined || onLoadIntake === undefined) return;
-    onLoadIntake(projectId);
-    const timer = setInterval(() => onLoadIntake(projectId), 30_000);
-    return () => clearInterval(timer);
-  }, [ready, projectId, onLoadIntake !== undefined]);
   const editError = edit !== undefined && state?.projects.has(edit.target) ? undefined : editErrorCopy(edit);
 
   return (
@@ -153,8 +135,6 @@ export function FactoryConsole({
                 onReply={onReplyHumanRequest}
                 onCancel={onCancelHumanRequest}
               />}
-              onIntakeAction={ready ? onIntakeAction : undefined}
-              intake={projectId === undefined ? undefined : { state: intake?.get(projectId)?.state, failed: intakeErrors?.has(projectId) === true, busy: intakePending?.has(projectId) === true }}
             />
             {liveAgent === undefined ? null : <AgentPanel
               key={liveAgent.id}

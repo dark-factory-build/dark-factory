@@ -24,8 +24,6 @@ import {
   type TaskUpdateBody,
   type TerminalTargetDescriptor,
   type OperationalGraphBody,
-  type IntakeBody,
-  type IntakeResultBody,
   type GitHubConnectionBody,
   type GitHubConnectionResultBody,
 } from "./control.js";
@@ -154,7 +152,6 @@ export type AccountLinkResult = Readonly<{ accountId: string; revision: bigint }
 export type AccountUpdateResult = Readonly<{ accountId: string; revision: bigint }>;
 export type RepositoryView = Readonly<RepositoryItem>;
 export type ProjectCreateResult = Readonly<{ projectId: string; revision: bigint }>;
-export type IntakeView = Readonly<IntakeResultBody>;
 export type GitHubConnectionResult = Readonly<GitHubConnectionResultBody>;
 
 /** One minted remote pairing invitation and the code that carries it. */
@@ -277,16 +274,6 @@ export class BrowserSession {
     return this.#accountRequest("REPOSITORIES", CAPABILITIES.administration, "repositories", (id) => encodeClientControl({ type: "REPOSITORIES_GET", id, body: { project_id: projectId } }), { entityId: projectId });
   }
 
-
-  /** Private operator intake controls; candidate content never enters STATE. */
-  intake(request: IntakeBody): Promise<IntakeView> {
-    try { this.#ensureLive(); } catch (error) { return Promise.reject(error); }
-    if ((this.#capabilities & CAPABILITIES.administration) === 0) return Promise.reject(new SessionError("unauthorized"));
-    if (this.#requests.size >= MAX_OUTSTANDING_REQUESTS) return Promise.reject(new SessionError("rate_limited"));
-    const id = this.#nextID("intake"); let payload: string; let body = request;
-    try { if (body.action === "create" && body.source_id === undefined) body = { ...body, source_id: this.#randomID() }; payload = encodeClientControl({ type: "INTAKE", id, body: body }); } catch (error) { return Promise.reject(error); }
-    return this.#track(id, { kind: "INTAKE_RESULT" }, payload);
-  }
 
   /** Edit one still-queued task: its brief, priority, assignment, or cancel it. A blocked task can only be cancelled or retried. */
   updateTask(request: { taskId: string; expectedRevision: bigint; title?: string; body?: string; priority?: number; assignedAgentId?: string; cancel?: boolean; retry?: boolean }): Promise<TaskUpdateResult> {
@@ -657,7 +644,7 @@ export class BrowserSession {
       this.#terminalTarget(frame);
       return;
     }
-    if (frame.type === "INTAKE_RESULT" || frame.type === "PUSH_SUBSCRIBE_RESULT" || frame.type === "GITHUB_CONNECTION_RESULT") {
+    if (frame.type === "PUSH_SUBSCRIBE_RESULT" || frame.type === "GITHUB_CONNECTION_RESULT") {
       this.#pending(frame.id, frame.type);
       this.#settle(frame.id, frame.type === "PUSH_SUBSCRIBE_RESULT" ? undefined : Object.freeze(frame.body)); return;
     }
