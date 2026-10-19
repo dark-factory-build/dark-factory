@@ -41,6 +41,9 @@ type fakePublishMaintainer struct {
 	issueBody       string           // the current source issue body
 	issueTitle      string           // the current source issue title
 	issueRepository string           // repository used for the current source issue
+	commits         json.RawMessage  // observe_pull_request_commits' answer
+	commitsErr      error            // or its refusal
+	commitReads     int
 }
 
 func TestRepairPublicationUsesTaskTitle(t *testing.T) {
@@ -71,6 +74,9 @@ func (f *fakePublishMaintainer) call(_ context.Context, name string, arguments m
 	case "observe_issue":
 		f.issueRepository, _ = arguments["repository"].(string)
 		return json.Marshal(map[string]any{"number": arguments["issue_number"], "title": f.issueTitle, "body": f.issueBody})
+	case "observe_pull_request_commits":
+		f.commitReads++
+		return f.commits, f.commitsErr
 	}
 	if _, replay := f.journal[id]; replay || f.planned[id] {
 		return nil, fmt.Errorf("conflict: operation %s replayed", id)

@@ -160,6 +160,7 @@ fn tool_write(name: &str) -> Option<bool> {
         | "list_pull_requests"
         | "observe_pull_request_checks"
         | "observe_pull_request_comments"
+        | "observe_pull_request_commits"
         | "observe_repository_checks"
         | "list_deployments"
         | "observe_pull_request_merge" => Some(false),
@@ -1165,8 +1166,35 @@ mod tests {
         assert_eq!(tool_write("unknown"), None);
     }
 
+    // The customer route denies any offered tool without a grant rule before
+    // its handler runs, so every tool mcp.rs offers must be classified here,
+    // as its annotation says. mcp.rs itself builds only for the Worker, so
+    // its surface is read from source: each entry names the tool first and
+    // annotates it last.
     #[test]
-    fn pull_request_comments_are_read_only() {
-        assert_eq!(tool_write("observe_pull_request_comments"), Some(false));
+    fn every_offered_tool_has_a_grant_rule() {
+        let mut name = None;
+        let mut seen = 0;
+        for line in include_str!("mcp.rs").lines().map(str::trim) {
+            if let Some(rest) = line.strip_prefix("\"name\": \"") {
+                let tool = rest.split('"').next().unwrap();
+                name = (tool != "dark-factory-maintainer").then_some(tool);
+            } else if let (Some(tool), Some(rest)) = (
+                name,
+                line.split_once("\"readOnlyHint\": ")
+                    .map(|(_, after)| after),
+            ) {
+                let read_only = rest.starts_with("true");
+                assert_eq!(
+                    tool_write(tool),
+                    Some(!read_only),
+                    "{tool} has no grant rule matching its annotation"
+                );
+                seen += 1;
+                name = None;
+            }
+        }
+        assert!(seen >= 22, "only {seen} offered tools were read");
+        assert_eq!(tool_write("observe_pull_request_commits"), Some(false));
     }
 }
