@@ -769,8 +769,8 @@ for (const [toolIndex, tool] of tools.entries()) {
 }
 // Compare finished portraits: transparent layer differences can disappear in composition.
 const legPose = pose => pose.startsWith('walk') ? pose : 'stand';
-// Busy hands put the tool down: a cup, a keyboard or a pencil takes its place.
-const carries = pose => pose !== 'sip' && pose !== 'hold' && !['type', 'pet', 'inspect', 'operate'].some(busy => pose.startsWith(busy));
+// Busy or folded hands put the tool down: a cup, a keyboard or a pencil takes its place.
+const carries = pose => pose !== 'sip' && pose !== 'hold' && pose !== 'waiting' && !['type', 'pet', 'inspect', 'operate'].some(busy => pose.startsWith(busy));
 const portrait = (pose, appearance = {}) => {
   const v = { skin: 1, hair: 0, hair_colour: 1, face: 0, outfit: 0, clothes_colour: 0, shoes: 0, tool: 0, headwear: 0, ...appearance };
   const pixels = blank();
@@ -1373,7 +1373,7 @@ function paint() {
       'person.hair.' + identity + '.' + identity,
       'person.face.0',
       'person.shoes.' + identity + '.' + (activity.startsWith('walk') ? activity : 'stand'),
-      ...(activity === 'sip' ? ['person.held.cup.mouth'] : activity === 'hold' ? ['person.held.book.chest'] : activity.startsWith('inspect') ? ['person.held.clipboard.' + (activity === 'inspect.0' ? 'chest' : 'low')] : activity.startsWith('type') ? ['person.held.keyboard'] : ['person.tool.' + (role.value === 'overseer' ? 1 : 0) + (activity === 'walk.1' ? '.high' : '.low')]),
+      ...(activity === 'sip' ? ['person.held.cup.mouth'] : activity === 'hold' ? ['person.held.book.chest'] : activity.startsWith('inspect') ? ['person.held.clipboard.' + (activity === 'inspect.0' ? 'chest' : 'low')] : activity.startsWith('type') ? ['person.held.keyboard'] : activity === 'waiting' ? [] : ['person.tool.' + (role.value === 'overseer' ? 1 : 0) + (activity === 'walk.1' ? '.high' : '.low')]),
       'person.headwear.' + (role.value === 'overseer' ? 1 : 0),
       'person.system.' + role.value + '.' + provider.value,
       ...(activity.startsWith('wave') ? ['person.alert'] : []),
