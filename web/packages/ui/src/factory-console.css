@@ -258,22 +258,16 @@
 }
 
 .dfFactoryConsole__terminalPanel {
-  position: sticky;
-  top: 1rem;
   display: flex;
-  flex: 0 0 clamp(24rem, 32vw, 34rem);
   min-width: 0;
   flex-direction: column;
-  height: min(46rem, calc(100svh - 2rem));
-  margin: 0;
-  padding: 1rem;
   color: var(--df-console-text);
   background: var(--df-console-surface);
-  border: 1px solid var(--df-console-accent);
 }
 
 .dfFactoryConsole__terminalPanel .dfFactoryConsole__terminal {
-  flex: 1 1 auto;
+  flex: 0 0 auto;
+  height: min(34rem, 52svh);
   min-height: 0;
 }
 
@@ -301,22 +295,6 @@
 .dfFactoryConsole__instructionState {
   color: var(--df-console-muted);
   font-size: var(--df-text-xs);
-}
-
-@media (max-width: 960px) {
-  .dfFactoryConsole__terminalPanel {
-    position: static;
-    width: auto;
-    max-width: 90rem;
-    height: auto;
-    min-height: 0;
-    margin: 0 auto 1.5rem;
-  }
-  .dfFactoryConsole__terminalPanel .dfFactoryConsole__terminal {
-    flex: 0 0 auto;
-    height: min(34rem, 52svh);
-    min-height: 0;
-  }
 }
 
 /* Legibility (owner review round 1): prose at 14px full text color; the
@@ -410,7 +388,7 @@
 
 .dfConsoleLayout {
   display: grid;
-  grid-template-columns: minmax(0, 2fr) minmax(0, 1fr);
+  grid-template-columns: minmax(0, 1fr) min(30rem, 33%);
   gap: 1.5rem;
 }
 
@@ -494,23 +472,6 @@ summary.dfConsoleItem__summary { cursor: pointer; }
 .dfConsoleItem__detail { display: grid; gap: 0.5rem; min-width: 0; padding: 0.7rem; border-top: 1px solid var(--df-console-rule); overflow-wrap: anywhere; }
 .dfConsoleItem__detail h4, .dfConsoleItem__detail p { margin: 0; }
 .dfConsoleItem__detail a { display: block; color: var(--df-console-accent); }
-
-.dfConsoleSidebar .dfFactoryConsole__terminalPanel {
-  position: static;
-  flex: none;
-  width: auto;
-  height: auto;
-  min-height: 0;
-  margin: 0;
-  padding: 0;
-  border: 0;
-}
-
-.dfConsoleSidebar .dfFactoryConsole__terminalPanel .dfFactoryConsole__terminal {
-  flex: 0 0 auto;
-  height: min(34rem, 52svh);
-  min-height: 0;
-}
 
 @media (min-width: 1025px) {
   .dfFactoryConsole { display: flex; height: 100svh; min-height: 0; overflow: hidden; flex-direction: column; }
