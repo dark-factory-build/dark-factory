@@ -1120,6 +1120,13 @@ func TestCodexOrchestratorResumesFromPreviousWorkingDirectory(t *testing.T) {
 	if launch.Argv()[1] != "resume" || launch.Argv()[2] != previousSession {
 		t.Fatalf("orchestrator argv = %q, want a leading resume of %q", launch.Argv(), previousSession)
 	}
+	launch, err = Build(request.WithTask([]byte("standing overseer task\n\nFactory causal wake: mode=delta")))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := launch.Argv()[len(launch.Argv())-1]; got != "\n\nTask:\nFactory causal wake: mode=delta" {
+		t.Fatalf("resumed orchestrator prompt = %q", got)
+	}
 }
 
 func TestInstalledBrowserBridgeUsesOnlyRunPathsForBothProviders(t *testing.T) {
@@ -2098,7 +2105,7 @@ func TestNativePromptCarriesMaximumTaskAndTrimsResumedOverseer(t *testing.T) {
 	}
 	installation, runtime, _ := nativeFixture(t, kernel.ProviderCodex)
 	overseer := roleRequestFor(t, kernel.ProviderCodex, installation, runtime, "", "", kernel.RoleOrchestrator).WithTask([]byte("standing overseer task\n\nFactory causal wake: mode=delta"))
-	if got := bootstrapPromptFor(overseer, "s", true); !strings.HasSuffix(got, "\n\nTask:\nFactory causal wake: mode=delta") || strings.Contains(got, "standing overseer task") {
+	if got := bootstrapPromptFor(overseer, "s", true); got != "\n\nTask:\nFactory causal wake: mode=delta" {
 		t.Fatalf("resumed overseer prompt = %q", got)
 	}
 	if got := bootstrapPromptFor(overseer, "s", false); !strings.HasSuffix(got, "\n\nTask:\nstanding overseer task\n\nFactory causal wake: mode=delta") {
