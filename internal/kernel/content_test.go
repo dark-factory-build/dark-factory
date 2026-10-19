@@ -191,6 +191,37 @@ func TestOverseerEnqueueProposalDispatchIsAtomicAndScopedToProposal(t *testing.T
 	}
 }
 
+// The pin is the acceptance: an overseer task add whose title or body names a
+// proposal without pinning it is refused, whatever the wording, since an
+// unpinned task leaves the proposal open to re-wake the overseer into
+// accepting it again (#2098).
+func TestOverseerEnqueueRefusesUnpinnedProposalTask(t *testing.T) {
+	t.Parallel()
+	store, overseer, _ := runningOrchestratorRun(t)
+	defer store.Close()
+	ctx := context.Background()
+	proposal, err := store.CreateContent(ctx, knowledgeSpec(t, overseer.ProjectID, 160, ContentObservation, KnowledgeMetadata{Status: "tentative", RecordType: "proposal"}), mustTime(t, 40))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var refusal *OutcomeRefusal
+	for i, spec := range []NewTask{
+		{ID: taskID(t, 161), ProjectID: overseer.ProjectID, IncarnationID: incarnationID(t, 162), Title: "unpinned", Body: "Source proposal " + proposal.ID.String() + " revision 1."},
+		{ID: taskID(t, 163), ProjectID: overseer.ProjectID, IncarnationID: incarnationID(t, 164), Title: "reworded", Body: "Owner-priority correction accepted from proposal " + strings.ToUpper(proposal.ID.String()) + "."},
+		{ID: taskID(t, 165), ProjectID: overseer.ProjectID, IncarnationID: incarnationID(t, 166), Title: "Implement [proposal:" + proposal.ID.String() + "]"},
+	} {
+		if _, err := store.EnqueueTaskForOverseer(ctx, overseer.CredentialDigest, spec, mustTime(t, int64(50+i))); !errors.Is(err, ErrInvalidValue) || !errors.As(err, &refusal) || !strings.Contains(err.Error(), "--content "+proposal.ID.String()+":") {
+			t.Fatalf("unpinned proposal task %d: %v", i, err)
+		}
+		if _, found, err := store.Task(ctx, spec.ID); err != nil || found {
+			t.Fatalf("refused add %d left task: found=%v err=%v", i, found, err)
+		}
+	}
+	if _, err := store.EnqueueTaskForOverseer(ctx, overseer.CredentialDigest, NewTask{ID: taskID(t, 167), ProjectID: overseer.ProjectID, IncarnationID: incarnationID(t, 168), Title: "pinned", Body: "Source proposal " + proposal.ID.String() + " revision 1."}, mustTime(t, 60), TaskContentReference{ContentID: proposal.ID, ContentRevision: proposal.Revision}); err != nil {
+		t.Fatalf("pinned proposal task: %v", err)
+	}
+}
+
 func TestProposalDispatchStaysBlockedAfterSuccessEvenWhenPullMerges(t *testing.T) {
 	t.Parallel()
 	store, _, project, agent := newAdmissionStore(t, RoleWorker, 4)

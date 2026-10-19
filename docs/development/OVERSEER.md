@@ -187,10 +187,12 @@ and evidence `["proposal:ID"]`, with `"status":"tentative"`: an attempt credenti
 cannot write `current`, and is refused as unauthorized if it tries. Before
 deciding, rerun the command or read the file:line the proposal cites as
 evidence; the decision's description names what you re-ran and its result, and
-evidence that does not reproduce is a reason to decline. To accept, first search queued and running tasks for existing work on it (one
-task per proposal), then `overseer task add --content PROPOSAL_ID:REVISION` the
-work (to a worker or the shared queue, never the specialist) and record the
-decision with `"task_id"` set to that task. To
+evidence that does not reproduce is a reason to decline. To accept,
+`overseer task add --content PROPOSAL_ID:REVISION` the work (to a worker or the
+shared queue, never the specialist) and record the decision with `"task_id"`
+set to that task. The pin is the acceptance and alone stops the proposal waking
+you, so an add whose title or body names a proposal id without pinning it is
+refused, whatever the wording. To
 decline or defer, record the decision without `task_id`, the reason in its
 description. Only you or the operator resolve a proposal, and an acceptance is
 refused while another accepted proposal's task is still queued, running or
