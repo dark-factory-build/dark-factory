@@ -2098,7 +2098,7 @@ func TestNativePromptCarriesMaximumTaskAndTrimsResumedOverseer(t *testing.T) {
 	}
 	installation, runtime, _ := nativeFixture(t, kernel.ProviderCodex)
 	overseer := roleRequestFor(t, kernel.ProviderCodex, installation, runtime, "", "", kernel.RoleOrchestrator).WithTask([]byte("standing overseer task\n\nFactory causal wake: mode=delta"))
-	if got := bootstrapPromptFor(overseer, "s", true); !strings.HasSuffix(got, "\n\nTask:\nFactory causal wake: mode=delta") || strings.Contains(got, "standing overseer task") {
+	if got := bootstrapPromptFor(overseer, "s", true); got != "\n\nTask:\nFactory causal wake: mode=delta" {
 		t.Fatalf("resumed overseer prompt = %q", got)
 	}
 	if got := bootstrapPromptFor(overseer, "s", false); !strings.HasSuffix(got, "\n\nTask:\nstanding overseer task\n\nFactory causal wake: mode=delta") {

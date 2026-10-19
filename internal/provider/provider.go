@@ -783,6 +783,7 @@ func bootstrapPromptFor(request Request, server string, resumed bool) string {
 	task := request.task
 	if marker := strings.Index(task, "\n\nFactory causal wake:"); resumed && request.role == kernel.RoleOrchestrator && marker >= 0 {
 		task = task[marker+2:]
+		return "\n\nTask:\n" + task
 	}
 	prompt := strings.ReplaceAll(bootstrapPrompt, "mcp__factory_attempt__factory", "mcp__"+server+"__factory")
 	if request.role == kernel.RoleOrchestrator {
