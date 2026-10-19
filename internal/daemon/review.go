@@ -484,7 +484,92 @@ func (daemon *Daemon) publishUnanswered(ctx context.Context, open kernel.OpenPul
 	if err != nil || settled == "" || daemon.publishSettledChanges(ctx, open.Task) {
 		return settled != "", "", err
 	}
+	if adopted, verifyErr := daemon.trustedDescendant(ctx, open, settled, request.Head); adopted {
+		return false, "", nil
+	} else if verifyErr != nil {
+		return true, "could not verify externally added commits between retained head " + settled + " and pull request head " + request.Head + ": " + verifyErr.Error(), nil
+	}
 	return true, "its task settled head " + settled + ", which pull request head " + request.Head + " is not, and factoryd does not publish it: its task did not succeed, its publication failed for good, or its work is not factoryd's to publish", nil
+}
+
+// trustedDescendant proves every commit after the retained Change through the
+// provider's authenticated account identity. Git names and email addresses
+// are never used as trust evidence.
+func (daemon *Daemon) trustedDescendant(ctx context.Context, open kernel.OpenPull, retained, head string) (bool, error) {
+	if open.Task == (kernel.TaskID{}) {
+		return false, nil
+	}
+	accepted, found, err := daemon.store.IntakeAcceptanceForTask(ctx, open.Task)
+	if err != nil || !found {
+		return false, err
+	}
+	sources, err := daemon.store.ProjectIntakeSources(ctx, accepted.ProjectID)
+	if err != nil {
+		return false, err
+	}
+	trusted := func(login, kind string) bool { return trustedIntakeCommitAuthor(sources, accepted, login, kind) }
+	backend := &daemonReviewBackend{daemon: daemon, project: open.Project, repository: open.Repository}
+	seen, visiting := map[string]bool{}, map[string]bool{}
+	var walk func(string) (bool, error)
+	walk = func(sha string) (bool, error) {
+		if strings.EqualFold(sha, retained) {
+			return true, nil
+		}
+		if seen[strings.ToLower(sha)] {
+			return true, nil
+		}
+		if visiting[strings.ToLower(sha)] {
+			return false, errors.New("commit ancestry cycle")
+		}
+		visiting[strings.ToLower(sha)] = true
+		var value struct {
+			Parents []string `json:"parents"`
+			Author  *struct {
+				Login string `json:"login"`
+				Kind  string `json:"type"`
+			} `json:"author"`
+		}
+		response, err := backend.callResponse(ctx, "observe_tree", map[string]any{"repository": open.Repository, "commit_sha": sha})
+		if err == nil {
+			err = json.Unmarshal(response, &value)
+		}
+		if err != nil {
+			return false, err
+		}
+		if value.Author == nil || !trusted(value.Author.Login, value.Author.Kind) {
+			return false, nil
+		}
+		if len(value.Parents) == 0 {
+			return false, nil
+		}
+		for _, parent := range value.Parents {
+			ok, err := walk(parent)
+			if err != nil || !ok {
+				return false, err
+			}
+		}
+		delete(visiting, strings.ToLower(sha))
+		seen[strings.ToLower(sha)] = true
+		return true, nil
+	}
+	return walk(head)
+}
+
+func trustedIntakeCommitAuthor(sources []kernel.IntakeSource, accepted kernel.IntakeAcceptance, login, kind string) bool {
+	if kind != "User" && kind != "user" || login == "" {
+		return false
+	}
+	for _, source := range sources {
+		if source.Policy != kernel.IntakePolicyTrustedAuthors || source.TargetRepositoryID != accepted.RepositoryID || !strings.EqualFold(source.GitHubRepositoryName, accepted.SourceRepository) {
+			continue
+		}
+		for _, allowed := range source.TrustedGitHubLogins {
+			if strings.EqualFold(allowed, login) {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // unpublishedHead is the head of the retained Change published on the pull
