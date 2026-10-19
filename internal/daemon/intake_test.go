@@ -466,7 +466,8 @@ func TestIntakeOperatorCancelSticksAndImportRetries(t *testing.T) {
 
 // The headline: an open, labelled issue retries its own task after an
 // automatic end. Here the task's run fails (its runner vanished before any
-// session), and the next tick queues the task again, up to the issue's bound.
+// session), and the next tick queues the task again, until it ends the same
+// way twice in a row.
 func TestIntakeTickRetriesAnAutomaticEnd(t *testing.T) {
 	ctx := context.Background()
 	// No operator API: the tick is called directly, so no socket is bound.
@@ -538,13 +539,13 @@ func TestIntakeTickRetriesAnAutomaticEnd(t *testing.T) {
 		}
 		return task
 	}
-	for retry := range int64(kernel.IntakeRetryLimit) {
-		if task = failAndTick(200 + 10*byte(retry)); task.Status != kernel.TaskQueued || task.WorkRevision.Int64() != retry+2 {
-			t.Fatalf("automatic end %d not retried: %+v", retry+1, task)
-		}
+	if task = failAndTick(200); task.Status != kernel.TaskQueued || task.WorkRevision.Int64() != 2 {
+		t.Fatalf("automatic end not retried: %+v", task)
 	}
-	if task = failAndTick(240); task.Status != kernel.TaskFailed {
-		t.Fatalf("retry past the bound: %+v", task)
+	// The second end of the same class is the shared retry rule's refusal: the
+	// task stays failed and is the overseer's.
+	if task = failAndTick(210); task.Status != kernel.TaskFailed || task.WorkRevision.Int64() != 2 {
+		t.Fatalf("repeated end retried: %+v", task)
 	}
 
 	// Every tick offers the spent issue a retry again. The refusal writes
@@ -568,7 +569,7 @@ func TestIntakeTickRetriesAnAutomaticEnd(t *testing.T) {
 		t.Fatalf("tick while another write holds the store = %+v, %v", got, busy.Err())
 	}
 	t.Log(got.Timing)
-	if task, _, err = fixture.store.Task(ctx, task.ID); err != nil || task.Status != kernel.TaskFailed || task.WorkRevision.Int64() != kernel.IntakeRetryLimit+1 {
+	if task, _, err = fixture.store.Task(ctx, task.ID); err != nil || task.Status != kernel.TaskFailed || task.WorkRevision.Int64() != 2 {
 		t.Fatalf("spent issue's task = %+v, %v", task, err)
 	}
 }

@@ -103,7 +103,7 @@ released AS MATERIALIZED (SELECT d.repository, CAST(n.value AS INTEGER) AS pull,
 item AS (
 	SELECT t.id, t.updated_at_ms AS version, CASE WHEN t.status IN ('blocked', 'failed') THEN 3 END AS rewakes, '' AS detail, lower(hex(t.id)) AS item_key
 	FROM tasks AS t JOIN agents AS a ON a.id = t.assigned_agent_id
-	WHERE t.project_id = ?1 AND a.role = 'worker' AND t.status IN ('succeeded', 'blocked', 'failed') AND NOT ` + taskIssueWithdrawn + ` AND NOT (` + taskLatestPremiseDispute + `) AND NOT ` + specialistCarrierSQL + `
+	WHERE t.project_id = ?1 AND a.role = 'worker' AND t.status IN ('succeeded', 'blocked', 'failed') AND NOT ` + taskIssueWithdrawn + ` AND NOT ` + specialistCarrierSQL + `
 	  AND NOT (t.status = 'succeeded' AND EXISTS (SELECT 1 FROM changes AS c WHERE c.task_id = t.id AND (c.phase = 'abandoned' OR c.phase = 'retained' AND c.head_commit IS NOT NULL)))
 	UNION ALL SELECT r.task_id, h.created_at_ms, 3, '', lower(hex(r.task_id)) FROM human_requests AS h JOIN runs AS r ON r.id = h.run_id
 	WHERE r.project_id = ?1 AND r.role = 'worker' AND h.status IN ('open', 'delivering', 'delivery_unknown')
@@ -133,7 +133,7 @@ item AS (
 	UNION ALL SELECT t.id, t.updated_at_ms, CASE WHEN ` + taskEndedAutomatically + ` THEN 3 END, '', lower(hex(t.id)) FROM tasks AS t
 	JOIN intake_task_bindings AS b ON b.task_id = t.id
 	JOIN intake_acceptances AS i ON i.id = b.acceptance_id
-	WHERE t.project_id = ?1 AND COALESCE(i.overseer_agent_id, ?4) = ?4 AND t.status IN ('failed', 'cancelled') AND NOT ` + taskIssueWithdrawn + ` AND NOT (` + taskLatestPremiseDispute + `)
+	WHERE t.project_id = ?1 AND COALESCE(i.overseer_agent_id, ?4) = ?4 AND t.status IN ('failed', 'cancelled') AND NOT ` + taskIssueWithdrawn + `
 	UNION ALL SELECT id, MAX(live, observed), NULL, '', lower(hex(id)) FROM (SELECT t.id, r.observed_at_ms AS observed, CASE WHEN EXISTS (SELECT 1 FROM production_records
 			WHERE project_id = ?1 AND repository = r.repository AND kind = 'delivery' AND identity LIKE 'release:%')
 		THEN (SELECT at FROM released WHERE repository = r.repository AND pull = p.pull_number) ELSE r.observed_at_ms END AS live

@@ -475,9 +475,10 @@ checks the current GitHub content again before recording acceptance. The
 daemon imports accepted work into the existing queue; comments and reactions
 do not create work. A later title/body edit needs fresh acceptance, including
 when the original issue author is trusted. While the issue stays open and
-labelled, its task is queued again up to three times after an automatic end (a
-failure, a run-limit cancel, a 24-hour blocked expiry); an operator's cancel
-sticks and completed work is not retried.
+labelled, its task is queued again after an automatic end (a failure, a
+run-limit cancel, a 24-hour blocked expiry) unless its last two runs ended in
+the same failure class; an operator's cancel sticks and completed work is not
+retried.
 
 factoryd polls each enabled source when its `--poll-seconds` interval is due,
 while the GitHub connection (or Linear) is configured. Poll progress is kept in

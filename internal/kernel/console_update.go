@@ -463,17 +463,16 @@ func (store *Store) CancelOrphanedTasks(ctx context.Context, at UnixMillis) ([]T
 // (task update --retry), every worker task blocked as "missing prerequisite"
 // once each prerequisite it declared is satisfied (prerequisiteSourceRun: its
 // producer succeeded and its work merged at its exact head), so it runs once
-// more on a base that has them (#2079). Once, as a transient failure's
-// requeue: not when the previous run ended the same way.
+// more on a base that has them (#2079). Once, as every retry: refuseRetry
+// leaves a task whose previous run ended the same way.
 func (store *Store) RetryTasksBlockedOnPrerequisites(ctx context.Context, at UnixMillis) ([]TaskID, error) {
 	return store.tasksWhere(ctx, func(id TaskID, revision Revision) error {
-		_, err := store.RetryTask(ctx, nil, id, revision, AgentID{}, at, 0)
+		_, err := store.RetryTask(ctx, nil, id, revision, AgentID{}, at, false)
 		return err
 	}, `SELECT t.id, t.revision FROM tasks AS t JOIN agents AS a ON a.id = t.assigned_agent_id AND a.role = 'worker'
 		WHERE t.status = 'blocked' AND t.blocked_reason LIKE 'missing prerequisite%'
 		  AND EXISTS (SELECT 1 FROM task_prerequisites AS prerequisite WHERE prerequisite.task_id = t.id)
-		  AND NOT EXISTS (SELECT 1 FROM task_prerequisites AS prerequisite WHERE prerequisite.task_id = t.id AND NOT EXISTS (`+prerequisiteSourceRun+`))
-		  AND NOT EXISTS (SELECT 1 FROM runs AS r WHERE r.task_id = t.id AND r.task_incarnation_id = t.incarnation_id AND r.admitted_task_work_revision = t.work_revision - 1 AND r.terminal_kind = 'blocked' AND r.terminal_detail LIKE 'missing prerequisite%')`)
+		  AND NOT EXISTS (SELECT 1 FROM task_prerequisites AS prerequisite WHERE prerequisite.task_id = t.id AND NOT EXISTS (`+prerequisiteSourceRun+`))`)
 }
 
 func (store *Store) cancelTasksWhere(ctx context.Context, patch TaskPatch, at UnixMillis, query string, args ...any) ([]TaskID, error) {
