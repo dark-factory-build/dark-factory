@@ -90,22 +90,21 @@ test("error banner keeps its centered layout after the paragraph reset", () => {
 test("one screen keeps Factory and the operator panels together", () => {
   const markup = render();
   assert.match(markup, /<main class="dfFactoryConsole" aria-label="Factory operator console">/);
-  for (const label of ["Factory floor", "Selected detail", "Work", "Console views"]) {
+  for (const label of ["Factory floor", "Selected detail", "Work"]) {
     assert.match(markup, new RegExp(`aria-label="${label}"`));
   }
   assert.doesNotMatch(markup, /aria-label="Right panel"/);
-  assert.equal((markup.match(/aria-label="Console views"/g) ?? []).length, 1);
+  // The last navigation is gone: no Floor/Work toggle, badge or mobile view state.
+  assert.doesNotMatch(markup, /aria-label="Console views"|dfConsoleViewToggle|data-mobile-view|dfBadge|aria-pressed="true">Floor/);
   assert.doesNotMatch(markup, /ACTIVE RUNS|OPERATOR VIEW/);
   assert.equal(markup.includes("<dt>QUEUED</dt>"), false);
   assert.equal(markup.includes("<dt>NEEDS YOU</dt>"), false);
-  assert.match(markup, /Work <span class="dfBadge">1<\/span>/);
   assert.doesNotMatch(markup, /aria-label="Work filter"|Show overseer and specialist passes|Needs you <span/);
   assert.match(markup, /Builder One asks/);
   assert.match(markup, /Review the state projection/);
   assert.match(markup, /Review the state projection[\s\S]*North Workshop · Builder One asks/);
   assert.equal(markup.includes("By mission"), false);
   assert.equal(markup.includes("Decision needed"), false, "an unopened request stays brief");
-  assert.match(render({ detail: "work" }), /aria-label="Work"/);
   // No screen union survives: there is no navigation away from this screen.
   assert.equal(markup.includes("dfFactoryConsole__homeLink"), false);
   assert.equal(markup.includes("BUILDING STATE UNAVAILABLE"), false);
@@ -301,7 +300,7 @@ test("hostile names and titles are escaped as text and private detail is absent"
     }
   }
   assert.match(render({ state: hostileState }), /&lt;img src=x onerror=alert\(1\)&gt;/);
-  assert.match(render({ state: hostileState, detail: "agent", selectedAgent: agentSelection() }), /<h2>&lt;img src=x onerror=alert\(1\)&gt;<\/h2>/);
+  assert.match(render({ state: hostileState, selectedAgent: agentSelection() }), /<h2>&lt;img src=x onerror=alert\(1\)&gt;<\/h2>/);
 });
 
 test("the console never shows a kernel-grammar or retired vocabulary word", () => {
@@ -319,7 +318,7 @@ test("the console never shows a kernel-grammar or retired vocabulary word", () =
   }, createElement("div"));
   const surfaces = [
     ...VIEWS.map((view) => [view, render({ ...withDetail, view })]),
-    ["agent", render({ detail: "agent", selectedAgent: agentSelection() })],
+    ["agent", render({ selectedAgent: agentSelection() })],
     ["settings", render({ settingsOpen: true, onToggleSettings: () => {} })],
     ["terminal", renderToStaticMarkup(terminalView())],
     ["terminal-reset", renderToStaticMarkup(terminalView({ terminal: { resets: 1 } }))],
@@ -353,7 +352,7 @@ test("unknown and inherited error codes use a finite fallback", () => {
 test("Work keeps every served item reachable", () => {
   const emptyState = baseState({ projects: new Map(), agents: new Map(), tasks: new Map(), humanRequests: new Map() });
   assert.match(render({ state: emptyState }), /No open work/);
-  assert.match(render({ state: emptyState, detail: "agent" }), /No open work/, "no agent to show leaves Work, never an empty sidebar");
+  assert.match(render({ state: emptyState, selectedAgent: agentSelection() }), /No open work/, "no agent to show leaves Work, never an empty sidebar");
 
   const agents = new Map();
   const tasks = new Map();
@@ -376,23 +375,21 @@ test("Work keeps every served item reachable", () => {
 });
 
 test("Work keeps running tasks visible beside queued ones", () => {
-  const markup = render({ detail: "work", state: baseState({ humanRequests: new Map() }) });
+  const markup = render({ state: baseState({ humanRequests: new Map() }) });
   assert.match(markup, /data-stage="running"/);
   assert.doesNotMatch(markup, /Briefs are editable while queued/);
   const queuedOnly = baseState({ tasks: new Map([...fixtureState.tasks].filter(([, task]) => task.status === "queued")) });
-  assert.doesNotMatch(render({ detail: "work", state: queuedOnly }), /Briefs are editable while queued/);
+  assert.doesNotMatch(render({ state: queuedOnly }), /Briefs are editable while queued/);
   assert.match(markup, /dfConsoleItem__taskTitle/);
   assert.match(markup, /Review the state projection/);
   assert.equal((markup.match(/aria-label="Work"/g) ?? []).length, 1, "one work panel");
 });
 
-test("Work ranks an open request and a blocked task above queued work, Work badge 2", async () => {
+test("Work ranks an open request and a blocked task above queued work", async () => {
   const blocked = { ...fixtureState.tasks.get(ids.task), id: "b3".repeat(16), title: "Stuck", status: "blocked", blocked_reason: "why" };
   const state = baseState({ tasks: new Map([...fixtureState.tasks, [blocked.id, blocked]]) });
   let tree;
-  await act(async () => { tree = create(createElement(FactoryConsole, { status: "ready", state, detail: "work", onDetail() {} })); });
-  const work = tree.root.findByProps({ "aria-label": "Console views" }).findAllByType("button").find((button) => textOf(button).startsWith("Work"));
-  assert.equal(work.findByProps({ className: "dfBadge" }).children.join(""), "2");
+  await act(async () => { tree = create(createElement(FactoryConsole, { status: "ready", state })); });
   const titles = tree.root.findByProps({ "aria-label": "Work" }).findAllByProps({ className: "dfConsoleItem__taskTitle dfWorkRow__title" }).map((node) => node.children.join(""));
   const queued = titles.indexOf("Tighten the queue ordering");
   assert.ok(queued > titles.indexOf("Review the state projection") && queued > titles.indexOf("Stuck") && titles.includes("Stuck"), "needs-you rows lead, queued work follows");
@@ -401,7 +398,7 @@ test("Work ranks an open request and a blocked task above queued work, Work badg
 
 test("an overseer pass is shown in Work", () => {
   const overseerTask = { ...fixtureState.tasks.get(ids.task), assigned_agent_id: ids.orchestrator };
-  assert.match(render({ detail: "work", state: baseState({ tasks: new Map([[overseerTask.id, overseerTask]]), humanRequests: new Map() }) }), /Review the state projection/);
+  assert.match(render({ state: baseState({ tasks: new Map([[overseerTask.id, overseerTask]]), humanRequests: new Map() }) }), /Review the state projection/);
 });
 
 test("a succeeded task linked to an open PR is in review with its PR cell", () => {
@@ -436,12 +433,12 @@ test("Work is one ranked list: blocked work first, every origin shown, flags dis
   });
   const edits = [];
   let renderer;
-  await act(async () => { renderer = create(createElement(FactoryConsole, { status: "ready", detail: "work", state, onDetail() {}, onEditTask: async (task, change) => { edits.push([task.id, change]); return true; } })); });
+  await act(async () => { renderer = create(createElement(FactoryConsole, { status: "ready", state, onEditTask: async (task, change) => { edits.push([task.id, change]); return true; } })); });
   const panel = renderer.root.findByProps({ "aria-label": "Work" });
   assert.ok(panel.findAllByType("button").some((button) => button.children.join("") === "Stuck on a prerequisite"));
   // The block reason is agent-written free text: it renders as plain text
   // (React's default escaping), never through dangerouslySetInnerHTML.
-  const markup = renderToStaticMarkup(createElement(FactoryConsole, { status: "ready", detail: "work", state, onDetail() {} }));
+  const markup = renderToStaticMarkup(createElement(FactoryConsole, { status: "ready", state }));
   assert.match(markup, /Needs a human to resolve a merge conflict &lt;script&gt;/);
   await act(async () => { panel.findByProps({ "aria-label": "Cancel Stuck on a prerequisite" }).props.onClick(); });
   assert.deepEqual(edits, [["b1".repeat(16), { cancel: true }]], "a blocked task is cleared in one step");
@@ -486,7 +483,7 @@ test("an unavailable snapshot is explicit and does not invent runtime state", ()
   assert.match(markup, /Waiting for the latest state…/);
   assert.match(markup, /Waiting for the latest state…/);
   assert.match(markup, /Connection status: Syncing/);
-  assert.match(markup, /Work <\/button>/);
+  assert.match(markup, /aria-label="Work"/, "Work is on screen before the first state arrives");
   assert.equal(markup.includes("NO QUEUED TASKS"), false);
   assert.equal(markup.includes("all quiet"), false);
 });
@@ -527,9 +524,9 @@ test("switching right panels keeps the selected terminal mounted", async () => {
   try {
     const props = { status: "ready", state: baseState(), selectedAgent: agentSelection(), terminalContent: createElement(TerminalProbe) };
     let renderer;
-    await act(async () => { renderer = create(createElement(FactoryConsole, { ...props, detail: "agent" })); });
-    await act(async () => { renderer.update(createElement(FactoryConsole, { ...props, detail: "work" })); });
-    await act(async () => { renderer.update(createElement(FactoryConsole, { ...props, detail: "work" })); });
+    await act(async () => { renderer = create(createElement(FactoryConsole, props)); });
+    await act(async () => { renderer.update(createElement(FactoryConsole, { ...props, selectedHumanRequest: selectedRequest() })); });
+    await act(async () => { renderer.update(createElement(FactoryConsole, props)); });
     assert.equal(mounted, 1);
     assert.equal(unmounted, 0);
     await act(async () => { renderer.unmount(); });
@@ -543,15 +540,12 @@ test("opening a selected question restores that agent's terminal panel", async (
   const previousAct = globalThis.IS_REACT_ACT_ENVIRONMENT;
   globalThis.IS_REACT_ACT_ENVIRONMENT = true;
   function ConsoleHarness() {
-    const [detail, setDetail] = useState("agent");
     return createElement(FactoryConsole, {
       status: "ready",
       state: baseState(),
       selectedAgent: agentSelection(),
       selectedHumanRequest: selectedRequest(),
-      detail,
-      onDetail: setDetail,
-      onOpenTerminalForHumanRequest: () => setDetail("agent"),
+      onOpenTerminalForHumanRequest: () => {},
       terminalContent: createElement("p", null, "terminal"),
     });
   }
@@ -561,10 +555,10 @@ test("opening a selected question restores that agent's terminal panel", async (
     await act(async () => { renderer.root.findByProps({ "aria-label": "Project" }).props.onChange({ currentTarget: { value: ids.secondProject } }); });
     assert.equal(renderer.root.findAllByProps({ "aria-label": "Terminal" }).length, 0);
     await act(async () => { renderer.root.findByProps({ "aria-label": "Project" }).props.onChange({ currentTarget: { value: "" } }); });
-    await act(async () => { renderer.root.findAllByType("button").find((button) => textOf(button).startsWith("Work")).props.onClick(); });
     await act(async () => { renderer.root.findAllByType("button").find((button) => button.props.children === "Open terminal").props.onClick(); });
     assert.equal(renderer.root.findByProps({ "aria-label": "Project" }).props.value, ids.project, "opening a global question switches to its agent’s project");
     assert.ok(renderer.root.findByProps({ "aria-label": "Terminal" }).findByProps({ children: "terminal" }));
+    assert.ok(renderer.root.findByProps({ "aria-label": "Selected question" }), "the question stays open in Work beside the terminal");
     await act(async () => { renderer.unmount(); });
   } finally {
     globalThis.IS_REACT_ACT_ENVIRONMENT = previousAct;
@@ -573,7 +567,6 @@ test("opening a selected question restores that agent's terminal panel", async (
 
 test("selecting an agent shows its sprite, name and terminal with no status readout or configuration controls", () => {
   const markup = render({
-    detail: "agent",
     selectedAgent: agentSelection(),
     onSelectAgent: () => {},
     onEditTask: () => {},
@@ -597,7 +590,6 @@ test("unclaimed shared work waits under its project until an eligible worker cla
   const shared = { ...template, id: "3a".repeat(16), title: "Anyone free", assigned_agent_id: "" };
   const markup = render({
     state: baseState({ tasks: new Map([[shared.id, shared]]) }),
-    detail: "work",
     selectedAgent: agentSelection(),
     onEditTask: () => {},
   });
@@ -616,7 +608,6 @@ test("a queued row uses the shared Work row and only selects it", async () => {
     const props = {
       status: "ready",
       state: baseState({ tasks: new Map([[queued.id, queued]]) }),
-      detail: "work",
       selectedAgent: agentSelection(),
       onSelectTask: (taskId) => selections.push(taskId),
     };
@@ -657,7 +648,7 @@ test("a queued edit refusal remains visible after its task leaves the queue", ()
     baseState({ tasks: new Map() }),
   ];
   for (const state of states) {
-    const markup = render({ state, detail: "work", edit: rejected });
+    const markup = render({ state, edit: rejected });
     assert.match(markup, /Someone else changed this\. Reopen it and try again\./);
     assert.equal((markup.match(/role="alert"/g) ?? []).length, 1);
   }
@@ -671,7 +662,7 @@ test("agent panels render plain portraits without appearance editing", () => {
 });
 
 test("the floor is the only agent picker: no Agents view, roster or All agents control", () => {
-  const floor = render({ detail: "agent", onDetail() {}, onSelectAgent() {} });
+  const floor = render({ onSelectAgent() {} });
   assert.doesNotMatch(floor, /aria-label="Left view"/);
   assert.doesNotMatch(floor, /aria-label="Agents"|dfAgentList|All agents|>Agents</);
   assert.match(floor, /aria-label="Factory floor"/);
@@ -746,7 +737,7 @@ test("agent and question terminal actions expose only current public intent", as
   const calls = [];
   let renderer;
   await act(async () => { renderer = create(createElement(FactoryConsole, {
-    status: "ready", state: baseState(), graphs: fixtureGraphs, detail: "agent", selectedHumanRequest: selectedRequest(),
+    status: "ready", state: baseState(), graphs: fixtureGraphs, selectedHumanRequest: selectedRequest(),
     onSelectAgent: (value) => calls.push(["agent", value]),
     onOpenTerminalForHumanRequest: (value) => calls.push(["request", value]),
   })); });
@@ -771,9 +762,9 @@ test("archived workers stay off the floor and stale selection has no panel", asy
   const state = baseState({ agents: new Map([[worker.id, worker]]) });
   try {
     let renderer;
-    await act(async () => { renderer = create(createElement(FactoryConsole, { status: "ready", state, graphs: fixtureGraphs, detail: "agent", onSelectAgent() {} })); });
+    await act(async () => { renderer = create(createElement(FactoryConsole, { status: "ready", state, graphs: fixtureGraphs, onSelectAgent() {} })); });
     assert.equal(renderer.root.findAllByProps({ "data-worker-id": worker.id }).length, 0);
-    await act(async () => { renderer.update(createElement(FactoryConsole, { status: "ready", state, detail: "agent", selectedAgent: { id: worker.id, name: worker.name, revision: worker.revision } })); });
+    await act(async () => { renderer.update(createElement(FactoryConsole, { status: "ready", state, selectedAgent: { id: worker.id, name: worker.name, revision: worker.revision } })); });
     const text = JSON.stringify(renderer.toJSON());
     assert.equal(text.includes("Restore paused"), false);
     assert.equal(renderer.root.findAllByProps({ "aria-label": `Agent ${worker.name}` }).length, 0);
@@ -790,18 +781,15 @@ test("task selection highlights the Work row and floor questions open the existi
   const queueSelections = [];
   function Harness({ state = fixtureState }) {
     const [selectedTaskId, setSelectedTaskId] = useState();
-    const [detail, setDetail] = useState("work");
     const [selectedHumanRequest, setSelectedHumanRequest] = useState();
     return createElement(FactoryConsole, {
       status: "ready", graphs: fixtureGraphs,
       runPaths: new Map([[ids.agent, runSample(ids.agent, ["internal/kernel/state.go"])]]),
       state,
-      detail,
-      onDetail: setDetail,
       selectedTaskId,
       onSelectTask: (taskId) => { queueSelections.push(taskId); setSelectedTaskId(taskId); },
       selectedHumanRequest,
-      onSelectHumanRequest: (request) => { questions.push(request); setSelectedHumanRequest(selectedRequest({ request, question: "Should the migration also cover the users table? The plan only names accounts." })); setDetail("work"); },
+      onSelectHumanRequest: (request) => { questions.push(request); setSelectedHumanRequest(selectedRequest({ request, question: "Should the migration also cover the users table? The plan only names accounts." })); },
     });
   }
   let tree;
@@ -838,26 +826,21 @@ test("floor omits the global evidence essay", () => {
 
 
 
-test("mobile navigation switches presentation without mutating work", () => {
-  const calls = [];
-  const elements = consoleElements({ status: "ready", state: fixtureState, detail: "floor", onDetail: (value) => calls.push(value) });
-  const nav = elements.find((element) => element.props["aria-label"] === "Console views");
-  const buttons = nav.props.children.filter((element) => element.type === "button" || element.type.name === "IconButton");
-  assert.equal(buttons[0].props["aria-pressed"], true);
-  assert.deepEqual(buttons.map(textOf), ["Floor", "Work"]);
-  buttons.find((button) => textOf(button) === "Work").props.onClick();
-  assert.deepEqual(calls, ["work"]);
-  assert.equal(elements.find((element) => element.type === "main").props["data-mobile-view"], "floor");
+test("the floor, Work and the selected agent's terminal are on screen together with no view toggle", () => {
+  const markup = render({ selectedAgent: agentSelection(), selectedHumanRequest: selectedRequest(), terminalContent: createElement("p", null, "terminal") });
+  assert.doesNotMatch(markup, /aria-label="Console views"|dfConsoleViewToggle|data-mobile-view| hidden=""/);
+  // Markup order is reading order: floor, then Work with its needs-you row first, then the agent's terminal.
+  assert.match(markup, /aria-label="Factory floor"[\s\S]*aria-label="Selected detail"[\s\S]*aria-label="Work"[\s\S]*Builder One asks[\s\S]*aria-label="Selected question"[\s\S]*aria-label="Agent Builder One"[\s\S]*aria-label="Terminal"><p>terminal<\/p>/);
+  assert.equal((markup.match(/aria-label="Work"/g) ?? []).length, 1);
+  const elements = consoleElements({ status: "ready", state: fixtureState, selectedAgent: agentSelection() });
+  assert.equal(elements.some((element) => element.props.hidden !== undefined), false, "neither panel is ever hidden");
 });
 
-
-test("a floor sprite is keyboard-selectable and opens its Agent panel while the floor stays mounted", async () => {
+test("a floor sprite is keyboard-selectable and opens its Agent panel below Work while the floor stays mounted", async () => {
   let tree;
   function Harness() {
-    const [detail, setDetail] = useState("floor");
     const [selectedAgent, setAgent] = useState();
-    return createElement(FactoryConsole, { status: "ready", state: fixtureState, graphs: fixtureGraphs, detail, onDetail: setDetail, selectedAgent,
-      onSelectAgent: (agent) => { setAgent(agent); setDetail("agent"); } });
+    return createElement(FactoryConsole, { status: "ready", state: fixtureState, graphs: fixtureGraphs, selectedAgent, onSelectAgent: setAgent });
   }
   await act(async () => { tree = create(createElement(Harness)); });
   const floor = tree.root.findByProps({ className: "dfFactoryFloor__map" });
@@ -868,10 +851,8 @@ test("a floor sprite is keyboard-selectable and opens its Agent panel while the 
   await act(async () => sprite.props.onKeyDown({ key: "Enter", preventDefault() { prevented = true; } }));
   assert.equal(prevented, true);
   assert.equal(tree.root.findByType(FactoryConsole).props.selectedAgent.id, agent.id);
-  assert.equal(tree.root.findByType("main").props["data-mobile-view"], "detail");
-  assert.equal(tree.root.findAllByProps({ "aria-label": `Agent ${agent.name}` }).length, 1);
-  await act(async () => tree.root.findByProps({ "aria-label": "Console views" }).findAllByType("button")[0].props.onClick());
-  assert.equal(tree.root.findByType("main").props["data-mobile-view"], "floor");
+  const sidebar = tree.root.findByProps({ "aria-label": "Selected detail" });
+  assert.deepEqual(sidebar.findAll((node) => node.type === "section" && node.props.className === "dfConsoleSidebar__panel").map((node) => node.props["aria-label"]), ["Work", `Agent ${agent.name}`]);
   assert.equal(tree.root.findByProps({ className: "dfFactoryFloor__map" }), floor);
   await act(async () => tree.unmount());
 });
@@ -995,31 +976,29 @@ test("the floor reads a machine from its tooltip and offers no inspector or Inve
 
 test("one project is selected automatically, with no header picker", () => {
   const one = baseState({ projects: new Map([...fixtureState.projects].slice(0, 1)) });
-  const single = render({ state: one, detail: "work" });
+  const single = render({ state: one });
   assert.equal(single.includes('aria-label="Project"'), false);
   assert.equal(single.includes("Mission project"), false);
-  const many = render({ detail: "work" });
+  const many = render();
   assert.match(many, /aria-label="Project"/);
 });
 
 test("Needs you and Changes counts hide at zero, and Help is gone", () => {
-  const markup = render({ state: baseState({ humanRequests: new Map() }), onDetail() {} });
+  const markup = render({ state: baseState({ humanRequests: new Map() }) });
   assert.equal(/Needs you (<!-- -->)?\d/.test(markup), false);
   assert.equal(/Changes (<!-- -->)?\d/.test(markup), false);
   assert.equal(markup.includes("Help"), false);
   assert.equal(markup.includes(" items"), false);
 });
 
-test("Work lists and counts only the chosen project's requests", async () => {
+test("Work lists only the chosen project's requests", async () => {
   let tree;
-  await act(async () => { tree = create(createElement(FactoryConsole, { status: "ready", state: fixtureState, onDetail() {} })); });
+  await act(async () => { tree = create(createElement(FactoryConsole, { status: "ready", state: fixtureState })); });
   const request = [...fixtureState.humanRequests.values()][0];
   const other = request.project_id === ids.project ? ids.secondProject : ids.project;
   await act(async () => tree.root.findByProps({ "aria-label": "Project" }).props.onChange({ currentTarget: { value: other } }));
   const text = JSON.stringify(tree.toJSON());
   assert.equal(text.includes(" asks"), false);
-  const work = tree.root.findByProps({ "aria-label": "Console views" }).findAllByType("button").find((button) => textOf(button).startsWith("Work"));
-  assert.equal(work.findAllByProps({ className: "dfBadge" }).length, 0);
   assert.doesNotMatch(text, /Review the state projection/);
   await act(async () => tree.unmount());
 });
@@ -1030,7 +1009,7 @@ test("a selected specialist gets its terminal; its remit and schedule stay on th
   const specialist = { ...worker, id: "5a".repeat(16), name: "Doc Watcher", archived: false, idle_policy: "standing_instruction", idle_after_seconds: 600, idle_instruction: "Keep the docs true to the code.\nSecond line stays out.", idle_run_budget: 4, idle_runs_used: 1, idle_wake_on: "failures",
     specialist: { next_review_at_ms: 1750000000000, next_reason: "events", waiting: "capacity", quiet_reviews: 0, open_proposals: 1, open_proposal_limit: 3, last_review_task_id: "" } };
   const state = baseState({ agents: new Map([...fixtureState.agents, [specialist.id, specialist]]), humanRequests: new Map() });
-  const markup = renderToStaticMarkup(createElement(FactoryConsole, { status: "ready", detail: "agent", state, graphs: fixtureGraphs, selectedAgent: { id: specialist.id, name: specialist.name, revision: specialist.revision } }));
+  const markup = renderToStaticMarkup(createElement(FactoryConsole, { status: "ready", state, graphs: fixtureGraphs, selectedAgent: { id: specialist.id, name: specialist.name, revision: specialist.revision } }));
   const panel = markup.match(/aria-label="Agent Doc Watcher"[\s\S]*?aria-label="Terminal"/)?.[0] ?? "";
   assert.match(panel, /<h2>Doc Watcher<\/h2>/);
   assert.doesNotMatch(panel, /waiting:|Keep the docs|Next review/, "the panel repeats nothing the floor already says");

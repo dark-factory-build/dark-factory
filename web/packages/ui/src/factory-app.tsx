@@ -2,7 +2,7 @@
 
 import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { browserEndpoint, FactoryAppController, type FactoryAppSnapshot, type FactoryAppStatus, type FactoryTerminalView } from "./factory-app-controller.js";
-import { FactoryConsole, type ConsoleDetail } from "./factory-console.js";
+import { FactoryConsole } from "./factory-console.js";
 import { primaryAgent } from "./console-view.js";
 import { XtermTerminal } from "./xterm-terminal.js";
 
@@ -18,7 +18,6 @@ export type FactoryAppProps = {
 /** Complete browser application lifecycle; hosts only render this component. */
 export function FactoryApp({ onStatusChange, browserPort }: FactoryAppProps = {}) {
   const [snapshot, setSnapshot] = useState<FactoryAppSnapshot>(INITIAL_SNAPSHOT);
-  const [detail, setDetail] = useState<ConsoleDetail>("work");
   const [selectedTaskId, setSelectedTaskId] = useState<string>();
   const browser = useMemo(() => browserEndpoint(browserPort), [browserPort]);
   const owner = useRef<FactoryAppController | undefined>(undefined);
@@ -87,13 +86,11 @@ export function FactoryApp({ onStatusChange, browserPort }: FactoryAppProps = {}
       selectedTaskId={selectedTaskId}
       onSelectTask={setSelectedTaskId}
       {...snapshot}
-      detail={detail}
-      onDetail={setDetail}
-      onSelectAgent={(agent) => { setDetail("agent"); owner.current?.selectAgent(agent); }}
+      onSelectAgent={(agent) => owner.current?.selectAgent(agent)}
       onProjectContent={(operation, input) => owner.current?.projectContent(operation, input) ?? Promise.reject(new Error("closed"))}
       onEditTask={(task, change) => owner.current?.editTask(task, change) ?? Promise.resolve(false)}
-      onOpenTerminalForHumanRequest={(request) => { setDetail("agent"); owner.current?.openTerminalForHumanRequest(request); }}
-      onSelectHumanRequest={(request) => { setDetail("work"); void owner.current?.selectHumanRequest(request); }}
+      onOpenTerminalForHumanRequest={(request) => owner.current?.openTerminalForHumanRequest(request)}
+      onSelectHumanRequest={(request) => { void owner.current?.selectHumanRequest(request); }}
       onHumanReplyChange={(reply) => owner.current?.setHumanReply(reply)}
       onReplyHumanRequest={() => { void owner.current?.replyHumanRequest(); }}
       onCancelHumanRequest={() => { void owner.current?.cancelHumanRequest(); }}

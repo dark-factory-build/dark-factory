@@ -25,17 +25,19 @@ test("the documented floor fixtures fit controls at phone width and stay one row
   }
 });
 
-test("desktop console navigation stays above a scrollable sidebar", { skip: browser === undefined ? "set DF_LAYOUT_BROWSER to opt into live layout measurement" : false }, () => {
+test("the floor and a sidebar scrolling Work above the selected agent's terminal stay on screen together at desktop and phone widths", { skip: browser === undefined ? "set DF_LAYOUT_BROWSER to opt into live layout measurement" : false }, () => {
   const dir = mkdtempSync(join(tmpdir(), "df-console-layout-"));
   const fixture = join(dir, "fixture.html");
-  writeFileSync(fixture, `<!doctype html><style>${consoleCSS}</style><main class="dfFactoryConsole"><header class="dfFactoryConsole__header"><h1>Dark Factory</h1></header><div class="dfConsoleLayout"><nav class="dfConsoleViewToggle" aria-label="Console views"><button>Floor</button><button>Agents</button><button>Work</button></nav><section class="dfConsoleLayout__left"><div style="height:600px">Floor</div></section><aside class="dfConsoleSidebar" style="height:240px"><div class="dfConsoleSidebar__panel"><p role="status">Visible status banner</p><div style="height:600px">Scrollable sidebar content</div></div></aside></div></main>`);
-  const script = `<script>requestAnimationFrame(() => { const nav = document.querySelector('[aria-label="Console views"]'); const sidebar = document.querySelector('.dfConsoleSidebar'); const banner = sidebar.querySelector('[role="status"]'); const n = nav.getBoundingClientRect(); const s = sidebar.getBoundingClientRect(); const b = banner.getBoundingClientRect(); document.body.insertAdjacentHTML('beforeend', '<pre id="df-layout">' + JSON.stringify({ above: n.bottom <= s.top + .1, bannerVisible: b.top >= s.top && b.bottom <= s.bottom, scrollable: sidebar.scrollHeight > sidebar.clientHeight }) + '</pre>'); });</script>`;
+  writeFileSync(fixture, `<!doctype html><style>${consoleCSS}</style><main class="dfFactoryConsole"><header class="dfFactoryConsole__header"><h1>Dark Factory</h1></header><div class="dfConsoleLayout"><section class="dfConsoleLayout__left"><div style="height:600px">Floor</div></section><aside class="dfConsoleSidebar"><section class="dfConsoleSidebar__panel" aria-label="Work"><p role="status">Visible status banner</p><div style="height:600px">Work rows</div></section><section class="dfConsoleSidebar__panel" aria-label="Agent"><section class="dfConsoleSidebar__section dfConsoleSidebar__terminalSlot" aria-label="Terminal"><div class="dfFactoryConsole__terminal">terminal</div></section></section></aside></div></main>`);
+  const script = `<script>requestAnimationFrame(() => { const floor = document.querySelector('.dfConsoleLayout__left'); const sidebar = document.querySelector('.dfConsoleSidebar'); const f = floor.getBoundingClientRect(); const s = sidebar.getBoundingClientRect(); const b = sidebar.querySelector('[role="status"]').getBoundingClientRect(); const w = sidebar.querySelector('[aria-label="Work"]').getBoundingClientRect(); const t = sidebar.querySelector('[aria-label="Terminal"]').getBoundingClientRect(); const onScreen = (r) => r.width > 0 && r.height > 0 && r.top < innerHeight && r.left < innerWidth; document.body.insertAdjacentHTML('beforeend', '<pre id="df-layout">' + JSON.stringify({ floorOnScreen: onScreen(f), sidebarOnScreen: onScreen(s), beside: innerWidth > 1024 ? f.right <= s.left + .1 : f.bottom <= s.top + .1, bannerVisible: b.top >= s.top && b.bottom <= s.bottom, workAboveTerminal: w.bottom <= t.top + .1, scrollable: sidebar.scrollHeight > sidebar.clientHeight }) + '</pre>'); });</script>`;
   const wrapper = `${fixture}.wrapper.html`;
   writeFileSync(wrapper, `${readFileSync(fixture, "utf8")}${script}`);
-  const dom = execFileSync(browser, ["--headless=new", "--no-sandbox", "--disable-gpu", "--no-first-run", "--disable-dev-shm-usage", `--user-data-dir=${mkdtempSync(join(tmpdir(), "df-chrome-"))}`, "--dump-dom", "--window-size=1440,844", `file://${wrapper}`], { encoding: "utf8" });
-  const match = dom.match(/<pre id="df-layout">([^<]+)/);
-  assert.ok(match, "browser did not emit the console layout measurement");
-  assert.deepEqual(JSON.parse(match[1]), { above: true, bannerVisible: true, scrollable: true });
+  for (const width of [1440, 390]) {
+    const dom = execFileSync(browser, ["--headless=new", "--no-sandbox", "--disable-gpu", "--no-first-run", "--disable-dev-shm-usage", `--user-data-dir=${mkdtempSync(join(tmpdir(), "df-chrome-"))}`, "--dump-dom", `--window-size=${width},844`, `file://${wrapper}`], { encoding: "utf8" });
+    const match = dom.match(/<pre id="df-layout">([^<]+)/);
+    assert.ok(match, `browser did not emit the console layout measurement at ${width}px`);
+    assert.deepEqual(JSON.parse(match[1]), { floorOnScreen: true, sidebarOnScreen: true, beside: true, bannerVisible: true, workAboveTerminal: true, scrollable: true }, `${width}px`);
+  }
 });
 
 function measure(file, width, selector, controls) {

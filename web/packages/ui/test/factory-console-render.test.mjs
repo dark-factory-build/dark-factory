@@ -17,10 +17,11 @@ test("factory floor disables animation under reduced motion", () => {
   assert.match(css, /@media \(prefers-reduced-motion: reduce\) \{ \.dfPlant \* \{ animation: none !important; \} \}/);
 });
 
-test("desktop console navigation reserves the sidebar row", () => {
+test("the console grid has no navigation row and never hides the floor or the sidebar", () => {
   const css = readFileSync(new URL("../src/factory-console.css", import.meta.url), "utf8");
-  assert.match(css, /\.dfConsoleLayout > \.dfConsoleViewToggle\[aria-label="Console views"\] \{ grid-column: 2; grid-row: 1; \}/);
-  assert.match(css, /\.dfConsoleLayout > \.dfConsoleLayout__left \{ grid-column: 1; grid-row: 1 \/ span 2; \}/);
-  assert.match(css, /\.dfConsoleLayout > \.dfConsoleSidebar \{ grid-column: 2; grid-row: 2; \}/);
-  assert.doesNotMatch(css, /\.dfConsoleViewToggle\[aria-label="Console views"\] \{[^}]*position: absolute/);
+  assert.doesNotMatch(css, /dfConsoleViewToggle|Console views|data-mobile-view/);
+  assert.match(css, /\.dfConsoleLayout \{\s*display: grid;\s*grid-template-columns: minmax\(0, 2fr\) minmax\(0, 1fr\);/, "desktop: floor beside the sidebar");
+  assert.match(css, /@media \(max-width: 1024px\) \{\s*\.dfConsoleLayout \{ grid-template-columns: minmax\(0, 1fr\); grid-template-rows: minmax\(0, 1fr\) minmax\(0, 1fr\); \}/, "narrow: floor above the sidebar, both on screen");
+  assert.match(css, /\.dfConsoleSidebar,\s*\.dfConsoleSidebar__panel:has\(> \.dfConsoleSidebar__terminalSlot\),\s*\.dfConsoleSidebar__terminalSlot \{ display: flex; flex: 1 1 auto; flex-direction: column; \}/, "the terminal fills the height Work leaves");
+  assert.match(css, /\.dfConsoleSidebar__panel \+ \.dfConsoleSidebar__panel \{ margin-top: 1rem; \}/);
 });

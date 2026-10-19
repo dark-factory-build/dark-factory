@@ -6,17 +6,11 @@ import { AgentPanel, HumanRequestPanel, WorkPanel, editErrorCopy, type TaskEdit 
 import type { ProjectContentCall } from "./factory-app-controller.js";
 import { useProduction } from "./production-data.js";
 import { deriveProductionView, inProgressProduction } from "./production-view.js";
-import { needsYou, workRows } from "./console-view.js";
-import { IconButton } from "./icons.js";
-import { Badge } from "./console-kit.js";
-
-export type ConsoleDetail = "work" | "agent" | "floor";
+import { workRows } from "./console-view.js";
 
 export type FactoryConsoleProps = FactoryAppSnapshot & {
   selectedTaskId?: string;
   onSelectTask?: (taskId: string | undefined) => void;
-  detail?: ConsoleDetail;
-  onDetail?: (detail: ConsoleDetail) => void;
   selectedAgent?: FactoryAgentSelection;
   onSelectAgent?: (agent: AgentItem) => void;
   onProjectContent?: ProjectContentCall;
@@ -75,8 +69,6 @@ export function FactoryConsole({
   runPaths,
   lastRunPaths,
   edit,
-  detail,
-  onDetail,
   selectedTaskId,
   onSelectTask,
   selectedHumanRequest,
@@ -112,36 +104,27 @@ export function FactoryConsole({
     humanRequests: new Map([...state.humanRequests].filter(([, request]) => request.project_id === projectId)),
   }, [state, projectId]);
   const selectedTask = selectedTaskId === undefined ? undefined : scopedState?.tasks.get(selectedTaskId);
-  const selectTask = onSelectTask === undefined ? undefined : (id: string) => { onSelectTask(id); onDetail?.("work"); };
   const ready = status === "ready";
   const productionData = useProduction([...(scopedState?.projects.keys() ?? [])].sort(), ready ? onProjectContent : undefined);
   const productionView = useMemo(() => deriveProductionView(productionData.records, Date.now()), [productionData.records]);
   const productionItems = useMemo(() => Object.values(productionView.contraptions).sort((a, b) => Number(a.completed) - Number(b.completed) || (a.completed ? a.completedAt - b.completedAt : 0) || a.visualId.localeCompare(b.visualId)), [productionView]);
   const inProgressItems = useMemo(() => productionItems.filter(inProgressProduction), [productionItems]);
-  const showWork = () => { onDetail?.("work"); };
-  const openWork = (id: string | undefined) => { selectProject(id); showWork(); };
-  // Routes into Work from the floor reset the view first so the answer form or task is never hidden.
-  const selectRequest = pickRequest === undefined ? undefined : (request: Parameters<typeof pickRequest>[0]) => { openWork(request.project_id); pickRequest(request); };
-  const goTask = selectTask === undefined ? undefined : (id: string) => { openWork(projectId); selectTask(id); };
   const sources = projectId === undefined ? undefined : intake?.get(projectId)?.sources;
   const rows = useMemo(() => workRows(scopedState, inProgressItems, sources), [scopedState, inProgressItems, sources]);
-  const waiting = rows.filter(needsYou).length;
   const agent = selectedAgent === undefined ? undefined : scopedState?.agents.get(selectedAgent.id);
   const liveAgent = agent?.archived === true ? undefined : agent;
-  const selectedDetail = liveAgent !== undefined && (detail ?? "agent") === "agent" ? "agent" : "work";
-  // Work's inbox is the daemon's last intake poll: re-read that local list (never the backlog) while Work is shown.
+  // Work's inbox is the daemon's last intake poll: re-read that local list (never the backlog) while connected.
   useEffect(() => {
     if (!ready || projectId === undefined || onLoadIntake === undefined) return;
     onLoadIntake(projectId);
-    if (selectedDetail !== "work") return;
     const timer = setInterval(() => onLoadIntake(projectId), 30_000);
     return () => clearInterval(timer);
-  }, [ready, projectId, onLoadIntake !== undefined, selectedDetail === "work"]);
+  }, [ready, projectId, onLoadIntake !== undefined]);
   const editError = edit !== undefined && state?.projects.has(edit.target) ? undefined : editErrorCopy(edit);
 
   return (
     <div className="dfConsoleShell">
-      <main className="dfFactoryConsole" aria-label="Factory operator console" data-mobile-view={onDetail === undefined ? undefined : detail === "floor" ? "floor" : "detail"}>
+      <main className="dfFactoryConsole" aria-label="Factory operator console">
         <header className="dfFactoryConsole__header">
           <div>
             <h1>Dark Factory</h1>
@@ -168,49 +151,42 @@ export function FactoryConsole({
         )}
 
         <div className="dfConsoleLayout">
-          <nav className="dfConsoleViewToggle" aria-label="Console views">
-            <button type="button" aria-pressed={detail === "floor"} disabled={!ready || onDetail === undefined} onClick={() => { onDetail?.("floor"); }}>Floor</button>
-            <IconButton icon="list" aria-pressed={detail !== "floor" && selectedDetail === "work"} disabled={!ready || onDetail === undefined} onClick={showWork}>Work <Badge n={waiting} /></IconButton>
-          </nav>
           <section className="dfConsoleLayout__left dfFactoryConsole__section" aria-label="Factory floor">
-            <FactoryFloor changes={productionItems} onProjectContent={onProjectContent} onOpenTasks={ready ? openWork : undefined} projectId={projectId} selectedTaskId={selectedTask?.id} onSelectTask={ready ? goTask : undefined} selectedAgentId={selectedDetail === "agent" ? liveAgent?.id : undefined} state={scopedState} graphs={graphs} graphErrors={graphErrors} runPaths={runPaths} lastRunPaths={lastRunPaths} onSelectAgent={ready ? onSelectAgent : undefined} onSelectHumanRequest={ready ? selectRequest : undefined} connected={ready} />
+            <FactoryFloor changes={productionItems} onProjectContent={onProjectContent} onOpenTasks={ready ? selectProject : undefined} projectId={projectId} selectedTaskId={selectedTask?.id} onSelectTask={ready ? onSelectTask : undefined} selectedAgentId={liveAgent?.id} state={scopedState} graphs={graphs} graphErrors={graphErrors} runPaths={runPaths} lastRunPaths={lastRunPaths} onSelectAgent={ready ? onSelectAgent : undefined} onSelectHumanRequest={ready ? pickRequest : undefined} connected={ready} />
           </section>
 
+          {/* Work (decisions first) always shows; the selected agent's terminal joins it below. */}
           <aside className="dfConsoleSidebar" aria-label="Selected detail">
             {editError === undefined ? null : <p className="dfFactoryConsole__terminalError" role="alert">{editError}</p>}
-            <div hidden={selectedDetail !== "work"}>
-              <WorkPanel
-                state={scopedState}
-                rows={rows}
-                projectId={projectId}
-                edit={edit}
-                ready={ready}
-                onEditTask={onEditTask}
-                selectedTaskId={selectedTask?.id}
-                onSelectTask={ready ? selectTask : undefined}
-                selectedHumanRequest={selectedHumanRequest}
-                onSelectHumanRequest={pickRequest}
-                onCloseHumanRequest={onCloseHumanRequest}
-                requestContent={selectedHumanRequest === undefined ? null : <HumanRequestPanel
-                  selected={selectedHumanRequest}
-                  onReplyChange={onHumanReplyChange}
-                  onReply={onReplyHumanRequest}
-                  onCancel={onCancelHumanRequest}
-                  onOpenTerminal={onOpenTerminalForHumanRequest === undefined ? undefined : (request) => { selectProject(request.project_id); onOpenTerminalForHumanRequest(request); }}
-                  terminalReady={ready}
-                />}
-                onIntakeAction={ready ? onIntakeAction : undefined}
-                intake={projectId === undefined ? undefined : { state: intake?.get(projectId)?.state, failed: intakeErrors?.has(projectId) === true, busy: intakePending?.has(projectId) === true }}
-              />
-            </div>
-            {liveAgent === undefined ? null : <div hidden={selectedDetail !== "agent"}>
-              <AgentPanel
-                key={liveAgent.id}
-                agent={liveAgent}
-                state={scopedState}
-                terminalContent={terminalContent}
-              />
-            </div>}
+            <WorkPanel
+              state={scopedState}
+              rows={rows}
+              projectId={projectId}
+              edit={edit}
+              ready={ready}
+              onEditTask={onEditTask}
+              selectedTaskId={selectedTask?.id}
+              onSelectTask={ready ? onSelectTask : undefined}
+              selectedHumanRequest={selectedHumanRequest}
+              onSelectHumanRequest={pickRequest}
+              onCloseHumanRequest={onCloseHumanRequest}
+              requestContent={selectedHumanRequest === undefined ? null : <HumanRequestPanel
+                selected={selectedHumanRequest}
+                onReplyChange={onHumanReplyChange}
+                onReply={onReplyHumanRequest}
+                onCancel={onCancelHumanRequest}
+                onOpenTerminal={onOpenTerminalForHumanRequest === undefined ? undefined : (request) => { selectProject(request.project_id); onOpenTerminalForHumanRequest(request); }}
+                terminalReady={ready}
+              />}
+              onIntakeAction={ready ? onIntakeAction : undefined}
+              intake={projectId === undefined ? undefined : { state: intake?.get(projectId)?.state, failed: intakeErrors?.has(projectId) === true, busy: intakePending?.has(projectId) === true }}
+            />
+            {liveAgent === undefined ? null : <AgentPanel
+              key={liveAgent.id}
+              agent={liveAgent}
+              state={scopedState}
+              terminalContent={terminalContent}
+            />}
           </aside>
         </div>
       </main>

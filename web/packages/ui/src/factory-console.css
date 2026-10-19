@@ -432,16 +432,6 @@
 
 .dfFactoryConsole__header { flex-wrap: wrap; }
 
-.dfConsoleViewToggle { display: flex; flex: 0 0 auto; flex-wrap: wrap; }
-.dfConsoleViewToggle button { white-space: nowrap; }
-.dfConsoleViewToggle button + button { margin-left: -1px; }
-.dfConsoleViewToggle button:hover:not(:disabled) { z-index: 2; }
-.dfConsoleViewToggle button:is([aria-pressed="true"], :focus-visible, :hover) { position: relative; z-index: 1; }
-.dfConsoleShell .dfConsoleViewToggle button[aria-pressed="true"] {
-  color: var(--df-console-accent);
-  border-color: var(--df-console-accent);
-}
-
 .dfConsoleLayout {
   display: grid;
   grid-template-columns: minmax(0, 2fr) minmax(0, 1fr);
@@ -473,6 +463,7 @@
   border: 1px solid var(--df-console-accent);
 }
 
+.dfConsoleSidebar__panel + .dfConsoleSidebar__panel { margin-top: 1rem; }
 .dfConsoleSidebar__panel h2 { font-size: var(--df-text-lg); letter-spacing: 0.02em; overflow-wrap: anywhere; }
 .dfConsoleSidebar__panel h3 { margin-bottom: 0.6rem; font-size: var(--df-text-sm); }
 
@@ -563,20 +554,18 @@ summary.dfConsoleItem__summary { cursor: pointer; }
   .dfConsoleLayout__left { min-height: 0; overflow: hidden; }
   .dfConsoleSidebar { min-height: 0; overflow-y: auto; }
   .dfConsoleSidebar { position: static; align-self: stretch; max-height: none; }
-  /* A selected agent's terminal fills the height the sidebar has left. */
-  .dfConsoleSidebar:has(> div:not([hidden]) > div:not([hidden]) > .dfConsoleSidebar__panel > .dfConsoleSidebar__terminalSlot),
-  .dfConsoleSidebar > div:not([hidden]):has(> div:not([hidden]) > .dfConsoleSidebar__panel > .dfConsoleSidebar__terminalSlot),
-  .dfConsoleSidebar > div > div:not([hidden]):has(> .dfConsoleSidebar__panel > .dfConsoleSidebar__terminalSlot),
+  /* Work keeps its height; the selected agent's terminal below it fills what the sidebar has left. */
+  .dfConsoleSidebar,
   .dfConsoleSidebar__panel:has(> .dfConsoleSidebar__terminalSlot),
   .dfConsoleSidebar__terminalSlot { display: flex; flex: 1 1 auto; flex-direction: column; }
-  .dfConsoleSidebar > div > div > button { align-self: start; }
   .dfConsoleSidebar .dfConsoleSidebar__terminalSlot .dfFactoryConsole__terminalPanel { flex: 1 1 auto; }
   .dfConsoleSidebar .dfConsoleSidebar__terminalSlot .dfFactoryConsole__terminal { flex: 1 1 auto; height: auto; min-height: 16rem; }
 }
 
 
+/* Narrow widths stack the floor above the sidebar; both stay on screen and scroll inside their half. */
 @media (max-width: 1024px) {
-  .dfConsoleLayout { grid-template-columns: minmax(0, 1fr); }
+  .dfConsoleLayout { grid-template-columns: minmax(0, 1fr); grid-template-rows: minmax(0, 1fr) minmax(0, 1fr); }
   .dfFactoryConsole { display: flex; flex-direction: column; height: 100svh; min-height: 0; overflow: hidden; }
   .dfConsoleLayout { flex: 1; min-height: 0; width: 100%; }
   .dfConsoleLayout__left { min-height: 0; overflow: hidden; }
@@ -918,17 +907,6 @@ summary.dfConsoleItem__summary { cursor: pointer; }
 }
 
 .dfConsoleSidebar__panel > h3 { margin: .75rem 0; font-size: var(--df-text-sm); }
-
-.dfConsoleViewToggle[aria-label="Console views"] { margin-bottom: 1rem; }
-@media (max-width: 1024px) {
-  .dfFactoryConsole[data-mobile-view="detail"] .dfConsoleLayout__left,
-  .dfFactoryConsole[data-mobile-view="floor"] .dfConsoleSidebar { display: none; }
-}
-@media (min-width: 1025px) {
-  .dfConsoleLayout > .dfConsoleViewToggle[aria-label="Console views"] { grid-column: 2; grid-row: 1; }
-  .dfConsoleLayout > .dfConsoleLayout__left { grid-column: 1; grid-row: 1 / span 2; }
-  .dfConsoleLayout > .dfConsoleSidebar { grid-column: 2; grid-row: 2; }
-}
 
 .dfStatus[data-stage$="passed"], .dfStatus[data-stage="succeeded"], .dfStatus[data-stage="working"], .dfStatus[data-stage="ready"], .dfStatus[data-stage="Delivered"], .dfStatus[data-stage="accepted"], .dfStatus[data-stage$="running"], .dfStatus[data-stage="Construction"], .dfStatus[data-stage="Deploying"], .dfStatus[data-stage="Merge"], .dfStatus[data-stage="Merge queued"] { color: var(--df-console-accent); }
 .dfStatus[data-stage="Blocked"], .dfStatus[data-stage="blocked"], .dfStatus[data-stage="needs-you"], .dfStatus[data-stage="inbox"], .dfStatus[data-stage="open"], .dfStatus[data-stage="paused"], .dfStatus[data-stage="Delivery blocked"], .dfStatus[data-stage="Correction"], .dfStatus[data-stage="reopened"] { color: var(--df-console-warning); }

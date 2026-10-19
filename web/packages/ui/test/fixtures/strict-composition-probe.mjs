@@ -34,11 +34,10 @@ try {
     });
   });
   await waitFor(() => counters.states === 2, "factory state did not render");
-  // Work is home: the default agent arriving with the state never takes the panel from it.
+  // Work is home: the default agent arriving with the state joins it below rather than replacing it, and there is no view toggle.
   for (let index = 0; index < 20; index += 1) await act(async () => { await new Promise((resolve) => setImmediate(resolve)); });
-  const pressed = renderer.root.findByProps({ "aria-label": "Console views" }).findAllByType("button").filter((button) => button.props["aria-pressed"] === true).map((button) => button.props["aria-label"] ?? button.props.title ?? String(button.props.children));
-  assert.equal(pressed.length, 1);
-  assert.match(pressed[0], /Work/, `right panel is ${pressed[0]}`);
+  assert.ok(renderer.root.findByProps({ "aria-label": "Work" }));
+  assert.equal(renderer.root.findAllByProps({ "aria-label": "Console views" }).length, 0, "no view toggle");
   // A floor sprite is the keyboard-reachable terminal entry.
   const sprite = renderer.root.findAll((node) => node.type === "g" && node.props.role === "button" && node.parent?.props["data-worker-id"] !== undefined)[0];
   assert.ok(sprite, "public FactoryApp must expose a selectable agent on the floor");
@@ -55,6 +54,7 @@ try {
 
   assert.equal(renderer.root.findAllByProps({ "aria-label": "Agent controls" }).length, 0, "the terminal has no mode toggle");
   assert.ok(renderer.root.findByProps({ "aria-label": "Terminal" }));
+  assert.ok(renderer.root.findByProps({ "aria-label": "Work" }), "Work stays on screen beside the live terminal");
   assert.equal(counters.detaches, 0);
 
   await act(async () => { renderer.unmount(); });
