@@ -9,8 +9,6 @@ import { deriveProductionView, inProgressProduction } from "./production-view.js
 import { workRows } from "./console-view.js";
 
 export type FactoryConsoleProps = FactoryAppSnapshot & {
-  selectedTaskId?: string;
-  onSelectTask?: (taskId: string | undefined) => void;
   selectedAgent?: FactoryAgentSelection;
   onSelectAgent?: (agent: AgentItem) => void;
   onProjectContent?: ProjectContentCall;
@@ -69,8 +67,6 @@ export function FactoryConsole({
   runPaths,
   lastRunPaths,
   edit,
-  selectedTaskId,
-  onSelectTask,
   selectedHumanRequest,
   selectedAgent,
   onSelectAgent,
@@ -91,11 +87,7 @@ export function FactoryConsole({
 }: FactoryConsoleProps) {
   const [chosenProjectId, setProjectId] = useState<string>();
   const projectId = chosenProjectId !== undefined && state?.projects.has(chosenProjectId) ? chosenProjectId : state?.projects.size === 1 ? [...state.projects.keys()][0] : undefined;
-  const selectProject = (next: string | undefined) => {
-    setProjectId(next);
-    if (next !== projectId && selectedTaskId !== undefined) onSelectTask?.(undefined);
-  };
-  const pickRequest = onSelectHumanRequest === undefined ? undefined : (request: Parameters<NonNullable<typeof onSelectHumanRequest>>[0]) => { selectProject(request.project_id); onSelectHumanRequest(request); };
+  const pickRequest = onSelectHumanRequest === undefined ? undefined : (request: Parameters<NonNullable<typeof onSelectHumanRequest>>[0]) => { setProjectId(request.project_id); onSelectHumanRequest(request); };
   const scopedState = useMemo(() => state === undefined || projectId === undefined ? state : {
     ...state,
     projects: new Map([...state.projects].filter(([id]) => id === projectId)),
@@ -103,7 +95,6 @@ export function FactoryConsole({
     tasks: new Map([...state.tasks].filter(([, task]) => task.project_id === projectId)),
     humanRequests: new Map([...state.humanRequests].filter(([, request]) => request.project_id === projectId)),
   }, [state, projectId]);
-  const selectedTask = selectedTaskId === undefined ? undefined : scopedState?.tasks.get(selectedTaskId);
   const ready = status === "ready";
   const productionData = useProduction([...(scopedState?.projects.keys() ?? [])].sort(), ready ? onProjectContent : undefined);
   const productionView = useMemo(() => deriveProductionView(productionData.records, Date.now()), [productionData.records]);
@@ -134,7 +125,7 @@ export function FactoryConsole({
         <div className="dfConsoleLayout">
           <section className="dfConsoleLayout__left dfFactoryConsole__section" aria-label="Factory floor">
             <FactoryFloor tools={<>
-              {state?.projects.size === 1 ? null : <label>Project <select aria-label="Project" value={projectId ?? ""} onChange={(event) => selectProject(event.currentTarget.value || undefined)}>
+              {state?.projects.size === 1 ? null : <label>Project <select aria-label="Project" value={projectId ?? ""} onChange={(event) => setProjectId(event.currentTarget.value || undefined)}>
                 <option value="">All projects</option>
                 {[...state?.projects.values() ?? []].sort((a, b) => a.name.localeCompare(b.name) || a.id.localeCompare(b.id)).map((project) => <option key={project.id} value={project.id}>{project.name}</option>)}
               </select></label>}
@@ -142,7 +133,7 @@ export function FactoryConsole({
                 <span className={`dfFactoryConsole__statusDot dfFactoryConsole__statusDot--${status}`} aria-hidden="true" />
                 {STATUS_LABELS[status]}
               </p>}
-            </>} changes={productionItems} onProjectContent={onProjectContent} onOpenTasks={ready ? selectProject : undefined} projectId={projectId} selectedTaskId={selectedTask?.id} onSelectTask={ready ? onSelectTask : undefined} selectedAgentId={liveAgent?.id} state={scopedState} graphs={graphs} graphErrors={graphErrors} runPaths={runPaths} lastRunPaths={lastRunPaths} onSelectAgent={ready ? onSelectAgent : undefined} onSelectHumanRequest={ready ? pickRequest : undefined} connected={ready} />
+            </>} changes={productionItems} onProjectContent={onProjectContent} onOpenTasks={ready ? setProjectId : undefined} projectId={projectId} selectedAgentId={liveAgent?.id} state={scopedState} graphs={graphs} graphErrors={graphErrors} runPaths={runPaths} lastRunPaths={lastRunPaths} onSelectAgent={ready ? onSelectAgent : undefined} onSelectHumanRequest={ready ? pickRequest : undefined} connected={ready} />
           </section>
 
           {/* Work (decisions first) always shows; the selected agent's terminal joins it below. */}
@@ -155,8 +146,6 @@ export function FactoryConsole({
               edit={edit}
               ready={ready}
               onEditTask={onEditTask}
-              selectedTaskId={selectedTask?.id}
-              onSelectTask={ready ? onSelectTask : undefined}
               selectedHumanRequest={selectedHumanRequest}
               onSelectHumanRequest={pickRequest}
               onCloseHumanRequest={onCloseHumanRequest}
@@ -165,7 +154,7 @@ export function FactoryConsole({
                 onReplyChange={onHumanReplyChange}
                 onReply={onReplyHumanRequest}
                 onCancel={onCancelHumanRequest}
-                onOpenTerminal={onOpenTerminalForHumanRequest === undefined ? undefined : (request) => { selectProject(request.project_id); onOpenTerminalForHumanRequest(request); }}
+                onOpenTerminal={onOpenTerminalForHumanRequest === undefined ? undefined : (request) => { setProjectId(request.project_id); onOpenTerminalForHumanRequest(request); }}
                 terminalReady={ready}
               />}
               onIntakeAction={ready ? onIntakeAction : undefined}

@@ -14,8 +14,8 @@ import { FactoryScene } from "../dist/src/factory-scene/factory-scene.js";
 import { TerminalPanel } from "../dist/src/factory-app.js";
 import { fixtureState, fixtureGraphs, fixtureGraph } from "../../../fixtures/state.mjs";
 import { graphWith, hex, unit } from "../../../fixtures/graph.mjs";
-const rowButton = (row) => row.findByProps({ className: "dfConsoleItem__taskTitle dfWorkRow__title" });
-const rowTitle = (row) => rowButton(row).children.join("");
+const rowTitleNode = (row) => row.findByProps({ className: "dfConsoleItem__taskTitle dfWorkRow__title" });
+const rowTitle = (row) => rowTitleNode(row).children.join("");
 const textOf = (node) => [].concat(node.props.children).flat(Infinity).filter((child) => typeof child === "string").join("").trim();
 
 const ids = {
@@ -435,7 +435,8 @@ test("Work is one ranked list: blocked work first, every origin shown, flags dis
   let renderer;
   await act(async () => { renderer = create(createElement(FactoryConsole, { status: "ready", state, onEditTask: async (task, change) => { edits.push([task.id, change]); return true; } })); });
   const panel = renderer.root.findByProps({ "aria-label": "Work" });
-  assert.ok(panel.findAllByType("button").some((button) => button.children.join("") === "Stuck on a prerequisite"));
+  const titled = (title) => panel.findAllByProps({ className: "dfConsoleItem__taskTitle dfWorkRow__title" }).some((node) => node.type === "span" && node.children.join("") === title);
+  assert.ok(titled("Stuck on a prerequisite"), "a blocked task is plain text with its actions beside it");
   // The block reason is agent-written free text: it renders as plain text
   // (React's default escaping), never through dangerouslySetInnerHTML.
   const markup = renderToStaticMarkup(createElement(FactoryConsole, { status: "ready", state }));
@@ -444,7 +445,6 @@ test("Work is one ranked list: blocked work first, every origin shown, flags dis
   assert.deepEqual(edits, [["b1".repeat(16), { cancel: true }]], "a blocked task is cleared in one step");
   await act(async () => { panel.findByProps({ "aria-label": "Retry Stuck on a prerequisite" }).props.onClick(); });
   assert.deepEqual(edits.at(-1), ["b1".repeat(16), { retry: true }], "or sent round again in one step");
-  const titled = (title) => panel.findAllByType("button").some((button) => button.children.join("") === title);
   assert.ok(titled("Standing instruction") && titled("Overseer stuck"), "overseer passes are never hidden by origin");
   assert.equal(panel.findAllByProps({ "aria-label": "Work filter" }).length + panel.findAllByProps({ "aria-label": "Show overseer and specialist passes" }).length, 0, "no filter or reveal control");
   const order = panel.findAllByProps({ className: "dfConsoleItem__taskTitle dfWorkRow__title" }).map((row) => row.children.join(""));
@@ -601,17 +601,15 @@ test("unclaimed shared work waits under its project until an eligible worker cla
   assert.doesNotMatch(markup, /df-assign-/);
 });
 
-test("a queued row uses the shared Work row and only selects it", async () => {
+test("a queued row uses the shared Work row with a plain-text title", async () => {
   const previousAct = globalThis.IS_REACT_ACT_ENVIRONMENT;
   globalThis.IS_REACT_ACT_ENVIRONMENT = true;
   try {
-    const selections = [];
     const queued = { ...fixtureState.tasks.get([...fixtureState.tasks.keys()][1]), title: "Queued task", assigned_agent_id: ids.agent };
     const props = {
       status: "ready",
       state: baseState({ tasks: new Map([[queued.id, queued]]) }),
       selectedAgent: agentSelection(),
-      onSelectTask: (taskId) => selections.push(taskId),
     };
     let renderer;
     await act(async () => { renderer = create(createElement(FactoryConsole, props)); });
@@ -620,8 +618,8 @@ test("a queued row uses the shared Work row and only selects it", async () => {
     assert.equal(row.findAllByType("button").some((button) => button.props.children === "Edit brief"), false);
     assert.equal(row.findAllByType("button").some((button) => button.props["aria-label"] === `Increase priority for ${queued.title}`), false);
     assert.equal(row.findAllByType("select").some((select) => select.props.id === `df-assign-${queued.id}`), false);
-    await act(async () => { rowButton(row).props.onClick(); });
-    assert.deepEqual(selections, [queued.id]);
+    assert.equal(rowTitleNode(row).type, "span", "a task title opens nothing");
+    assert.equal(work.findAll((node) => "aria-pressed" in node.props).length, 0, "nothing in Work is a selection");
     assert.equal(renderer.root.findAllByProps({ "aria-label": "Task details" }).length, 0);
     await act(async () => { renderer.unmount(); });
   } finally {
@@ -778,31 +776,20 @@ test("archived workers stay off the floor and stale selection has no panel", asy
   }
 });
 
-test("task selection highlights the Work row and floor questions open the existing question route", async () => {
+test("floor questions open the existing question route", async () => {
   const questions = [];
-  const queueSelections = [];
   function Harness({ state = fixtureState }) {
-    const [selectedTaskId, setSelectedTaskId] = useState();
     const [selectedHumanRequest, setSelectedHumanRequest] = useState();
     return createElement(FactoryConsole, {
       status: "ready", graphs: fixtureGraphs,
       runPaths: new Map([[ids.agent, runSample(ids.agent, ["internal/kernel/state.go"])]]),
       state,
-      selectedTaskId,
-      onSelectTask: (taskId) => { queueSelections.push(taskId); setSelectedTaskId(taskId); },
       selectedHumanRequest,
       onSelectHumanRequest: (request) => { questions.push(request); setSelectedHumanRequest(selectedRequest({ request, question: "Should the migration also cover the users table? The plan only names accounts." })); },
     });
   }
   let tree;
   await act(async () => { tree = create(createElement(Harness)); });
-  const queuedTask = fixtureState.tasks.get("32".repeat(16));
-  const queuedRow = () => tree.root.findByProps({ "aria-label": "Work" }).findAllByProps({ className: "dfConsoleItem dfWorkRow" }).find((row) => rowTitle(row) === queuedTask.title);
-  assert.equal(rowButton(queuedRow()).props["aria-pressed"], false);
-  await act(async () => { rowButton(queuedRow()).props.onClick(); });
-  assert.deepEqual(queueSelections, [queuedTask.id]);
-  assert.equal(rowButton(queuedRow()).props["aria-pressed"], true);
-  assert.equal(tree.root.findAllByProps({ "aria-label": "Task details" }).length, 0, "selecting work opens no dialog");
   await act(async () => { tree.root.findByProps({ "data-human-request-id": ids.request }).props.onClick(); });
   assert.equal(questions[0], fixtureState.humanRequests.get(ids.request));
   assert.equal(tree.root.findByProps({ "aria-label": "Selected question" }).findByProps({ className: "dfFactoryConsole__question" }).children.join(""), "Should the migration also cover the users table? The plan only names accounts.");
@@ -946,21 +933,6 @@ test("open Work re-reads the local intake list so issues polled later reach the 
     if (renderer) await act(async () => renderer.unmount());
     globalThis.IS_REACT_ACT_ENVIRONMENT = previous;
   }
-});
-
-test("floor project changes clear task selection", async () => {
-  const task = [...fixtureState.tasks.values()].find((task) => task.project_id === ids.secondProject);
-  function Harness() {
-    const [selectedTaskId, onSelectTask] = useState(task.id);
-    return createElement(FactoryConsole, { status: "ready", state: fixtureState, graphs: fixtureGraphs, selectedTaskId, onSelectTask });
-  }
-  let tree;
-  await act(async () => { tree = create(createElement(Harness)); });
-  assert.equal(tree.root.findByType(FactoryConsole).props.selectedTaskId, task.id);
-  await act(async () => tree.root.findByProps({ "aria-label": "Project" }).props.onChange({ currentTarget: { value: ids.project } }));
-  assert.equal(tree.root.findByType(FactoryConsole).props.selectedTaskId, undefined);
-  assert.equal(tree.root.findAllByProps({ "aria-label": "Task details" }).length, 0);
-  await act(async () => tree.unmount());
 });
 
 test("the floor reads a machine from its tooltip and offers no inspector or Investigate control", async () => {

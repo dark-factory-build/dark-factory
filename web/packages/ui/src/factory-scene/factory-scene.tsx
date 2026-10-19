@@ -43,8 +43,6 @@ export type FactorySceneProps = Readonly<{
   tasks?: readonly SceneTask[];
   /** Questions between live tasks: shown as they are asked and answered, and stated while they wait. */
   peerQuestions?: readonly PeerQuestionItem[];
-  selectedTaskId?: string;
-  onSelectTask?: (taskId: string) => void;
   /** Open the existing project task queue from the floor inbox. */
   onOpenTasks?: (projectId?: string) => void;
   onSelectHumanRequest?: (requestId: string) => void;
@@ -269,7 +267,7 @@ function useSceneMotion(layout: SceneLayout, seated: ReturnType<typeof placeWork
 }
 
 /** The animation clock updates worker elements without rerendering the floor or atlas. */
-function SceneWorkers({ nook, errands, peerQuestions, layout, placements: seated, labels, workers, tasks, connected, animate, selectedWorkerId, onSelectWorker, onSelectTask, onSelectHumanRequest }: Pick<FactorySceneProps, "workers" | "selectedWorkerId" | "onSelectWorker" | "onSelectTask" | "onSelectHumanRequest"> & {
+function SceneWorkers({ nook, errands, peerQuestions, layout, placements: seated, labels, workers, tasks, connected, animate, selectedWorkerId, onSelectWorker, onSelectHumanRequest }: Pick<FactorySceneProps, "workers" | "selectedWorkerId" | "onSelectWorker" | "onSelectHumanRequest"> & {
   layout: SceneLayout;
   placements: ReturnType<typeof placeWorkers>;
   labels: ReadonlyMap<string, string>;
@@ -386,7 +384,6 @@ function SceneWorkers({ nook, errands, peerQuestions, layout, placements: seated
         const frames = workerFrames(worker, position.motion, placement.area === "work" || placement.errand !== undefined ? undefined : placement.area === "resting" ? "resting" : "planning", placement.errand, stroking, hailing.get(worker.id));
         const asking = waiting.flatMap(({ asker, asked }) => asker === worker.id && workerById.has(asked ?? "") ? [`\nAsked ${workerById.get(asked!)!.name} · waiting for an answer`] : asked === worker.id && workerById.has(asker ?? "") ? [`\nHas a question from ${workerById.get(asker!)!.name}`] : []);
         const peerQuestionCount = peerQuestionsByAgent.get(worker.id) ?? 0;
-        const peerTaskID = peerQuestions.find((question) => !question.answered && (agentOf.get(question.source_task_id) === worker.id || agentOf.get(question.target_task_id) === worker.id))?.source_task_id;
         // A step lifts the whole body a pixel.
         const bob = position.motion.action === "walking" && position.motion.frame === 1 ? -1 : 0;
         // Only a profile facing east is drawn; walking west is its mirror image.
@@ -422,7 +419,7 @@ function SceneWorkers({ nook, errands, peerQuestions, layout, placements: seated
             {attention.length === 0 ? null : <g {...sceneAction(onSelectHumanRequest === undefined ? undefined : () => onSelectHumanRequest(attention[0]!))} aria-label={`Question from ${worker.name}`} data-human-request-id={attention[0]}>
               <rect x="10" y="-20" width="22" height="22" rx="3" fill="#f0c777" /><text x="21" y="-5" textAnchor="middle" fill="#172330" fontSize="16" fontWeight="700">!</text>
             </g>}
-            {peerQuestionCount === 0 ? null : <g {...sceneAction(peerTaskID !== undefined && onSelectTask !== undefined ? () => onSelectTask(peerTaskID) : onSelectWorker === undefined ? undefined : () => onSelectWorker(worker.id))} aria-label={`${peerQuestionCount} peer question${peerQuestionCount === 1 ? "" : "s"}`} data-peer-question-count={peerQuestionCount}>
+            {peerQuestionCount === 0 ? null : <g {...sceneAction(onSelectWorker === undefined ? undefined : () => onSelectWorker(worker.id))} aria-label={`${peerQuestionCount} peer question${peerQuestionCount === 1 ? "" : "s"}`} data-peer-question-count={peerQuestionCount}>
               <rect x="-32" y="-20" width="22" height="22" rx="3" fill="#80ddff" /><text x="-21" y="-5" textAnchor="middle" fill="#172330" fontSize="11" fontWeight="700">{peerQuestionCount}</text>
             </g>}
           </g>
@@ -464,7 +461,7 @@ export function offeredFixtures({ appearance = DEFAULT_SCENE_APPEARANCE, onOpenT
 }
 
 /** A disposable SVG projection of the operational world and current factory state. */
-export function FactoryScene({ tools, graph, workers, appearance = DEFAULT_SCENE_APPEARANCE, selectedWorkerId, onSelectWorker, tasks = [], peerQuestions = NO_QUESTIONS, selectedTaskId, onSelectTask, onOpenTasks, onSelectHumanRequest, projectId, connected = true, reading = false, unavailable }: FactorySceneProps) {
+export function FactoryScene({ tools, graph, workers, appearance = DEFAULT_SCENE_APPEARANCE, selectedWorkerId, onSelectWorker, tasks = [], peerQuestions = NO_QUESTIONS, onOpenTasks, onSelectHumanRequest, projectId, connected = true, reading = false, unavailable }: FactorySceneProps) {
   const mapElement = useRef<HTMLDivElement>(null);
   const floorElement = useRef<SVGSVGElement>(null);
   // Scene pixels per scene unit; undefined fits the whole floor to its pane.
@@ -672,7 +669,7 @@ export function FactoryScene({ tools, graph, workers, appearance = DEFAULT_SCENE
         <g aria-hidden="true" pointerEvents="none" opacity=".8">
           {piece.errand === "tasks" ? <g><rect x="0" y="9" width="16" height="4" fill="#5b5545" stroke="#a08f68" strokeWidth=".5" /><path d="M2 13v3 M14 13v3" stroke="#393b35" strokeWidth="1.5" />
               {/* Waiting work, as the pile in a real tray: it says how the queue is doing. */}
-              {[...Array(Math.min(queued, 3))].map((_, index) => <rect key={index} x="4" y={7 - index * 1.5} width="8" height="1.5" fill="#e4dcc0" strokeWidth=".4" stroke={tasks.some((task) => task.id === selectedTaskId && task.status === "queued") ? "#80ddff" : "#a6a087"} />)}
+              {[...Array(Math.min(queued, 3))].map((_, index) => <rect key={index} x="4" y={7 - index * 1.5} width="8" height="1.5" fill="#e4dcc0" strokeWidth=".4" stroke="#a6a087" />)}
               <path d="M3 7v2h10v-2" fill="none" stroke="#c2b184" /></g>
             : <Frame name={piece.errand === "shelf" ? "prop.bookshelf" : "prop.coffeestation"} x={0} y={0} />}
           {sign === undefined ? <path d="M2 15v3 M14 15v3" stroke="#303b3b" strokeWidth="2" /> : <text x="8" y="23" textAnchor="middle" fill="#d4ddd2" fontSize="4">{sign}</text>}
@@ -681,7 +678,7 @@ export function FactoryScene({ tools, graph, workers, appearance = DEFAULT_SCENE
       {layout.stations.length === 0 ? <text x={PADDING} y={floorBottom + PADDING} fill="#9db1be" fontFamily="ui-monospace, monospace" fontSize="10">{unavailable !== undefined ? `PLANT UNAVAILABLE · ${unavailable}` : reading ? "READING THE PLANT…" : "NO OPERATIONAL STRUCTURE INFERRED YET"}</text> : null}
 
       {placements.filter((placement) => placement.area !== "work").map((seat) => <g key={seat.id} data-nearby-rest={seat.stationId} aria-hidden="true"><rect x={seat.x - 12} y={seat.y + 5} width="24" height="7" fill="#655948" stroke="#9b8b6b" /><path d={`M${seat.x - 8} ${seat.y + 12}v5m16-5v5`} stroke="#74664e" strokeWidth="3" /></g>)}
-      <SceneWorkers nook={implementsShown} errands={appearance.scenery !== "off"} peerQuestions={peerQuestions} layout={layout} placements={placements} labels={labels} workers={workers} tasks={tasks} connected={connected} animate={appearance.animation !== "off"} selectedWorkerId={selectedWorkerId} onSelectWorker={onSelectWorker} onSelectTask={onSelectTask} onSelectHumanRequest={onSelectHumanRequest} />
+      <SceneWorkers nook={implementsShown} errands={appearance.scenery !== "off"} peerQuestions={peerQuestions} layout={layout} placements={placements} labels={labels} workers={workers} tasks={tasks} connected={connected} animate={appearance.animation !== "off"} selectedWorkerId={selectedWorkerId} onSelectWorker={onSelectWorker} onSelectHumanRequest={onSelectHumanRequest} />
     </svg>
     {tooltip === undefined ? null : <div ref={tooltipElement} className="dfFactoryTooltip" role="tooltip" style={{ left: tooltip.x, top: tooltip.y, maxHeight: tooltip.room }}>{tooltip.text}</div>}
     </div>

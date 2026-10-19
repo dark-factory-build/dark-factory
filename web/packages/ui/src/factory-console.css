@@ -599,9 +599,9 @@ summary.dfConsoleItem__summary { cursor: pointer; }
 
 .dfWorkRow__head { position: relative; padding: .7rem; overflow-wrap: anywhere; }
 .dfWorkRow__head .dfConsoleItem__meta { margin-top: .3rem; }
-.dfConsoleItem .dfWorkRow__title { text-align: left; padding: 0; }
+.dfConsoleItem .dfWorkRow__title { display: flex; align-items: center; min-height: var(--df-control-height); text-align: left; padding: 0; }
 .dfConsoleItem__detail[hidden] { display: none; }
-.dfWorkRow__title::after { content: ""; position: absolute; inset: 0; }
+:is(a, button).dfWorkRow__title::after { content: ""; position: absolute; inset: 0; }
 .dfWorkRow__head button:not(.dfWorkRow__title) { position: relative; z-index: 1; }
 .dfWorkRow > :not(.dfWorkRow__head) { margin: 0 .7rem .7rem; }
 .dfWorkRow > .dfConsoleItem__detail { margin: 0; }
