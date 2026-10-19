@@ -672,11 +672,6 @@ and those are exactly latency, backlog, errors and retries.
 There is one detailed floor, and the viewer zooms and scrolls it. Detail
 never depends on data:
 
-- **Overview** (zoomed past fit only): a minimap of the whole plant in the
-  floor's corner, a quarter of the pane on a phone. It shows machines
-  coloured by coverage, areas, workers and the visible window; clicking or
-  dragging it moves the floor. It folds to a button, and the browser
-  remembers that.
 - **Floor** (zoomable): one station per node. Ingress beyond 6 per unit always
   folds into a manifold. Fit shows the whole floor, facilities and externals
   included, by the pane's width and height; the pane's size comes from CSS
