@@ -1084,11 +1084,9 @@ test("a deploy is a changeover dated by the graph, not by the viewer's clock", (
   assert.doesNotMatch(render(undefined), /data-changeover=/);
 });
 
-test("fit shows the whole floor in the pane without relaying it out, the overview only when zoomed past it, and every zoom path returns to fit", async () => {
+test("fit shows the whole floor in the pane without relaying it out, and every zoom path returns to fit", async () => {
   globalThis.IS_REACT_ACT_ENVIRONMENT = true;
-  const priorWindow = globalThis.window, priorObserver = globalThis.ResizeObserver, priorStorage = globalThis.localStorage;
-  const stored = new Map();
-  globalThis.localStorage = { getItem: (key) => stored.get(key) ?? null, setItem: (key, value) => stored.set(key, value) };
+  const priorWindow = globalThis.window, priorObserver = globalThis.ResizeObserver;
   globalThis.window = { innerWidth: 1200, innerHeight: 800 };
   let resized;
   globalThis.ResizeObserver = class { constructor(callback) { resized = callback; } observe() {} disconnect() {} };
@@ -1096,7 +1094,6 @@ test("fit shows the whole floor in the pane without relaying it out, the overvie
   const listeners = {};
   const pane = { scrollLeft: 0, scrollTop: 0, clientWidth: 600, clientHeight: 400, getBoundingClientRect: () => ({ left: 0, top: 0, width: pane.clientWidth, height: pane.clientHeight }), addEventListener: (name, listener) => { listeners[name] = listener; }, removeEventListener() {} };
   const floor = { getBoundingClientRect: () => ({ left: -pane.scrollLeft, top: -pane.scrollTop, width: style().width }) };
-  const view = { attributes: {}, setAttribute(name, value) { this.attributes[name] = Number(value); } };
   let renderer;
   const svg = () => renderer.root.findAll((node) => node.props["data-graph-digest"] === graph.digest)[0];
   const style = () => svg()?.props.style ?? {};
@@ -1104,9 +1101,8 @@ test("fit shows the whole floor in the pane without relaying it out, the overvie
   const fitted = () => { const width = sceneWidth(), scale = Math.min(pane.clientWidth / width, pane.clientHeight / height()); return [Math.floor(width * scale), Math.floor(height() * scale)]; };
   const wheel = (deltaY) => act(async () => listeners.wheel({ ctrlKey: true, deltaY, clientX: 300, clientY: 200, preventDefault() {} }));
   try {
-    await act(async () => { renderer = create(createElement(FactoryScene, { graph, appearance: scenic, workers }), { createNodeMock: (element) => element.type === "svg" && element.props.viewBox?.startsWith("0 0 ") && element.props["data-graph-digest"] ? floor : element.type === "div" && element.props.className === "dfFactoryFloor__map" ? pane : element.type === "rect" && element.props["data-overview-view"] !== undefined ? view : {} }); });
-    assert.equal(renderer.root.findAll((node) => node.props.className === "dfPlantMap").length, 0, "fitted, the whole floor is in view: no overview");
-    const layout = floorFor(graph), viewBox = svg().props.viewBox;
+    await act(async () => { renderer = create(createElement(FactoryScene, { graph, appearance: scenic, workers }), { createNodeMock: (element) => element.type === "svg" && element.props.viewBox?.startsWith("0 0 ") && element.props["data-graph-digest"] ? floor : element.type === "div" && element.props.className === "dfFactoryFloor__map" ? pane : {} }); });
+    const viewBox = svg().props.viewBox, layout = floorFor(graph);
     assert.equal(sceneWidth(), layout.width, "the floor is laid out from structure, not the pane");
     const button = (label) => renderer.root.findAll((node) => node.type === "button" && node.props["aria-label"] === label)[0];
     assert.equal(button("Zoom out").props.disabled, true, "fitted: nothing further out to show");
@@ -1127,18 +1123,9 @@ test("fit shows the whole floor in the pane without relaying it out, the overvie
     const before = centre();
     await act(async () => button("Zoom in").props.onClick());
     assert.ok(Math.abs(style().width - Math.floor(fitWidth * 1.5)) <= 1, "one and a half times the fit, to the pixel");
-    const overview = renderer.root.findByProps({ className: "dfPlantMap" });
-    assert.match(overview.props["aria-label"], /^Plant overview: 3 units, 0 external, 2 workers$/);
-    assert.equal(overview.findAll((node) => node.props["data-overview-station"] !== undefined).length, layout.stations.length);
-    assert.equal(overview.props.style.width, "min(12rem, " + (10 * width / height()).toFixed(2) + "rem)", "a wide pane keeps the usual overview");
-    // The overview folds to a button, and the browser remembers it; past fit it comes back as it was left.
-    await act(async () => button("Hide overview").props.onClick());
-    assert.equal(renderer.root.findAll((node) => node.props.className === "dfPlantMap").length, 0);
-    assert.equal(stored.get("dfFloorOverview"), "hidden");
-    await act(async () => button("Show overview").props.onClick());
-    assert.equal(stored.get("dfFloorOverview"), "shown");
+    assert.equal(button("Zoom out").props.disabled, false, "past fit there is somewhere to zoom back out to");
+    assert.equal(renderer.root.findByProps({ className: "dfFactoryFloor__map" }).props.style, undefined, "past fit the pane scrolls");
     await act(async () => button("Zoom in").props.onClick());
-    assert.equal(view.attributes.width, Math.min(width - view.attributes.x, 600 / (style().width / width)), "the overview window is the pane, in floor units");
     for (const axis of ["x", "y"]) assert.ok(Math.abs(centre()[axis] - before[axis]) < 2, `zoom keeps the floor's ${axis} under the pane's centre`);
     // A pinch out after button zooms returns to fit: the wheel sees the current zoom, not the one at mount.
     await wheel(1000);
@@ -1154,25 +1141,21 @@ test("fit shows the whole floor in the pane without relaying it out, the overvie
     await act(async () => button("Fit floor").props.onClick());
     assert.equal(style().width, fitWidth);
     assert.deepEqual([pane.scrollLeft, pane.scrollTop], [0, 0], "fit applies no stale zoom anchor");
-    // On a phone-width pane the overview is a quarter of it.
+    assert.deepEqual(renderer.root.findByProps({ className: "dfFactoryFloor__map" }).props.style, { overflow: "hidden" }, "fitted, nothing scrolls");
+    // A phone-width pane refits to its own size, and zooming it never relays the floor out.
     pane.clientWidth = 390; pane.clientHeight = 590;
     await act(async () => resized());
+    assert.deepEqual([style().width, style().height], fitted(), "the fit follows the narrow pane");
     await act(async () => button("Zoom in").props.onClick());
-    assert.match(renderer.root.findByProps({ className: "dfPlantMap" }).props.style.width, /^\d+px$/);
-    assert.ok(Number.parseInt(renderer.root.findByProps({ className: "dfPlantMap" }).props.style.width, 10) <= 390 / 4 + 1);
+    assert.ok(style().width > fitted()[0], "a narrow pane zooms past its own fit");
     assert.equal(svg().props.viewBox, viewBox, "zooming and resizing never relay the floor out");
-    // Storage that refuses leaves the toggle working for the visit.
-    globalThis.localStorage = { getItem() { throw new Error("blocked"); }, setItem() { throw new Error("blocked"); } };
-    await act(async () => button("Hide overview").props.onClick());
-    assert.equal(renderer.root.findAll((node) => node.props.className === "dfPlantMap").length, 0);
-    // An empty plant has no overview and nothing to zoom.
+    // An empty plant has nothing to zoom.
     await act(async () => renderer.update(createElement(FactoryScene, { graph: sceneGraph([]), appearance: scenic, workers: [] })));
-    assert.equal(renderer.root.findAll((node) => node.props.className === "dfPlantOverview").length, 0);
+    assert.equal(renderer.root.findAll((node) => node.props["aria-label"] === "Zoom").length, 0);
   } finally {
     await act(async () => renderer?.unmount());
     globalThis.window = priorWindow;
     globalThis.ResizeObserver = priorObserver;
-    if (priorStorage === undefined) delete globalThis.localStorage; else globalThis.localStorage = priorStorage;
   }
 });
 
